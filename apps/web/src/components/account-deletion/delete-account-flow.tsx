@@ -7,12 +7,12 @@ import { ApiRequestError } from '@/lib/auth';
 import { isStepUpDismissed, useStepUp } from '@/lib/step-up';
 import { DataUnavailable } from '@/components/data-unavailable';
 import {
-  DELETED_PAGE, deleteMyAccount, getDeletionCheck, requestAccountClosure, stashDeletionReceipt,
+  DELETED_PAGE, cancelAccountClosure, deleteMyAccount, getDeletionCheck, requestAccountClosure, stashDeletionReceipt,
   type DeletionCheck, type DeletionSide,
 } from '@/lib/account-deletion';
 import {
   CLOSURE_LEAD, DELETE_LEAD, DELETION_GONE, DELETION_KEPT, DELETION_KEPT_LEAD, MOVER_DELETION_EFFECTS, STAFF_DELETION_EFFECTS, STORE_CLOSURE_EFFECTS,
-  STORE_STAYS_OPEN,
+  STORE_ORDERS_PAUSED, STORE_ORDERS_PAUSE_NOW,
 } from '@/lib/account-deletion-words';
 
 // ---------------------------------------------------------------------------
@@ -73,6 +73,8 @@ function Flow({ area, backHref, check, recheck, rechecking }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
+  // [owner ruling 1 Nov 2026] The server's words once the owner cancels their request.
+  const [notice, setNotice] = useState<string | null>(null);
   const sending = useRef(false);
 
   const live = check.openOrders.count + check.openServiceJobs.count;
@@ -89,6 +91,7 @@ function Flow({ area, backHref, check, recheck, rechecking }: {
       const receipt = await stepUp.withStepUp(closure ? requestAccountClosure : deleteMyAccount)();
       if (receipt.status === 'CLOSURE_REQUESTED') {
         // A request, not a deletion: the person stays signed in and sees it on this page.
+        setNotice(null);
         setSent(true);
         recheck();
         sending.current = false;
@@ -108,30 +111,61 @@ function Flow({ area, backHref, check, recheck, rechecking }: {
     }
   };
 
+  // [owner ruling 1 Nov 2026] Cancelling takes the request back: it is resolved and its pause on new orders lifted.
+  const cancel = async () => {
+    if (sending.current) return;
+    sending.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const done = await stepUp.withStepUp(cancelAccountClosure)();
+      setNotice(done.message);
+      setSent(false);
+      setTicked(false);
+      recheck();
+    } catch (e) {
+      setError(errorWords(e));
+    } finally {
+      sending.current = false;
+      setBusy(false);
+    }
+  };
+
   if (closure && (check.closureRequest || sent)) {
     const when = new Date(check.closureRequest?.requestedAt ?? Date.now());
+    // A request just sent holds the pause; an older one says what the server reads.
+    const paused = check.ownsStore && (check.closureRequest ? check.closureRequest.ordersPaused : sent);
     return (
       <Frame title="Your closure request is with our team">
         <div role="status" className="sw-card space-y-2 p-5 text-sm">
           <p className="font-semibold">We received your request{Number.isNaN(when.getTime()) ? '' : ` on ${when.toLocaleDateString('en-GY', { day: 'numeric', month: 'long', year: 'numeric' })}`}.</p>
           <p className="text-[var(--swift-muted)]">You keep access while our team resolves listings and anything outstanding. Nothing else is needed from you now; you don&apos;t need to send it again.</p>
-          {check.ownsStore && <p className="text-[var(--swift-muted)]">{STORE_STAYS_OPEN}</p>}
+          {paused && <p className="font-semibold">{STORE_ORDERS_PAUSED}</p>}
+        </div>
+        <div className="sw-card space-y-3 p-5 text-sm">
+          <p className="text-[var(--swift-muted)]">Changed your mind? Cancel the request{check.ownsStore ? ' and your store can take new orders again once you resume them' : ''}.</p>
+          {error && <p role="alert" className="font-semibold text-[var(--swift-red)]">{error}</p>}
+          <button type="button" className="sw-btn sw-btn-md sw-btn-outline" disabled={busy || !check.closureRequest} onClick={() => void cancel()}>
+            {busy ? 'Cancelling…' : 'Cancel my closure request'}
+          </button>
         </div>
         <LiveWork check={check} closure recheck={recheck} rechecking={rechecking} />
         <Effects area={area} closure ownsStore={check.ownsStore} />
         <Gone />
         <Kept />
         <Footer backHref={backHref} />
+        {stepUp.dialog}
       </Frame>
     );
   }
 
   return (
     <Frame title={title}>
+      {notice && <p role="status" className="rounded-2xl bg-[var(--swift-subtle)] p-4 text-sm font-semibold">{notice}</p>}
       <p className="text-[15px] leading-6 text-[var(--swift-muted)]">{closure ? CLOSURE_LEAD : DELETE_LEAD}</p>
       <LiveWork check={check} closure={closure} recheck={recheck} rechecking={rechecking} />
       <Effects area={area} closure={closure} ownsStore={check.ownsStore} />
-      {closure && check.ownsStore && <p className="rounded-2xl bg-[var(--swift-subtle)] p-4 text-sm">{STORE_STAYS_OPEN}</p>}
+      {closure && check.ownsStore && <p className="rounded-2xl bg-[var(--swift-subtle)] p-4 text-sm font-semibold">{STORE_ORDERS_PAUSE_NOW}</p>}
       <Gone />
       <Kept />
 
@@ -139,7 +173,7 @@ function Flow({ area, backHref, check, recheck, rechecking }: {
         <label className="flex min-h-11 items-start gap-3 text-sm font-semibold">
           <input type="checkbox" checked={ticked} disabled={busy || blocked} onChange={(e) => setTicked(e.target.checked)} className="mt-0.5 h-5 w-5 flex-none accent-[var(--swift-red)]" />
           <span>{!closure ? 'I understand that deleting my account cannot be undone.'
-            : check.ownsStore ? 'I want Swift to close my account and take my store off sale.' : 'I want Swift to close my account.'}</span>
+            : check.ownsStore ? 'I want Swift to close my account. I understand my store stops taking new orders now.' : 'I want Swift to close my account.'}</span>
         </label>
         {error && <p role="alert" className="text-sm font-semibold text-[var(--swift-red)]">{error}</p>}
         {error && <p className="text-sm text-[var(--swift-muted)]">Need a hand? <Link href="/contact" className="font-semibold underline">Contact Swift support</Link>.</p>}

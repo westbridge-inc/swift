@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
 import { DeleteAccountFlow, type DeletionArea } from './delete-account-flow';
 import type { DeletionCheck } from '@/lib/account-deletion';
-import { CLOSURE_LEAD, DELETE_LEAD, DELETION_GONE, DELETION_KEPT, MOVER_DELETION_EFFECTS, STAFF_DELETION_EFFECTS, STORE_CLOSURE_EFFECTS, STORE_STAYS_OPEN } from '@/lib/account-deletion-words';
+import { CLOSURE_LEAD, DELETE_LEAD, DELETION_GONE, DELETION_KEPT, MOVER_DELETION_EFFECTS, STAFF_DELETION_EFFECTS, STORE_CLOSURE_EFFECTS, STORE_ORDERS_PAUSED, STORE_ORDERS_PAUSE_NOW } from '@/lib/account-deletion-words';
 
 // ---------------------------------------------------------------------------
 // [WEB-DELETE · owner 1 Nov 2026] A person who signed up on the website deletes their own account there, as the
@@ -24,6 +24,7 @@ function api(opts: {
   stepUp?: boolean;
   deleteReply?: { status: number; body: unknown };
   closureReply?: { status: number; body: unknown };
+  cancelReply?: { status: number; body: unknown };
 } = {}) {
   let stepped = !opts.stepUp;
   let reads = 0;
@@ -50,6 +51,11 @@ function api(opts: {
     if (path === '/customer/account/closure-request' && method === 'POST') {
       if (!stepped) return { status: 403, body: { success: false, error: { code: 'STEP_UP_REQUIRED', message: 'Confirm it’s you first.' } } };
       const reply = opts.closureReply ?? { status: 202, body: { success: true, data: { deleted: false, status: 'CLOSURE_REQUESTED', ticketId: 't1', message: 'Your account closure request is received.' } } };
+      return { status: reply.status, body: reply.body };
+    }
+    if (path === '/customer/account/closure-request/cancel' && method === 'POST') {
+      if (!stepped) return { status: 403, body: { success: false, error: { code: 'STEP_UP_REQUIRED', message: 'Confirm it’s you first.' } } };
+      const reply = opts.cancelReply ?? { status: 200, body: { success: true, data: { cancelled: true, ticketId: 't1', storesLifted: 1, message: 'Your closure request is cancelled. Your store still takes no new orders until you press Resume orders on the Orders page.' } } };
       return { status: reply.status, body: reply.body };
     }
     return { status: 404, body: { success: false, error: { code: 'NOT_FOUND', message: `unexpected ${method} ${path}` } } };
@@ -209,17 +215,21 @@ describe('[WEB-DELETE] deleting an account on the website', () => {
 describe('[WEB-DELETE] a store owner closes by a request the team completes', () => {
   const OWNER: DeletionCheck = { ...CLEAR, closure: 'REQUEST', ownsStore: true };
 
-  it('says what happens to the store, its team and the weekly fee, sends the closure request (never a delete) and stays signed in', async () => {
-    api({ checks: [OWNER, { ...OWNER, closureRequest: { ticketId: 't1', status: 'OPEN', requestedAt: '2026-11-01T12:00:00.000Z' } }] });
+  it('says new orders stop now, what happens to the store, its team and the weekly fee, sends the closure request (never a delete) and stays signed in', async () => {
+    api({ checks: [OWNER, { ...OWNER, closureRequest: { ticketId: 't1', status: 'OPEN', requestedAt: '2026-11-01T12:00:00.000Z', ordersPaused: true } }] });
     const { user } = render('store');
     expect(await screen.findByRole('heading', { name: 'Request account closure', level: 1 })).toBeTruthy();
     expect(screen.getByText(CLOSURE_LEAD)).toBeTruthy();
     const store = screen.getByRole('region', { name: 'What happens to your store' });
     for (const line of STORE_CLOSURE_EFFECTS) expect(within(store).getByText(line)).toBeTruthy();
-    expect(screen.getByText(STORE_STAYS_OPEN)).toBeTruthy();
-    await user.click(screen.getByRole('checkbox', { name: 'I want Swift to close my account and take my store off sale.' }));
+    expect(within(store).getByText(/^New orders stop now/)).toBeTruthy();
+    expect(screen.getByText(STORE_ORDERS_PAUSE_NOW)).toBeTruthy();
+    // [owner ruling 1 Nov] The request itself pauses new orders: the old "press Pause new orders" advice is gone.
+    expect(screen.queryByText(/Pause new orders/)).toBeNull();
+    await user.click(screen.getByRole('checkbox', { name: 'I want Swift to close my account. I understand my store stops taking new orders now.' }));
     await user.click(mainButton('Request account closure'));
     expect(await screen.findByRole('heading', { name: 'Your closure request is with our team' })).toBeTruthy();
+    expect(await screen.findByText(STORE_ORDERS_PAUSED)).toBeTruthy();
     expect(calls.filter((c) => c.method === 'POST' && c.path === '/customer/account/closure-request')).toHaveLength(1);
     expect(deletes()).toEqual([]);
     expect(replace).not.toHaveBeenCalled();
@@ -227,7 +237,7 @@ describe('[WEB-DELETE] a store owner closes by a request the team completes', ()
   });
 
   it('an open request is shown, not sent again; the store\'s live orders are listed but do not stop the request', async () => {
-    api({ check: { ...OWNER, closureRequest: { ticketId: 't1', status: 'OPEN', requestedAt: '2026-11-01T12:00:00.000Z' },
+    api({ check: { ...OWNER, closureRequest: { ticketId: 't1', status: 'OPEN', requestedAt: '2026-11-01T12:00:00.000Z', ordersPaused: true },
       openOrders: { count: 1, items: [{ id: 'o1', orderNumber: 'S1', status: 'PREPARING', orderType: 'FOOD_DELIVERY', createdAt: '2026-11-01T10:00:00.000Z', side: 'STORE', storeName: 'Sample Kitchen' }] } } });
     render('store');
     expect(await screen.findByRole('heading', { name: 'Your closure request is with our team' })).toBeTruthy();
@@ -236,8 +246,31 @@ describe('[WEB-DELETE] a store owner closes by a request the team completes', ()
     expect(screen.queryByRole('button', { name: /Request account closure/ })).toBeNull();
   });
 
+  it('the owner can cancel the open request (with a fresh code when asked): the page says the server\'s words and offers the request again', async () => {
+    const OPEN = { ...OWNER, closureRequest: { ticketId: 't1', status: 'OPEN', requestedAt: '2026-11-01T12:00:00.000Z', ordersPaused: true } };
+    api({ checks: [OPEN, OWNER], stepUp: true });
+    const { user } = render('store');
+    expect(await screen.findByText(STORE_ORDERS_PAUSED)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Cancel my closure request' }));
+    await user.type(await screen.findByLabelText('Code'), '123456');
+    expect(await screen.findByText('Your closure request is cancelled. Your store still takes no new orders until you press Resume orders on the Orders page.')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Request account closure', level: 1 })).toBeTruthy();
+    expect(calls.filter((c) => c.method === 'POST' && c.path === '/customer/account/closure-request/cancel')).toHaveLength(2);
+    expect(calls.some((c) => c.path === '/customer/account/closure-request')).toBe(false);
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('a cancel the server refuses is said in its words, and the request stays shown', async () => {
+    api({ check: { ...OWNER, closureRequest: { ticketId: 't1', status: 'OPEN', requestedAt: '2026-11-01T12:00:00.000Z', ordersPaused: true } },
+      cancelReply: { status: 409, body: { success: false, error: { code: 'NO_CLOSURE_REQUEST', message: 'There is no open account closure request to cancel.' } } } });
+    const { user } = render('store');
+    await user.click(await screen.findByRole('button', { name: 'Cancel my closure request' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('There is no open account closure request to cancel.');
+    expect(screen.getByRole('heading', { name: 'Your closure request is with our team' })).toBeTruthy();
+  });
+
   it('when the server says closure for an account the check called a deletion, the request is shown and nobody is signed out', async () => {
-    api({ checks: [CLEAR, { ...OWNER, closureRequest: { ticketId: 't1', status: 'OPEN', requestedAt: '2026-11-01T12:00:00.000Z' } }],
+    api({ checks: [CLEAR, { ...OWNER, closureRequest: { ticketId: 't1', status: 'OPEN', requestedAt: '2026-11-01T12:00:00.000Z', ordersPaused: true } }],
       deleteReply: { status: 202, body: { success: true, data: { deleted: false, status: 'CLOSURE_REQUESTED', ticketId: 't1', message: 'received' } } } });
     const { user } = render('store');
     await user.click(await screen.findByRole('checkbox'));

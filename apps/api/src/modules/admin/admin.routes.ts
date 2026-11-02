@@ -7453,7 +7453,7 @@ export async function adminRoutes(app: FastifyInstance) {
         where: { userId: ticket.userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
       });
     if (!confirmedInApp) {
-      throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request confirmed in the app can be completed here.');
+      throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request the account holder confirmed (in the app or on the website) can be completed here.');
     }
     if (ticket.status === 'RESOLVED') throw new AppError(409, 'ALREADY_RESOLVED', 'This closure request is already resolved.');
     const [subject, staffGrant] = await Promise.all([

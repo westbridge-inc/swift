@@ -5,6 +5,8 @@ import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { log } from '../../utils/logger';
 import { supportResolutionCounter } from '../../plugins/observability';
+import { ACCOUNT_CLOSURE_SUBJECT } from '../user/account-closure';
+import { liftClosurePause } from '../user/closure-pause';
 
 /** [A-18] What a SAFETY ticket may close on. "Answered" is not one of them. */
 export const SAFETY_RESOLUTIONS: SupportResolution[] = ['ACTION_TAKEN', 'ESCALATED_SAFETY', 'NO_RISK_FOUND'];
@@ -189,6 +191,13 @@ export class SupportService {
           );
         }
       }
+    }
+
+    // [WEB-DELETE · owner ruling 1 Nov 2026] Swift staff resolving an account closure request (without completing
+    // it) lifts the request's pause on the stores' new orders, audited, before the ticket closes (a failed close then
+    // leaves nothing half done but the lift, which the resolve the staff member retries repeats harmlessly).
+    if (resolving && ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT) {
+      await this.prisma.$transaction((tx) => liftClosurePause(tx, ticket.userId, ticketId, { kind: 'STAFF_RESOLVED', actorId: adminId }));
     }
 
     const updated = await this.queue((db, scope) => db.supportTicket.update({

@@ -1607,6 +1607,11 @@ model Vendor {
   // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT
   // lift it). Reinstatement CAS-matches BILLING only.
   suspensionSource        String?
+  /// [WEB-DELETE · owner ruling 1 Nov 2026] When the owner's account closure request paused this store's NEW orders
+  /// (user/closure-pause.ts). While it is set nothing turns order intake back on (a database CHECK keeps
+  /// acceptingOrders false): only Swift staff resolving the request, or the owner cancelling it, clears it. Orders
+  /// already placed still finish.
+  closurePausedAt         DateTime?
   isFeatured              Boolean                  @default(false)
   averageRating           Float                    @default(5.0)
   totalRatings            Int                      @default(0)

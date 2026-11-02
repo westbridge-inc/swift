@@ -243,6 +243,8 @@ const SCOPE: Record<string, Entry> = {
 
 /** Verb-matched routes that create none of the eight things (reviewed). */
 const OUT: Record<string, string> = {
+  // [WEB-DELETE · owner ruling 1 Nov 2026]
+  [`${CUSTOMER}|POST|/account/closure-request/cancel`]: 'The owner takes back their own closure request: it resolves that ticket and lifts its pause on new orders, under the person lock (a replay finds no open request and is refused). No order or money.',
   [`${CUSTOMER}|POST|/orders/:id/reorder`]: 'Fills the CART from a past order; nothing is ordered until checkout (which holds its own key).',
   [`${CUSTOMER}|PUT|/cart/tip`]: 'Sets the tip VALUE on the cart (a replay sets the same value); the money moves at checkout.',
   'modules/ads/ads.routes.ts|POST|/campaigns': 'Creates a DRAFT campaign; no money is reserved or charged until reserve / checkout (both guarded).',

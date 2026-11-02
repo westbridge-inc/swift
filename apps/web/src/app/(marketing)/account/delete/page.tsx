@@ -88,10 +88,11 @@ export default function DeleteAccountPage() {
           customer&apos;s own deletion is never blocked by this.
         </p>
         <p className="mt-3 text-[var(--swift-muted)]">
-          A store owner closes the account by a request, in the app or on the website. Our team then
+          A store owner closes the account by a request, in the app or on the website. The store
+          stops taking new orders as soon as the request is sent; orders already placed still finish, and cancelling the request lifts the pause. Our team then
           takes the store off sale, removes its team members, stops the weekly fee (refunding any week
           paid for that has not started) and closes the account once every order and payment is
-          settled. Until then the owner keeps access and the store stays as it is.
+          settled. The owner keeps access until then.
         </p>
 
         <h2 className="mt-12 text-2xl font-bold tracking-tight">What is deleted</h2>

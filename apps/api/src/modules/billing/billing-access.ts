@@ -48,8 +48,10 @@ export async function restoreBillingAccess(tx: Prisma.TransactionClient, vendorI
     data: { status: 'ACTIVE', suspensionSource: null },
   });
   if (lifted.count !== 1) return false;
+  // [WEB-DELETE · owner ruling 1 Nov 2026] A store whose owner asked Swift to close the account stays paused: the
+  // billing hold lifts, new orders do not reopen (user/closure-pause.ts; the database CHECK refuses it anyway).
   await tx.vendor.updateMany({
-    where: { id: vendorId, status: 'ACTIVE', isVerified: true },
+    where: { id: vendorId, status: 'ACTIVE', isVerified: true, closurePausedAt: null },
     data: { acceptingOrders: true },
   });
   return true;

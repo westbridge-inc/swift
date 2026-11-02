@@ -8,6 +8,7 @@ import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
+import { browserClientOf } from '../auth/browser-session';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
@@ -861,6 +862,8 @@ export async function customerRoutes(app: FastifyInstance) {
 
   const support = new SupportService(app.prisma, notificationService);
   const account = new AccountService(app);
+  // [WEB-DELETE] Where a closure request was confirmed, for its ticket: the website names itself (W-01 client header).
+  const closureSurfaceOf = (request: AuthRequest) => (browserClientOf(request) === 'web' ? 'website' as const : 'app' as const);
   const createTicketSchema = z.object({
     category: z.enum(['ORDER_ISSUE', 'PAYMENT', 'SAFETY', 'ACCOUNT', 'VENDOR', 'MOVER', 'OTHER']),
     subject: z.string().trim().min(3).max(120),
@@ -1052,8 +1055,16 @@ export async function customerRoutes(app: FastifyInstance) {
    *  client must log the user out afterwards; every session is already revoked. */
   app.post('/account/closure-request', async (request: AuthRequest, reply) => {
     await requireRecentOtpOrStepUp(app, request);
-    const result = await account.requestClosure(request.user.userId);
+    const result = await account.requestClosure(request.user.userId, closureSurfaceOf(request));
     reply.code(202);
+    return { success: true, data: result };
+  });
+
+  /** POST /account/closure-request/cancel — [WEB-DELETE · owner ruling 1 Nov 2026] the owner takes the request back:
+   *  resolved, and its pause on the stores' new orders lifted (audited). The same fresh code as asking. */
+  app.post('/account/closure-request/cancel', async (request: AuthRequest) => {
+    await requireRecentOtpOrStepUp(app, request);
+    const result = await account.cancelClosure(request.user.userId);
     return { success: true, data: result };
   });
 
@@ -1074,7 +1085,7 @@ export async function customerRoutes(app: FastifyInstance) {
       }
       throw error;
     });
-    const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
+    const result = await account.deleteAccount(request.user.userId, true, closureSurfaceOf(request)).catch(async (error: unknown) => {
       const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
       if (user?.phone !== `deleted:${request.user.userId}`) throw error;
       app.log.error({ err: error, userId: request.user.userId }, 'Account erasure pending automatic retry');

@@ -2703,7 +2703,7 @@ export class VerificationService {
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
           where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
-          select: { id: true, name: true, vendorType: true, isVerified: true, status: true, publicPhone: true, personApprovalRequired: true },
+          select: { id: true, name: true, vendorType: true, isVerified: true, status: true, publicPhone: true, personApprovalRequired: true, closurePausedAt: true },
         },
       },
     });
@@ -2757,7 +2757,8 @@ export class VerificationService {
         const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
         await db.vendor.update({
           where: { id: vendor.id },
-          data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
+          // [WEB-DELETE] A store whose owner asked Swift to close the account goes live paused (closure-pause.ts).
+          data: { isVerified: true, activationValidUntil, ...(vendor.isVerified || vendor.closurePausedAt ? {} : { acceptingOrders: true }) },
         });
         // [RETIER PR-A] The first time a store is made live, for good (partner/store-fee.ts: only a never-live store is
         // priced on its catalogue).

@@ -1,5 +1,6 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
-import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF } from './account-closure';
+import { ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF, closureMessageFor, type ClosureSurface } from './account-closure';
+import { ACCOUNT_CLOSURE_CANCELLED, liftClosurePause, pauseStoresForClosure } from './closure-pause';
 import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { eraseUserDevices } from '../../lib/owner-rls';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
@@ -95,12 +96,12 @@ export class AccountService {
     return exportPersonalData(this.app.prisma, userId);
   }
 
-  private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
+  private async closureTicket(tx: Prisma.TransactionClient, userId: string, surface: ClosureSurface) {
     const where = { userId, category: 'ACCOUNT' as const, subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
     const ticket = await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
       ?? await tx.supportTicket.create({ data: {
         userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
-        message: ACCOUNT_CLOSURE_MESSAGE,
+        message: closureMessageFor(surface),
       } });
     // Same transaction as the request: the confirmation and its ticket commit
     // together. One record per ticket; a repeated request reuses it.
@@ -108,8 +109,11 @@ export class AccountService {
       where: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
     });
     if (!confirmed) {
-      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id } });
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id, changes: { surface } } });
     }
+    // [WEB-DELETE · owner ruling 1 Nov 2026] The request stops the stores' NEW orders now, in this same transaction
+    // (website and app alike: this is the one closure path). Orders already placed finish; the team completes.
+    await pauseStoresForClosure(tx, userId, ticket.id);
     return ticket;
   }
 
@@ -123,19 +127,46 @@ export class AccountService {
     } catch (error) {
       this.app.log.error({ err: error, ticketId }, 'Closure notification failed; support ticket remains open');
     }
+    // [WEB-DELETE · owner ruling 1 Nov 2026] Said when the request paused a store's new orders (the app shows this).
+    const paused = await this.app.prisma.vendor.count({ where: { owner: { userId }, closurePausedAt: { not: null } } }).catch(() => 0);
     return { deleted: false, status: 'CLOSURE_REQUESTED' as const, ticketId,
-      message: 'Your account closure request is received. Track it in Get help. Keep access while the team resolves listings, campaigns and any outstanding obligations.' };
+      message: `Your account closure request is received. Track it in Get help. Keep access while the team resolves listings, campaigns and any outstanding obligations.${
+        paused > 0 ? ' New orders at your store are paused now; orders already placed still finish.' : ''}` };
   }
 
   /** The existing support queue owns the human business wind-down. */
-  async requestClosure(userId: string) {
+  async requestClosure(userId: string, surface: ClosureSurface = 'app') {
     const ticket = await this.app.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
       const user = await tx.user.findUnique({ where: { id: userId }, select: { status: true } });
       if (!user || user.status !== 'ACTIVE') throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
-      return this.closureTicket(tx, userId);
+      return this.closureTicket(tx, userId, surface);
     });
     return this.closureReceipt(userId, ticket.id);
+  }
+
+  /** [WEB-DELETE · owner ruling 1 Nov 2026] The owner takes their closure request back: the request is resolved and
+   *  its pause on the stores' new orders is lifted (both audited). Order intake stays off until the owner resumes it
+   *  with the usual switch. Under the same person lock as the request, so a request and its cancel never interleave. */
+  async cancelClosure(userId: string) {
+    return this.app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+      const ticket = await tx.supportTicket.findFirst({
+        where: { userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN', 'IN_PROGRESS'] } },
+        orderBy: { createdAt: 'desc' }, select: { id: true },
+      });
+      if (!ticket) throw new AppError(409, 'NO_CLOSURE_REQUEST', 'There is no open account closure request to cancel.');
+      await tx.supportTicket.updateMany({
+        where: { id: ticket.id, userId, status: { in: ['OPEN', 'IN_PROGRESS'] } },
+        data: { status: 'RESOLVED', resolution: 'ANSWERED', resolvedAt: new Date(), adminNote: 'The account holder cancelled this closure request.' },
+      });
+      const stores = await liftClosurePause(tx, userId, ticket.id, { kind: 'OWNER_CANCELLED', actorId: userId });
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CANCELLED, entity: 'SupportTicket', entityId: ticket.id, changes: { storesLifted: stores } } });
+      return { cancelled: true as const, ticketId: ticket.id, storesLifted: stores.length,
+        message: stores.length > 0
+          ? 'Your closure request is cancelled. Your store still takes no new orders until you press Resume orders on the Orders page.'
+          : 'Your closure request is cancelled.' };
+    });
   }
 
   /**
@@ -150,11 +181,12 @@ export class AccountService {
       const user = await tx.user.findUnique({ where: { id: userId }, select: { roles: true } });
       if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
       const live = liveWorkWhere(userId);
-      const [closure, rider, driver, storeOwner] = await Promise.all([
+      const [closure, rider, driver, storeOwner, pausedStores] = await Promise.all([
         closesByRequest(tx, userId, user.roles),
         tx.rider.findUnique({ where: { userId }, select: { id: true } }),
         tx.driver.findUnique({ where: { userId }, select: { id: true } }),
         tx.vendorOwner.findUnique({ where: { userId }, select: { id: true } }),
+        tx.vendor.count({ where: { owner: { userId }, closurePausedAt: { not: null } } }),
       ]);
       const [orderCount, orders, jobCount, jobs, obligations, ticket] = await Promise.all([
         tx.order.count({ where: live.orders }),
@@ -185,7 +217,8 @@ export class AccountService {
         closure: closure ? 'REQUEST' as const : 'DELETE' as const,
         // What a closure does to a store is shown only to a person who owns one (an advertiser closes too).
         ownsStore: user.roles.includes('VENDOR_OWNER') || storeOwner !== null,
-        closureRequest: ticket ? { ticketId: ticket.id, status: ticket.status, requestedAt: ticket.createdAt } : null,
+        // ordersPaused: the request holds the stores' new orders (an older request, sent before the pause, may not).
+        closureRequest: ticket ? { ticketId: ticket.id, status: ticket.status, requestedAt: ticket.createdAt, ordersPaused: pausedStores > 0 } : null,
         openOrders: {
           count: orderCount,
           items: orders.map((o) => ({ id: o.id, orderNumber: o.orderNumber, status: o.status, orderType: o.orderType, createdAt: o.createdAt, side: side(o), storeName: o.vendor?.name ?? null })),
@@ -200,7 +233,7 @@ export class AccountService {
   }
 
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
-  async deleteAccount(userId: string, selfServe = false) {
+  async deleteAccount(userId: string, selfServe = false, surface: ClosureSurface = 'app') {
     const prisma = this.app.prisma;
     const preflight = await prisma.$transaction(async (tx) => {
       // Service-job creation, provider profile changes and verification events
@@ -277,7 +310,7 @@ export class AccountService {
       // The server, not a navigation flag or active role, chooses the business
       // closure flow. Keep sign-in until the support team resolves obligations.
       if (selfServe && await closesByRequest(tx, userId, user.roles)) {
-        const ticket = await this.closureTicket(tx, userId);
+        const ticket = await this.closureTicket(tx, userId, surface);
         return { closureTicketId: ticket.id, hold: null, avatarOrphanId: null };
       }
 

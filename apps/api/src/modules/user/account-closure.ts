@@ -3,8 +3,15 @@ import type { Prisma } from '@prisma/client';
 /** The subject of a closure request confirmed in the app. Support completes
  *  only these: a typed-in ticket is not a confirmed request. */
 export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
-/** The server-written text of that request (no personal data): the erasure keeps it. */
+/** The server-written text of that request (no personal data): the erasure keeps it. It says where the request was
+ *  confirmed: the app, or [WEB-DELETE] the website (the same server path; the browser client names itself). */
 export const ACCOUNT_CLOSURE_MESSAGE = 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.';
+export const ACCOUNT_CLOSURE_MESSAGE_WEBSITE = 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed on the website.';
+/** Every server-written closure-request text (the erasure keeps each one). */
+export const ACCOUNT_CLOSURE_MESSAGES: readonly string[] = [ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_MESSAGE_WEBSITE];
+/** Where a closure request was confirmed. */
+export type ClosureSurface = 'app' | 'website';
+export const closureMessageFor = (surface: ClosureSurface): string => (surface === 'website' ? ACCOUNT_CLOSURE_MESSAGE_WEBSITE : ACCOUNT_CLOSURE_MESSAGE);
 
 /** The audit action the erasure writes with its cut-off (marker + DEACTIVATED), in the same transaction. The
  *  database's erasure exceptions open only for a person whose row carries the marker, DEACTIVATED and this row. */

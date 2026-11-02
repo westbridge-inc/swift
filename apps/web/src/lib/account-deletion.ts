@@ -17,7 +17,8 @@ export interface DeletionCheck {
   closure: 'REQUEST' | 'DELETE';
   /** The person owns a store (what a closure does to it is shown). */
   ownsStore: boolean;
-  closureRequest: { ticketId: string; status: string; requestedAt: string } | null;
+  /** ordersPaused: the request holds the person's stores' new orders (owner ruling 1 Nov 2026). */
+  closureRequest: { ticketId: string; status: string; requestedAt: string; ordersPaused: boolean } | null;
   openOrders: { count: number; items: Array<{ id: string; orderNumber: string; status: string; orderType: string; createdAt: string; side: DeletionSide; storeName: string | null }> };
   openServiceJobs: { count: number; items: Array<{ id: string; status: string; scheduledFor: string | null; createdAt: string; side: 'CUSTOMER' | 'PROVIDER' }> };
   /** Money that must be settled first, in the deletion's own sentence. */
@@ -46,6 +47,12 @@ export async function deleteMyAccount(): Promise<DeletionReceipt> {
 
 export async function requestAccountClosure(): Promise<DeletionReceipt> {
   return (await apiFetch(`${ACCOUNT}/closure-request`, { method: 'POST', body: '{}' })).data as DeletionReceipt;
+}
+
+/** [WEB-DELETE · owner ruling 1 Nov 2026] Take the closure request back: it is resolved and its pause on the stores'
+ *  new orders lifted (the owner then resumes orders with the usual switch). The same fresh code as asking. */
+export async function cancelAccountClosure(): Promise<{ cancelled: true; ticketId: string; storesLifted: number; message: string }> {
+  return (await apiFetch(`${ACCOUNT}/closure-request/cancel`, { method: 'POST', body: '{}' })).data as { cancelled: true; ticketId: string; storesLifted: number; message: string };
 }
 
 /** Where the "Your account is deleted" page is. Public, and outside the pre-launch front door. */

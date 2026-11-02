@@ -217,7 +217,7 @@ describe('[WEB-DELETE] GET /customer/account/deletion-check shows what stops the
     expect(refused.json().error).toMatchObject({ code: 'PARTNER_OBLIGATIONS', message: BLOCKER_MESSAGE.CASH_HELD });
   });
 
-  it('tells a store owner the account closes by a request the team completes, lists the store\'s live orders, and shows the request once sent; the store is untouched', async () => {
+  it('tells a store owner the account closes by a request the team completes, lists the store\'s live orders, and shows the request once sent; the store\'s new orders pause, it stays live', async () => {
     const p = await person(['VENDOR_OWNER', 'CUSTOMER']);
     const owner = await app.prisma.vendorOwner.create({ data: { userId: p.userId } });
     const vendor = await app.prisma.vendor.create({ data: {
@@ -239,10 +239,12 @@ describe('[WEB-DELETE] GET /customer/account/deletion-check shows what stops the
     expect(sent.statusCode, sent.payload).toBe(202);
     const ticketId = sent.json().data.ticketId as string;
     const second = (await check(jar)).json().data;
-    expect(second.closureRequest).toMatchObject({ ticketId, status: 'OPEN' });
+    expect(second.closureRequest).toMatchObject({ ticketId, status: 'OPEN', ordersPaused: true });
     expect(typeof second.closureRequest.requestedAt).toBe('string');
-    // A request is not a deletion: the person keeps access and the store is as it was.
-    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
+    // A request is not a deletion: the person keeps access and the store stays live, its NEW orders paused
+    // (owner ruling 1 Nov; closure-request-pause.test.ts) and its live order still listed to finish.
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).toMatchObject({ status: 'ACTIVE', acceptingOrders: false });
+    expect(second.openOrders.items).toEqual([expect.objectContaining({ id: live.id, status: 'PREPARING' })]);
     expect(await app.prisma.session.count({ where: { userId: p.userId } })).toBe(1);
   });
 

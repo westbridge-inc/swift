@@ -50,8 +50,10 @@ export const DELETE_LEAD = 'This closes your account and starts erasing your per
 /** The phone's closure-request confirmation, with where a website partner sees the request. */
 export const CLOSURE_LEAD = 'Send a closure request to our team. You keep access while outstanding business obligations are resolved, and you can see where your request stands on this page.';
 
-/** What happens to a store when its owner's account is closed (partner-wind-down.ts windDownPartner). */
+/** What happens to a store when its owner's account is closed: at once on the request (closure-pause.ts, owner ruling
+ *  1 Nov 2026), then when the team completes it (partner-wind-down.ts windDownPartner). */
 export const STORE_CLOSURE_EFFECTS: readonly string[] = [
+  'New orders stop now: your store takes no new orders from the moment you send the request. Orders already placed still finish.',
   'Your store is taken off sale: it stops taking orders and its items can no longer be ordered. Its orders, receipts and sales history are kept as financial records.',
   'Your team loses access: every manager and staff member is removed from your store.',
   'Your weekly fee stops and no further fee falls due. A week that has started is not refunded. If you paid for a week that has not started, Swift refunds it within 14 days to the account you paid from, records the refund, and then closes your account.',
@@ -59,8 +61,11 @@ export const STORE_CLOSURE_EFFECTS: readonly string[] = [
   'Our team closes the account once every live order is delivered or cancelled and nothing is owed either way.',
 ];
 
-/** Until the team closes it, the store is as it was: the owner can stop new orders at once. */
-export const STORE_STAYS_OPEN = 'Until then your store stays as it is. If it is taking orders and you want to stop new ones now, press “Pause new orders” on the Orders page.';
+/** The request pauses the store's new orders at once (owner ruling 1 Nov 2026): said before the person sends it. */
+export const STORE_ORDERS_PAUSE_NOW = 'Your store stops taking new orders as soon as you send this request. Orders already placed still finish. Only Swift’s team, or cancelling the request on this page, lifts the pause.';
+
+/** While the request is open and holds the pause. */
+export const STORE_ORDERS_PAUSED = 'Your store takes no new orders while this request is open. Orders already placed still finish.';
 
 /** A manager or staff member (not an owner) deleting their own account. */
 export const STAFF_DELETION_EFFECTS: readonly string[] = [
