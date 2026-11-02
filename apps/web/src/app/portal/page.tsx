@@ -10,6 +10,7 @@ import { readSettlementLedger } from '@/lib/cash-settlement-view';
 import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 import { NoEarnerProfile } from '@/components/pro-office-note';
+import { partnerSignupHref } from '@/lib/signup-roles';
 import {
   confirmRiderSettlement, getDriverProfile, getDriverSubscription, getDriverSummary, getEarningsStatementPath,
   getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary, getVerificationStatus, type EarningsSummary,
@@ -170,8 +171,11 @@ export default function PortalHome() {
     // [REVIEW-F #2238 S4-1] A pro is told what this office is for and where their fee is.
     return (
       <NoEarnerProfile>
+        {/* [WEB-ONBOARDING · FLOW-QA F27] the website's own doors (partners have no app yet) */}
         <p className="rounded-2xl border border-dashed border-[var(--swift-border)] bg-[var(--swift-card)] p-10 text-center text-sm text-[var(--swift-muted)]">
-          No earner profile on this account — start driving or delivering from the Swift app.
+          No earner profile on this account. To earn with Swift:{' '}
+          <Link href={partnerSignupHref('rider')} className="font-semibold underline">Deliver with Swift</Link> or{' '}
+          <Link href={partnerSignupHref('driver')} className="font-semibold underline">Drive a taxi with Swift</Link>.
         </p>
       </NoEarnerProfile>
     );
