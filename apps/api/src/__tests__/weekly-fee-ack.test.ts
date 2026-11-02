@@ -45,7 +45,7 @@ const V1_ITEMS = [
 const V1_TICK = 'I understand the weekly fee.';
 /** [WEB-ONBOARDING · owner 1 Nov 2026 (D3, F13)] The words served now: v1 with "How you pay" naming the website and "When it starts" saying the trial. */
 const V2_CHANGED: Record<string, string> = {
-  'When it starts': 'Nothing is paid at sign-up. Your free trial starts once Swift approves you and lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it. The weekly fee starts after that. Each person gets one free trial for each kind of partner.',
+  'When it starts': 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one. A new partner\u2019s free trial lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it, counted from the day Swift approves you (for a service provider, from the day the Pro Agreement says). A new branch has no trial of its own: it shares its business\u2019s. Each person gets one free trial for each kind of partner, and none while an earlier Swift subscription of theirs is overdue, paused or ended.',
   'How you pay': 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.',
 };
 const V2_ITEMS = V1_ITEMS.map((i) => (V2_CHANGED[i.heading] ? { ...i, text: V2_CHANGED[i.heading]! } : i));

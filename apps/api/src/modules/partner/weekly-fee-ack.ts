@@ -65,18 +65,22 @@ export const WEEKLY_FEE_ACK_TEXT_V1 = [
  * [WEB-ONBOARDING · owner rulings 1 Nov 2026 (D3, D1/F13)] The v2 words, two lines changed from v1:
  *  - "How you pay" names the website too (the weekly fee is paid on MMG's checkout page from swiftgy.com as well as
  *    from the app);
- *  - "When it starts" says the free trial plainly: when it starts (once Swift approves you), how long it lasts (the
- *    trial law's own lengths: subscription/trial-length.ts TRIAL_DAYS, and DEPARTMENT_TRIAL_DAYS for a store at the
- *    department step, 10,000+ items, when approved) and that each person gets one per kind of partner (the trial
- *    entitlement law: one per person, per role). A change to any of those numbers is a new version (the unit test
- *    pins them together).
+ *  - "When it starts" says the free trial plainly, and true on EVERY screen these words are ticked on [REVIEW-LIGHT2 M]:
+ *    v1's "after your free trial if you get one" stays (the trial law can refuse one); how long a NEW partner's lasts
+ *    (subscription/trial-length.ts TRIAL_DAYS, and DEPARTMENT_TRIAL_DAYS for a store at the department step, 10,000+
+ *    items, when approved), counted from approval, and for a pro from the day the Pro Agreement says (the last of the
+ *    fee's start for Providers, approval, acceptance and the fee tick: pros tick these same words); that a new branch
+ *    (Add a branch ticks them too) has no trial of its own and shares its business's; and that each person gets one
+ *    per kind of partner (the trial entitlement law: one per person, per role), none while an earlier subscription in
+ *    their accounts is overdue, paused or ended (DEBT_REINSTATE_FIRST: PAST_DUE, SUSPENDED, CHURNED). A change to any
+ *    of those numbers is a new version (the unit test pins them together).
  * "What it covers", "If the price changes" and the tick are v1's, word for word. Card-rail switch-on checklist: before
  * card payment is offered, "How you pay" must change again, and that is v3.
  */
 export const WEEKLY_FEE_TERMS_V2 = {
   items: [
     { heading: 'What it covers', text: 'The Swift app and its tools for your work. Swift takes no commission: you keep 100% of your sales, fares, delivery fees and tips.' },
-    { heading: 'When it starts', text: `Nothing is paid at sign-up. Your free trial starts once Swift approves you and lasts ${TRIAL_DAYS} days, or ${DEPARTMENT_TRIAL_DAYS} days for a store with 10,000 or more items when Swift approves it. The weekly fee starts after that. Each person gets one free trial for each kind of partner.` },
+    { heading: 'When it starts', text: `Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one. A new partner’s free trial lasts ${TRIAL_DAYS} days, or ${DEPARTMENT_TRIAL_DAYS} days for a store with 10,000 or more items when Swift approves it, counted from the day Swift approves you (for a service provider, from the day the Pro Agreement says). A new branch has no trial of its own: it shares its business’s. Each person gets one free trial for each kind of partner, and none while an earlier Swift subscription of theirs is overdue, paused or ended.` },
     { heading: 'How you pay', text: 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.' },
     { heading: 'If the price changes', text: 'Swift tells you in the app at least 14 days before. A new price applies only from your first weekly fee due after that, never to a week you have already paid.' },
   ],

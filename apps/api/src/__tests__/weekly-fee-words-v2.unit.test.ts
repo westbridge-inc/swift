@@ -20,8 +20,14 @@ import { guyanaTiers } from '../modules/ops/platform-config';
 
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 const HOW_YOU_PAY_V2 = 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.';
-/** [D1 / F13] The free trial said plainly: when it starts, how long (the trial law's lengths), once per person per kind of partner. */
-const WHEN_IT_STARTS_V2 = 'Nothing is paid at sign-up. Your free trial starts once Swift approves you and lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it. The weekly fee starts after that. Each person gets one free trial for each kind of partner.';
+/**
+ * [D1 / F13 · REVIEW-LIGHT2 M S2+S3] The free trial said plainly AND true on every screen these words are ticked on:
+ * sign-up (a new store, rider or taxi driver), Add a branch (a branch has no trial of its own: it shares its business's,
+ * and the page says "Billed from the day Swift approves it" when that has ended), and a pro's fee tick (a pro's trial
+ * starts as the Pro Agreement says). "if you get one" stays: the trial law can refuse one (an earlier trial, an
+ * overdue, paused or ended subscription in the same person's accounts, a review hold).
+ */
+const WHEN_IT_STARTS_V2 = 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one. A new partner\u2019s free trial lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it, counted from the day Swift approves you (for a service provider, from the day the Pro Agreement says). A new branch has no trial of its own: it shares its business\u2019s. Each person gets one free trial for each kind of partner, and none while an earlier Swift subscription of theirs is overdue, paused or ended.';
 const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V2, 'When it starts': WHEN_IT_STARTS_V2 };
 
 describe('[D3] the weekly fee words v2', () => {
@@ -39,7 +45,17 @@ describe('[D3] the weekly fee words v2', () => {
 
   it('the trial words are the trial law’s own numbers (a change to one is a new version)', () => {
     expect([TRIAL_DAYS, DEPARTMENT_TRIAL_DAYS, guyanaTiers.departmentCatalogueThreshold]).toEqual([14, 7, 10000]);
-    expect(WHEN_IT_STARTS_V2).toContain(`lasts ${TRIAL_DAYS} days, or ${DEPARTMENT_TRIAL_DAYS} days for a store with ${guyanaTiers.departmentCatalogueThreshold.toLocaleString('en-US')} or more items`);
+    expect(WHEN_IT_STARTS_V2).toContain(`free trial lasts ${TRIAL_DAYS} days, or ${DEPARTMENT_TRIAL_DAYS} days for a store with ${guyanaTiers.departmentCatalogueThreshold.toLocaleString('en-US')} or more items`);
+  });
+
+  it('[REVIEW-LIGHT2 M] true wherever v2 is ticked: no trial promised outright, a branch shares its business’s, a pro’s follows the Pro Agreement, none while an earlier subscription is overdue, paused or ended', () => {
+    const when = weeklyFeeTerms().items.find((i) => i.heading === 'When it starts')!.text;
+    expect(when).toContain('after your free trial if you get one');
+    expect(when).toMatch(/^Nothing is paid at sign-up\. The weekly fee starts only after Swift approves you/);
+    expect(when).toContain('A new branch has no trial of its own: it shares its business\u2019s.');
+    expect(when).toContain('for a service provider, from the day the Pro Agreement says');
+    expect(when).toContain('none while an earlier Swift subscription of theirs is overdue, paused or ended');
+    expect(when).not.toMatch(/Your free trial starts once/);
   });
 
   it('v1 keeps its exact words (the ledger rows already anchored to them)', () => {
