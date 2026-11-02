@@ -1,3 +1,5 @@
+import type { StoreGoLive } from './branch-label';
+
 /** The store record inside GET /vendor/profile, as the app reads it. */
 export interface HubStore {
   id?: string; name?: string; vendorType?: string; status?: string; isVerified?: boolean;
@@ -5,6 +7,8 @@ export interface HubStore {
   /** [O-2] "Ask for the pickup code" (absent on an older server). */
   requirePickupCode?: boolean;
   operatingHours?: unknown; _count?: { orders?: number; items?: number };
+  /** [WEB-ONBOARDING] A store not live yet: whose turn it is and the owner's steps (vendor.routes GET /profile). */
+  goLive?: StoreGoLive | null;
 }
 
 /** GET /vendor/profile answers `{ id, userId, vendors: [...], myRole }`; the store

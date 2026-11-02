@@ -24,6 +24,9 @@ import {
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
+import { ownerSteps } from '@/lib/branch-go-live';
+import { waitingFor } from '@/lib/branch-label';
+import { NOT_LIVE } from '@/lib/first-steps';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
 // The app's own O-4 rules and words (plain file, imported as is).
@@ -248,6 +251,37 @@ export function FirstOrderGuide({ store, manager, listening }: { store: HubStore
         <span className={`h-2 w-2 rounded-full ${listening ? 'bg-[var(--swift-success)]' : 'bg-white/40'}`} aria-hidden="true" />
         {listening ? 'LISTENING FOR ORDERS' : 'RECONNECTING TO THE BOARD'}
       </p>
+    </section>
+  );
+}
+
+/**
+ * [WEB-ONBOARDING · owner 1 Nov 2026] A store not live yet (never approved): in place of the first-order guide, what is
+ * left and whose turn it is, as the app's waiting store screen (VendorOnboarding) says it. The owner's steps are the
+ * server's (`goLive`), each opening where it is done on this website; adding items works while the store waits.
+ */
+export function NotLiveGuide({ store, manager, owner }: { store: HubStore; manager: boolean; owner: boolean }) {
+  const itemsQ = useItems();
+  const catalogue = catalogueName(store.vendorType).toLowerCase();
+  const swiftsTurn = waitingFor(store) === 'SWIFT';
+  const steps = owner && !swiftsTurn ? ownerSteps(store) : [];
+  const body = swiftsTurn ? NOT_LIVE.swiftBody : !owner ? NOT_LIVE.staffBody : steps.length > 0 ? NOT_LIVE.ownerBody : NOT_LIVE.noWord;
+  const emptyCatalogue = manager && itemsQ.isSuccess && (itemsQ.data ?? []).length === 0;
+  return (
+    <section aria-label="Your store is not live yet" className="rounded-2xl bg-[var(--swift-red-600)] p-6 text-white">
+      <p className="text-[11px] font-bold tracking-[0.1em] opacity-80">{NOT_LIVE.kicker}</p>
+      <p className="mt-1 text-[24px] font-semibold leading-8 [font-family:var(--swift-face-display)]">{swiftsTurn ? NOT_LIVE.swiftTurn : NOT_LIVE.ownerTurn}</p>
+      <p className="mt-2 opacity-90">{body}</p>
+      {(steps.length > 0 || emptyCatalogue) && (
+        <div className="mt-4 space-y-2">
+          {steps.map((step, i) => (
+            <GuideRow key={step.words} index={i + 1} label={step.words} href={step.where === 'documents' ? '/dashboard/documents' : '/dashboard/settings'}
+              detail={step.where === 'documents' ? 'A person at Swift checks each one' : 'In your store’s Settings'} />
+          ))}
+          {emptyCatalogue && <GuideRow index={steps.length + 1} label="Add your first item" detail={`Your ${catalogue} is empty — nothing to order yet`} href="/dashboard/inventory" />}
+        </div>
+      )}
+      <p className="mt-4 text-sm opacity-90">{NOT_LIVE.wait}</p>
     </section>
   );
 }

@@ -12,8 +12,9 @@ import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 import { NoEarnerProfile } from '@/components/pro-office-note';
 import {
   confirmRiderSettlement, getDriverProfile, getDriverSubscription, getDriverSummary, getEarningsStatementPath,
-  getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary, type EarningsSummary,
+  getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary, getVerificationStatus, type EarningsSummary,
 } from '@/lib/mover-api';
+import { moverNextStep, moverNextWords } from '@/lib/first-steps';
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -124,6 +125,11 @@ export default function PortalHome() {
   const riderSub = useQuery({ queryKey: ['p-rider-sub'], queryFn: getRiderSubscription, enabled: !!rider.data, retry: 0 });
   const driverSub = useQuery({ queryKey: ['p-driver-sub'], queryFn: getDriverSubscription, enabled: !!driver.data, retry: 0 });
   const settlements = useQuery({ queryKey: ['p-settlements'], queryFn: getRiderCashSettlements, enabled: !!rider.data, retry: 0 });
+  // [WEB-ONBOARDING · owner 1 Nov 2026] A mover not cleared yet is told what is left, as the app's mover onboarding
+  // screen does: the Documents page's own read (same key), so opening Documents next reads nothing twice.
+  const vehicleType = (rider.data?.['vehicleType'] as string | undefined) ?? undefined;
+  const docs = useQuery({ queryKey: ['p-docs', vehicleType], queryFn: () => getVerificationStatus(vehicleType), enabled: !!rider.data || !!driver.data, retry: 0 });
+  const next = moverNextStep(docs.data);
   // [W-26] see the store's half in dashboard/settings: confirming this row says
   // real cash reached the rider's hand. It names the store and the figure, and
   // takes a second deliberate step.
@@ -178,6 +184,13 @@ export default function PortalHome() {
         {/* [P36 · 13d / W3] The phone's sentence (EarningsScreen THIS WEEK hero). */}
         <p className="mt-1 text-sm font-semibold text-[var(--swift-success)]">100% yours · cash · 0% commission</p>
       </div>
+
+      {next && (
+        <div className="sw-card p-5">
+          <p className="font-semibold">{moverNextWords(next)}</p>
+          {next.kind === 'send' && <Link href="/portal/documents" className="sw-btn sw-btn-md mt-3 inline-flex">Upload your documents</Link>}
+        </div>
+      )}
 
       {/* [P36] A mover who both delivers and drives sees each role's own windows, named. */}
       {isRider && isDriver && <h2 className="sw-heading">Deliveries</h2>}
