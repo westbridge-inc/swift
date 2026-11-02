@@ -16,6 +16,7 @@ const fx = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: vi.fn(), sessionProbe: fx.probe, apiFetch: fx.api }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: vi.fn() }));
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: vi.fn(), registerAccount: vi.fn(), becomePartner: fx.become, signOwnName: fx.sign }));
 vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: fx.search, placeDetails: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
@@ -46,10 +47,10 @@ async function businessStep(storeName = 'Persaud') {
   render(<SignupPage />);
   expect(await screen.findByRole('heading', { name: 'Your business' })).toBeTruthy();
   fireEvent.change(screen.getByLabelText('Business name'), { target: { value: storeName } });
-  for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
+  for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region (optional)', 'Demerara-Mahaica']]) {
     fireEvent.change(screen.getByLabelText(label!), { target: { value } });
   }
-  await user.click(screen.getByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ }));
+  await user.click(screen.getByRole('checkbox', { name: /I agree to the Business Agreement/ }));
   await user.click(screen.getByRole('button', { name: 'Place your store on the map' }));
   await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ });
   loadMap();
@@ -75,8 +76,9 @@ describe('[ROLE-DOCS] the web sign-up offers and signs the own-name declaration'
   it('own name without the tick creates nothing; with the tick the store is created as own-name, then signed', async () => {
     const user = await businessStep();
     await user.click(await screen.findByRole('radio', { name: OWN }));
-    await user.click(screen.getByRole('button', { name: 'Create business' }));
-    expect((await screen.findByRole('alert')).textContent).toBe('Sign the own-name declaration to continue');
+    // [FLOW-QA F19] the button waits for the signed declaration, and the line under it says so
+    expect((screen.getByRole('button', { name: 'Create business' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(document.querySelector('[data-signup-ask]')?.textContent).toBe('Sign the own-name declaration');
     expect(fx.become).not.toHaveBeenCalled();
     expect(fx.sign).not.toHaveBeenCalled();
 

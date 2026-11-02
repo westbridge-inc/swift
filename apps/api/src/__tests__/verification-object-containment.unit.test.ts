@@ -265,7 +265,8 @@ afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllEnvs(); 
 // are not the subject of these tests; the input principal is explicitly bound.
 async function handlers(h: ReturnType<typeof harness>, routes: typeof verificationRoutes) {
   const registered = new Map<string, (...args: any[]) => any>();
-  const app: any = { prisma: h.db, redis: { exists: vi.fn(async () => 1) }, io: {}, log: h.log, prefix: '', addHook: vi.fn() };
+  // [FLOW-QA F15] createRateLimit: the auth routes build their per-number sign-in ceiling from the limiter; this stand-in lets all through
+  const app: any = { prisma: h.db, redis: { exists: vi.fn(async () => 1) }, io: {}, log: h.log, prefix: '', addHook: vi.fn(), createRateLimit: () => async () => ({ isAllowed: true, key: '' }) };
   h.db.$extends = () => h.db;
   for (const verb of ['get', 'post', 'put', 'patch', 'delete']) {
     app[verb] = (path: string, ...args: any[]) => { registered.set(`${verb} ${path}`, args.at(-1)); };

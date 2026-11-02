@@ -85,7 +85,7 @@ beforeAll(async () => {
   const { socketPlugin } = await import('../plugins/socket');
   const { registerErrorHandler } = await import('../middleware/error-handler');
   const { beginRequestTenantContext } = await import('../plugins/tenant-context');
-  const { authRoutes } = await import('../modules/auth/auth.routes');
+  const { registerAuthRoutes } = await import('./helpers/auth-routes-harness');
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaModule.prismaPlugin);
@@ -94,7 +94,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   // server.ts's request context boundary: every request starts with no tenant bound.
   app.addHook('onRequest', async () => { beginRequestTenantContext(); });
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
 }, 120_000);
 

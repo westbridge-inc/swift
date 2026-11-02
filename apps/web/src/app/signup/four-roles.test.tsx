@@ -17,6 +17,7 @@ import { LAUNCH_HIDDEN_BUSES, MOVER_VEHICLES } from '@/lib/signup-roles';
 const fx = vi.hoisted(() => ({ send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(), replace: vi.fn(), probe: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: vi.fn() }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: fx.send }));
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become }));
 vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: vi.fn(), placeDetails: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
@@ -71,7 +72,7 @@ describe('[W9] four ways to join', () => {
     const create = screen.getByRole('button', { name: 'Create rider account' }) as HTMLButtonElement;
     expect(create.disabled).toBe(true);
     fireEvent.change(screen.getByLabelText('Vehicle'), { target: { value: 'BICYCLE' } });
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(create);
     expect(fx.become).toHaveBeenCalledTimes(1);
     expect(fx.become.mock.calls[0]![0]).toEqual({ role: 'MOVER', acceptAgreement: true, vehicleType: 'BICYCLE' });
@@ -85,7 +86,7 @@ describe('[W9] four ways to join', () => {
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(screen.getByRole('button', { name: 'Create driver account' }));
     expect(fx.become.mock.calls[0]![0]).toEqual({
       role: 'MOVER', acceptAgreement: true, vehicleType: 'CAR',
@@ -99,7 +100,7 @@ describe('[W9] four ways to join', () => {
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     const create = () => screen.getByRole('button', { name: 'Create driver account' }) as HTMLButtonElement;
     expect(screen.getByText(/Taxi plates in Guyana start with H — e\.g\. HC 1234\./)).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'PLX4821' } });
@@ -114,7 +115,7 @@ describe('[W9] four ways to join', () => {
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     const create = () => screen.getByRole('button', { name: 'Create driver account' }) as HTMLButtonElement;
     const next = new Date().getFullYear() + 1;
     for (const [year, open] of [['1979', false], ['1980', true], [String(next), true], [String(next + 1), false]] as const) {

@@ -24,6 +24,7 @@ const NOTE = 'Swift opens in Georgetown soon. We check documents now and approve
 const fx = vi.hoisted(() => ({ send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(), replace: vi.fn(), probe: vi.fn(), pricing: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace, push: vi.fn() }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: vi.fn() }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: fx.send }));
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become, signOwnName: vi.fn() }));
 vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: vi.fn(), placeDetails: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
@@ -168,7 +169,7 @@ describe('[OPEN-EARLY] /signup?as= opens on a partner door', () => {
         fireEvent.change(screen.getByLabelText(label!), { target: { value } });
       }
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(screen.getByRole('button', { name: door === 'driver' ? 'Create driver account' : 'Create rider account' }));
     expect(fx.become).toHaveBeenCalledTimes(1);
     expect(fx.become.mock.calls[0]![0]).toMatchObject({ role: 'MOVER', vehicleType: vehicle });
@@ -188,7 +189,9 @@ describe('[OPEN-EARLY] /signup?as= opens on a partner door', () => {
     await signupAt('https://swiftgy.com/signup?as=customer');
     await answered();
     expect(screen.getByRole('heading', { level: 1, name: 'Who are you signing up as?' })).toBeTruthy();
-    expect((screen.getByRole('button', { name: /Order on Swift/ }) as HTMLButtonElement).disabled).toBe(true);
+    // [FLOW-QA F28] closed = no customer sign-up: the door opens the launching-soon page, never the phone step
+    expect(screen.getByRole('link', { name: /Order on Swift/ }).getAttribute('href')).toBe('/launching-soon');
+    expect(screen.queryByRole('button', { name: /Order on Swift/ })).toBeNull();
   });
 
   it('a business account resuming its store keeps its own path, whatever ?as= says', async () => {

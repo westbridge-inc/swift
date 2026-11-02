@@ -43,8 +43,8 @@ describe('inventory count and phone column order', () => {
   });
 
   // Owner ruling (11 Oct): named exactly like the app — the title is the store
-  // type's name (Menu / Inventory / Products / Services), then the app's
-  // "Your menu" line with how many items are live and sold out.
+  // type's name (Menu / Inventory / Products / Services), then [FLOW-QA F20]
+  // "Your <that name>" with how many items are live and sold out.
   it.each([['RESTAURANT', 'Menu'], ['SUPERMARKET', 'Inventory'], ['STORE', 'Products'], ['SERVICE', 'Services']])('a %s store sees the page titled %s', async (vendorType, name) => {
     const fetchMock = mockApi(({ url }) => {
       if (url.pathname === '/api/v1/vendor/items') return { body: { data: [
@@ -59,7 +59,7 @@ describe('inventory count and phone column order', () => {
     renderWithQuery(<InventoryPage />);
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/api/v1/vendor/stores'))).toBe(true));
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(name));
-    expect(screen.getByText('Your menu')).toBeTruthy();
+    expect(screen.getByText(`Your ${name.toLowerCase()}`)).toBeTruthy();
     expect(await screen.findByText('2 active · 1 sold out')).toBeTruthy();
   });
 

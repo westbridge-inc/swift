@@ -16,6 +16,7 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(mocked.query),
 }));
 vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: mocked.sendOtp }));
 vi.mock('@/lib/customer-login', () => ({ verifyCustomerLogin: mocked.verifyCustomerLogin }));
 vi.mock('@/components/swift-logo', () => ({ SwiftLogo: () => <span>Swift</span> }));
 

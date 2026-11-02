@@ -23,7 +23,8 @@ describe('taxi documents on the website', () => {
 
   it('sign-up, the documents page and the FAQ use it; the FAQ no longer asks a business for a TIN', () => {
     const read = (p: string) => readFileSync(join(__dirname, '..', 'app', p), 'utf8');
-    expect(read('signup/page.tsx')).toMatch(/TAXI_TWO_LICENCES/);
+    // [D6] the vehicle step loads on demand (signup/partner-steps.tsx)
+    expect(read('signup/partner-steps.tsx')).toMatch(/TAXI_TWO_LICENCES/);
     expect(read('portal/documents/page.tsx')).toMatch(/taxiDocumentHint\(docType/);
     const faq = read('(marketing)/faq/page.tsx');
     expect(faq).toMatch(/Hire Car Driver&apos;s Licence/);

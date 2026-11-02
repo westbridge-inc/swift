@@ -14,6 +14,7 @@ import * as api from '@/lib/api';
 import * as customer from '@/lib/customer';
 import * as customerLogin from '@/lib/customer-login';
 import * as auth from '@/lib/auth';
+import * as otpSend from '@/lib/otp-send';
 import * as browseServer from '@/lib/browse-server';
 import { stubIntersectionObserver } from '@/test/test-utils';
 
@@ -49,7 +50,7 @@ beforeEach(() => {
   nav.push.mockReset();
   nav.replace.mockReset();
   nav.query = '';
-  vi.spyOn(auth, 'sendOtp').mockResolvedValue(undefined);
+  vi.spyOn(otpSend, 'sendOtp').mockResolvedValue(undefined);
   vi.spyOn(auth, 'verifyPartnerLogin').mockResolvedValue({ home: '/dashboard' } as Awaited<ReturnType<typeof auth.verifyPartnerLogin>>);
   vi.spyOn(customerLogin, 'verifyCustomerLogin').mockResolvedValue({ user: { id: 'customer' } } as Awaited<ReturnType<typeof customerLogin.verifyCustomerLogin>>);
   vi.spyOn(api, 'fetchStorefront').mockResolvedValue(store);

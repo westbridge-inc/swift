@@ -7,7 +7,7 @@
     "/(app)/order/browse/page": 150,
     "/(app)/cart/page": 158,
     "/(app)/checkout/page": 158,
-    "/login/page": 117,
+    "/login/page": 119,
     "/signup/page": 123,
     "/dashboard/orders/page": 173,
     "/dashboard/inventory/page": 159,

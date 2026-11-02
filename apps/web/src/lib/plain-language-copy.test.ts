@@ -9,6 +9,8 @@ const checks: Array<[string, RegExp]> = [
   ['./auth.ts', /Request failed \(|Session expired\./],
   ['./customer.ts', /Request failed \(|updated delivery quote/],
   ['../app/signup/page.tsx', /Store location confirmed.*Latitude/],
+  // [D6] the business step loads on demand: the same guard on its own file
+  ['../app/signup/partner-steps.tsx', /Store location confirmed.*Latitude/],
   ['../app/selfie/page.tsx', /capture the camera frame|captured frame|sent as a JPEG/i],
   ['../app/qr/unavailable/page.tsx', /store may be offline or no longer public/i],
   ['../app/qr/retired/page.tsx', /counter code retired/i],

@@ -51,7 +51,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { PartnerService } from '../modules/partner/partner.service';
 import type { NotificationService } from '../modules/notification/notification.service';
 import type { PaymentProvider } from '../providers/payment/payment-provider';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import * as pricing from '../modules/country/country-config.service';
 import { partnerPriceList } from '../modules/country/partner-pricing';
 import { GUYANA_TZ } from '../modules/prep/prep-time';
@@ -421,7 +421,7 @@ async function pricingApp(tiersByCountry: Record<string, unknown>): Promise<Fast
   const app = Fastify({ logger: false });
   app.decorate('prisma', { countryConfig: countryConfigFake(tiersByCountry) } as unknown as PrismaClient);
   app.decorate('authenticate', async () => undefined);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
   return app;
 }

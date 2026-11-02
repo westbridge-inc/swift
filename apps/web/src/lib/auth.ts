@@ -409,15 +409,6 @@ export async function apiFetch(
   return json;
 }
 
-export async function sendOtp(phone: string) {
-  const res = await fetch(`${API_URL}/api/v1/auth/send-otp`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...clientHeaders },
-    body: JSON.stringify({ phone }),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'Could not send the code.');
-}
 
 /** [BILL-PRO PR6] Does the signed-in person have a provider profile (a pro)? Read with the session cookie the
  *  sign-in just set; any failure is "no". */
