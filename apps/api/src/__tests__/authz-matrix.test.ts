@@ -8,7 +8,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { registerAuthRoutes } from './helpers/auth-routes-harness';
+import { authRoutes } from '../modules/auth/auth.routes';
+import rateLimit from '@fastify/rate-limit';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
@@ -62,7 +63,10 @@ async function buildTestApp() {
   await server.register(redisPlugin);
   await server.register(authPlugin);
   await server.register(socketPlugin);
-  await registerAuthRoutes(server);
+  // [FLOW-QA F15] the auth routes count sign-in tries through the limiter (as app.ts registers it); here every request
+  // is let through, as before. Mounted here by name, so the composition-root drift guard below still sees authRoutes.
+  await server.register(rateLimit, { global: false, allowList: () => true });
+  await server.register(authRoutes, { prefix: '/api/v1/auth' });
   await server.register(customerRoutes, { prefix: '/api/v1/customer' });
   await server.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await server.register(riderRoutes, { prefix: '/api/v1/rider' });
