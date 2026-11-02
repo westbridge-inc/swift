@@ -11,7 +11,7 @@ import { providerFeeRoutes } from '../modules/services/provider-fee.routes';
 import { providerChecklist } from '../modules/services/services.service';
 import { birthDueProFees, ensureProFeeBorn, PRO_FEE_ACK_PATH, proFeeQuote, recordProFeeAck } from '../modules/services/pro-fee';
 import { PRO_FEE_COVERED_CODE } from '../modules/services/provider-fee.routes';
-import { WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
+import { WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
 import { publishLegalDocumentOnce, recordConsent } from '../modules/legal/consent.service';
 import { recordReacceptance } from '../modules/legal/reaccept';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -274,7 +274,7 @@ describe('[REVIEW-G #2230 S3-1 · owner B3] a fee tick is consent to ONE amount:
     const quote = await sys(() => proFeeQuote(app.prisma, pro.userId));
     expect(quote.currencyCode).toBe('GYD');
     await sys(async () => {
-      await publishLegalDocumentOnce(app.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+      await publishLegalDocumentOnce(app.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
       await app.prisma.$transaction((tx) => recordConsent(tx, {
         subjectType: 'vendor_user', subjectId: pro.userId, documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION,
         action: 'granted', surface: 'mobile', ip: null,

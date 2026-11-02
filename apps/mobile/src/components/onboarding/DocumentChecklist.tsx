@@ -272,8 +272,9 @@ export function DocumentChecklist({
       <View style={{ marginTop: space.sm, flexDirection: 'row', alignItems: 'flex-start', borderRadius: radius.lg, backgroundColor: color.surface.subtle, padding: space.md }}>
         <MaterialCommunityIcons name="shield-check-outline" size={16} color={color.text.muted} style={{ marginTop: 1 }} />
         <T variant="micro" tone="muted" style={{ marginLeft: space.sm, flex: 1 }}>
-          We confirm your documents are genuine and that they&apos;re yours, and re‑check expiry every day — we&apos;ll
-          remind you before anything lapses so you stay verified.
+          {/* [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D5)] what happens, not a claim Swift cannot prove ("genuine") */}
+          A person at Swift checks every document, and we re‑check expiry every day — we&apos;ll remind you before
+          anything lapses so you stay verified.
         </T>
       </View>
     </View>

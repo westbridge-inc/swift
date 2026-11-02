@@ -5,7 +5,7 @@ import { readFeePause } from '../billing/mmg-pause';
 import { proAgreementAccepted, proAgreementState } from '../legal/reaccept';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import {
-  assertSawQuote, assertWeeklyFeeAck, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type SignupQuote, type WeeklyFeeAck,
+  assertSawQuote, assertWeeklyFeeAck, signupQuote, WEEKLY_FEE_ACK_HONOURED_VERSIONS, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type SignupQuote, type WeeklyFeeAck,
 } from '../partner/weekly-fee-ack';
 import { subscriptionOperability, type OperabilitySubscription, type SubscriptionOperability } from '../subscription/operate-gate';
 import { liveServicesStoreFeeWhere } from '../subscription/subscription-owner';
@@ -180,7 +180,8 @@ export interface ProFeeTick { amount: number; currencyCode: string }
  *  withdrawn, or it carries no amount. */
 export async function latestProFeeTick(db: Db, userId: string): Promise<ProFeeTick | null> {
   const tick = await db.consentRecord.findFirst({
-    where: { subjectId: userId, documentType: WEEKLY_FEE_ACK_TYPE, documentVersion: WEEKLY_FEE_ACK_VERSION, evidence: { path: ['path'], equals: PRO_FEE_ACK_PATH } },
+    // [WEB-ONBOARDING · owner 1 Nov 2026 (D3)] a tick on the v1 words still stands (the v2 change names the website)
+    where: { subjectId: userId, documentType: WEEKLY_FEE_ACK_TYPE, documentVersion: { in: [...WEEKLY_FEE_ACK_HONOURED_VERSIONS] }, evidence: { path: ['path'], equals: PRO_FEE_ACK_PATH } },
     orderBy: { capturedAt: 'desc' },
     select: { action: true, evidence: true },
   });
@@ -255,7 +256,7 @@ export function proFeeQuote(db: Db, userId: string) {
  *  (WEEKLY_FEE_TERMS_CHANGED / WEEKLY_FEE_CHANGED), exactly as at partner sign-up. Idempotent per pro and amount. */
 export async function recordProFeeAck(prisma: PrismaClient, input: { userId: string; ack: WeeklyFeeAck; surface: ConsentSurface; ip?: string | null }): Promise<void> {
   assertWeeklyFeeAck(true, input.ack);
-  await publishLegalDocumentOnce(prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+  await publishLegalDocumentOnce(prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
   await prisma.$transaction(async (tx) => {
     const pro = await tx.serviceProvider.findUnique({ where: { userId: input.userId }, select: { id: true } });
     if (!pro) throw new AppError(404, 'NOT_FOUND', 'ServiceProvider not found');
