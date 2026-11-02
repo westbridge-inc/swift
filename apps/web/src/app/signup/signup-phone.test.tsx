@@ -167,6 +167,8 @@ describe('the sign-up phone step', () => {
 describe('the sign-in code step says it too', () => {
   it('under the code box', async () => {
     mocked.sendOtp.mockResolvedValue(undefined);
+    // a return address, so Continue does not wait on the guest-basket module (slow on a cold, busy run)
+    mocked.query = 'next=%2Fdashboard';
     const user = userEvent.setup();
     render(<LoginPage />);
     await user.type(screen.getByLabelText('Phone number'), '600 1234');

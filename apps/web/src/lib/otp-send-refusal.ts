@@ -38,6 +38,9 @@ export function otpSendRefusal(status: number, body: unknown, retryAfterHeader: 
 
 /** [FLOW-QA F16] A refused code check, in plain words. Errors the page raised itself (no status) keep their words. */
 export const CODE_NOT_RIGHT = 'That code isn’t right — check the latest text from Swift.';
+/** [REVIEW-GMF2 S3-2] A locked or expired code is not a wrong one: the way on is a new code. */
+export const CODE_LOCKED = 'Too many tries for this code. Send a new code.';
+export const CODE_EXPIRED = 'That code has expired. Send a new code.';
 export function otpVerifyRefusal(error: unknown): string {
   const e = error as { message?: unknown; status?: unknown; code?: unknown; retryAfterSeconds?: unknown } | null;
   const message = typeof e?.message === 'string' ? e.message : '';
@@ -45,6 +48,11 @@ export function otpVerifyRefusal(error: unknown): string {
     const seconds = typeof e.retryAfterSeconds === 'number' && e.retryAfterSeconds > 0 ? Math.ceil(e.retryAfterSeconds) : NaN;
     return Number.isFinite(seconds) ? `Too many tries; wait ${waitWords(seconds)}.` : 'Too many tries; wait a minute, then try again.';
   }
-  if (e?.code === 'INVALID_OTP' || e?.status === 400) return CODE_NOT_RIGHT;
+  if (e?.code === 'INVALID_OTP' || e?.status === 400) {
+    // the server's reasons (utils/otp): "Too many attempts. Request a new OTP." / "OTP expired or not found. Request a new one."
+    if (/too many attempts/i.test(message)) return CODE_LOCKED;
+    if (/expired|not found/i.test(message)) return CODE_EXPIRED;
+    return CODE_NOT_RIGHT;
+  }
   return message || 'Could not check the code. Check your connection and try again.';
 }

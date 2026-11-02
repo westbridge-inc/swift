@@ -176,7 +176,7 @@ describe('[FLOW-QA F9] an existing account choosing another partner door adds to
 describe('[FLOW-QA F16] a refused code in plain words', () => {
   it('sign-up: a wrong or expired code', async () => {
     window.history.replaceState(null, '', '/signup');
-    mocked.verifyOtp.mockRejectedValue(Object.assign(new Error('Invalid or expired OTP'), { status: 400, code: 'INVALID_OTP' }));
+    mocked.verifyOtp.mockRejectedValue(Object.assign(new Error('Invalid OTP code'), { status: 400, code: 'INVALID_OTP' }));
     fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     expect((await screen.findByRole('alert')).textContent).toBe(CODE_NOT_RIGHT);
@@ -197,5 +197,91 @@ describe('[FLOW-QA F23] the code step shows the number grouped', () => {
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     await screen.findByLabelText('Verification code', {}, { timeout: 5000 });
     expect(screen.getByText(/Sent to \+592 600 1234/)).toBeTruthy();
+  });
+});
+
+describe('[REVIEW-GMF2 S3-1] a partner page’s sign-up (?as=…) resumes its step after a refresh', () => {
+  it('rider door, refreshed at the code step: still the code step, door and number kept', async () => {
+    window.history.replaceState(null, '', '/signup?as=rider');
+    render(<SignupPage />);
+    fireEvent.change(await screen.findByLabelText('Phone number'), { target: { value: '600 1234' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
+    await screen.findByLabelText('Verification code');
+    expect(new URLSearchParams(window.location.search).get('step')).toBe('code');
+    expect(new URLSearchParams(window.location.search).get('as')).toBe('rider');
+    document.body.replaceChildren();
+    render(<SignupPage />);
+    expect(await screen.findByLabelText('Verification code')).toBeTruthy();
+    expect(new URLSearchParams(window.location.search).get('step')).toBe('code');
+    expect(JSON.parse(sessionStorage.getItem('swift_signup_draft')!)).toMatchObject({ step: 'code', role: 'RIDER', phone: '600 1234' });
+  });
+});
+
+describe('[REVIEW-GMF2 S3-2] a locked or expired code says to send a new one', () => {
+  it.each([
+    ['Too many attempts. Request a new OTP.', 'Too many tries for this code. Send a new code.'],
+    ['OTP expired or not found. Request a new one.', 'That code has expired. Send a new code.'],
+    ['Invalid OTP code', CODE_NOT_RIGHT],
+  ])('server "%s" -> "%s"', async (server, words) => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.verifyOtp.mockRejectedValue(Object.assign(new Error(server), { status: 400, code: 'INVALID_OTP' }));
+    fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect((await screen.findByRole('alert')).textContent).toBe(words);
+  });
+});
+
+describe('[REVIEW-GMF2 S3-3] once the account exists, Back leaves sign-up instead of reopening its steps', () => {
+  it('at the business step, Back to an earlier step goes on back (never a re-push), and the business step stays', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 'u1', roles: ['MOVER'] } });
+    fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByText('Add a business to your Swift account.');
+    const back = vi.spyOn(window.history, 'back').mockImplementation(() => {});
+    const push = vi.spyOn(window.history, 'pushState');
+    act(() => {
+      window.history.replaceState(null, '', '/signup?step=code');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(push).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: 'Your business' })).toBeTruthy();
+    back.mockRestore(); push.mockRestore();
+  });
+});
+
+describe('[REVIEW-GMF2 S4-11] finishing sign-up clears the kept draft', () => {
+  it('an existing account that goes home leaves nothing kept for the tab', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 'u1', roles: ['VENDOR_OWNER'] } });
+    fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
+    expect(sessionStorage.getItem('swift_signup_draft')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(mocked.replace).toHaveBeenCalledWith('/dashboard'));
+    expect(sessionStorage.getItem('swift_signup_draft')).toBeNull();
+  });
+
+  it('[REVIEW-GMF2 S4] a self-employed pro choosing a door they have no role for... the customer door goes to their weekly fee', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.pro.mockResolvedValue(true);
+    mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 'u1', roles: ['CUSTOMER'] } });
+    fireEvent.change(await toCodeStep(/Order on Swift/), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(mocked.replace).toHaveBeenCalledWith('/portal/weekly-fee'));
+  });
+});
+
+describe('[REVIEW-GMF2 S3-4] sign-in returns a partner to the private page that sent them, inside their own area only', () => {
+  it.each([
+    [{ home: '/dashboard' }, '/dashboard/orders?page=2', '/dashboard/orders?page=2'],
+    [{ home: '/portal' }, '/portal/documents', '/portal/documents'],
+    [{ home: '/portal' }, '/dashboard/orders', '/portal'],
+    [{ home: '/dashboard' }, '/dashboardx', '/dashboard'],
+    [{ home: '/dashboard' }, '//evil.example/dashboard', '/dashboard'],
+  ])('%j with next=%s -> %s', async (answer, next, lands) => {
+    mocked.verifyPartnerLogin.mockResolvedValue({ user: { id: 'p1' }, ...answer });
+    await loginWithCode(`next=${encodeURIComponent(next)}`);
+    await waitFor(() => expect(mocked.replace).toHaveBeenCalledWith(lands));
   });
 });

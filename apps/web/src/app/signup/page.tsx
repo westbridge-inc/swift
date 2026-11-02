@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
-import { sessionProbe } from '@/lib/auth';
+import { hasProviderProfile, sessionProbe } from '@/lib/auth';
 import { sendOtp } from '@/lib/otp-send';
 import { markSignedIn } from '@/lib/session-hint';
 import { ACCOUNT_STEPS, clearDraft, readDraft, saveDraft, stepOf, stepUrl } from '@/lib/signup-draft';
@@ -57,6 +57,11 @@ function vehicleYearAccepted(year: string): boolean {
  *  a car or a bus provisions a Driver, a motorbike or bicycle a Rider). */
 type Role = 'CUSTOMER' | 'VENDOR' | 'RIDER' | 'DRIVER';
 const accountRole = (r: Role): 'CUSTOMER' | 'VENDOR' | 'MOVER' => (r === 'RIDER' || r === 'DRIVER' ? 'MOVER' : r);
+/** A self-employed pro's profile, asked of the server; any failure is "no", as on sign-in. */
+async function isPro(): Promise<boolean> {
+  try { return await hasProviderProfile(); } catch { return false; }
+}
+
 type Step = 'role' | 'phone' | 'code' | 'name' | 'business' | 'vehicle';
 
 function safeReturnPath(): string {
@@ -123,12 +128,17 @@ export default function SignupPage() {
 
   // [FLOW-QA F6] One history entry per step, and what was typed kept for this tab (lib/signup-draft).
   const fromHistory = useRef(false);
+  const stepNow = useRef<Step>('role');
+  useEffect(() => { stepNow.current = step; }, [step]);
   const restored = useRef(false);
+  // The step a kept draft is being restored to: until the page shows it, nothing is saved over the draft and the
+  // partner-door effect below leaves the door alone (REVIEW-GMF2 S3-1).
+  const restoringTo = useRef<Step | null>(null);
   useEffect(() => {
     const wanted = stepOf(window.location.search);
     const draft = readDraft();
     if (wanted && wanted !== 'role' && draft && draft.step === wanted) {
-      fromHistory.current = true;
+      restoringTo.current = wanted;
       if (draft.role === 'CUSTOMER' || draft.role === 'VENDOR' || draft.role === 'RIDER' || draft.role === 'DRIVER') setRole(draft.role);
       setPhone(draft.phone); setFirst(draft.first); setLast(draft.last);
       setStep(wanted);
@@ -140,22 +150,21 @@ export default function SignupPage() {
     restored.current = true;
     const onPop = () => {
       const popped = stepOf(window.location.search) ?? 'role';
-      setStep((current) => {
-        // Once the account exists, Back never reopens the steps that made it.
-        if (ACCOUNT_STEPS.includes(current) && !ACCOUNT_STEPS.includes(popped)) {
-          window.history.pushState(window.history.state, '', stepUrl(current));
-          return current;
-        }
-        fromHistory.current = true;
-        return popped;
-      });
+      // [REVIEW-GMF2 S3-3] Once the account exists, Back never reopens the steps that made it: it keeps going back,
+      // past them, so one press leaves sign-up (the page stays on its step while it does).
+      if (ACCOUNT_STEPS.includes(stepNow.current) && !ACCOUNT_STEPS.includes(popped)) { window.history.back(); return; }
+      fromHistory.current = true;
+      setStep(popped);
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
   useEffect(() => {
     if (!restored.current) return;
-    if (fromHistory.current) { fromHistory.current = false; }
+    if (restoringTo.current) {
+      if (step !== restoringTo.current) return; // the restored values have not landed yet
+      restoringTo.current = null;
+    } else if (fromHistory.current) { fromHistory.current = false; }
     else if (stepOf(window.location.search) !== step) {
       if (stepOf(window.location.search) === null && step === 'role') window.history.replaceState(window.history.state, '', stepUrl(step));
       else window.history.pushState(window.history.state, '', stepUrl(step));
@@ -297,7 +306,9 @@ export default function SignupPage() {
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
       if (customerReturnPath) continueJourney();
       clearDraft();
-      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
+      // [REVIEW-GMF2 S4] a self-employed pro (no partner role) goes where sign-in sends them: their weekly fee
+      const pro = !customerReturnPath && !isVendor && !isMover && await isPro();
+      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : pro ? '/portal/weekly-fee' : '/'));
       return;
     }
     setStep('name');
@@ -386,6 +397,9 @@ export default function SignupPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('resume') === 'business' || params.get('resume') === 'mover') return;
+    // [REVIEW-GMF2 S3-1] a refresh or Back on a partner page's sign-up (?as=…&step=…) resumes its step: the door is
+    // already in the kept draft, so it is not opened again on the phone step
+    if (restoringTo.current) return;
     const door = partnerDoorRole(params.get('as'));
     if (door) chooseRole(door);
   }, []);
