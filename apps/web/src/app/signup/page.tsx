@@ -238,12 +238,16 @@ export default function SignupPage() {
               // [Item 7] Before launch, the public site cannot start a customer
               // account; businesses, riders and drivers can still sign up.
               const closed = r === 'CUSTOMER' && !orderingOpen;
-              return (
-                <button key={r} type="button" disabled={closed} onClick={() => chooseRole(r)} className={styles.roleButton}>
+              const inner = (
+                <>
                   <span className={styles.roleIcon} data-role-tile={r === 'CUSTOMER' ? 'brand' : 'neutral'}><Pictogram name={pictogram} size={24} /></span>
                   <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{closed ? `Launching soon in ${launchCity()}` : desc}</span></span>
-                </button>
+                </>
               );
+              // [FLOW-QA F28] the closed door is not a dead button: it opens the launching-soon page
+              return closed
+                ? <Link key={r} href="/launching-soon" className={styles.roleButton}>{inner}</Link>
+                : <button key={r} type="button" onClick={() => chooseRole(r)} className={styles.roleButton}>{inner}</button>;
             })}
             <p className={styles.inlineText}>Already on Swift? <Link
               href="/login?next=/"

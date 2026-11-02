@@ -76,8 +76,9 @@ describe('[ROLE-DOCS] the web sign-up offers and signs the own-name declaration'
   it('own name without the tick creates nothing; with the tick the store is created as own-name, then signed', async () => {
     const user = await businessStep();
     await user.click(await screen.findByRole('radio', { name: OWN }));
-    await user.click(screen.getByRole('button', { name: 'Create business' }));
-    expect((await screen.findByRole('alert')).textContent).toBe('Sign the own-name declaration to continue');
+    // [FLOW-QA F19] the button waits for the signed declaration, and the line under it says so
+    expect((screen.getByRole('button', { name: 'Create business' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(document.querySelector('[data-signup-ask]')?.textContent).toBe('Sign the own-name declaration');
     expect(fx.become).not.toHaveBeenCalled();
     expect(fx.sign).not.toHaveBeenCalled();
 

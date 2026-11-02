@@ -108,6 +108,13 @@ export interface BusinessDraft {
   ownNameTick: boolean;
   storePin: StorePin | null;
 }
+/** [FLOW-QA F19] The server refused an own-name store whose name is not just the owner's surname: what to do next. */
+export const OWN_NAME_NEXT = 'Choose “A business name, or a company” and add your business registration under Documents, or use just your surname as the store name.';
+/** [FLOW-QA F26] A Services business is not a shop: it is asked where it is based. */
+const PIN_WORDS = {
+  store: { place: 'Place your store on the map', move: 'Move the store pin', confirmed: 'Store location confirmed' },
+  service: { place: 'Show where you’re based on the map', move: 'Move the pin', confirmed: 'Location confirmed' },
+} as const;
 const NEW_BUSINESS: BusinessDraft = { biz: { name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' }, nameBasis: 'REGISTERED', ownNameTick: false, storePin: null };
 
 export function BusinessStep({ shell, draft, onDraft }: { shell: StepShell; draft: BusinessDraft | null; onDraft: (_draft: BusinessDraft) => void }) {
@@ -156,18 +163,25 @@ export function BusinessStep({ shell, draft, onDraft }: { shell: StepShell; draf
     if (!ownNameType || OwnNameChoice || ownNameLoadFailed) return;
     loadOwnNameChoice().then((m) => setOwnNameChoice(() => m.OwnNameChoice), () => setOwnNameLoadFailed(true));
   }, [ownNameType, OwnNameChoice, ownNameLoadFailed]);
+  const pinWords = PIN_WORDS[biz.vendorType === 'SERVICE' ? 'service' : 'store'];
+  const ownName = nameBasis === 'OWN_NAME' && ownNameType;
   // [WEB-ONBOARDING · owner 1 Nov 2026] While the button waits, one line under it names the first thing missing, in the
-  // app's words (#947's grammar), held to the server's shortest values. The weekly fee block says its own ask.
-  const storeAsk = businessAsk(biz, !!storePin);
+  // app's words (#947's grammar), held to the server's shortest values: the form, the pin, then [FLOW-QA F19] an
+  // own-name store's signed declaration, in the app's order (businessSetupBlocker). The weekly fee block says its own ask.
+  const storeAsk = businessAsk(biz, true) ?? (!storePin ? pinWords.place : null) ?? (ownName && !ownNameTick ? 'Sign the own-name declaration' : null);
 
   const doBusiness = () => wrap(async () => {
-    if (!storePin || placingStore) throw new Error('Place your store on the map');
+    if (!storePin || placingStore) throw new Error(pinWords.place);
     if (!storePinInMarket(storePin)) throw new Error(STORE_PIN_OUTSIDE);
-    const ownName = nameBasis === 'OWN_NAME' && ownNameType;
     if (ownName && !ownNameTick) throw new Error('Sign the own-name declaration to continue');
     if (fee.ask) throw new Error(fee.ask);
     if (!agree) throw new Error(agreementAsk(AGREEMENT.business));
-    await terms.feeChecked(becomePartner({ role: 'VENDOR', acceptAgreement: true, ...(fee.ack && { weeklyFeeAck: fee.ack }), business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: guyanaPhone(phone), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude, ...(ownName ? { nameBasis: 'OWN_NAME' } : {}) } }));
+    await terms.feeChecked(becomePartner({ role: 'VENDOR', acceptAgreement: true, ...(fee.ack && { weeklyFeeAck: fee.ack }), business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: guyanaPhone(phone), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude, ...(ownName ? { nameBasis: 'OWN_NAME' } : {}) } })
+      .catch((e: { code?: unknown; message?: string }) => {
+        // [FLOW-QA F19] the server's words, then what to do next
+        if (e?.code === 'OWN_NAME_MISMATCH') throw Object.assign(new Error(`${e.message ?? ''} ${OWN_NAME_NEXT}`.trim()), { code: e.code });
+        throw e;
+      }));
     // The store exists: the ticked declaration is signed now (the app's Documents offers it again if this fails).
     if (ownName) await signOwnName().catch(() => undefined);
     done('/dashboard');
@@ -204,8 +218,8 @@ export function BusinessStep({ shell, draft, onDraft }: { shell: StepShell; draf
         ) : <p role="status" className={styles.bodyCopy}>Loading the map…</p>
       ) : (
         <>
-          <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); if (!StoreLocationPicker) loadPicker(); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
-          {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed: {storePin.address ?? biz.addressLine1}.</p>}
+          <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); if (!StoreLocationPicker) loadPicker(); }}>{storePin ? pinWords.move : pinWords.place}</button>
+          {storePin && <p role="status" className={styles.bodyCopy}>{pinWords.confirmed}: {storePin.address ?? biz.addressLine1}.</p>}
         </>
       )}
       {terms.feeBlock('VENDOR', biz.vendorType)}

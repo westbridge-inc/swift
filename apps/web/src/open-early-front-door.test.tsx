@@ -189,7 +189,9 @@ describe('[OPEN-EARLY] /signup?as= opens on a partner door', () => {
     await signupAt('https://swiftgy.com/signup?as=customer');
     await answered();
     expect(screen.getByRole('heading', { level: 1, name: 'Who are you signing up as?' })).toBeTruthy();
-    expect((screen.getByRole('button', { name: /Order on Swift/ }) as HTMLButtonElement).disabled).toBe(true);
+    // [FLOW-QA F28] closed = no customer sign-up: the door opens the launching-soon page, never the phone step
+    expect(screen.getByRole('link', { name: /Order on Swift/ }).getAttribute('href')).toBe('/launching-soon');
+    expect(screen.queryByRole('button', { name: /Order on Swift/ })).toBeNull();
   });
 
   it('a business account resuming its store keeps its own path, whatever ?as= says', async () => {
