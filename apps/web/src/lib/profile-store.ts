@@ -9,6 +9,8 @@ export interface HubStore {
   operatingHours?: unknown; _count?: { orders?: number; items?: number };
   /** [WEB-ONBOARDING] A store not live yet: whose turn it is and the owner's steps (vendor.routes GET /profile). */
   goLive?: StoreGoLive | null;
+  /** [REVIEW-LIGHT2 #2306] Why a SUSPENDED store is held (BILLING, ADMIN, WIND_DOWN), the app's storeHoldOf input. */
+  suspensionSource?: string | null;
 }
 
 /** GET /vendor/profile answers `{ id, userId, vendors: [...], myRole }`; the store
