@@ -9,6 +9,8 @@ import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 import { lazyRetry } from '@/lib/chunk-retry';
 import { CheckingLatest, useCheckingLatest } from '@/components/checking-latest';
+// [F8] A partner not approved yet has no fee: what it will be loads on demand (weekly-fee-not-started.tsx).
+const WeeklyFeeNotStarted = lazyRetry(() => import('./weekly-fee-not-started'));
 
 // [MMG reopen] Loaded only when the server grants a reopen (switch off by default): not in the first load,
 // and neither is its rule or its words (lib/weekly-fee-reopen).
@@ -58,6 +60,8 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
     return () => window.removeEventListener('focus', focus);
   }, [client, queryKey, session]);
   if (q.isLoading) return <p>Loading your weekly fee…</p>;
+  // [WEB-ONBOARDING · FLOW-QA F8] No subscription yet (data: null) is a partner Swift has not approved: not a failure.
+  if (!q.isError && q.data === null) return <Suspense fallback={<p>Loading your weekly fee…</p>}><WeeklyFeeNotStarted family={family} storeId={storeId} /></Suspense>;
   if (q.isError || !q.data) return <div role="alert"><p>Could not load your weekly fee.</p><button onClick={() => void q.refetch()}>Try again</button></div>;
   const sub = q.data;
   const action = liveMmg(sub);

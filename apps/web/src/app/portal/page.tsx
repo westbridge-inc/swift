@@ -170,8 +170,12 @@ export default function PortalHome() {
     // [REVIEW-F #2238 S4-1] A pro is told what this office is for and where their fee is.
     return (
       <NoEarnerProfile>
+        {/* [WEB-ONBOARDING · FLOW-QA F27] the website's own doors (partners have no app yet) */}
         <p className="rounded-2xl border border-dashed border-[var(--swift-border)] bg-[var(--swift-card)] p-10 text-center text-sm text-[var(--swift-muted)]">
-          No earner profile on this account — start driving or delivering from the Swift app.
+          {/* [REVIEW-LIGHT2 #2309] a signed-in account adds its vehicle on the sign-up's resume door: the partner doors would
+              show it "Go to your dashboard" instead */}
+          No earner profile on this account.{' '}
+          <Link href="/signup?resume=mover" className="font-semibold underline">Add your vehicle: deliver or drive a taxi with Swift</Link>.
         </p>
       </NoEarnerProfile>
     );

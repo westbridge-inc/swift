@@ -10,7 +10,7 @@ import { Pictogram } from '@/components/glyphs';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
-import { useCatalogueName } from '@/lib/catalogue-name';
+import { useCatalogueName, yourCatalogue } from '@/lib/catalogue-name';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { useStoreRole } from '@/lib/store-role';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -290,9 +290,9 @@ export default function InventoryPage() {
       <MutationNotice errors={[availMut.error, vatMut.error, priceMut.error]} />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          {/* As in the app (VendorMenuScreen): the store type's name, then "Your menu" with live and sold-out counts. */}
+          {/* As in the app (VendorMenuScreen): the store type's name, then [F20] "Your <its name>" with live and sold-out counts. */}
           <h1 className="sw-title">{catalogue}</h1>
-          <p className="sw-caption mt-1"><span className="font-semibold uppercase tracking-wide">Your menu</span>{items.data && <> · <span>{activeCount} active · {soldOutCount} sold out</span></>}</p>
+          <p className="sw-caption mt-1"><span className="font-semibold uppercase tracking-wide">{yourCatalogue(catalogue)}</span>{items.data && <> · <span>{activeCount} active · {soldOutCount} sold out</span></>}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Link
