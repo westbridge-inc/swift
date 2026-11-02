@@ -168,7 +168,7 @@ describe('[OPEN-EARLY] /signup?as= opens on a partner door', () => {
         fireEvent.change(screen.getByLabelText(label!), { target: { value } });
       }
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(screen.getByRole('button', { name: door === 'driver' ? 'Create driver account' : 'Create rider account' }));
     expect(fx.become).toHaveBeenCalledTimes(1);
     expect(fx.become.mock.calls[0]![0]).toMatchObject({ role: 'MOVER', vehicleType: vehicle });

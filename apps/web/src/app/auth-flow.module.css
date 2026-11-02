@@ -138,6 +138,8 @@
 }
 
 .input:focus { border-color: var(--swift-red); outline: none; }
+/* [WEB-ONBOARDING] The example in a box is greyed, in light and dark, and goes as soon as the person types. */
+.input::placeholder { color: var(--swift-muted); opacity: 1; }
 
 .codeInput {
   font: 700 24px/28px var(--swift-face-display), system-ui, sans-serif;

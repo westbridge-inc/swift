@@ -87,9 +87,9 @@ async function driverDetails() {
 describe('web partner sign-up records the partner agreement', () => {
   it('driver: the box is unticked, links to the agreement, and the button waits for it', async () => {
     const user = await driverDetails();
-    const box = screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }) as HTMLInputElement;
+    const box = screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }) as HTMLInputElement;
     expect(box.checked).toBe(false);
-    const link = screen.getByRole('link', { name: 'Driver Partner Agreement' }) as HTMLAnchorElement;
+    const link = screen.getByRole('link', { name: 'Mover Agreement' }) as HTMLAnchorElement;
     expect(link.href).toMatch(/\/legal\/driver-agreement$/);
     expect(disabled('Create driver account')).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Create driver account' }));
@@ -105,7 +105,7 @@ describe('web partner sign-up records the partner agreement', () => {
 
   it('unticking again disables the button and nothing is sent', async () => {
     const user = await driverDetails();
-    const box = screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ });
+    const box = screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ });
     await user.click(box);
     await user.click(box);
     expect(disabled('Create driver account')).toBe(true);
@@ -115,13 +115,13 @@ describe('web partner sign-up records the partner agreement', () => {
   it('the server’s agreement refusal is shown as it is', async () => {
     fx.become.mockRejectedValue(new Error(AGREEMENT_REFUSED));
     const user = await driverDetails();
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(screen.getByRole('button', { name: 'Create driver account' }));
     expect((await screen.findByRole('alert')).textContent).toBe(AGREEMENT_REFUSED);
     expect(fx.replace).not.toHaveBeenCalled();
   });
 
-  it('business: an unticked box naming the Vendor Partner Agreement, linking to it', async () => {
+  it('business: an unticked box naming the Business Agreement, linking to it', async () => {
     const user = userEvent.setup();
     render(<SignupPage />);
     await user.click(screen.getByRole('button', { name: /Put my business on Swift/ }));
@@ -135,30 +135,30 @@ describe('web partner sign-up records the partner agreement', () => {
     await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
     await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
     await user.click(screen.getByRole('button', { name: 'Create account' }));
-    const box = (await screen.findByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ })) as HTMLInputElement;
+    const box = (await screen.findByRole('checkbox', { name: /I agree to the Business Agreement/ })) as HTMLInputElement;
     expect(box.checked).toBe(false);
-    expect((screen.getByRole('link', { name: 'Vendor Partner Agreement' }) as HTMLAnchorElement).href).toMatch(/\/legal\/vendor-agreement$/);
+    expect((screen.getByRole('link', { name: 'Business Agreement' }) as HTMLAnchorElement).href).toMatch(/\/legal\/vendor-agreement$/);
   });
 
   it('a tick given for the Driver agreement is not carried to the Vendor agreement', async () => {
     const user = await driverDetails();
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     for (let i = 0; i < 4; i += 1) await back(user); // vehicle -> name -> code -> phone -> role
     await newAccount(user, /Put my business on Swift/, '+5926001007');
-    const box = (await screen.findByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ })) as HTMLInputElement;
+    const box = (await screen.findByRole('checkbox', { name: /I agree to the Business Agreement/ })) as HTMLInputElement;
     expect(box.checked).toBe(false);
     expect(fx.become).not.toHaveBeenCalled();
   });
 
   it('leaving the agreement step and coming back shows the box unticked again', async () => {
     const user = await driverDetails();
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await back(user); // vehicle -> name
     // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
     await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
     await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
     await user.click(screen.getByRole('button', { name: 'Create account' }));
-    const box = (await screen.findByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ })) as HTMLInputElement;
+    const box = (await screen.findByRole('checkbox', { name: /I agree to the Mover Agreement/ })) as HTMLInputElement;
     expect(box.checked).toBe(false);
     expect(disabled('Create driver account')).toBe(true);
   });
@@ -172,10 +172,10 @@ describe('a signed-in business account without a store resumes at the business s
     render(<SignupPage />);
     expect(await screen.findByRole('heading', { name: 'Your business' })).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Business name'), { target: { value: 'Test shop' } });
-    for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
+    for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region (optional)', 'Demerara-Mahaica']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Business Agreement/ }));
     await user.click(screen.getByRole('button', { name: 'Place your store on the map' }));
     await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ });
     loadMap();

@@ -46,10 +46,10 @@ async function businessStep(storeName = 'Persaud') {
   render(<SignupPage />);
   expect(await screen.findByRole('heading', { name: 'Your business' })).toBeTruthy();
   fireEvent.change(screen.getByLabelText('Business name'), { target: { value: storeName } });
-  for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
+  for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region (optional)', 'Demerara-Mahaica']]) {
     fireEvent.change(screen.getByLabelText(label!), { target: { value } });
   }
-  await user.click(screen.getByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ }));
+  await user.click(screen.getByRole('checkbox', { name: /I agree to the Business Agreement/ }));
   await user.click(screen.getByRole('button', { name: 'Place your store on the map' }));
   await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ });
   loadMap();

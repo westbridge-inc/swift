@@ -12,6 +12,7 @@ import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefr
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 import { launchCity } from '@/lib/web-ordering';
+import { AGREEMENT, agreementAsk, businessAsk, EXAMPLE, LIMIT, NAME_AS_ON_ID, taxiAsk } from '@/lib/signup-fields';
 import { SwiftLogo } from '@/components/swift-logo';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
 import { isHirePlate, MOVER_VEHICLES, partnerDoorRole, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
@@ -65,9 +66,13 @@ const ROLES: { role: Role; title: string; desc: string; pictogram: PictogramName
 /** Until the weekly fee block reports, the partner buttons wait for it. */
 const FEE_LOADING: FeeState = { ask: 'Loading your weekly fee…' };
 
-/** The partner agreement clickwrap: unticked until the person ticks it. */
-function PartnerAgreement({ kind, doc, agree, onChange }: {
-  kind: 'Vendor' | 'Driver';
+/** [WEB-ONBOARDING] Under a waiting partner button: the first thing missing, or nothing. */
+const askLine = (ask: string | null) => (ask ? <p className={styles.smallCopy} aria-live="polite" data-signup-ask>{ask}</p> : null);
+
+/** The partner agreement clickwrap: unticked until the person ticks it. [WEB-ONBOARDING] Named by the document's own
+ *  title (the Business Agreement, the Mover Agreement), as the app and the console's legal gate name it. */
+function PartnerAgreement({ name, doc, agree, onChange }: {
+  name: string;
   doc: 'vendor-agreement' | 'driver-agreement';
   agree: boolean;
   onChange: (_next: boolean) => void;
@@ -77,7 +82,7 @@ function PartnerAgreement({ kind, doc, agree, onChange }: {
       <input type="checkbox" checked={agree} onChange={(e) => onChange(e.target.checked)} />
       <span>
         I agree to the{' '}
-        <a href={LEGAL_URL(doc)} target="_blank" rel="noreferrer" className={styles.inlineLink}>{kind} Partner Agreement</a>
+        <a href={LEGAL_URL(doc)} target="_blank" rel="noreferrer" className={styles.inlineLink}>{name}</a>
       </span>
     </label>
   );
@@ -142,6 +147,14 @@ export default function SignupPage() {
   const [WeeklyFee, setWeeklyFee] = useState<typeof WeeklyFeeComponent | null>(null);
   const [feeLoadFailed, setFeeLoadFailed] = useState(false);
   const feeStep = step === 'business' || step === 'vehicle';
+  // [WEB-ONBOARDING · owner 1 Nov 2026] While a partner's button waits, one line under it names the first thing missing,
+  // in the app's words (#947's grammar), held to the server's shortest values. The weekly fee block says its own ask,
+  // and a non-H taxi plate says why under the plate box (the red line there is the ask).
+  const storeAsk = businessAsk(biz, !!storePin);
+  const agreementWait = (name: string) => (fee.ask || agree ? null : agreementAsk(name));
+  const vehicleAsk = mover === 'DRIVER'
+    ? (taxiPlateWrong ? null : taxiAsk(veh, vehicleYearAccepted(veh.year)) ?? agreementWait(AGREEMENT.mover))
+    : agreementWait(AGREEMENT.mover);
   useEffect(() => {
     if (!feeStep || WeeklyFee || feeLoadFailed) return;
     loadWeeklyFee().then((m) => setWeeklyFee(() => m.WeeklyFee), () => setFeeLoadFailed(true));
@@ -261,7 +274,7 @@ export default function SignupPage() {
   });
   const doVehicle = () => wrap(async () => {
     if (fee.ask) throw new Error(fee.ask);
-    if (!agree) throw new Error('Tick the Driver Partner Agreement to continue');
+    if (!agree) throw new Error(agreementAsk(AGREEMENT.mover));
     if (!mover || !MOVER_VEHICLES[mover].some((v) => v.value === veh.vehicleType)) throw new Error('Choose your vehicle');
     // A rider's bike needs no make or plate here (the documents step asks for
     // what the vehicle needs); a taxi's details are required by the server.
@@ -367,12 +380,14 @@ export default function SignupPage() {
             <h1 id="signup-title" className={styles.heading}>Your name</h1>
             <div className={styles.field}>
               <label htmlFor="signup-first" className={styles.label}>First name</label>
-              <input id="signup-first" autoComplete="given-name" value={first} onChange={(e) => setFirst(e.target.value)} className={styles.input} />
+              <input id="signup-first" autoComplete="given-name" maxLength={LIMIT.name} placeholder={EXAMPLE.first} value={first} onChange={(e) => setFirst(e.target.value)} className={styles.input} />
             </div>
             <div className={styles.field}>
               <label htmlFor="signup-last" className={styles.label}>Last name</label>
-              <input id="signup-last" autoComplete="family-name" value={last} onChange={(e) => setLast(e.target.value)} className={styles.input} />
+              <input id="signup-last" autoComplete="family-name" maxLength={LIMIT.name} placeholder={EXAMPLE.last} value={last} onChange={(e) => setLast(e.target.value)} className={styles.input} />
             </div>
+            {/* [WEB-ONBOARDING] a person compares each partner document's name with the account's (NAME_MISMATCH) */}
+            {role !== 'CUSTOMER' ? <p className={styles.smallCopy}>{NAME_AS_ON_ID}</p> : null}
             {/* Two explicit, unticked ticks (the Terms say acceptance is by "ticking the acceptance box at registration"):
                 the Terms and Privacy consent, and the owner's 15 Oct 18+ declaration. The API records both in the consent ledger. */}
             <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
@@ -394,7 +409,7 @@ export default function SignupPage() {
         {step === 'business' && (
           <div className={styles.stackTight}>
             <h1 id="signup-title" className={styles.heading}>Your business</h1>
-            <div className={styles.field}><label htmlFor="business-name" className={styles.label}>Business name</label><input id="business-name" value={biz.name} onChange={(e) => setBiz({ ...biz, name: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-name" className={styles.label}>Business name</label><input id="business-name" maxLength={LIMIT.business} placeholder={nameBasis === 'OWN_NAME' && ownNameStoreType(biz.vendorType) ? EXAMPLE.ownName : EXAMPLE.business} value={biz.name} onChange={(e) => setBiz({ ...biz, name: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
               <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
             </select></div>
@@ -403,9 +418,9 @@ export default function SignupPage() {
               : ownNameLoadFailed
                 ? <button type="button" className={styles.roleButton} onClick={() => setOwnNameLoadFailed(false)}>Couldn’t load the store-name choice — try again</button>
                 : null) : null}
-            <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" disabled={busy || placingStore} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" maxLength={LIMIT.street} placeholder={EXAMPLE.street} disabled={busy || placingStore} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" maxLength={LIMIT.city} placeholder={EXAMPLE.city} disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
+            <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region (optional)</label><input id="business-region" autoComplete="address-level1" maxLength={LIMIT.region} placeholder={EXAMPLE.region} disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
             {placingStore ? (
               StoreLocationPicker ? <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
               : pickerFailed ? (
@@ -422,8 +437,10 @@ export default function SignupPage() {
               </>
             )}
             {feeBlock({ role: 'VENDOR', type: biz.vendorType })}
-            <PartnerAgreement kind="Vendor" doc="vendor-agreement" agree={agree} onChange={setAgree} />
-            <button type="button" onClick={() => void doBusiness()} disabled={busy || !!fee.ask || !agree || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
+            <PartnerAgreement name={AGREEMENT.business} doc="vendor-agreement" agree={agree} onChange={setAgree} />
+            {/* [WEB-ONBOARDING] the region is optional, as on the server and in the app (which never asks it) */}
+            <button type="button" onClick={() => void doBusiness()} disabled={busy || !!fee.ask || !agree || placingStore || !!storeAsk} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
+            {askLine(placingStore ? null : storeAsk ?? agreementWait(AGREEMENT.business))}
             <p className={styles.smallCopy}>You’ll finish verification (documents) in your dashboard before going live.</p>
           </div>
         )}
@@ -437,22 +454,23 @@ export default function SignupPage() {
               <>
                 {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
                 <p className={styles.smallCopy}>{TAXI_TWO_LICENCES}</p>
-                <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} aria-describedby="vehicle-plate-rule" aria-invalid={taxiPlateWrong || undefined} />
+                <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" maxLength={LIMIT.make} placeholder={EXAMPLE.make} value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" maxLength={LIMIT.model} placeholder={EXAMPLE.model} value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" maxLength={LIMIT.year} placeholder={EXAMPLE.year} value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" maxLength={LIMIT.color} placeholder={EXAMPLE.color} value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
+                <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" autoCapitalize="characters" maxLength={LIMIT.plate} placeholder={EXAMPLE.plate} value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} aria-describedby="vehicle-plate-rule" aria-invalid={taxiPlateWrong || undefined} />
                   {/* [Owner ruling 11 Oct 2026 — H-PLATE] said where the plate is typed; the server refuses a non-H taxi plate too */}
                   <p id="vehicle-plate-rule" className={taxiPlateWrong ? styles.error : styles.smallCopy} role={taxiPlateWrong ? 'alert' : undefined}>{taxiPlateWrong ? TAXI_PLATE_ERROR : TAXI_PLATE_HINT}</p></div>
               </>
             ) : null}
             {feeBlock({ role: 'MOVER', type: veh.vehicleType })}
-            <PartnerAgreement kind="Driver" doc="driver-agreement" agree={agree} onChange={setAgree} />
+            <PartnerAgreement name={AGREEMENT.mover} doc="driver-agreement" agree={agree} onChange={setAgree} />
             {mover === 'DRIVER' ? (
               <button type="button" onClick={() => void doVehicle()} disabled={busy || !!fee.ask || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || taxiPlateWrong || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
             ) : (
               <button type="button" onClick={() => void doVehicle()} disabled={busy || !!fee.ask || !agree} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create rider account'}</button>
             )}
+            {askLine(vehicleAsk)}
             <p className={styles.smallCopy}>You’ll upload your documents in your earner dashboard before going online.</p>
           </div>
         )}

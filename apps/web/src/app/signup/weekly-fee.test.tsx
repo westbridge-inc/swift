@@ -66,7 +66,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     // The price is read fresh from the API, never a cached page's figure.
     expect(fx.fetch).toHaveBeenCalledWith(expect.stringMatching(/\/api\/v1\/auth\/pricing$/), expect.objectContaining({ cache: 'no-store' }));
 
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create rider account').disabled).toBe(true);
     await user.click(button('Create rider account'));
     expect(fx.become).not.toHaveBeenCalled();
@@ -80,7 +80,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
   it('another vehicle is another fee: the amount changes and the tick is cleared, then sent with the new amount', async () => {
     const user = await throughName(/Deliver with Swift/);
     await user.click(await feeBox());
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     fireEvent.change(screen.getByLabelText('Vehicle'), { target: { value: 'BICYCLE' } });
     expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('Your weekly fee: $5,000/week');
     expect((await feeBox()).checked).toBe(false);
@@ -96,7 +96,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create driver account').disabled).toBe(true);
     await user.click(await feeBox());
     await user.click(button('Create driver account'));
@@ -158,10 +158,10 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     fx.api.mockResolvedValue({ data: { address: 'Store entrance, Georgetown' } });
     const user = await throughName(/Put my business on Swift/);
     fireEvent.change(await screen.findByLabelText('Business name'), { target: { value: 'Test shop' } });
-    for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
+    for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region (optional)', 'Demerara-Mahaica']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Business Agreement/ }));
     const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
     await user.click(button('Place your store on the map'));
     await user.click(await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ }));
@@ -179,7 +179,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     fx.fetch.mockImplementationOnce(() => Promise.reject(new TypeError('Failed to fetch')));
     const user = await throughName(/Deliver with Swift/);
     expect((await screen.findByRole('alert')).textContent).toMatch(/Couldn’t load your weekly fee/);
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create rider account').disabled).toBe(true);
     await user.click(button('Try again'));
     expect((await feeBox()).checked).toBe(false);
@@ -190,7 +190,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, movers: [] }));
     const first = await throughName(/Deliver with Swift/);
     expect((await screen.findByText('No weekly fee is set for this choice yet.'))).toBeTruthy();
-    await first.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await first.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create rider account').disabled).toBe(true);
   });
 
@@ -199,7 +199,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     const user = await throughName(/Deliver with Swift/);
     expect((await screen.findByText('Couldn’t load the weekly fee terms — try again later.'))).toBeTruthy();
     expect(screen.queryByRole('checkbox', { name: /weekly fee/ })).toBeNull();
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create rider account').disabled).toBe(true);
   });
 
@@ -208,7 +208,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     const user = await throughName(/Deliver with Swift/);
     expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('$6,000/week');
     expect(screen.queryByRole('checkbox', { name: /weekly fee/ })).toBeNull();
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(button('Create rider account'));
     expect(fx.become.mock.calls[0]![0]).toEqual({ role: 'MOVER', acceptAgreement: true, vehicleType: 'MOTORCYCLE' });
   });
@@ -216,7 +216,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
   it('the server refusing the tick because the fee changed: its words are shown, the price is read again, the tick is cleared', async () => {
     const user = await throughName(/Deliver with Swift/);
     await user.click(await feeBox());
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     const changed = Object.assign(new Error('The weekly fee is now $6,500 a week. Check it and tick “I understand the weekly fee” again.'), { code: 'WEEKLY_FEE_CHANGED' });
     fx.become.mockRejectedValueOnce(changed);
     fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, movers: [{ vehicleType: 'MOTORCYCLE', rate: 6500 }, { vehicleType: 'BICYCLE', rate: 5000 }] }));

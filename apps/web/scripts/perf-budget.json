@@ -8,7 +8,7 @@
     "/(app)/cart/page": 158,
     "/(app)/checkout/page": 158,
     "/login/page": 117,
-    "/signup/page": 123,
+    "/signup/page": 124,
     "/dashboard/orders/page": 173,
     "/dashboard/inventory/page": 159,
     "/dashboard/inventory/import/page": 158,
@@ -32,6 +32,7 @@
   "raisedBecause": {
     "/(app)/store/[slug]/page": "[BOOK-S6b 29 Oct] +1 kB: web customer booking (owner C3). The sheet, time picker and held time load on tap; what stays is the Book button, its sign-in path and the lazy loader (measured 166.6 kB; main 165.7).",
     "/(app)/cart/page": "[BOOK-S6b 29 Oct] +1 kB: the one checkout books an appointment (owner C3). Its panels, words and held time load on demand; what stays is the one-booking checks and the phone payment-copy module the success words share (measured 157.9 kB; main 156.1).",
-    "/(app)/checkout/page": "[BOOK-S6b 29 Oct] +1 kB: as /(app)/cart/page (the same checkout)."
+    "/(app)/checkout/page": "[BOOK-S6b 29 Oct] +1 kB: as /(app)/cart/page (the same checkout).",
+    "/signup/page": "[WEB-ONBOARDING 1 Nov] +1 kB: the owner's ask that partners see an example in every sign-up box (name, business, address, taxi details), each box held to the server's limit, and one line under a waiting button naming what is missing; the agreements carry their documents' own titles. Main measured 123.0 kB, at its ceiling, so any word added to the page needs room. A follow-up can load the business and vehicle steps on demand to win it back."
   }
 }
