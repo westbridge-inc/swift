@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { formatAmount } from '@/lib/money';
+import { feeMoney } from '@/lib/fee-status';
 import { FEE_ASK, feeLadderLine, feeQuote, feeSteps, feeTermsOf, fetchSignupPricing, stepTrialLines, trialDaysOf, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
 import styles from '../auth-flow.module.css';
 
@@ -38,7 +39,9 @@ export function WeeklyFee({ role, type, onChange }: {
     // [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D1)] The free trial first, as the app's price card says it, from the
     // server's numbers; a list without a trial length shows the amount alone.
     const trial = trialDaysOf(pricing.trialDays);
-    const amount = `${trial ? `${trial} days free, then ` : ''}${formatAmount(rate, pricing.currencySymbol)}/week`;
+    // [F30] Guyana dollars as every web fee screen writes them (GY$15,000 a week); another currency by its own symbol.
+    const money = pricing.currencyCode === 'GYD' ? feeMoney(rate) : formatAmount(rate, pricing.currencySymbol);
+    const amount = `${trial ? `${trial} days free, then ` : ''}${money} a week`;
     const steps = feeSteps(pricing, choice);
     if (terms === 'invalid') return { amount, steps, state: { ask: FEE_ASK.invalid } as FeeState };
     // An API older than the tick serves no words: the amount is shown, nothing is ticked or sent.

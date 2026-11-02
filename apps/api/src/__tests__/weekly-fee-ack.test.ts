@@ -43,8 +43,12 @@ const V1_ITEMS = [
   { heading: 'If the price changes', text: 'Swift tells you in the app at least 14 days before. A new price applies only from your first weekly fee due after that, never to a week you have already paid.' },
 ];
 const V1_TICK = 'I understand the weekly fee.';
-/** [WEB-ONBOARDING · owner 1 Nov 2026 (D3)] The words served now: v1 with "How you pay" naming the website too. */
-const V2_ITEMS = V1_ITEMS.map((i) => (i.heading === 'How you pay' ? { ...i, text: 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.' } : i));
+/** [WEB-ONBOARDING · owner 1 Nov 2026 (D3, F13)] The words served now: v1 with "How you pay" naming the website and "When it starts" saying the trial. */
+const V2_CHANGED: Record<string, string> = {
+  'When it starts': 'Nothing is paid at sign-up. Your free trial starts once Swift approves you and lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it. The weekly fee starts after that. Each person gets one free trial for each kind of partner.',
+  'How you pay': 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.',
+};
+const V2_ITEMS = V1_ITEMS.map((i) => (V2_CHANGED[i.heading] ? { ...i, text: V2_CHANGED[i.heading]! } : i));
 const V2_TEXT = [...V2_ITEMS.map((i) => `${i.heading}: ${i.text}`), V1_TICK].join('\n');
 
 async function customer(n: number) {

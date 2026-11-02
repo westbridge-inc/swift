@@ -1,6 +1,7 @@
 /**
- * [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D3)] The weekly fee words, v2: "How you pay" names the website too, since
- * the weekly fee is paid on MMG's checkout page from swiftgy.com as well as from the app. A version is a promise about
+ * [WEB-ONBOARDING · owner rulings 1 Nov 2026 (D3, D1/F13)] The weekly fee words, v2: "How you pay" names the website too,
+ * since the weekly fee is paid on MMG's checkout page from swiftgy.com as well as from the app, and "When it starts"
+ * says the free trial plainly (when, how long, once per person per kind of partner). A version is a promise about
  * specific words, so this is a NEW version (weekly_fee_acknowledgement v2) beside v1, which never changes (rows in the
  * ledger are anchored to it). New ticks are taken on v2 only; a partner who ticked v1 is not asked again (a store
  * owner's store-fee tick and a pro's fee tick are read across both versions). The partner agreements and LEGAL_VERSION
@@ -14,21 +15,31 @@ import {
 } from '../modules/partner/weekly-fee-ack';
 import { latestStoreFeeTick } from '../modules/partner/store-fee';
 import { latestProFeeTick } from '../modules/services/pro-fee';
+import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../modules/subscription/trial-length';
+import { guyanaTiers } from '../modules/ops/platform-config';
 
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 const HOW_YOU_PAY_V2 = 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.';
+/** [D1 / F13] The free trial said plainly: when it starts, how long (the trial law's lengths), once per person per kind of partner. */
+const WHEN_IT_STARTS_V2 = 'Nothing is paid at sign-up. Your free trial starts once Swift approves you and lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it. The weekly fee starts after that. Each person gets one free trial for each kind of partner.';
+const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V2, 'When it starts': WHEN_IT_STARTS_V2 };
 
 describe('[D3] the weekly fee words v2', () => {
-  it('serves v2: "How you pay" names the website; every other line and the tick are v1’s, word for word', () => {
+  it('serves v2: "How you pay" names the website and "When it starts" says the trial; the other lines and the tick are v1’s', () => {
     const served = weeklyFeeTerms();
     expect(WEEKLY_FEE_ACK_VERSION).toBe('v2');
     expect(served.version).toBe('v2');
     expect(served.items.map((i) => i.heading)).toEqual(WEEKLY_FEE_TERMS_V1.items.map((i) => i.heading));
     served.items.forEach((item, i) => {
-      expect(item.text, item.heading).toBe(item.heading === 'How you pay' ? HOW_YOU_PAY_V2 : WEEKLY_FEE_TERMS_V1.items[i]!.text);
+      expect(item.text, item.heading).toBe(CHANGED[item.heading] ?? WEEKLY_FEE_TERMS_V1.items[i]!.text);
     });
     expect(served.tick).toBe(WEEKLY_FEE_TERMS_V1.tick);
     expect(WEEKLY_FEE_ACK_TEXT).toBe([...served.items.map((i) => `${i.heading}: ${i.text}`), served.tick].join('\n'));
+  });
+
+  it('the trial words are the trial law’s own numbers (a change to one is a new version)', () => {
+    expect([TRIAL_DAYS, DEPARTMENT_TRIAL_DAYS, guyanaTiers.departmentCatalogueThreshold]).toEqual([14, 7, 10000]);
+    expect(WHEN_IT_STARTS_V2).toContain(`lasts ${TRIAL_DAYS} days, or ${DEPARTMENT_TRIAL_DAYS} days for a store with ${guyanaTiers.departmentCatalogueThreshold.toLocaleString('en-US')} or more items`);
   });
 
   it('v1 keeps its exact words (the ledger rows already anchored to them)', () => {

@@ -5,6 +5,7 @@ import type { ConsentDocumentType } from '../legal/consent.service';
 import { browserClientOf } from '../auth/browser-session';
 import { moverRoleFor } from '../../config/vehicle-classes';
 import { partnerRateFor, PricingConfigError, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
+import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../subscription/trial-length';
 
 /**
  * [COORD ruling 22 Oct 2026 · row 628 · GUARDRAILS §1 + §7 standing rule 2] The weekly fee at partner sign-up.
@@ -61,15 +62,21 @@ export const WEEKLY_FEE_ACK_TEXT_V1 = [
 ].join('\n');
 
 /**
- * [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D3)] The v2 words: v1 with "How you pay" naming the website too (the
- * weekly fee is paid on MMG's checkout page from swiftgy.com as well as from the app). Every other line and the tick
- * are v1's, word for word. Card-rail switch-on checklist: before card payment is offered, "How you pay" must change
- * again, and that is v3.
+ * [WEB-ONBOARDING · owner rulings 1 Nov 2026 (D3, D1/F13)] The v2 words, two lines changed from v1:
+ *  - "How you pay" names the website too (the weekly fee is paid on MMG's checkout page from swiftgy.com as well as
+ *    from the app);
+ *  - "When it starts" says the free trial plainly: when it starts (once Swift approves you), how long it lasts (the
+ *    trial law's own lengths: subscription/trial-length.ts TRIAL_DAYS, and DEPARTMENT_TRIAL_DAYS for a store at the
+ *    department step, 10,000+ items, when approved) and that each person gets one per kind of partner (the trial
+ *    entitlement law: one per person, per role). A change to any of those numbers is a new version (the unit test
+ *    pins them together).
+ * "What it covers", "If the price changes" and the tick are v1's, word for word. Card-rail switch-on checklist: before
+ * card payment is offered, "How you pay" must change again, and that is v3.
  */
 export const WEEKLY_FEE_TERMS_V2 = {
   items: [
     { heading: 'What it covers', text: 'The Swift app and its tools for your work. Swift takes no commission: you keep 100% of your sales, fares, delivery fees and tips.' },
-    { heading: 'When it starts', text: 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one.' },
+    { heading: 'When it starts', text: `Nothing is paid at sign-up. Your free trial starts once Swift approves you and lasts ${TRIAL_DAYS} days, or ${DEPARTMENT_TRIAL_DAYS} days for a store with 10,000 or more items when Swift approves it. The weekly fee starts after that. Each person gets one free trial for each kind of partner.` },
     { heading: 'How you pay', text: 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.' },
     { heading: 'If the price changes', text: 'Swift tells you in the app at least 14 days before. A new price applies only from your first weekly fee due after that, never to a week you have already paid.' },
   ],
