@@ -19,8 +19,8 @@ vi.mock('@/app/signup/store-picker-loader', () => ({
   loadStorePicker: async () => {
     loads.count += 1;
     return {
-      StoreLocationPicker: ({ current, onConfirm, onClose }: { current: { latitude: number; longitude: number } | null; onConfirm: (_p: { latitude: number; longitude: number; address: string | null }) => void; onClose: () => void }) => (
-        <div>
+      StoreLocationPicker: ({ current, onConfirm, onClose, words }: { current: { latitude: number; longitude: number } | null; onConfirm: (_p: { latitude: number; longitude: number; address: string | null }) => void; onClose: () => void; words?: string }) => (
+        <div data-picker-words={words}>
           <p>Picker opened at {current ? `${current.latitude},${current.longitude}` : 'nowhere'}</p>
           <button type="button" onClick={() => onConfirm({ latitude: 6.81, longitude: -58.16, address: 'Sample Street' })}>Confirm store location</button>
           <button type="button" onClick={onClose}>Close without placing the pin</button>
@@ -30,7 +30,7 @@ vi.mock('@/app/signup/store-picker-loader', () => ({
   },
 }));
 
-type Opts = { role?: string; refuse?: string };
+type Opts = { role?: string; refuse?: string; vendorType?: string };
 const calls: Array<{ method: string; path: string; body: unknown }> = [];
 function api(opts: Opts = {}) {
   let store = { addressLine1: '1 Sample Street', city: 'Town A', region: null as string | null, latitude: 6.8, longitude: -58.15 };
@@ -39,7 +39,7 @@ function api(opts: Opts = {}) {
     const body = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : null;
     calls.push({ method, path, body });
     if (path === '/vendor/profile' && method === 'GET') {
-      return { body: { success: true, data: { id: 'owner-1', userId: 'user-1', myRole: opts.role ?? 'OWNER', vendors: [{ id: 'store-1', name: 'Sample Kitchen', vendorType: 'RESTAURANT', ...store }] } } };
+      return { body: { success: true, data: { id: 'owner-1', userId: 'user-1', myRole: opts.role ?? 'OWNER', vendors: [{ id: 'store-1', name: 'Sample Kitchen', vendorType: opts.vendorType ?? 'RESTAURANT', ...store }] } } };
     }
     if (path === '/vendor/profile' && method === 'PUT') {
       if (opts.refuse) return { status: 400, body: { success: false, error: { code: 'STORE_PIN_OUTSIDE_MARKET', message: opts.refuse } } };
@@ -53,6 +53,16 @@ const puts = () => calls.filter((c) => c.method === 'PUT');
 
 beforeEach(() => { calls.length = 0; loads.count = 0; setSelectedStore('store-1'); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); localStorage.clear(); });
+
+describe('[FLOW-QA2 F26] the map\'s words follow the business type', () => {
+  it.each([['SERVICE', 'service'], ['RESTAURANT', 'store'], ['STORE', 'store']])('%s: the picker opens with the %s words', async (vendorType, words) => {
+    api({ vendorType });
+    const { user } = renderWithQuery(<StoreLocationCard storeId="store-1" />);
+    await user.click(await screen.findByRole('button', { name: 'Move the pin' }));
+    await screen.findByText(/Picker opened/);
+    expect(document.querySelector('[data-picker-words]')?.getAttribute('data-picker-words')).toBe(words);
+  });
+});
 
 describe('[WEB-SETTINGS] the store\'s location (web)', () => {
   it('the owner moves the pin: the picker loads only when opened, starts at the current pin, and only { latitude, longitude } is sent', async () => {

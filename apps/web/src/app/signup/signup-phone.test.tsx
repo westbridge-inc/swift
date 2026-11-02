@@ -266,6 +266,75 @@ describe('a browser already signed in is not asked for a code again', () => {
     window.history.replaceState(null, '', '/signup');
   });
 
+  it('[FLOW-QA2 NEW-1] on /signup itself, the card\'s "Finish signing up" opens the vehicle step at once, as a refresh does', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['MOVER', 'CUSTOMER'] } });
+    mocked.rider.mockResolvedValue(null);
+    render(<SignupPage />);
+    const finish = await screen.findByRole('link', { name: 'Finish signing up' });
+    // a click the page does not stop would only change the address (the page stays mounted on the signed-in card)
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    fireEvent(finish, click);
+    expect(click.defaultPrevented).toBe(true);
+    expect(await screen.findByRole('heading', { name: 'Finish signing up' })).toBeTruthy();
+    expect(screen.queryByText(/You’re signed in/)).toBeNull();
+    expect(window.location.search).toContain('resume=mover');
+    fireEvent.click(screen.getByRole('button', { name: /Deliver with Swift/ }));
+    expect(await screen.findByRole('heading', { name: 'How you deliver' })).toBeTruthy();
+    window.history.replaceState(null, '', '/signup');
+  });
+
+  it('[FLOW-QA2 NEW-1] the card\'s other links are left to the browser (a dashboard is another page)', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['VENDOR'] } });
+    render(<SignupPage />);
+    const go = await screen.findByRole('link', { name: 'Go to your dashboard' });
+    let stoppedBeforeWindow: boolean | null = null;
+    // after the page's own handler has run (it is attached below the window), then the test keeps its page where it is
+    const atWindow = (event: Event) => { stoppedBeforeWindow = event.defaultPrevented; event.preventDefault(); };
+    window.addEventListener('click', atWindow);
+    fireEvent.click(go);
+    window.removeEventListener('click', atWindow);
+    expect(stoppedBeforeWindow).toBe(false);
+    expect(screen.getByText(/You’re signed in/)).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Your business' })).toBeNull();
+  });
+
+  it('[FLOW-QA2 NEW-9] a signed-in business on the rider door can add a vehicle to its account, not only go to its dashboard', async () => {
+    window.history.replaceState(null, '', '/signup?as=rider');
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['VENDOR'] } });
+    render(<SignupPage />);
+    expect(await screen.findByRole('link', { name: 'Go to your dashboard' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Add a vehicle to this account' }));
+    expect(await screen.findByRole('heading', { name: 'How you deliver' })).toBeTruthy();
+    expect(screen.getByText('Add your vehicle to your Swift account.')).toBeTruthy();
+    window.history.replaceState(null, '', '/signup');
+  });
+
+  it('[FLOW-QA2 NEW-9] a signed-in rider on the business door can add a business; on its own door, no extra button', async () => {
+    window.history.replaceState(null, '', '/signup?as=business');
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['MOVER'] } });
+    const { unmount } = render(<SignupPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Add a business to this account' }));
+    expect(await screen.findByRole('heading', { name: 'Your business' })).toBeTruthy();
+    expect(screen.getByText('Add a business to your Swift account.')).toBeTruthy();
+    unmount();
+    window.history.replaceState(null, '', '/signup?as=rider');
+    render(<SignupPage />);
+    expect(await screen.findByRole('link', { name: 'Go to your portal' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Add a (vehicle|business) to this account/ })).toBeNull();
+    window.history.replaceState(null, '', '/signup');
+  });
+
+  it('[FLOW-QA2 NEW-9] signed in on /login: no "Keep browsing as a guest" and no "Create an account"', async () => {
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['VENDOR'] } });
+    render(<LoginPage />);
+    expect(await screen.findByRole('link', { name: 'Go to your dashboard' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Create an account' })).toBeNull();
+    expect(screen.queryByText(/New to Swift\?/)).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Keep browsing as a guest' })).toBeNull();
+  });
+
   it('[REVIEW-G G3] a self-employed pro goes where sign-in sends them: their weekly fee', async () => {
     mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['CUSTOMER'] } });
     mocked.pro.mockResolvedValue(true);

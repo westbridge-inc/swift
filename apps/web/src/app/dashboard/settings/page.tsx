@@ -168,7 +168,7 @@ function SubscriptionCard({ isOwner }: { isOwner: boolean }) {
     <div className="sw-card p-6">
       <h2 className="font-bold">Subscription</h2>
       {!s ? (
-        <p className="mt-2 text-sm text-[var(--swift-muted)]">No subscription on this store yet — it starts when your documents are verified.</p>
+        <p className="mt-2 text-sm text-[var(--swift-muted)]">No subscription on this store yet — it starts when Swift approves your store.</p>
       ) : (
         <div className="mt-3 space-y-1 text-sm">
           <p>

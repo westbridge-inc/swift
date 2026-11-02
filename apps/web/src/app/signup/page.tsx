@@ -87,6 +87,10 @@ export default function SignupPage() {
   const [first, setFirst] = useState('');
   const [last, setLast] = useState('');
 
+  // [D6] What a partner typed on the business or vehicle step, kept here across Back and forward (the steps themselves
+  // load on demand: partner-steps.tsx).
+  const [bizDraft, setBizDraft] = useState<PartnerStepsModule.BusinessDraft | null>(null);
+  const [vehDraft, setVehDraft] = useState<PartnerStepsModule.VehicleDraft | null>(null);
   // [FLOW-QA F6] One history entry per step, and what was typed kept for this tab (lib/signup-draft).
   const fromHistory = useRef(false);
   const stepNow = useRef<Step>('role');
@@ -135,10 +139,6 @@ export default function SignupPage() {
     }
     saveDraft({ step, role, phone, first, last });
   }, [step, role, phone, first, last]);
-  // [D6] What a partner typed on the business or vehicle step, kept here across Back and forward (the steps themselves
-  // load on demand: partner-steps.tsx).
-  const [bizDraft, setBizDraft] = useState<PartnerStepsModule.BusinessDraft | null>(null);
-  const [vehDraft, setVehDraft] = useState<PartnerStepsModule.VehicleDraft | null>(null);
   const mover = role === 'RIDER' || role === 'DRIVER' ? role : null;
   // [Owner ruling 15 Oct 2026] the sign-up ticks: Terms + Privacy, and "I am 18 or older". Both start
   // unticked and are cleared whenever the role or the step changes (the partner agreement and the weekly fee tick
@@ -166,20 +166,38 @@ export default function SignupPage() {
   // here from the console (/signup?resume=business) straight to that step.
   // [REVIEW-G G1 · owner rule 3] A rider or driver account that stopped after its name comes back
   // (/signup?resume=mover, from the signed-in card) straight to the vehicle step.
-  useEffect(() => {
-    const resume = new URLSearchParams(window.location.search).get('resume');
-    if (resume !== 'business' && resume !== 'mover') return;
-    let cancelled = false;
+  const resumeAccount = (resume: 'business' | 'mover', live: () => boolean = () => true) => {
     void sessionProbe().then((session) => {
-      if (cancelled || !session.ok) return;
+      if (!live() || !session.ok) return;
       const accountPhone = session.user?.['phone'];
       if (typeof accountPhone === 'string') setPhone(guyanaLocal(accountPhone));
       if (resume === 'mover') { setPickMover(true); setStep('vehicle'); return; }
       setRole('VENDOR');
       setStep('business');
     });
+  };
+  useEffect(() => {
+    const resume = new URLSearchParams(window.location.search).get('resume');
+    if (resume !== 'business' && resume !== 'mover') return;
+    let cancelled = false;
+    resumeAccount(resume, () => !cancelled);
     return () => { cancelled = true; };
   }, []);
+  /** [FLOW-QA2 NEW-1] The signed-in card's "Finish signing up" (/signup?resume=mover) is this page: a link to it
+   *  changes only the address and this page stays mounted, so the card's tap resumes here, as a refresh would. */
+  const goFromCard = (href: string): boolean => {
+    const resume = /^\/signup\?resume=(mover|business)$/.exec(href)?.[1] as 'mover' | 'business' | undefined;
+    if (!resume) return false;
+    window.history.replaceState(window.history.state, '', href);
+    resumeAccount(resume);
+    return true;
+  };
+  /** [FLOW-QA F9] An existing account that chose another partner door goes on to that door's step (its account is
+   *  kept; a business or a vehicle is added to it). [FLOW-QA2 NEW-9] So does a signed-in one, from the card. */
+  const addToAccount = (door: Role) => {
+    setAddingTo(door === 'VENDOR' ? 'Add a business to your Swift account.' : 'Add your vehicle to your Swift account.');
+    setStep(door === 'VENDOR' ? 'business' : 'vehicle');
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busyNow = useRef(false);
@@ -219,8 +237,7 @@ export default function SignupPage() {
       const isMover = kind === 'earner';
       // [FLOW-QA F9] An existing account that chose another partner door goes on to that door's step (its account is
       // kept; a business or a vehicle is added to it), never silently back to its old home.
-      if (role === 'VENDOR' && !isVendor) { setAddingTo('Add a business to your Swift account.'); setStep('business'); return; }
-      if ((role === 'RIDER' || role === 'DRIVER') && !isMover) { setAddingTo('Add your vehicle to your Swift account.'); setStep('vehicle'); return; }
+      if (role === 'VENDOR' ? !isVendor : role !== 'CUSTOMER' && !isMover) { addToAccount(role); return; }
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
       if (customerReturnPath) continueJourney();
       clearDraft();
@@ -283,6 +300,9 @@ export default function SignupPage() {
     if (door) chooseRole(door);
   }, []);
   const chosenDoor = ROLES.find((r) => r.role === role && r.role !== 'CUSTOMER');
+  // [FLOW-QA2 NEW-9] The partner door this signed-in visit came by, when the account is not already that partner.
+  const cardDoor = signedIn && chosenDoor && signedIn.who.kind
+    && (chosenDoor.role === 'VENDOR' ? signedIn.who.kind !== 'business' : signedIn.who.kind !== 'earner') ? chosenDoor : null;
 
   return (
     <main id="main" tabIndex={-1} className={styles.page}>
@@ -300,7 +320,9 @@ export default function SignupPage() {
         <Link href="/" aria-label="Swift home" onClick={clearStorefrontContinuation} className={styles.brandLink}><SwiftLogo /></Link>
 
         {signedIn && (step === 'role' || step === 'phone') ? (
-          <signedIn.Card who={signedIn.who} here="/signup" titleId="signup-title" onSignedOut={() => setSignedIn(null)} />
+          <signedIn.Card who={signedIn.who} here="/signup" titleId="signup-title" onGo={goFromCard} onSignedOut={() => setSignedIn(null)}
+            addTo={cardDoor ? (cardDoor.role === 'VENDOR' ? 'business' : 'vehicle') : undefined}
+            onAddTo={() => { if (cardDoor) { clearStorefrontContinuation(); setPhone(guyanaLocal(signedIn.who.phone)); addToAccount(cardDoor.role); } }} />
         ) : null}
         {step === 'role' && !signedIn && (
           <div className={styles.stackTight}>

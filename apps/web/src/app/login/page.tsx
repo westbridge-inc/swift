@@ -179,11 +179,12 @@ function LoginInner() {
 
         {pendingReturn ? (
           <Link href={pendingReturn} onClick={clearStorefrontContinuation} className="sw-link-btn self-center py-2">Cancel and return to menu</Link>
-        ) : isCustomer && step === 'phone' ? (
+        ) : isCustomer && step === 'phone' && !signedIn ? (
           <Link href={guestReturn(next)} className="sw-link-btn self-center py-2">Keep browsing as a guest</Link>
         ) : null}
 
-        <p className="sw-caption border-t border-[var(--swift-border)] pt-5">
+        {/* [FLOW-QA2 NEW-9] A browser already signed in is neither a guest nor new to Swift: the card says where to go. */}
+        {signedIn && step === 'phone' ? null : <p className="sw-caption border-t border-[var(--swift-border)] pt-5">
           New to Swift?{' '}
           <Link
             href={next ? `/signup?next=${encodeURIComponent(next)}` : '/signup'}
@@ -193,7 +194,7 @@ function LoginInner() {
             Create an account
           </Link>{' '}
           — order, sell, or drive.
-        </p>
+        </p>}
       </section>
     </AuthPage>
   );

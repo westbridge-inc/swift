@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
@@ -51,13 +51,14 @@ async function businessStep(name: string, vendorType = 'RESTAURANT') {
   return user;
 }
 
-async function placePin(user: ReturnType<typeof userEvent.setup>, button: RegExp) {
+async function placePin(user: ReturnType<typeof userEvent.setup>, button: RegExp, confirm = 'Confirm store location', check?: () => void) {
   await user.click(screen.getByRole('button', { name: button }));
   await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ });
   loadMap();
   await user.click(screen.getByRole('button', { name: /12 Regent Street.*Georgetown/ }));
   loadMap();
-  await user.click(screen.getByRole('button', { name: 'Confirm store location' }));
+  check?.();
+  await user.click(screen.getByRole('button', { name: confirm }));
 }
 
 describe('[F19] the own-name declaration is part of what is missing', () => {
@@ -93,9 +94,63 @@ describe('[F26] a Services business is asked where it is based', () => {
     const user = await businessStep('Test services', 'SERVICE');
     expect(screen.queryByRole('button', { name: 'Place your store on the map' })).toBeNull();
     expect(ask()).toBe('Show where you’re based on the map');
-    await placePin(user, /Show where you’re based on the map/);
+    await placePin(user, /Show where you’re based on the map/, 'Confirm location', () => {
+      // [FLOW-QA2 F26] the map itself says it too: never a store, its entrance or "Confirm store location"
+      const picker = screen.getByRole('heading', { name: 'Show where you’re based on the map' }).closest('section')!;
+      expect(picker.textContent).toContain('Put the pin where you’re based.');
+      expect(picker.textContent).not.toMatch(/store/i);
+      expect(picker.textContent).not.toMatch(/entrance/i);
+      expect(screen.getByRole('application', { name: 'Location map' })).toBeTruthy();
+    });
     expect(await screen.findByText(/^Location confirmed:/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Move the pin' })).toBeTruthy();
+  });
+
+  it('a shop keeps the store words on the map', async () => {
+    const user = await businessStep('Test shop', 'STORE');
+    await placePin(user, /Place your store on the map/, 'Confirm store location', () => {
+      const picker = screen.getByRole('heading', { name: 'Place your store on the map' }).closest('section')!;
+      expect(picker.textContent).toContain('Put the pin on your store’s entrance.');
+      expect(picker.textContent).toContain('Riders and customers will come here.');
+    });
+    expect(await screen.findByText(/^Store location confirmed:/)).toBeTruthy();
+  });
+});
+
+describe('[FLOW-QA2 F24] the own-name tick is the same size as the other ticks', () => {
+  it('a 20 px box in a 44 px row: the same tick row as the Business Agreement', async () => {
+    const user = await businessStep('Persaud');
+    await user.click(await screen.findByRole('radio', { name: /My own name — just my surname/ }));
+    const own = screen.getByRole('checkbox', { name: 'I have read the declaration above and I sign it.' }).closest('label')!;
+    const agreement = screen.getByRole('checkbox', { name: /I agree to the Business Agreement/ }).closest('label')!;
+    expect(own.className).toBeTruthy();
+    expect(own.className).toBe(agreement.className);
+    expect(own.getAttribute('style')).toBe(agreement.getAttribute('style'));
+    const css = readFileSync(join(__dirname, '..', 'auth-flow.module.css'), 'utf8');
+    expect(css).toMatch(/\.legal input\[type='checkbox'\] \{ width: 20px; height: 20px;/);
+  });
+});
+
+describe('[FLOW-QA2 NEW-6] a refresh on the business step keeps what was typed', () => {
+  it('the name, type and address come back after a refresh; the ticks do not', async () => {
+    const user = await businessStep('Refresh Kitchen', 'SUPERMARKET');
+    fireEvent.change(screen.getByLabelText('Region (optional)'), { target: { value: 'Demerara-Mahaica' } });
+    await user.click(await screen.findByRole('radio', { name: /My own name — just my surname/ }));
+    await user.click(screen.getByRole('checkbox', { name: 'I have read the declaration above and I sign it.' }));
+    await waitFor(() => expect(window.location.search).toContain('step=business'));
+    cleanup();
+    // the browser reloads the same address: the page mounts again from what this tab kept
+    render(<SignupPage />);
+    await screen.findByRole('heading', { name: 'Your business' });
+    expect((screen.getByLabelText('Business name') as HTMLInputElement).value).toBe('Refresh Kitchen');
+    expect((screen.getByLabelText('Business type') as HTMLSelectElement).value).toBe('SUPERMARKET');
+    expect((screen.getByLabelText('Street address') as HTMLInputElement).value).toBe('12 Regent Street');
+    expect((screen.getByLabelText('City or town') as HTMLInputElement).value).toBe('Georgetown');
+    expect((screen.getByLabelText('Region (optional)') as HTMLInputElement).value).toBe('Demerara-Mahaica');
+    expect(((await screen.findByRole('radio', { name: /My own name — just my surname/ })) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('checkbox', { name: 'I have read the declaration above and I sign it.' }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole('checkbox', { name: /I agree to the Business Agreement/ }) as HTMLInputElement).checked).toBe(false);
+    sessionStorage.clear();
   });
 });
 

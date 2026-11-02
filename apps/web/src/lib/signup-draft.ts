@@ -26,11 +26,15 @@ export function saveDraft(draft: SignupDraft): void {
   try { sessionStorage.setItem(KEY, JSON.stringify(draft)); } catch { /* storage unavailable */ }
 }
 export function clearDraft(): void {
-  try { sessionStorage.removeItem(KEY); } catch { /* storage unavailable */ }
+  try { sessionStorage.removeItem(KEY); sessionStorage.removeItem(BUSINESS_KEY); } catch { /* storage unavailable */ }
 }
+
 /** The address of a step: the page's own address with ?step= set, every other parameter kept. */
 export function stepUrl(step: SignupStep): string {
   const url = new URL(window.location.href);
   url.searchParams.set('step', step);
   return `${url.pathname}${url.search}${url.hash}`;
 }
+
+/** [FLOW-QA2 NEW-6] What the business step keeps for this tab (app/signup/business-draft.ts, in the steps' own chunk). */
+export const BUSINESS_KEY = 'swift_signup_business';
