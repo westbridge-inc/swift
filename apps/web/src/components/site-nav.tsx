@@ -24,10 +24,17 @@ export function SiteNav() {
   // [FLOW-QA F5b] A signed-in partner sees the way to their own area instead of "Sign in" / "Join Swift".
   const [account, setAccount] = useState<{ href: string; label: string } | null>(null);
   useEffect(() => {
-    if (!signedInBefore()) return;
     let alive = true;
-    import('@/lib/header-session').then((m) => m.headerAccount()).then((a) => { if (alive) setAccount(a); }, () => {});
-    return () => { alive = false; };
+    const ask = () => {
+      if (!signedInBefore()) { setAccount(null); return; }
+      import('@/lib/header-session').then((m) => m.headerAccount()).then((a) => { if (alive) setAccount(a); }, () => {});
+    };
+    ask();
+    // [FLOW-QA2 NEW-7] Back to a page kept whole by the browser (the back-forward cache) after signing out shows the
+    // header as it was: it asks again, so a signed-out browser never shows "Dashboard".
+    const onShow = (event: PageTransitionEvent) => { if (event.persisted) ask(); };
+    window.addEventListener('pageshow', onShow);
+    return () => { alive = false; window.removeEventListener('pageshow', onShow); };
   }, []);
   // [FLOW-QA F1] Before launch there is no customer sign-in on the site: "Sign in" is the partners' sign-in.
   const signInHref = useWebOrderingOpen() ? '/login?next=/' : '/login';

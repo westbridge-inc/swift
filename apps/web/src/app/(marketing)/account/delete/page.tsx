@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { Section } from '@/components/site';
 import { site } from '@/site.config';
 import { DELETION_GONE, DELETION_KEPT, DELETION_KEPT_LEAD } from '@/lib/account-deletion-words';
+import { CustomerDeleteRoute } from '@/components/account-deletion/customer-delete-route';
 
 // Google Play's account-deletion policy requires a PUBLICLY reachable URL, in
 // addition to the in-app path — reachable by someone who has already
@@ -53,7 +54,8 @@ export default function DeleteAccountPage() {
         <ul className="mt-4 list-disc space-y-2 pl-5 text-[var(--swift-muted)]">
           <li>A store: <b>Account</b>, then <b>Request account closure</b> (owners) or <b>Delete my account</b> (managers and staff)</li>
           <li>A rider or driver: <b>Account</b>, then <b>Delete my account</b></li>
-          <li>A customer: <b>Account</b>, then <b>Personal details</b>, then <b>Delete my account</b></li>
+          {/* [FLOW-QA2 NEW-2] true before launch (no customer pages on the public site yet) and after */}
+          <CustomerDeleteRoute />
         </ul>
         <p className="mt-4 text-[var(--swift-muted)]">
           The website shows what is deleted and what is kept, asks you to confirm, and may text a code to

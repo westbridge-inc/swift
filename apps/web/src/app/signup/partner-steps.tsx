@@ -95,8 +95,10 @@ function usePartnerTerms() {
     : feeLoadFailed
       ? <button type="button" className={styles.roleButton} onClick={() => setFeeLoadFailed(false)}>Couldn’t load your weekly fee — try again</button>
       : <p role="status" className={styles.smallCopy}>{FEE_LOADING.ask}</p>);
-  // [WEB-ONBOARDING] the agreement is what is missing once the fee block has nothing to ask
-  const agreementWait = (name: string) => (fee.ask || agree ? null : agreementAsk(name));
+  // [WEB-ONBOARDING] the agreement is what is missing once the fee block has nothing to ask. [FLOW-QA2 NEW-10] An
+  // unticked fee is said here too: the block shows only its tick then, so nothing else would say why the button waits
+  // (its loading, failed or missing states say their own words in the block).
+  const agreementWait = (name: string) => (fee.tick ? fee.ask : fee.ask || agree ? null : agreementAsk(name));
   return { agree, setAgree, fee, feeChecked, feeBlock, agreementWait };
 }
 
@@ -210,7 +212,7 @@ export function BusinessStep({ shell, draft, onDraft, note = null }: { shell: St
       <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" maxLength={LIMIT.city} placeholder={EXAMPLE.city} disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
       <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region (optional)</label><input id="business-region" autoComplete="address-level1" maxLength={LIMIT.region} placeholder={EXAMPLE.region} disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
       {placingStore ? (
-        StoreLocationPicker ? <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
+        StoreLocationPicker ? <StoreLocationPicker words={biz.vendorType === 'SERVICE' ? 'service' : 'store'} current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
         : pickerFailed ? (
           <div role="alert" className={styles.stackTight}>
             <p className={styles.bodyCopy}>The map didn’t load. Check your connection; what you typed is kept.</p>

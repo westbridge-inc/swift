@@ -99,6 +99,34 @@ describe('[FLOW-QA F5b] the public header knows a signed-in partner', () => {
     expect(screen.queryByRole('link', { name: 'Sign in' })).toBeNull();
   });
 
+  it('[FLOW-QA2 NEW-7] Back to a page the browser kept whole after signing out: the header asks again and drops "Dashboard"', async () => {
+    localStorage.setItem('swift_signed_in_before', '1');
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', roles: ['VENDOR_OWNER'] } });
+    render(<SiteNav />);
+    expect(await screen.findByRole('link', { name: 'Dashboard' })).toBeTruthy();
+    // signed out elsewhere, then Back restores this page from the back-forward cache
+    mocked.sessionProbe.mockResolvedValue({ ok: false });
+    const restored = new Event('pageshow') as PageTransitionEvent;
+    Object.defineProperty(restored, 'persisted', { value: true });
+    await act(async () => { window.dispatchEvent(restored); await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.queryByRole('link', { name: 'Dashboard' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Join Swift' })).toBeTruthy();
+    localStorage.clear();
+  });
+
+  it('[FLOW-QA2 NEW-7] a normal page show (not from the cache) asks nothing more', async () => {
+    localStorage.setItem('swift_signed_in_before', '1');
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', roles: ['VENDOR_OWNER'] } });
+    render(<SiteNav />);
+    await screen.findByRole('link', { name: 'Dashboard' });
+    const calls = mocked.sessionProbe.mock.calls.length;
+    const shown = new Event('pageshow') as PageTransitionEvent;
+    Object.defineProperty(shown, 'persisted', { value: false });
+    await act(async () => { window.dispatchEvent(shown); await new Promise((r) => setTimeout(r, 20)); });
+    expect(mocked.sessionProbe.mock.calls.length).toBe(calls);
+    localStorage.clear();
+  });
+
   it('a guest browser asks nothing and keeps Sign in / Join Swift', async () => {
     render(<SiteNav />);
     expect(screen.getByRole('link', { name: 'Join Swift' })).toBeTruthy();

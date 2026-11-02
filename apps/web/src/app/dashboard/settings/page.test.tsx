@@ -188,6 +188,17 @@ describe('dashboard settings: the subscription card (U18 / U20 / U46)', () => {
     expect(card.textContent).toContain(`Free trial until 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
   });
 
+  it('[FLOW-QA2 NEW-8] no subscription yet: it starts when Swift approves the store, as the Weekly fee tab says', async () => {
+    // The server makes a store's weekly fee only when it makes the store live: on Swift's approval (verification
+    // projectVendorActivation -> startTrialForVendor), not when the documents alone are verified.
+    stubSettings({ subscription: () => Promise.resolve(null) });
+    setSelectedStore('store-1');
+    renderWithQuery(<SettingsPage />);
+    const card = await subscriptionCard();
+    expect(card.textContent).toContain('No subscription on this store yet — it starts when Swift approves your store.');
+    expect(card.textContent).not.toMatch(/documents are verified/);
+  });
+
   it('a failed read is not "no subscription": it says it could not check, and retries', async () => {
     let calls = 0;
     stubSettings({ subscription: () => (++calls === 1 ? Promise.reject(new Error('Server error')) : Promise.resolve(subscriptionRow())) });

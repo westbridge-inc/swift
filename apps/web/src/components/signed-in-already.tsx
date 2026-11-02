@@ -1,11 +1,12 @@
 'use client';
 
+import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { hasProviderProfile, restoreSession, sessionProbe } from '@/lib/auth';
 import { SignOutButton } from '@/components/sign-out-button';
 import { GUYANA_DIAL_CODE, guyanaLocal } from '@/lib/guyana-phone';
 import { forgetSignedIn, markSignedIn, signedInBefore } from '@/lib/session-hint';
-import { roleHome } from '@/lib/role-home';
+import { roleHome, type RoleHome } from '@/lib/role-home';
 
 /**
  * [SIGNUP-PHONE · owner 1 Nov 2026] Sign-in and sign-up recognise a session that is already there (GET /auth/me)
@@ -14,7 +15,7 @@ import { roleHome } from '@/lib/role-home';
  * or back to the step they stopped at, or signs out first to use a different number.
  * Loaded on demand (signed-in-loader.ts), so neither page carries it up front.
  */
-export type SignedIn = { phone: string; home: string; label: string };
+export type SignedIn = { phone: string; home: string; label: string; /** where the account belongs by its roles */ kind?: RoleHome['kind'] };
 
 /** Where sign-in sends this account (lib/auth verifyPartnerLogin, signup doVerify): roles first, then a pro profile. */
 export async function homeFor(user: Record<string, unknown>): Promise<{ home: string; label: string }> {
@@ -49,24 +50,30 @@ export async function probeSignedIn(): Promise<SignedIn | null> {
   if (!session.ok || !session.user) return null;
   markSignedIn();
   const phone = typeof session.user['phone'] === 'string' ? session.user['phone'] : '';
-  return { phone, ...(await homeFor(session.user)) };
+  return { phone, kind: roleHome(session.user).kind, ...(await homeFor(session.user)) };
 }
 
-export function SignedInAlready({ who, here, back, onSignedOut, titleId, className }: {
+export function SignedInAlready({ who, here, back, onSignedOut, onGo, titleId, className, children }: {
   who: SignedIn;
   here: string;
   /** Where the page was asked to return to (sign-in's `next`), with its own words; else the account's home. */
   back?: { href: string; label: string };
   onSignedOut: () => void;
+  /** [FLOW-QA2 NEW-1] The page itself opens this address (true): a link to the page the person is already on changes
+   *  only the address, so the page that is already open takes the person there instead. */
+  onGo?: (_href: string) => boolean;
   titleId: string;
   className?: string;
+  /** More ways on, under the main one (sign-up's "add a business or a vehicle to this account"). */
+  children?: ReactNode;
 }) {
   const shown = who.phone.startsWith(GUYANA_DIAL_CODE) ? `${GUYANA_DIAL_CODE} ${guyanaLocal(who.phone)}` : who.phone;
   return (
     <div className={className ?? 'flex flex-col gap-3'} data-signed-in-already>
       <h1 id={titleId} className="sw-title">You’re signed in{shown ? ` as ${shown}` : ''}</h1>
       <p className="sw-caption">No new code needed: this browser is already signed in.</p>
-      <Link href={back?.href ?? who.home} className="sw-btn sw-btn-block">{back?.label ?? who.label}</Link>
+      <Link href={back?.href ?? who.home} className="sw-btn sw-btn-block" onClick={(event) => { if (onGo?.(back?.href ?? who.home)) event.preventDefault(); }}>{back?.label ?? who.label}</Link>
+      {children}
       <SignOutButton
         className="sw-link cursor-pointer self-center border-0 bg-transparent p-0"
         title="Use a different number?"
