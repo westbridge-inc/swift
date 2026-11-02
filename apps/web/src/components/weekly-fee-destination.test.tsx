@@ -4,6 +4,7 @@ const mock = vi.hoisted(() => ({ probe: vi.fn(), restore: vi.fn(), pro: vi.fn(),
 vi.mock('next/navigation', () => ({ useRouter: () => mock.router }));
 vi.mock('@/lib/auth', () => ({ sessionProbe: mock.probe, restoreSession: mock.restore, hasProviderProfile: mock.pro, apiFetch: mock.api }));
 vi.mock('@/lib/provider-fee-api', () => ({ getProviderFee: mock.fee }));
+vi.mock('@/lib/partner-profiles', () => ({ isProvider: mock.pro }));
 import { WeeklyFeeDestination } from './weekly-fee-destination';
 beforeEach(() => { vi.resetAllMocks(); mock.restore.mockResolvedValue({ ok: false }); mock.pro.mockResolvedValue(false); mock.fee.mockResolvedValue(null); mock.api.mockResolvedValue({ data: null }); });
 describe('neutral weekly-fee destination', () => {

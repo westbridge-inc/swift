@@ -87,6 +87,30 @@ describe('[F29] the profile reads ask only for profiles the person holds', () =>
   });
 });
 
+describe('[REVIEW-G4 #2315 S4-1] an answer about the session itself reaches the page, and the route is not asked again', () => {
+  it.each([409, 410, 429])('/auth/me %i: the read fails with it, and no profile route is asked', async (status) => {
+    const asked: string[] = [];
+    mockApi(({ url }: ApiRequest) => {
+      asked.push(url.pathname);
+      if (url.pathname === ME) return { status, body: { success: false, error: { code: 'X', message: 'session answer' } } };
+      return NO;
+    });
+    await expect(getDriverProfile()).rejects.toMatchObject({ status });
+    expect(asked.filter((p) => p !== ME)).toEqual([]);
+  });
+
+  it('/auth/me 401 and the refresh refused: signed out once, one refresh, and no profile route asked', async () => {
+    const asked: string[] = [];
+    mockApi(({ url }: ApiRequest) => {
+      asked.push(url.pathname);
+      return { status: 401, body: { success: false, error: { code: 'UNAUTHORIZED', message: 'no session' } } };
+    });
+    await expect(getDriverProfile()).rejects.toMatchObject({ status: 401 });
+    expect(asked.filter((p) => p === '/api/v1/auth/refresh')).toHaveLength(1);
+    expect(asked).not.toContain('/api/v1/driver/profile');
+  });
+});
+
 describe('[F29] the provider fee is asked only of a pro', () => {
   it('not a pro: no /provider/subscription request, and no fee', async () => {
     const asked = server({ rider: true, driver: false, provider: false });

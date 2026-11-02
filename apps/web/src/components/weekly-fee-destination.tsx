@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { apiFetch, hasProviderProfile, restoreSession, sessionProbe } from '@/lib/auth';
+import { apiFetch, restoreSession, sessionProbe } from '@/lib/auth';
+import { isProvider } from '@/lib/partner-profiles';
 import { getProviderFee } from '@/lib/provider-fee-api';
 
 /** [REVIEW-M #2238 S4-2] A checkout started in the last two hours is the one MMG is returning from. */
@@ -47,7 +48,7 @@ export function WeeklyFeeDestination() {
       // [BILL-PRO PR6] A pro's MMG return lands on their own weekly fee (the portal's provider block).
       // [REVIEW-M #2238 S4-2] A store owner who is also a pro returns to the fee whose checkout they just left: their
       // pro fee when they started its checkout in the last two hours, otherwise they choose (the pro fee is a choice).
-      const pro = await hasProviderProfile();
+      const pro = await isProvider();
       if (cancelled) return;
       // [REVIEW-M #2240 S4] The NEWER checkout decides; with an earner profile too (whose checkout is not read here)
       // only the pro's newer checkout routes, otherwise they choose.

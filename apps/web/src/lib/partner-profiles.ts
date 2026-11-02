@@ -1,7 +1,7 @@
 'use client';
 
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
-import { apiFetch, BROWSER_CLIENT, hasProviderProfile } from './auth';
+import { ApiRequestError, apiFetch, BROWSER_CLIENT, hasProviderProfile } from './auth';
 
 // [PORTAL-404 · FLOW-QA F29] The earner office asked GET /rider/profile, /driver/profile and /provider/subscription
 // for every account, and the server answers 404 for a profile the person does not hold. The browser logs each 404
@@ -36,12 +36,14 @@ export async function providerFromMe(): Promise<boolean | null> {
 
 /** Is this person a pro? /auth/me's answer (a 200, never a 404 the browser logs for someone who is not a pro); only
  *  when it could not say is the provider route asked (lib/auth hasProviderProfile, as before). Used by the pages that
- *  load it on demand (the header's account link, the signed-in card, the store's weekly-fee link). lib/auth itself is
+ *  load it on demand (the header's account link, the signed-in card, the store's weekly-fee link, the page MMG returns
+ *  to). lib/auth itself is
  *  left as it was: every page carries it, and the home page sits at its size ceiling. */
 export async function isProvider(): Promise<boolean> {
   return (await providerFromMe()) ?? hasProviderProfile();
 }
 
+const SESSION_ANSWERS = new Set([401, 409, 410, 429]);
 let inFlight: Promise<PartnerProfiles | null> | null = null;
 
 /** The person's partner profiles from /auth/me, or null when it did not say. Reads at the same moment share one
@@ -50,7 +52,13 @@ let inFlight: Promise<PartnerProfiles | null> | null = null;
 export function partnerProfiles(): Promise<PartnerProfiles | null> {
   inFlight ??= apiFetch('/api/v1/auth/me')
     .then((body) => readPartnerProfiles((body as { data?: { profiles?: unknown } } | null)?.data?.profiles))
-    .catch(() => null)
+    // [REVIEW-G4 #2315 S4-1] An answer about the session itself (signed out, another account, a closed demo, too many
+    // checks) is the page's answer too: passed on, so the profile route is not asked again (a second refresh and a
+    // second redirect). Only "could not say" (a network failure, a server error, an older API) asks the route.
+    .catch((error: unknown) => {
+      if (error instanceof ApiRequestError && SESSION_ANSWERS.has(error.status)) throw error;
+      return null;
+    })
     .finally(() => { inFlight = null; });
   return inFlight;
 }
