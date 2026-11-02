@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
-import { sendOtp, sessionProbe } from '@/lib/auth';
+import { sessionProbe } from '@/lib/auth';
+import { sendOtp } from '@/lib/otp-send';
+import { markSignedIn } from '@/lib/session-hint';
 import { LEGAL_URL } from '@/lib/legal-url';
 import { verifyOtp, registerAccount, becomePartner, signOwnName } from '@/lib/customer-account';
 import { ownNameStoreType } from '@/lib/own-name-store-type';
@@ -34,7 +36,7 @@ import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-
 import styles from '../auth-flow.module.css';
 import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 import { AGE_TICK_LABEL, AGE_TICK_REQUIRED } from '@/lib/age-tick';
-import { CODE_NOT_SEEN_HINT, PhoneField } from '@/components/auth-ui';
+import { CODE_NOT_SEEN_HINT, PhoneField } from '@/components/phone-field';
 import { loadSignedIn } from '@/components/signed-in-loader';
 import type { SignedIn, SignedInAlready as SignedInAlreadyComponent } from '@/components/signed-in-already';
 import { sendCooldownOf, sendLabel, useSendCooldown } from '@/lib/otp-cooldown';
@@ -95,6 +97,8 @@ export default function SignupPage() {
   useEffect(() => { safeReturnPath(); }, []);
   const [step, setStep] = useState<Step>('role');
   const [role, setRole] = useState<Role>('CUSTOMER');
+  // [REVIEW-G G1] A resumed mover account says first whether it delivers or drives a taxi.
+  const [pickMover, setPickMover] = useState(false);
   // [SIGNUP-PHONE] The local number only: the +592 chip sits beside it, as on sign-in and in the app.
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
@@ -104,7 +108,7 @@ export default function SignupPage() {
   // [SIGNUP-PHONE] A browser already signed in is not asked for a code again (components/signed-in-already).
   const [signedIn, setSignedIn] = useState<{ who: SignedIn; Card: typeof SignedInAlreadyComponent } | null>(null);
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('resume') === 'business') return;
+    if (new URLSearchParams(window.location.search).get('resume')) return;
     let alive = true;
     loadSignedIn().then((m) => m.probeSignedIn().then((who) => { if (alive && who) setSignedIn({ who, Card: m.SignedInAlready }); })).catch(() => {});
     return () => { alive = false; };
@@ -186,13 +190,17 @@ export default function SignupPage() {
   }
   // A signed-in business account whose store was never created comes back
   // here from the console (/signup?resume=business) straight to that step.
+  // [REVIEW-G G1 · owner rule 3] A rider or driver account that stopped after its name comes back
+  // (/signup?resume=mover, from the signed-in card) straight to the vehicle step.
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('resume') !== 'business') return;
+    const resume = new URLSearchParams(window.location.search).get('resume');
+    if (resume !== 'business' && resume !== 'mover') return;
     let cancelled = false;
     void sessionProbe().then((session) => {
       if (cancelled || !session.ok) return;
       const accountPhone = session.user?.['phone'];
       if (typeof accountPhone === 'string') setPhone(guyanaLocal(accountPhone));
+      if (resume === 'mover') { setPickMover(true); setStep('vehicle'); return; }
       setRole('VENDOR');
       setStep('business');
     });
@@ -228,6 +236,7 @@ export default function SignupPage() {
   const doVerify = () => wrap(async () => {
     const r = await verifyOtp(guyanaPhone(phone), code.trim());
     if (r.signedIn) {
+      markSignedIn();
       // Existing account: route by its ACTUAL roles, not the tile they tapped.
       const roles: string[] = r.user?.roles ?? [];
       const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
@@ -246,6 +255,7 @@ export default function SignupPage() {
     if (!adult) throw new Error(AGE_TICK_REQUIRED);
     try {
       await registerAccount({ phone: guyanaPhone(phone), firstName: first.trim(), lastName: last.trim(), role: accountRole(role), acceptTerms, ageConfirmed: adult });
+      markSignedIn();
     } catch (cause) {
       // Registration consumes its HttpOnly continuation before account reads
       // and writes. A transport or server error is therefore ambiguous: never
@@ -318,7 +328,7 @@ export default function SignupPage() {
   // account resuming its store (?resume=business) keeps its own path.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('resume') === 'business') return;
+    if (params.get('resume') === 'business' || params.get('resume') === 'mover') return;
     const door = partnerDoorRole(params.get('as'));
     if (door) chooseRole(door);
   }, []);
@@ -458,6 +468,17 @@ export default function SignupPage() {
             <PartnerAgreement kind="Vendor" doc="vendor-agreement" agree={agree} onChange={setAgree} />
             <button type="button" onClick={() => void doBusiness()} disabled={busy || !!fee.ask || !agree || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
             <p className={styles.smallCopy}>You’ll finish verification (documents) in your dashboard before going live.</p>
+          </div>
+        )}
+        {step === 'vehicle' && !mover && pickMover && (
+          <div className={styles.stackTight}>
+            <h1 id="signup-title" className={styles.heading}>Finish signing up</h1>
+            <p className={styles.bodyCopy}>Your account is made. Tell us how you work with Swift to add your vehicle.</p>
+            {(['RIDER', 'DRIVER'] as const).map((r) => (
+              <button key={r} type="button" className={styles.roleButton} onClick={() => { setRole(r); setVeh((current) => ({ ...current, vehicleType: MOVER_VEHICLES[r][0]!.value })); setPickMover(false); }}>
+                <span className={styles.roleCopy}><span className={styles.roleTitle}>{ROLES.find((x) => x.role === r)?.title}</span><span className={styles.roleDescription}>{ROLES.find((x) => x.role === r)?.desc}</span></span>
+              </button>
+            ))}
           </div>
         )}
         {step === 'vehicle' && mover && (

@@ -11,6 +11,7 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams('next=%2Fcheckout'),
 }));
 vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: mocked.sendOtp }));
 vi.mock('@/lib/customer-login', () => ({ verifyCustomerLogin: mocked.verifyCustomerLogin }));
 
 it('signs in as a customer and returns to the one checkout', async () => {

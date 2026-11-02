@@ -4,7 +4,6 @@ import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 import { DEMO_ENDED_LOGIN, DEMO_ENDED_NOTICE, isClosedDemoAnswer, noteDemoEnded } from '@/lib/demo-ended';
 import { CALL_BRIDGE_HEADER, CALL_BRIDGE_VERSION } from '@/lib/call-bridge-header';
-import { otpSendRefusal } from '@/lib/otp-send-refusal';
 
 // ── The session ──────────────────────────────────────────────────────────────
 // [W-01] THIS APP HOLDS NO CREDENTIAL. It used to keep both tokens in
@@ -410,29 +409,6 @@ export async function apiFetch(
   return json;
 }
 
-export async function sendOtp(phone: string) {
-  let res: Response;
-  try {
-    res = await fetch(`${API_URL}/api/v1/auth/send-otp`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...clientHeaders },
-      body: JSON.stringify({ phone }),
-    });
-  } catch {
-    throw new Error(otpSendRefusal(0, null));
-  }
-  const json = await res.json().catch(() => ({}));
-  // [SIGNUP-PHONE] Every refusal in words: the number again (400/502), how long to wait (429).
-  if (!res.ok || !json.success) {
-    // The status and the server's wait ride along, so a page can count the send button down instead of showing an error.
-    const details = json?.error?.details ?? {};
-    const header = Number(res.headers.get('Retry-After'));
-    const retryAfterSeconds = typeof details.retryAfterSeconds === 'number' ? details.retryAfterSeconds : header > 0 ? header : undefined;
-    throw Object.assign(new Error(otpSendRefusal(res.status, json, res.headers.get('Retry-After'))), {
-      status: res.status, retryAfterSeconds, codeAlreadySent: details.codeAlreadySent === true,
-    });
-  }
-}
 
 /** [BILL-PRO PR6] Does the signed-in person have a provider profile (a pro)? Read with the session cookie the
  *  sign-in just set; any failure is "no". */

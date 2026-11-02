@@ -2,12 +2,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
 import LoginPage from '../login/page';
 import { CODE_NOT_SEEN_HINT, fullPhone } from '@/components/auth-ui';
 import { guyanaLocal, guyanaPhone, guyanaPhoneProblem, guyanaPhoneReady } from '@/lib/guyana-phone';
-import { NUMBER_LOOKS_WRONG, otpSendRefusal } from '@/lib/otp-send-refusal';
+import { NUMBER_LOOKS_WRONG, otpSendRefusal, SMS_NOT_SENT, TRY_LATER } from '@/lib/otp-send-refusal';
 
 // [SIGNUP-PHONE · owner 1 Nov 2026] The sign-up phone box pre-filled "+592" as free text: people deleted it, doubled
 // it or added a trunk 0, the server refused the first try (400) or the SMS provider refused the number, and the code
@@ -15,6 +15,7 @@ import { NUMBER_LOOKS_WRONG, otpSendRefusal } from '@/lib/otp-send-refusal';
 // the box, every normal way of typing it sent as +592 and seven digits on the FIRST try, and every refusal in words.
 
 const mocked = vi.hoisted(() => ({
+  query: '',
   sendOtp: vi.fn(),
   verifyOtp: vi.fn(),
   registerAccount: vi.fn(),
@@ -24,17 +25,29 @@ const mocked = vi.hoisted(() => ({
   restoreSession: vi.fn(),
   logout: vi.fn(),
   docs: vi.fn(),
+  rider: vi.fn(),
+  driver: vi.fn(),
+  pro: vi.fn(),
   replace: vi.fn(),
   push: vi.fn(),
 }));
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ replace: mocked.replace, push: mocked.push }),
-  useSearchParams: () => new URLSearchParams(''),
+  useSearchParams: () => new URLSearchParams(mocked.query),
 }));
-vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin, sessionProbe: mocked.sessionProbe, restoreSession: mocked.restoreSession, logout: mocked.logout }));
+vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin, sessionProbe: mocked.sessionProbe, restoreSession: mocked.restoreSession, logout: mocked.logout, hasProviderProfile: mocked.pro }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: mocked.sendOtp }));
 beforeEach(() => {
   mocked.sessionProbe.mockReset();
   mocked.sessionProbe.mockResolvedValue({ ok: false });
+  localStorage.clear();
+  mocked.query = '';
+  mocked.rider.mockReset();
+  mocked.rider.mockResolvedValue({ id: 'r1' });
+  mocked.driver.mockReset();
+  mocked.driver.mockResolvedValue(null);
+  mocked.pro.mockReset();
+  mocked.pro.mockResolvedValue(false);
   mocked.docs.mockReset();
   mocked.docs.mockResolvedValue({ checklist: [], documents: [], missing: [], roleVerified: true });
   mocked.restoreSession.mockReset();
@@ -45,7 +58,7 @@ beforeEach(() => {
 });
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: mocked.verifyOtp, registerAccount: mocked.registerAccount, becomePartner: mocked.becomePartner }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
-vi.mock('@/lib/mover-api', () => ({ getVerificationStatus: mocked.docs }));
+vi.mock('@/lib/mover-api', () => ({ getVerificationStatus: mocked.docs, getRiderProfile: mocked.rider, getDriverProfile: mocked.driver }));
 
 const FORMS = ['6001234', '600 1234', '600-1234', '0600 1234', '0600-1234', '+592 600 1234', '+5926001234', '592 600 1234', '5926001234', '(592) 600-1234', '00592 600 1234', '+592 0600 1234'];
 
@@ -73,11 +86,17 @@ describe('every normal way of typing a Guyana number is +592 and seven digits', 
 });
 
 describe('a refused send is said in words, never silence or a generic failure', () => {
-  it('a refused number (400) and a number the SMS provider refused (502) ask for the number again', () => {
+  it('a refused number (400) asks for the number again', () => {
     expect(otpSendRefusal(400, { error: { code: 'VALIDATION_ERROR', message: 'Invalid request data' } })).toBe(NUMBER_LOOKS_WRONG);
     expect(otpSendRefusal(400, { error: { code: 'COUNTRY_NOT_ACTIVE', message: 'Swift is currently available in Guyana only' } })).toBe(NUMBER_LOOKS_WRONG);
-    expect(otpSendRefusal(502, { error: { code: 'SMS_SEND_FAILED', message: "We couldn't send your code right now." } })).toBe(NUMBER_LOOKS_WRONG);
-    expect(NUMBER_LOOKS_WRONG).toBe("That number doesn't look right: enter the 7-digit number after +592.");
+    expect(NUMBER_LOOKS_WRONG).toBe('That number doesn’t look right: enter the 7-digit number after +592.');
+  });
+
+  it('[REVIEW-F S2] a failed SMS (502, any provider failure) never blames the number: the server’s words, as in the app', () => {
+    const server = "We couldn't send your code right now. Please try again in a moment.";
+    expect(otpSendRefusal(502, { error: { code: 'SMS_SEND_FAILED', message: server } })).toBe(server);
+    expect(otpSendRefusal(502, {})).toBe(SMS_NOT_SENT);
+    expect(otpSendRefusal(502, {})).not.toBe(NUMBER_LOOKS_WRONG);
   });
 
   it('a throttle says how long to wait', () => {
@@ -85,23 +104,12 @@ describe('a refused send is said in words, never silence or a generic failure', 
     expect(otpSendRefusal(429, { error: { message: 'Too many codes requested for this number. Try again in 42 minutes.' } })).toBe('Too many tries; wait 42 minutes.');
     expect(otpSendRefusal(429, {}, '60')).toBe('Too many tries; wait 1 minute.');
     expect(otpSendRefusal(429, { error: { details: { retryAfterSeconds: 40, codeAlreadySent: true } } })).toBe('We already sent a code to this number. Wait 40 seconds to ask for a new one.');
-    expect(otpSendRefusal(429, null)).toMatch(/^Too many tries; wait a few minutes/);
+    // [REVIEW-F S3] the daily cap names no time and can last hours: "later", never "a few minutes"
+    expect(otpSendRefusal(429, { error: { message: 'Too many verification requests right now. Please try again later.' } })).toBe(TRY_LATER);
+    expect(TRY_LATER).not.toMatch(/minute/);
   });
 });
 
-describe('the site’s sendOtp shows the refusal words', () => {
-  afterEach(() => { vi.unstubAllGlobals(); });
-  it('a 400 from send-otp reads as the number looking wrong', async () => {
-    const { sendOtp } = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid request data' } }), { status: 400 })));
-    await expect(sendOtp('+5926001234')).rejects.toThrow(NUMBER_LOOKS_WRONG);
-  });
-  it('no connection is said too', async () => {
-    const { sendOtp } = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
-    await expect(sendOtp('+5926001234')).rejects.toThrow('Could not send the code. Check your connection and try again.');
-  });
-});
 
 describe('the sign-up phone step', () => {
   beforeEach(() => {
@@ -152,7 +160,7 @@ describe('the sign-up phone step', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
     await screen.findByLabelText('Verification code');
     expect(screen.getByText(CODE_NOT_SEEN_HINT)).toBeTruthy();
-    expect(CODE_NOT_SEEN_HINT).toBe("Can't see the code? It comes from 'Swift'. Check your Messages filters (Unknown Senders / Transactions) or spam folder.");
+    expect(CODE_NOT_SEEN_HINT).toBe('Can’t see the code? It comes from ‘Swift’. Check your Messages filters (Unknown Senders / Transactions) or spam folder.');
   });
 });
 
@@ -163,7 +171,8 @@ describe('the sign-in code step says it too', () => {
     render(<LoginPage />);
     await user.type(screen.getByLabelText('Phone number'), '600 1234');
     await user.click(screen.getByRole('button', { name: 'Continue' }));
-    await screen.findByLabelText('Verification code');
+    // the first sign-in render loads the basket module before Continue works: give a cold run time
+    await screen.findByLabelText('Verification code', {}, { timeout: 5000 });
     expect(screen.getByText(CODE_NOT_SEEN_HINT)).toBeTruthy();
   });
 });
@@ -177,6 +186,7 @@ describe('sign-in normalises a Guyana number the same way, so an existing number
 describe('a browser already signed in is not asked for a code again', () => {
   it.each([
     [['VENDOR'], '/dashboard', 'Go to your dashboard'],
+    [['VENDOR_OWNER'], '/dashboard', 'Go to your dashboard'],
     [['MOVER'], '/portal', 'Go to your portal'],
     [['DRIVER'], '/portal', 'Go to your portal'],
     [['CUSTOMER'], '/', 'Go to Swift'],
@@ -215,9 +225,50 @@ describe('a browser already signed in is not asked for a code again', () => {
 
   it('back after the 15-minute access cookie ran out: the refresh cookie restores it, still no code', async () => {
     mocked.restoreSession.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['VENDOR'] } });
+    localStorage.setItem('swift_signed_in_before', '1');
     render(<SignupPage />);
     expect(await screen.findByRole('link', { name: 'Go to your dashboard' })).toBeTruthy();
     expect(mocked.restoreSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('[REVIEW-G G2] a guest (this browser never signed in) spends no refresh: the form, one cheap /me read', async () => {
+    render(<LoginPage />);
+    await waitFor(() => expect(mocked.sessionProbe).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mocked.restoreSession).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Phone number')).toBeTruthy();
+  });
+
+  it('a refresh the server refuses forgets that this browser signed in', async () => {
+    localStorage.setItem('swift_signed_in_before', '1');
+    render(<LoginPage />);
+    await waitFor(() => expect(mocked.restoreSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(localStorage.getItem('swift_signed_in_before')).toBeNull());
+  });
+
+  it('[REVIEW-G G1] a rider or driver who stopped after the name step resumes at the vehicle step', async () => {
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['MOVER', 'CUSTOMER'] } });
+    mocked.rider.mockResolvedValue(null);
+    render(<LoginPage />);
+    expect((await screen.findByRole('link', { name: 'Finish signing up' })).getAttribute('href')).toBe('/signup?resume=mover');
+  });
+
+  it('/signup?resume=mover opens the vehicle step for the signed-in account: deliver or drive, then the vehicle', async () => {
+    window.history.replaceState(null, '', '/signup?resume=mover');
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['MOVER', 'CUSTOMER'] } });
+    render(<SignupPage />);
+    expect(await screen.findByRole('heading', { name: 'Finish signing up' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Drive a taxi with Swift/ }));
+    expect(await screen.findByRole('heading', { name: 'Your taxi' })).toBeTruthy();
+    expect(screen.queryByText(/You’re signed in/)).toBeNull();
+    window.history.replaceState(null, '', '/signup');
+  });
+
+  it('[REVIEW-G G3] a self-employed pro goes where sign-in sends them: their weekly fee', async () => {
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['CUSTOMER'] } });
+    mocked.pro.mockResolvedValue(true);
+    render(<SignupPage />);
+    expect((await screen.findByRole('link', { name: 'Go to your weekly fee' })).getAttribute('href')).toBe('/portal/weekly-fee');
   });
 
   it('a server that could not say spends no refresh and shows the form', async () => {
@@ -265,6 +316,17 @@ describe('a wait is a countdown on the button, not an error box', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it('[REVIEW-G M17] only a 429 counts down: another refusal carrying a wait is still said in words', async () => {
+    mocked.sendOtp.mockReset();
+    mocked.sendOtp.mockRejectedValue(Object.assign(new Error(SMS_NOT_SENT), { status: 502, retryAfterSeconds: 35 }));
+    const user = userEvent.setup();
+    render(<LoginPage />);
+    await user.type(screen.getByLabelText('Phone number'), '600 1234');
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect((await screen.findByRole('alert')).textContent).toContain(SMS_NOT_SENT);
+    expect(screen.queryByRole('button', { name: /Send a new code in/ })).toBeNull();
+  });
+
   it('a cap without a wait the server can count is said in words', async () => {
     mocked.sendOtp.mockReset();
     mocked.sendOtp.mockRejectedValue(Object.assign(new Error('Too many tries; wait 42 minutes.'), { status: 429 }));
@@ -276,14 +338,6 @@ describe('a wait is a countdown on the button, not an error box', () => {
   });
 });
 
-describe('the site’s sendOtp passes the server’s wait along', () => {
-  afterEach(() => { vi.unstubAllGlobals(); });
-  it('429 with retryAfterSeconds and codeAlreadySent', async () => {
-    const { sendOtp } = await vi.importActual<typeof import('@/lib/auth')>('@/lib/auth');
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: false, error: { code: 'RATE_LIMITED', message: 'x', details: { retryAfterSeconds: 35, codeAlreadySent: true } } }), { status: 429 })));
-    await expect(sendOtp('+5926001234')).rejects.toMatchObject({ status: 429, retryAfterSeconds: 35, codeAlreadySent: true });
-  });
-});
 
 describe('[PERF] the "already signed in" card loads on demand on both pages', () => {
   it.each(['signup/page.tsx', 'login/page.tsx'])('%s imports it only as a type, through the loader', (file) => {
@@ -291,5 +345,23 @@ describe('[PERF] the "already signed in" card loads on demand on both pages', ()
     const imports = src.split('\n').filter((line) => /^import\s/.test(line));
     expect(imports.filter((line) => /signed-in-already'/.test(line) && !/^import type /.test(line))).toEqual([]);
     expect(imports).toContain("import { loadSignedIn } from '@/components/signed-in-loader';");
+  });
+});
+
+describe('[REVIEW-F F3] on sign-in, the card’s button says where its link goes', () => {
+  it('a customer return address reads "Continue where you were", not the account’s home', async () => {
+    mocked.query = 'next=/orders';
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['VENDOR'] } });
+    render(<LoginPage />);
+    const link = await screen.findByRole('link', { name: 'Continue where you were' });
+    expect(link.getAttribute('href')).toBe('/orders');
+    expect(screen.queryByRole('link', { name: 'Go to your dashboard' })).toBeNull();
+  });
+
+  it('the weekly-fee return reads "Go to your weekly fee"', async () => {
+    mocked.query = 'next=/weekly-fee';
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['VENDOR'] } });
+    render(<LoginPage />);
+    expect((await screen.findByRole('link', { name: 'Go to your weekly fee' })).getAttribute('href')).toBe('/weekly-fee');
   });
 });

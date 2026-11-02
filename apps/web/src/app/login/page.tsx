@@ -3,7 +3,9 @@
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
+import { verifyPartnerLogin } from '@/lib/auth';
+import { sendOtp } from '@/lib/otp-send';
+import { markSignedIn } from '@/lib/session-hint';
 import { verifyCustomerLogin } from '@/lib/customer-login';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
@@ -109,10 +111,12 @@ function LoginInner() {
     try {
       if (isCustomer) {
         await verifyCustomerLogin(fullPhone(phone), code.trim());
+        markSignedIn();
         continueJourney();
         router.replace(next || '/');
       } else {
         const { home } = await verifyPartnerLogin(fullPhone(phone), code.trim());
+        markSignedIn();
         router.replace(next === '/weekly-fee' ? next : home);
       }
     } catch (e) { setError((e as Error).message); }
@@ -125,7 +129,7 @@ function LoginInner() {
       <section aria-labelledby="login-title" className="flex flex-col gap-6">
         {demoEnded ? <p className="sw-note sw-note-info" role="status" data-testid="demo-ended">{DEMO_ENDED_NOTICE}</p> : null}
         {signedIn && step === 'phone' ? (
-          <signedIn.Card who={signedIn.who} here="/login" titleId="login-title" home={isCustomer && next ? next : undefined} onSignedOut={() => setSignedIn(null)} />
+          <signedIn.Card who={signedIn.who} here="/login" titleId="login-title" back={isCustomer && next ? { href: next, label: 'Continue where you were' } : next === '/weekly-fee' ? { href: next, label: 'Go to your weekly fee' } : undefined} onSignedOut={() => setSignedIn(null)} />
         ) : step === 'phone' ? (
           <>
             <AuthHeading id="login-title" eyebrow={isCustomer ? 'Sign in or create an account' : 'Swift for businesses and earners'} title="What’s your number?">
