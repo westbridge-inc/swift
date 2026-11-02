@@ -9,6 +9,7 @@ import {
 import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/legal-url';
 import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
+import { vehicleDocumentHint } from '@/lib/vehicle-document-hints';
 import { documentExpiryDay } from '@/lib/documentExpiry';
 import { lazyRetry } from '@/lib/chunk-retry';
 
@@ -117,6 +118,9 @@ export default function DocumentsPage() {
           const tone = doc ? statusTone(doc.status, doc.expiresAt, doc.replaced === true) : null;
           // An approved document stays locked until its renewal window; a copy waiting for review can be replaced.
           const locked = doc?.status === 'APPROVED' && !expiringSoonAt(doc.expiresAt);
+          // [WEB-ONBOARDING] what the reviewer checks, said before the upload: a taxi's documents, and every motor vehicle's
+          // insurance (hire or reward) and a motorbike's licence class
+          const hint = taxiDocumentHint(docType, d?.checklist ?? []) ?? vehicleDocumentHint(docType, d?.checklist ?? [], vehicleType);
           return (
             <div key={docType} className="sw-card p-5">
               <div className="flex flex-wrap items-center gap-3">
@@ -138,9 +142,7 @@ export default function DocumentsPage() {
                   </button>
                 )}
               </div>
-              {taxiDocumentHint(docType, d?.checklist ?? []) && (
-                <p className="mt-1 text-xs text-[var(--swift-muted)]">{taxiDocumentHint(docType, d?.checklist ?? [])}</p>
-              )}
+              {hint && <p className="mt-1 text-xs text-[var(--swift-muted)]">{hint}</p>}
               {doc?.reviewNote && doc.status === 'REJECTED' && (
                 <p className="mt-2 text-sm text-[var(--swift-red)]">Reviewer: {doc.reviewNote}</p>
               )}

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import LoginPage from '@/app/login/page';
 import SignupPage from '@/app/signup/page';
 import * as auth from './auth';
+import * as otpSend from '@/lib/otp-send';
 import * as customerLogin from './customer-login';
 import { queueStorefrontContinuation, readStorefrontContinuation, takeStorefrontContinuation } from './storefront-continuation';
 
@@ -18,7 +19,7 @@ beforeEach(() => {
   nav.query = '';
   nav.push.mockReset();
   nav.replace.mockReset();
-  vi.spyOn(auth, 'sendOtp').mockResolvedValue();
+  vi.spyOn(otpSend, 'sendOtp').mockResolvedValue();
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) }));
 });
 async function signIn() {
