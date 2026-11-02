@@ -1,6 +1,5 @@
 'use client';
 
-import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { hasProviderProfile, restoreSession, sessionProbe } from '@/lib/auth';
 import { SignOutButton } from '@/components/sign-out-button';
@@ -53,7 +52,7 @@ export async function probeSignedIn(): Promise<SignedIn | null> {
   return { phone, kind: roleHome(session.user).kind, ...(await homeFor(session.user)) };
 }
 
-export function SignedInAlready({ who, here, back, onSignedOut, onGo, titleId, className, children }: {
+export function SignedInAlready({ who, here, back, onSignedOut, onGo, titleId, className, addTo, onAddTo }: {
   who: SignedIn;
   here: string;
   /** Where the page was asked to return to (sign-in's `next`), with its own words; else the account's home. */
@@ -64,8 +63,9 @@ export function SignedInAlready({ who, here, back, onSignedOut, onGo, titleId, c
   onGo?: (_href: string) => boolean;
   titleId: string;
   className?: string;
-  /** More ways on, under the main one (sign-up's "add a business or a vehicle to this account"). */
-  children?: ReactNode;
+  /** [FLOW-QA2 NEW-9] Sign-up, reached by another partner door: add that business or vehicle to this account. */
+  addTo?: 'business' | 'vehicle';
+  onAddTo?: () => void;
 }) {
   const shown = who.phone.startsWith(GUYANA_DIAL_CODE) ? `${GUYANA_DIAL_CODE} ${guyanaLocal(who.phone)}` : who.phone;
   return (
@@ -73,7 +73,7 @@ export function SignedInAlready({ who, here, back, onSignedOut, onGo, titleId, c
       <h1 id={titleId} className="sw-title">You’re signed in{shown ? ` as ${shown}` : ''}</h1>
       <p className="sw-caption">No new code needed: this browser is already signed in.</p>
       <Link href={back?.href ?? who.home} className="sw-btn sw-btn-block" onClick={(event) => { if (onGo?.(back?.href ?? who.home)) event.preventDefault(); }}>{back?.label ?? who.label}</Link>
-      {children}
+      {addTo ? <button type="button" className="sw-btn sw-btn-block sw-btn-outline" onClick={onAddTo}>{addTo === 'business' ? 'Add a business to this account' : 'Add a vehicle to this account'}</button> : null}
       <SignOutButton
         className="sw-link cursor-pointer self-center border-0 bg-transparent p-0"
         title="Use a different number?"
