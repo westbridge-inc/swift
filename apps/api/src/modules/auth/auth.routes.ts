@@ -18,7 +18,7 @@ import { ensureProFeeBorn } from '../services/pro-fee';
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
-import { AUTH_LIMITS, bodyPhone, perAddress, perCredential, sessionCookie } from './auth-rate-limits';
+import { AUTH_LIMITS, bodyPhone, loginCredential, perAddress, perCredential, sessionCookie } from './auth-rate-limits';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -118,6 +118,7 @@ export async function authRoutes(app: FastifyInstance) {
   // session cookie), and a higher one per address alone, so people sharing one carrier address do not lock each other out.
   const codeLimits = { config: perAddress(AUTH_LIMITS.codePerAddress), preValidation: perCredential(app, 'code', AUTH_LIMITS.codePerNumber, bodyPhone) };
   const accountLimits = { config: perAddress(AUTH_LIMITS.accountPerAddress), preValidation: perCredential(app, 'account', AUTH_LIMITS.accountPerNumber, bodyPhone) };
+  const passwordLimits = { config: perAddress(AUTH_LIMITS.passwordPerAddress), preValidation: perCredential(app, 'password', AUTH_LIMITS.passwordPerCredential, loginCredential, 'credential') };
   const refreshLimits = { config: perAddress(AUTH_LIMITS.refreshPerAddress), preValidation: perCredential(app, 'refresh', AUTH_LIMITS.refreshPerSession, sessionCookie) };
 
   app.post('/send-otp', codeLimits, async (request, reply) => {
@@ -454,7 +455,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   // ── Email + password (secondary to phone OTP) ──────────────────────────
 
-  app.post('/password/login', accountLimits, async (request, reply) => {
+  app.post('/password/login', passwordLimits, async (request, reply) => {
     const body = passwordLoginSchema.parse(request.body);
     const result = await authService.loginWithPassword(
       { phone: body.phone, email: body.email },

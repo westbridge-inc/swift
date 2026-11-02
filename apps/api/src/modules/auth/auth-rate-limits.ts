@@ -23,9 +23,13 @@ export const AUTH_LIMITS = {
   /** send-otp, verify-otp, password reset: per address + number, and per address alone. */
   codePerNumber: 5,
   codePerAddress: 30,
-  /** register, password login: per address + number, and per address alone. */
+  /** register: per address + number, and per address alone. */
   accountPerNumber: 10,
   accountPerAddress: 30,
+  /** password login: per phone-or-email from ANY address (a guessing target: credential stuffing spreads over many
+   *  addresses), and per address alone at its old 10 (the shared-carrier concern is code sign-in). */
+  passwordPerCredential: 10,
+  passwordPerAddress: 10,
   /** refresh: per address + session cookie, and per address alone. */
   refreshPerSession: 10,
   refreshPerAddress: 60,
@@ -40,6 +44,15 @@ export function bodyPhone(request: Pick<FastifyRequest, 'body'>): string | null 
   if (typeof phone !== 'string') return null;
   const normalized = normalizePhone(phone);
   return normalized.replace(/\D/g, '').length >= 7 ? normalized : null;
+}
+
+/** [security review · MEDIUM] Password login's credential: the phone, else the email (trimmed, lower-cased), so an
+ *  email login has a per-credential ceiling too; null when there is neither. */
+export function loginCredential(request: Pick<FastifyRequest, 'body'>): string | null {
+  const phone = bodyPhone(request);
+  if (phone) return `p:${phone}`;
+  const email = (request.body as { email?: unknown } | null | undefined)?.email;
+  return typeof email === 'string' && email.trim() ? `e:${email.trim().toLowerCase()}` : null;
 }
 
 /** The whole cookie header of a refresh (it carries the refresh cookie); null without one. */
@@ -65,11 +78,14 @@ export function perCredential(
   name: string,
   max: number,
   credential: (request: FastifyRequest) => string | null,
+  scope: 'address-and-credential' | 'credential' = 'address-and-credential',
 ) {
   const limiter = app.createRateLimit({
     max,
     timeWindow: WINDOW_MS,
-    keyGenerator: (request: FastifyRequest) => `auth-${name}:${request.ip}:${digest(credential(request) ?? '')}`,
+    keyGenerator: (request: FastifyRequest) => scope === 'credential'
+      ? `auth-${name}:${digest(credential(request) ?? '')}`
+      : `auth-${name}:${request.ip}:${digest(credential(request) ?? '')}`,
   });
   return async (request: FastifyRequest) => {
     if (!credential(request)) return;
