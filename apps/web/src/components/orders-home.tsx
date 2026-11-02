@@ -38,6 +38,9 @@ import { billingHeadline, billingPill } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '@/lib/mmg-dispute';
+// [REVIEW-LIGHT2 #2306 S3] the app's own reading of a held store (plain file), and its words
+import { storeHoldOf } from '../../../mobile/src/lib/vendorProfile';
+import { STORE_HOLD_WORDS } from '@/lib/store-hold-words';
 
 export type { HubStore };
 
@@ -425,6 +428,11 @@ export function StoreStatusCard({ store, manager, owner = false, readFailed = fa
   // A store that is not live yet (being reviewed) cannot open: as in the app,
   // the switch is locked and Pause is not offered.
   const inPreview = store.status != null && store.status !== 'ACTIVE';
+  // [REVIEW-LIGHT2 #2306 S3] A store held from orders is told its real hold, in the app's words, never "opens once
+  // verification is approved" (that is a store waiting for approval).
+  const hold = inPreview ? storeHoldOf(store) : null;
+  const holdTitle = hold === 'FEE_UNPAID' ? STORE_HOLD_WORDS.FEE_UNPAID.title : hold ? STORE_HOLD_WORDS[hold].title : null;
+  const holdBody = hold === 'FEE_UNPAID' ? (owner ? STORE_HOLD_WORDS.FEE_UNPAID.owner : STORE_HOLD_WORDS.FEE_UNPAID.staff) : hold ? STORE_HOLD_WORDS[hold].body : null;
   // [PERF row 562] Both controls move at the tap (dimmed until the server
   // answers) and go back, with the server's words, if it refuses. The server
   // FLIPS what it holds and answers with both flags: that answer is shown at
@@ -462,8 +470,8 @@ export function StoreStatusCard({ store, manager, owner = false, readFailed = fa
   const text = (
     <span className="min-w-0 flex-1">
       <span className="flex items-center gap-2 font-semibold"><span className={`h-2.5 w-2.5 rounded-full ${open && accepting ? 'bg-[var(--swift-success)]' : 'bg-[var(--swift-muted)]'}`} aria-hidden="true" />
-        {inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}</span>
-      <span className="sw-caption mt-1 block">{inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}</span>
+        {holdTitle ?? (inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused')}</span>
+      <span className="sw-caption mt-1 block">{holdBody ?? (inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders')}</span>
     </span>
   );
   return (
@@ -473,7 +481,8 @@ export function StoreStatusCard({ store, manager, owner = false, readFailed = fa
           className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">{text}<Switch on={!inPreview && open} /></button>
       ) : <div className="flex min-h-12 items-center">{text}</div>}
       {/* [OPEN-EARLY PR-2] A store not live yet: its owner sends its documents on this website (Documents). */}
-      {owner && inPreview && <Link href="/dashboard/documents" className="sw-btn sw-btn-md mt-4 w-full">Upload your documents</Link>}
+      {owner && inPreview && !hold && <Link href="/dashboard/documents" className="sw-btn sw-btn-md mt-4 w-full">Upload your documents</Link>}
+      {owner && hold === 'FEE_UNPAID' && <Link href="/dashboard/weekly-fee" className="sw-btn sw-btn-md mt-4 w-full">Weekly fee</Link>}
       {manager && !inPreview && (
         <button type="button" disabled={locked} onClick={() => ordersMut.mutate(!accepting)} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
           {accepting ? 'Pause new orders' : 'Resume orders'}

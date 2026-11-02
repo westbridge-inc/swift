@@ -6,7 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { devChannelLog, getChannels, resetDevChannelLog } from '../providers/notifications/channels';
 import { OTP_RESEND_WINDOW_S } from '../utils/otp';
 import { guyanaDayKey } from '../utils/guyana-day';
@@ -117,7 +117,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
 
   // Every SMS here must land in the dev adapter log, never a real provider.

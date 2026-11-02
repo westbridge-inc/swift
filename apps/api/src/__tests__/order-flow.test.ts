@@ -4,7 +4,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
@@ -34,7 +34,7 @@ async function buildTestApp() {
   await server.register(redisPlugin);
   await server.register(authPlugin);
   await server.register(socketPlugin);
-  await server.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(server);
   await server.register(customerRoutes, { prefix: '/api/v1/customer' });
   await server.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await server.register(riderRoutes, { prefix: '/api/v1/rider' });

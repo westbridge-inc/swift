@@ -249,6 +249,23 @@ describe('[REVIEW-GMF2 S3-3] once the account exists, Back leaves sign-up instea
     expect(screen.getByRole('heading', { name: 'Your business' })).toBeTruthy();
     back.mockRestore(); push.mockRestore();
   });
+
+  it('[REVIEW-GMF2 S3 · P8] once Back has left sign-up for the page it came from, it never goes back again', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 'u1', roles: ['MOVER'] } });
+    fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByText('Add a business to your Swift account.');
+    const back = vi.spyOn(window.history, 'back').mockImplementation(() => {});
+    act(() => {
+      // the client-side link the person came by: the page they were on before sign-up
+      window.history.replaceState(null, '', '/vendors');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(back).not.toHaveBeenCalled();
+    back.mockRestore();
+    window.history.replaceState(null, '', '/');
+  });
 });
 
 describe('[REVIEW-GMF2 S4-11] finishing sign-up clears the kept draft', () => {

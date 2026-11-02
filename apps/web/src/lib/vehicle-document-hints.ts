@@ -11,7 +11,7 @@ import { isTaxiChecklist } from './taxi-documents';
 export const TAXI_INSURANCE = 'Your insurance must permit use for hire or reward, covering passengers carried for hire. A private-use policy is not accepted.';
 export const DELIVERY_INSURANCE = 'Your insurance must permit use for hire or reward (commercial use). A private-use policy is not accepted.';
 /** The law's licence: one for the class of vehicle ridden on a road (apps/api doc-registry drivers_licence basis). */
-export const MOTORBIKE_LICENCE = "Your driver's licence must cover motorcycles, the class of vehicle you ride.";
+export const MOTORBIKE_LICENCE = "Your driver's licence must cover a motorbike, the class of vehicle you ride.";
 
 /** What the reviewer checks on a mover's insurance (a taxi's or any delivery motor vehicle's) and, for a motorbike, the
  *  licence class. A bicycle's list (no licence) gets none; a taxi's other rows keep taxiDocumentHint. */

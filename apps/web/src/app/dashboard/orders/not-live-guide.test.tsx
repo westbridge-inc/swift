@@ -73,6 +73,19 @@ describe('[WEB-ONBOARDING] a store not live yet is told what is left, not that t
     expect(within(guide).queryByRole('link', { name: /Add the documents/ })).toBeNull();
   });
 
+  it('[REVIEW S4] a store that is not live for another reason (suspended, closed) is never told "The board is live."', async () => {
+    for (const status of ['SUSPENDED', 'CLOSED']) {
+      storeApi({ status, goLive: null });
+      const view = renderWithQuery(<OrdersPage />);
+      // [REVIEW-LIGHT2 #2306 S3] the card names the real hold (store-hold-card.test.tsx), never "Not open yet"
+      expect(await screen.findByText(status === 'CLOSED' ? 'This store is closed' : 'This store is suspended')).toBeTruthy();
+      expect(screen.queryByText('Not open yet'), status).toBeNull();
+      expect(screen.queryByText('The board is live.'), status).toBeNull();
+      expect(screen.queryByText('Use the switch below to start taking orders'), status).toBeNull();
+      view.unmount();
+    }
+  });
+
   it('a live store keeps the first-order guide', async () => {
     storeApi({ status: 'ACTIVE', goLive: null });
     renderWithQuery(<OrdersPage />);

@@ -11,6 +11,7 @@ import { LEGAL_URL } from '@/lib/legal-url';
 import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 import { vehicleDocumentHint } from '@/lib/vehicle-document-hints';
 import { documentExpiryDay } from '@/lib/documentExpiry';
+import { moverNextStep, moverNextWords } from '@/lib/first-steps';
 import { lazyRetry } from '@/lib/chunk-retry';
 
 // [PERF · REVIEW-F S2-1] The taxi driver's police-clearance card (its own consent, the phone's words) loads on demand,
@@ -65,6 +66,7 @@ export default function DocumentsPage() {
   });
 
   const d = status.data;
+  const next = moverNextStep(d);
   // [POLICE-CLEARANCE CONSENT · owner 31 Oct 2026] A TAXI driver may add a police clearance (optional; an approved,
   // current one records the account as police-cleared; it never gates), on the phone's card with its OWN consent in the
   // API's words — never under the privacy-notice tick below. A delivery rider is never offered one, whatever a list says
@@ -80,9 +82,13 @@ export default function DocumentsPage() {
     <div className="max-w-3xl space-y-5">
       <div>
         <h1 className="sw-title">Documents</h1>
+        {/* [WEB-ONBOARDING · FLOW-QA F18] a new mover reads how to start first; the renewal line is for an approved one */}
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
-          Upload renewals on a big screen — we review documents Monday to Saturday, 8:00–16:00 Guyana time. An expired document takes you
-          offline until it is renewed.
+          {/* [REVIEW-LIGHT2 #2309] an approved mover whose document lapsed (marked EXPIRED, or approved and past its date)
+              keeps the renewal line: it is exactly when it applies */}
+          {d?.roleVerified || (d?.documents ?? []).some((doc) => doc.status === 'EXPIRED' || (doc.status === 'APPROVED' && !!doc.expiresAt && new Date(doc.expiresAt).getTime() <= Date.now()))
+            ? 'Upload renewals on a big screen — we review documents Monday to Saturday, 8:00–16:00 Guyana time. An expired document takes you offline until it is renewed.'
+            : 'Send these documents to start. We review documents Monday to Saturday, 8:00–16:00 Guyana time.'}
         </p>
       </div>
 
@@ -96,7 +102,10 @@ export default function DocumentsPage() {
           <p className="text-sm font-semibold">
             {d.roleVerified
               ? 'You are fully verified and cleared to work.'
-              : `${d.missing.length} document${d.missing.length === 1 ? '' : 's'} still needed before you can go online.`}
+              // [WEB-ONBOARDING · FLOW-QA F17] what is left to SEND (a copy in review is Swift's turn, not the mover's)
+              : next?.kind === 'send' ? moverNextWords(next)
+                : next?.kind === 'review' ? 'In review — nothing more needed from you.'
+                  : `${d.missing.length} document${d.missing.length === 1 ? '' : 's'} still needed before you can go online.`}
           </p>
         </div>
       )}

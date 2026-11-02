@@ -10,7 +10,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { loginWithOtp } from './helpers/otp';
 import { FareService } from '../modules/rides/fare.service';
 import { pickZone, scanFareZones, fareZoneTableKilled, resolveFareZones, resolveFareZonePath, zonePricedPairs, DEFAULT_TENANT_ID } from '../modules/rides/fare-zones';
@@ -74,7 +74,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   // orphans from an interrupted run

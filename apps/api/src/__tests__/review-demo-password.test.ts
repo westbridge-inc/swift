@@ -18,7 +18,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-context';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { storePasswordResetOtp } from '../modules/auth/signup-continuation';
 import { grantStepUp } from './helpers/step-up';
 import { AuthService } from '../modules/auth/auth.service';
@@ -61,7 +61,7 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   app.addHook('onRequest', async () => { beginRequestTenantContext(); });
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
   await system(async () => {
     await app.prisma.tenant.create({ data: { id: REVIEW, name: 'Password demo fiction', slug: REVIEW, kind: 'REVIEW', isActive: true } });

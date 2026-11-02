@@ -6,13 +6,14 @@ import DocumentsPage from './page';
 import { renderWithQuery } from '@/test/test-utils';
 import * as moverApi from '@/lib/mover-api';
 import { DELIVERY_INSURANCE, MOTORBIKE_LICENCE, TAXI_INSURANCE } from '@/lib/vehicle-document-hints';
+import { MOVER_VEHICLES } from '@/lib/signup-roles';
 
 // ---------------------------------------------------------------------------
 // [WEB-ONBOARDING · R13 · owner 15 Oct 2026] A rider or taxi driver used to learn the insurance rule from a rejection:
 // every motor vehicle's insurance must permit use for hire or reward, and a person refuses a private-use policy
 // (verification.service V_INSURANCE_SCOPE, INSURANCE_NOT_HIRE). The Documents page now says it under the insurance
 // row before anything is uploaded, in the server's terms: a taxi's cover is for passengers carried for hire, a
-// delivery rider's for commercial use. A motorbike rider's licence must cover motorcycles. A bicycle rider's list
+// delivery rider's for commercial use. A motorbike rider's licence must cover a motorbike. A bicycle rider's list
 // (a national ID only) gets none of these. Synthetic values only.
 // ---------------------------------------------------------------------------
 
@@ -36,10 +37,13 @@ beforeEach(() => { vi.restoreAllMocks(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('[WEB-ONBOARDING] the Documents page says what the reviewer checks, before the upload', () => {
-  it('a motorbike rider: insurance for hire or reward (commercial use), a licence that covers motorcycles', async () => {
+  it('a motorbike rider: insurance for hire or reward (commercial use), a licence that covers a motorbike', async () => {
     open('MOTORCYCLE', MOTOR);
     expect(await hintUnder('Vehicle Insurance')).toBe(DELIVERY_INSURANCE);
     expect(await hintUnder("Driver's licence")).toBe(MOTORBIKE_LICENCE);
+    // [REVIEW S4] the vehicle by the name the rider picked at sign-up (the app's "Motorbike"), not "motorcycles"
+    expect(MOTORBIKE_LICENCE).toBe("Your driver's licence must cover a motorbike, the class of vehicle you ride.");
+    expect(MOTORBIKE_LICENCE).toContain(MOVER_VEHICLES.RIDER.find((v) => v.value === 'MOTORCYCLE')!.label.toLowerCase());
     expect(await hintUnder('Certificate of Registration')).toBeNull();
   });
 
@@ -52,7 +56,7 @@ describe('[WEB-ONBOARDING] the Documents page says what the reviewer checks, bef
   it('a bicycle rider: nothing about licences or insurance', async () => {
     open('BICYCLE', ['national_id']);
     expect(await hintUnder('National ID or Digital ID card')).toBeNull();
-    expect(document.body.textContent).not.toMatch(/hire or reward|cover motorcycles/);
+    expect(document.body.textContent).not.toMatch(/hire or reward|cover a motorbike/);
   });
 });
 
@@ -70,7 +74,7 @@ describe('[WEB-ONBOARDING] the words are the server’s rule', () => {
 
   it('[perf] the lines live apart from taxi-documents, which the sign-up page loads up front', () => {
     const web = (path: string) => readFileSync(join(__dirname, '..', '..', '..', path), 'utf8');
-    expect(web('lib/taxi-documents.ts')).not.toMatch(/hire or reward|cover motorcycles/);
+    expect(web('lib/taxi-documents.ts')).not.toMatch(/hire or reward|cover a motorbike/);
     expect(web('app/signup/page.tsx')).not.toMatch(/vehicle-document-hints/);
   });
 
