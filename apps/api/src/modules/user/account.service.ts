@@ -1,6 +1,6 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
 import { ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF, closureMessageFor, type ClosureSurface } from './account-closure';
-import { ACCOUNT_CLOSURE_CANCELLED, liftClosurePause, pauseStoresForClosure } from './closure-pause';
+import { ACCOUNT_CLOSURE_CANCELLED, CLOSURE_IN_PROGRESS_REFUSAL, liftClosurePause, pauseStoresForClosure } from './closure-pause';
 import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { eraseUserDevices } from '../../lib/owner-rls';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
@@ -150,16 +150,26 @@ export class AccountService {
    *  with the usual switch. Under the same person lock as the request, so a request and its cancel never interleave. */
   async cancelClosure(userId: string) {
     return this.app.prisma.$transaction(async (tx) => {
+      // [COORD security review #2304] The same person lock support's completion claims the request under
+      // (deleteAccount's preflight): a cancel and a completion never interleave. Once support has the request
+      // (IN_PROGRESS), or the account is already closed, the cancel is refused: completion is irreversible.
       await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+      const person = await tx.user.findUnique({ where: { id: userId }, select: { status: true, phone: true } });
+      if (!person || person.status !== 'ACTIVE' || person.phone === erasedPhoneMarker(userId)) {
+        throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
+      }
       const ticket = await tx.supportTicket.findFirst({
         where: { userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN', 'IN_PROGRESS'] } },
-        orderBy: { createdAt: 'desc' }, select: { id: true },
+        orderBy: { createdAt: 'desc' }, select: { id: true, status: true },
       });
       if (!ticket) throw new AppError(409, 'NO_CLOSURE_REQUEST', 'There is no open account closure request to cancel.');
-      await tx.supportTicket.updateMany({
-        where: { id: ticket.id, userId, status: { in: ['OPEN', 'IN_PROGRESS'] } },
+      if (ticket.status !== 'OPEN') throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
+      // Only an OPEN request: a claim that commits first (its row lock) leaves nothing for this write to cancel.
+      const cancelled = await tx.supportTicket.updateMany({
+        where: { id: ticket.id, userId, status: 'OPEN' },
         data: { status: 'RESOLVED', resolution: 'ANSWERED', resolvedAt: new Date(), adminNote: 'The account holder cancelled this closure request.' },
       });
+      if (cancelled.count !== 1) throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
       const stores = await liftClosurePause(tx, userId, ticket.id, { kind: 'OWNER_CANCELLED', actorId: userId });
       await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CANCELLED, entity: 'SupportTicket', entityId: ticket.id, changes: { storesLifted: stores } } });
       return { cancelled: true as const, ticketId: ticket.id, storesLifted: stores.length,
@@ -233,7 +243,10 @@ export class AccountService {
   }
 
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
-  async deleteAccount(userId: string, selfServe = false, surface: ClosureSurface = 'app') {
+  async deleteAccount(
+    userId: string, selfServe = false, surface: ClosureSurface = 'app',
+    opts: { claimClosure?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
+  ) {
     const prisma = this.app.prisma;
     const preflight = await prisma.$transaction(async (tx) => {
       // Service-job creation, provider profile changes and verification events
@@ -246,6 +259,11 @@ export class AccountService {
         FOR UPDATE /* account-deletion-provider-authority */
       `;
       if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
+      // [COORD security review #2304] Support completing a closure request claims it (IN_PROGRESS) under this lock,
+      // before anything is erased: a request the holder cancelled (cancelClosure takes this same lock) is refused here.
+      if (opts.claimClosure && !(await opts.claimClosure(tx))) {
+        throw new AppError(409, 'CLOSURE_REQUEST_NOT_OPEN', 'This closure request is no longer open: the account holder cancelled it, or it was already resolved. Nothing was erased.');
+      }
       const user = await tx.user.findUniqueOrThrow({
         where: { id: userId },
         select: { id: true, phone: true, roles: true, status: true, avatar: true, tenantId: true },

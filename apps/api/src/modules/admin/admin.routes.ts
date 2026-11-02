@@ -79,7 +79,7 @@ import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
-import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
+import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT, erasedPhoneMarker } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -7465,7 +7465,26 @@ export async function adminRoutes(app: FastifyInstance) {
       || subject.roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
       throw new ForbiddenError('A staff account is not closed from the support queue.');
     }
-    const outcome = await new AccountService(app).deleteAccount(ticket.userId);
+    // This request's writes to the ticket: with the owner wall on, the named capability inside the tenant boundary;
+    // otherwise the given transaction (the erasure's own, so a refused completion rolls its claim back) or tenantPrisma.
+    const writeTicket = (where: Prisma.SupportTicketWhereInput, data: Prisma.SupportTicketUpdateManyMutationInput, tx?: Prisma.TransactionClient) => (closureScope
+      ? ownerWallSystem('admin:support-closure', () => app.prisma.supportTicket.updateMany({ where: { AND: [where, closureScope] }, data }))
+      : (tx ?? tenantPrisma).supportTicket.updateMany({ where, data }));
+    // [WEB-DELETE · COORD security review #2304] Completion is irreversible and the owner may cancel the request at
+    // the same moment: the erasure claims the request (IN_PROGRESS) under the person's lock before it erases anything,
+    // so a request the owner cancelled since the checks above is refused there, and the owner's cancel (the same lock)
+    // is refused once the claim holds. A completion the erasure then refuses (live orders, open cash) gives the claim
+    // back, so the owner can still cancel.
+    const claimWhere = { id, userId: ticket.userId, category: 'ACCOUNT' as const, subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
+    const outcome = await new AccountService(app).deleteAccount(ticket.userId, false, 'app', {
+      claimClosure: async (tx) => (await writeTicket(claimWhere, { status: 'IN_PROGRESS' }, tx)).count === 1,
+    }).catch(async (error: unknown) => {
+      const person = await tenantPrisma.user.findUnique({ where: { id: ticket.userId }, select: { phone: true } }).catch(() => null);
+      if (person && person.phone !== erasedPhoneMarker(ticket.userId) && ticket.status !== 'IN_PROGRESS') {
+        await writeTicket({ id, status: 'IN_PROGRESS' }, { status: ticket.status }).catch(() => undefined);
+      }
+      throw error;
+    });
     const complete = 'deleted' in outcome && outcome.deleted === true;
     const closureWhere = { id, status: { not: 'RESOLVED' as const } };
     const closureData = {
@@ -7474,11 +7493,7 @@ export async function adminRoutes(app: FastifyInstance) {
         ? 'Account closed and personal data de-identified; financial and legal records are retained.'
         : 'Account closed; the remaining erasure is pending and retried automatically.',
     };
-    if (closureScope) {
-      await ownerWallSystem('admin:support-closure', () => app.prisma.supportTicket.updateMany({ where: { AND: [closureWhere, closureScope] }, data: closureData }));
-    } else {
-      await tenantPrisma.supportTicket.updateMany({ where: closureWhere, data: closureData });
-    }
+    await writeTicket(closureWhere, closureData);
     return { success: true, data: { ticketId: id, outcome } };
   });
 

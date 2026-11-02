@@ -21,6 +21,9 @@ export const ACCOUNT_CLOSURE_CANCELLED = 'ACCOUNT_CLOSURE_CANCELLED';
 /** What a store's "Resume orders" answers while the request holds the pause. */
 export const CLOSURE_PAUSE_REFUSAL = 'New orders are paused because you asked Swift to close your account. Cancel the closure request (Account, Request account closure) to take new orders again.';
 
+/** What the owner's cancel answers once support has the request, or the account is already closed. */
+export const CLOSURE_IN_PROGRESS_REFUSAL = 'Swift is already closing your account, so this request can no longer be cancelled here. Contact Swift support.';
+
 type PauseDb = Pick<Prisma.TransactionClient, 'vendor' | 'auditLog'>;
 
 /** Pause the NEW orders of every store this person owns, for this closure request. Idempotent: a store already
