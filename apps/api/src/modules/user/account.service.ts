@@ -45,6 +45,20 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
+/** [WEB-DELETE] The live work that stops a deletion: ONE definition, read by the deletion's census (under its
+ *  locks) and by the website's deletion check (no lock), so the list a person is shown is the list Delete refuses on. */
+export function liveWorkWhere(userId: string): { orders: Prisma.OrderWhereInput; serviceJobs: Prisma.ServiceJobWhereInput } {
+  return {
+    orders: { status: { notIn: TERMINAL_ORDER }, OR: [
+      { customerId: userId }, { rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } },
+    ] },
+    serviceJobs: { status: { notIn: TERMINAL_SERVICE_JOB }, OR: [{ customerId: userId }, { provider: { userId } }] },
+  };
+}
+
+/** How many live orders and jobs the deletion check names (the count is always the whole). */
+const DELETION_CHECK_LIST_MAX = 10;
+
 /** [SEC-PII] The exact erasure marker this file writes in place of an erased account's number. Exported so other code
  *  can RECOGNISE an erased account without spelling the marker (erasure-trigger-exceptions pins the one writer). */
 export function erasedPhoneMarker(userId: string): string {
@@ -122,6 +136,67 @@ export class AccountService {
       return this.closureTicket(tx, userId);
     });
     return this.closureReceipt(userId, ticket.id);
+  }
+
+  /**
+   * [WEB-DELETE · owner 1 Nov 2026] What Delete would meet for this person now, by the deletion's own rules and
+   * words, so the website can show WHICH live orders and jobs, and which money, must be finished first (before it
+   * asks for a code). It writes nothing and takes no lock: the deletion re-checks all of it under its locks. Each
+   * order is the person's own view of it (their side, its number and status, the store's public name), never
+   * another person's id or contact.
+   */
+  async deletionCheck(userId: string) {
+    return this.app.prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({ where: { id: userId }, select: { roles: true } });
+      if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
+      const live = liveWorkWhere(userId);
+      const [closure, rider, driver, storeOwner] = await Promise.all([
+        closesByRequest(tx, userId, user.roles),
+        tx.rider.findUnique({ where: { userId }, select: { id: true } }),
+        tx.driver.findUnique({ where: { userId }, select: { id: true } }),
+        tx.vendorOwner.findUnique({ where: { userId }, select: { id: true } }),
+      ]);
+      const [orderCount, orders, jobCount, jobs, obligations, ticket] = await Promise.all([
+        tx.order.count({ where: live.orders }),
+        tx.order.findMany({
+          where: live.orders, orderBy: { createdAt: 'desc' }, take: DELETION_CHECK_LIST_MAX,
+          select: { id: true, orderNumber: true, status: true, orderType: true, createdAt: true, customerId: true, riderId: true, driverId: true, vendor: { select: { name: true } } },
+        }),
+        tx.serviceJob.count({ where: live.serviceJobs }),
+        tx.serviceJob.findMany({
+          where: live.serviceJobs, orderBy: { createdAt: 'desc' }, take: DELETION_CHECK_LIST_MAX,
+          select: { id: true, status: true, scheduledFor: true, createdAt: true, customerId: true },
+        }),
+        partnerObligations(tx, userId),
+        closure
+          ? tx.supportTicket.findFirst({
+            where: { userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN', 'IN_PROGRESS'] } },
+            orderBy: { createdAt: 'desc' }, select: { id: true, status: true, createdAt: true },
+          })
+          : null,
+      ]);
+      // The side is the person's own part in the order, matched in the order's precedence (a store owner who
+      // ordered from their own store sees it as their order).
+      const side = (o: (typeof orders)[number]) => o.customerId === userId ? 'CUSTOMER' as const
+        : rider && o.riderId === rider.id ? 'RIDER' as const
+          : driver && o.driverId === driver.id ? 'DRIVER' as const : 'STORE' as const;
+      const verdict = verdictFor(obligations);
+      return {
+        closure: closure ? 'REQUEST' as const : 'DELETE' as const,
+        // What a closure does to a store is shown only to a person who owns one (an advertiser closes too).
+        ownsStore: user.roles.includes('VENDOR_OWNER') || storeOwner !== null,
+        closureRequest: ticket ? { ticketId: ticket.id, status: ticket.status, requestedAt: ticket.createdAt } : null,
+        openOrders: {
+          count: orderCount,
+          items: orders.map((o) => ({ id: o.id, orderNumber: o.orderNumber, status: o.status, orderType: o.orderType, createdAt: o.createdAt, side: side(o), storeName: o.vendor?.name ?? null })),
+        },
+        openServiceJobs: {
+          count: jobCount,
+          items: jobs.map((j) => ({ id: j.id, status: j.status, scheduledFor: j.scheduledFor, createdAt: j.createdAt, side: j.customerId === userId ? 'CUSTOMER' as const : 'PROVIDER' as const })),
+        },
+        settleFirst: verdict.clear ? null : { blockers: verdict.blockers, message: refusalMessage(verdict.blockers, obligations) },
+      };
+    });
   }
 
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
@@ -213,16 +288,10 @@ export class AccountService {
         WHERE o."userId" = ${userId} ORDER BY v.id FOR UPDATE OF v
       `;
 
+      const live = liveWorkWhere(userId);
       const [inFlightOrders, inFlightServiceJobs] = await Promise.all([
-        tx.order.count({ where: { status: { notIn: TERMINAL_ORDER }, OR: [
-          { customerId: userId }, { rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } },
-        ] } }),
-        tx.serviceJob.count({
-          where: {
-            status: { notIn: TERMINAL_SERVICE_JOB },
-            OR: [{ customerId: userId }, { provider: { userId } }],
-          },
-        }),
+        tx.order.count({ where: live.orders }),
+        tx.serviceJob.count({ where: live.serviceJobs }),
       ]);
       // Read the cash census after the live-work snapshot. If goods return
       // between these reads, their terminal status cannot hide customer cash

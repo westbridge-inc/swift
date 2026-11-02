@@ -381,7 +381,8 @@ describe('[item 20] support tickets: the census', () => {
       'modules/support/support.service.ts findUnique': 1,
       'modules/support/support.service.ts findFirst': 1,
       'modules/support/support.service.ts update': 1,
-      'modules/user/account.service.ts findFirst': 1,
+      // [WEB-DELETE] + the deletion check's read of the person's own open closure request (keyed by userId).
+      'modules/user/account.service.ts findFirst': 2,
       'modules/user/account.service.ts create': 1,
       // The admin closure completion: tenantPrisma off, the capability on (read and close).
       'modules/admin/admin.routes.ts findFirst': 1,

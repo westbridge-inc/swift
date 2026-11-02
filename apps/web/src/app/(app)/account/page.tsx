@@ -38,7 +38,8 @@ function Account() {
   const legalRows = [
     { href: '/legal/terms', label: 'Terms of service', Icon: FileText },
     { href: '/legal/privacy', label: 'Privacy policy', Icon: Shield },
-    { href: '/account/delete', label: 'Delete your account', Icon: Trash2 },
+    // [WEB-DELETE] The signed-in person deletes here (the public how-to page is linked from the flow).
+    { href: '/account/profile/delete', label: 'Delete my account', Icon: Trash2 },
   ];
 
   return (

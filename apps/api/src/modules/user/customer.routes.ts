@@ -1040,6 +1040,14 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data };
   });
 
+  /** GET /account/deletion-check — [WEB-DELETE] what Delete would meet now, by the deletion's own rules and words:
+   *  closure by request or deletion, the live orders and jobs to finish first, the money to settle first. Reads only;
+   *  the delete re-checks everything under its locks. */
+  app.get('/account/deletion-check', async (request: AuthRequest) => {
+    const data = await account.deletionCheck(request.user.userId);
+    return { success: true, data };
+  });
+
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
   app.post('/account/closure-request', async (request: AuthRequest, reply) => {

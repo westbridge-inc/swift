@@ -15,6 +15,8 @@ const checks: Array<[string, RegExp]> = [
   ['../app/qr/not-found/page.tsx', /counter code retired/i],
   ['../app/(app)/store/[slug]/not-found.tsx', /store may no longer be public/i],
   ['../app/(marketing)/account/delete/page.tsx', /encryption key destroyed|push notification tokens/i],
+  // [WEB-DELETE] that page's lists now live here (the website's delete flow shows the same ones)
+  ['./account-deletion-words.ts', /encryption key destroyed|push notification tokens/i],
 ];
 
 describe('web plain language census', () => {
