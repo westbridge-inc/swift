@@ -3,9 +3,12 @@
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { verifyPartnerLogin } from '@/lib/auth';
+import { hasProviderProfile, verifyPartnerLogin } from '@/lib/auth';
 import { sendOtp } from '@/lib/otp-send';
 import { markSignedIn } from '@/lib/session-hint';
+import { roleHome } from '@/lib/role-home';
+import { guyanaDisplay } from '@/lib/guyana-phone';
+import { otpVerifyRefusal } from '@/lib/otp-send-refusal';
 import { verifyCustomerLogin } from '@/lib/customer-login';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
@@ -32,6 +35,13 @@ function isCustomerReturn(next: string): boolean {
 function guestReturn(next: string): string {
   const path = next.split(/[?#]/)[0] ?? '';
   return next && customerRoute(path).public ? next : '/';
+}
+
+/** [FLOW-QA F1] Where a signed-in account belongs: its partner home by roles, a self-employed pro's weekly fee, else Swift. */
+async function accountHome(user: unknown): Promise<string> {
+  const { kind, home } = roleHome(user as { roles?: unknown; vendorOwner?: unknown });
+  if (kind !== 'customer') return home;
+  try { return (await hasProviderProfile()) ? '/portal/weekly-fee' : '/'; } catch { return '/'; }
 }
 
 function LoginInner() {
@@ -110,26 +120,31 @@ function LoginInner() {
     setError(null); setBusy(true);
     try {
       if (isCustomer) {
-        await verifyCustomerLogin(fullPhone(phone), code.trim());
+        const { user } = await verifyCustomerLogin(fullPhone(phone), code.trim());
         markSignedIn();
         continueJourney();
-        router.replace(next || '/');
+        // [FLOW-QA F1] "Sign in" from the header or the launch page carries next=/ (or nothing): that is no customer
+        // deep link, so the account goes where it belongs, by its roles, never to the launch page.
+        router.replace(next && next !== '/' ? next : await accountHome(user));
       } else {
         const { home } = await verifyPartnerLogin(fullPhone(phone), code.trim());
         markSignedIn();
-        router.replace(next === '/weekly-fee' ? next : home);
+        // [FLOW-QA F31] A private page that sent them here (next=/dashboard/orders, /portal/documents) is where they
+        // go back to, when it is inside their own area; anything else goes home.
+        router.replace(next === '/weekly-fee' || (next && (next === home || next.startsWith(`${home}/`))) ? next : home);
       }
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) { setError(otpVerifyRefusal(e)); }
     finally { busyNow.current = false; setBusy(false); }
   }
 
-  const shownPhone = fullPhone(phone).replace(/^\+592/, `${DIAL_CODE} `);
+  // [FLOW-QA F23] grouped as people read it: +592 600 1234
+  const shownPhone = fullPhone(phone).startsWith(DIAL_CODE) ? guyanaDisplay(fullPhone(phone)) : fullPhone(phone);
   return (
     <AuthPage onBrandClick={clearStorefrontContinuation}>
       <section aria-labelledby="login-title" className="flex flex-col gap-6">
         {demoEnded ? <p className="sw-note sw-note-info" role="status" data-testid="demo-ended">{DEMO_ENDED_NOTICE}</p> : null}
         {signedIn && step === 'phone' ? (
-          <signedIn.Card who={signedIn.who} here="/login" titleId="login-title" back={isCustomer && next ? { href: next, label: 'Continue where you were' } : next === '/weekly-fee' ? { href: next, label: 'Go to your weekly fee' } : undefined} onSignedOut={() => setSignedIn(null)} />
+          <signedIn.Card who={signedIn.who} here="/login" titleId="login-title" back={isCustomer && next && next !== '/' ? { href: next, label: 'Continue where you were' } : next === '/weekly-fee' ? { href: next, label: 'Go to your weekly fee' } : undefined} onSignedOut={() => setSignedIn(null)} />
         ) : step === 'phone' ? (
           <>
             <AuthHeading id="login-title" eyebrow={isCustomer ? 'Sign in or create an account' : 'Swift for businesses and earners'} title="What’s your number?">

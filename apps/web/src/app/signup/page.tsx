@@ -4,9 +4,12 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
-import { sessionProbe } from '@/lib/auth';
+import { hasProviderProfile, sessionProbe } from '@/lib/auth';
 import { sendOtp } from '@/lib/otp-send';
 import { markSignedIn } from '@/lib/session-hint';
+import { ACCOUNT_STEPS, clearDraft, readDraft, saveDraft, stepOf, stepUrl } from '@/lib/signup-draft';
+import { roleHome } from '@/lib/role-home';
+import { otpVerifyRefusal } from '@/lib/otp-send-refusal';
 import { verifyOtp, registerAccount } from '@/lib/customer-account';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
@@ -29,13 +32,18 @@ import { CODE_NOT_SEEN_HINT, PhoneField } from '@/components/phone-field';
 import { loadSignedIn } from '@/components/signed-in-loader';
 import type { SignedIn, SignedInAlready as SignedInAlreadyComponent } from '@/components/signed-in-already';
 import { sendCooldownOf, sendLabel, useSendCooldown } from '@/lib/otp-cooldown';
-import { GUYANA_DIAL_CODE, guyanaLocal, guyanaPhone, guyanaPhoneProblem, guyanaPhoneReady } from '@/lib/guyana-phone';
+import { guyanaDisplay, guyanaLocal, guyanaPhone, guyanaPhoneProblem, guyanaPhoneReady } from '@/lib/guyana-phone';
 
 /** [W9] The four ways in. A delivery rider and a taxi driver are both movers
  *  to the API; the vehicle each chooses decides which (partner.service:
  *  a car or a bus provisions a Driver, a motorbike or bicycle a Rider). */
 type Role = 'CUSTOMER' | 'VENDOR' | 'RIDER' | 'DRIVER';
 const accountRole = (r: Role): 'CUSTOMER' | 'VENDOR' | 'MOVER' => (r === 'RIDER' || r === 'DRIVER' ? 'MOVER' : r);
+/** A self-employed pro's profile, asked of the server; any failure is "no", as on sign-in. */
+async function isPro(): Promise<boolean> {
+  try { return await hasProviderProfile(); } catch { return false; }
+}
+
 type Step = 'role' | 'phone' | 'code' | 'name' | 'business' | 'vehicle';
 
 function safeReturnPath(): string {
@@ -60,6 +68,8 @@ export default function SignupPage() {
   const [role, setRole] = useState<Role>('CUSTOMER');
   // [REVIEW-G G1] A resumed mover account says first whether it delivers or drives a taxi.
   const [pickMover, setPickMover] = useState(false);
+  // [FLOW-QA F9] Set when an existing account goes on to add a business or a vehicle.
+  const [addingTo, setAddingTo] = useState<string | null>(null);
   // [SIGNUP-PHONE] The local number only: the +592 chip sits beside it, as on sign-in and in the app.
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
@@ -76,6 +86,55 @@ export default function SignupPage() {
   }, []);
   const [first, setFirst] = useState('');
   const [last, setLast] = useState('');
+
+  // [FLOW-QA F6] One history entry per step, and what was typed kept for this tab (lib/signup-draft).
+  const fromHistory = useRef(false);
+  const stepNow = useRef<Step>('role');
+  useEffect(() => { stepNow.current = step; }, [step]);
+  const restored = useRef(false);
+  // The step a kept draft is being restored to: until the page shows it, nothing is saved over the draft and the
+  // partner-door effect below leaves the door alone (REVIEW-GMF2 S3-1).
+  const restoringTo = useRef<Step | null>(null);
+  useEffect(() => {
+    const wanted = stepOf(window.location.search);
+    const draft = readDraft();
+    if (wanted && wanted !== 'role' && draft && draft.step === wanted) {
+      restoringTo.current = wanted;
+      if (draft.role === 'CUSTOMER' || draft.role === 'VENDOR' || draft.role === 'RIDER' || draft.role === 'DRIVER') setRole(draft.role);
+      setPhone(draft.phone); setFirst(draft.first); setLast(draft.last);
+      setStep(wanted);
+    } else if (wanted) {
+      // an old step address with nothing kept for it: start at the beginning, without an extra entry
+      fromHistory.current = true;
+      window.history.replaceState(window.history.state, '', stepUrl('role'));
+    }
+    restored.current = true;
+    const onPop = () => {
+      // [REVIEW-GMF2 S3] Back has already left sign-up (every way in is a client-side link, so this page's listener
+      // can still hear the page it came from): nothing more to do, and never another step back.
+      if (window.location.pathname !== '/signup') return;
+      const popped = stepOf(window.location.search) ?? 'role';
+      // [REVIEW-GMF2 S3-3] Once the account exists, Back never reopens the steps that made it: it keeps going back,
+      // past them, so one press leaves sign-up (the page stays on its step while it does).
+      if (ACCOUNT_STEPS.includes(stepNow.current) && !ACCOUNT_STEPS.includes(popped)) { window.history.back(); return; }
+      fromHistory.current = true;
+      setStep(popped);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+  useEffect(() => {
+    if (!restored.current) return;
+    if (restoringTo.current) {
+      if (step !== restoringTo.current) return; // the restored values have not landed yet
+      restoringTo.current = null;
+    } else if (fromHistory.current) { fromHistory.current = false; }
+    else if (stepOf(window.location.search) !== step) {
+      if (stepOf(window.location.search) === null && step === 'role') window.history.replaceState(window.history.state, '', stepUrl(step));
+      else window.history.pushState(window.history.state, '', stepUrl(step));
+    }
+    saveDraft({ step, role, phone, first, last });
+  }, [step, role, phone, first, last]);
   // [D6] What a partner typed on the business or vehicle step, kept here across Back and forward (the steps themselves
   // load on demand: partner-steps.tsx).
   const [bizDraft, setBizDraft] = useState<PartnerStepsModule.BusinessDraft | null>(null);
@@ -149,16 +208,25 @@ export default function SignupPage() {
     }
   });
   const doVerify = () => wrap(async () => {
-    const r = await verifyOtp(guyanaPhone(phone), code.trim());
+    let r: Awaited<ReturnType<typeof verifyOtp>>;
+    // [FLOW-QA F16] a refused code in plain words
+    try { r = await verifyOtp(guyanaPhone(phone), code.trim()); } catch (e) { throw new Error(otpVerifyRefusal(e)); }
     if (r.signedIn) {
       markSignedIn();
       // Existing account: route by its ACTUAL roles, not the tile they tapped.
-      const roles: string[] = r.user?.roles ?? [];
-      const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
-      const isMover = roles.some((x) => ['MOVER', 'RIDER', 'DRIVER'].includes(x));
+      const { kind } = roleHome(r.user);
+      const isVendor = kind === 'business';
+      const isMover = kind === 'earner';
+      // [FLOW-QA F9] An existing account that chose another partner door goes on to that door's step (its account is
+      // kept; a business or a vehicle is added to it), never silently back to its old home.
+      if (role === 'VENDOR' && !isVendor) { setAddingTo('Add a business to your Swift account.'); setStep('business'); return; }
+      if ((role === 'RIDER' || role === 'DRIVER') && !isMover) { setAddingTo('Add your vehicle to your Swift account.'); setStep('vehicle'); return; }
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
       if (customerReturnPath) continueJourney();
-      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
+      clearDraft();
+      // [REVIEW-GMF2 S4] a self-employed pro (no partner role) goes where sign-in sends them: their weekly fee
+      const pro = !customerReturnPath && !isVendor && !isMover && await isPro();
+      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : pro ? '/portal/weekly-fee' : '/'));
       return;
     }
     setStep('name');
@@ -186,12 +254,13 @@ export default function SignupPage() {
       // where they were headed (else to ordering), not to the camera.
       const destination = safeReturnPath();
       if (destination) continueJourney();
+      clearDraft();
       router.replace(destination || '/');
     }
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });
   /** [D6] What the partner steps need from the page (they load on demand). */
-  const shell: PartnerStepsModule.StepShell = { phone, busy, wrap, setError, done: (path) => router.replace(path) };
+  const shell: PartnerStepsModule.StepShell = { phone, busy, wrap, setError, done: (path) => { clearDraft(); router.replace(path); } };
   const stepsLoading = stepsFailed
     ? <button type="button" className={styles.roleButton} onClick={() => setStepsFailed(false)}>Couldn’t load this step — try again</button>
     : <p role="status" className={styles.smallCopy}>Loading…</p>;
@@ -207,6 +276,9 @@ export default function SignupPage() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('resume') === 'business' || params.get('resume') === 'mover') return;
+    // [REVIEW-GMF2 S3-1] a refresh or Back on a partner page's sign-up (?as=…&step=…) resumes its step: the door is
+    // already in the kept draft, so it is not opened again on the phone step
+    if (restoringTo.current) return;
     const door = partnerDoorRole(params.get('as'));
     if (door) chooseRole(door);
   }, []);
@@ -250,7 +322,7 @@ export default function SignupPage() {
                 : <button key={r} type="button" onClick={() => chooseRole(r)} className={styles.roleButton}>{inner}</button>;
             })}
             <p className={styles.inlineText}>Already on Swift? <Link
-              href="/login?next=/"
+              href={orderingOpen ? '/login?next=/' : '/login'}
               onClick={(event) => {
                 continueJourney();
                 const next = safeReturnPath();
@@ -276,7 +348,7 @@ export default function SignupPage() {
         {step === 'code' && (
           <div className={styles.stack}>
             <h1 id="signup-title" className={styles.heading}>Enter your code</h1>
-            <p className={styles.bodyCopy}>Enter the code sent to {GUYANA_DIAL_CODE} {guyanaLocal(phone)}.</p>
+            <p className={styles.bodyCopy}>Enter the code sent to {guyanaDisplay(phone)}.</p>
             <div className={styles.field}>
               <label htmlFor="signup-code" className={styles.label}>Verification code</label>
               <input id="signup-code" inputMode="numeric" autoComplete="one-time-code" autoFocus value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void doVerify()} placeholder="000000" className={`${styles.input} ${styles.codeInput}`} />
@@ -318,7 +390,7 @@ export default function SignupPage() {
             <button type="button" onClick={() => void doRegister()} disabled={busy || !first.trim() || !last.trim() || !acceptTerms || !adult} className={styles.primaryButton}>{busy ? 'Creating…' : 'Create account'}</button>
           </div>
         )}
-        {step === 'business' && (Steps ? <Steps.BusinessStep shell={shell} draft={bizDraft} onDraft={setBizDraft} /> : stepsLoading)}
+        {step === 'business' && (Steps ? <Steps.BusinessStep shell={shell} draft={bizDraft} onDraft={setBizDraft} note={addingTo} /> : stepsLoading)}
         {step === 'vehicle' && !mover && pickMover && (
           <div className={styles.stackTight}>
             <h1 id="signup-title" className={styles.heading}>Finish signing up</h1>
@@ -330,7 +402,7 @@ export default function SignupPage() {
             ))}
           </div>
         )}
-        {step === 'vehicle' && mover && (Steps ? <Steps.VehicleStep key={mover} shell={shell} mover={mover} draft={vehDraft} onDraft={setVehDraft} /> : stepsLoading)}
+        {step === 'vehicle' && mover && (Steps ? <Steps.VehicleStep key={mover} shell={shell} mover={mover} draft={vehDraft} onDraft={setVehDraft} note={addingTo} /> : stepsLoading)}
 
         {error ? <p className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
       </section>

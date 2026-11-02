@@ -117,7 +117,8 @@ const PIN_WORDS = {
 } as const;
 const NEW_BUSINESS: BusinessDraft = { biz: { name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' }, nameBasis: 'REGISTERED', ownNameTick: false, storePin: null };
 
-export function BusinessStep({ shell, draft, onDraft }: { shell: StepShell; draft: BusinessDraft | null; onDraft: (_draft: BusinessDraft) => void }) {
+/** [FLOW-QA F9] `note`: said under the heading when an existing account adds a business or a vehicle to itself. */
+export function BusinessStep({ shell, draft, onDraft, note = null }: { shell: StepShell; draft: BusinessDraft | null; onDraft: (_draft: BusinessDraft) => void; note?: string | null }) {
   const { phone, busy, wrap, setError, done } = shell;
   const [d, setD] = useState<BusinessDraft>(() => draft ?? NEW_BUSINESS);
   useEffect(() => { onDraft(d); }, [d, onDraft]);
@@ -195,6 +196,7 @@ export function BusinessStep({ shell, draft, onDraft }: { shell: StepShell; draf
   return (
     <div className={styles.stackTight}>
       <h1 id="signup-title" className={styles.heading}>Your business</h1>
+      {note ? <p className={styles.bodyCopy} role="status">{note}</p> : null}
       <div className={styles.field}><label htmlFor="business-name" className={styles.label}>Business name</label><input id="business-name" maxLength={LIMIT.business} placeholder={nameBasis === 'OWN_NAME' && ownNameType ? EXAMPLE.ownName : EXAMPLE.business} value={biz.name} onChange={(e) => setBiz({ ...biz, name: e.target.value })} className={styles.input} /></div>
       <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
         <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
@@ -237,7 +239,7 @@ export interface VehicleDraft { mover: MoverRole; vehicleType: string; make: str
 /** Each mover starts on their own kind of vehicle. */
 const newVehicle = (mover: MoverRole): VehicleDraft => ({ mover, vehicleType: MOVER_VEHICLES[mover][0]!.value, make: '', model: '', color: '', licensePlate: '', year: '' });
 
-export function VehicleStep({ shell, mover, draft, onDraft }: { shell: StepShell; mover: MoverRole; draft: VehicleDraft | null; onDraft: (_draft: VehicleDraft) => void }) {
+export function VehicleStep({ shell, mover, draft, onDraft, note = null }: { shell: StepShell; mover: MoverRole; draft: VehicleDraft | null; onDraft: (_draft: VehicleDraft) => void; note?: string | null }) {
   const { busy, wrap, done } = shell;
   const [veh, setVeh] = useState<VehicleDraft>(() => (draft && draft.mover === mover ? draft : newVehicle(mover)));
   useEffect(() => { onDraft(veh); }, [veh, onDraft]);
@@ -265,6 +267,7 @@ export function VehicleStep({ shell, mover, draft, onDraft }: { shell: StepShell
   return (
     <div className={styles.stackTight}>
       <h1 id="signup-title" className={styles.heading}>{mover === 'DRIVER' ? 'Your taxi' : 'How you deliver'}</h1>
+      {note ? <p className={styles.bodyCopy} role="status">{note}</p> : null}
       <div className={styles.field}><label htmlFor="vehicle-type" className={styles.label}>Vehicle</label><select id="vehicle-type" value={veh.vehicleType} onChange={(e) => setVeh({ ...veh, vehicleType: e.target.value })} className={styles.input}>
         {MOVER_VEHICLES[mover].map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
       </select></div>

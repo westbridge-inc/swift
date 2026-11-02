@@ -5,6 +5,7 @@ import { hasProviderProfile, restoreSession, sessionProbe } from '@/lib/auth';
 import { SignOutButton } from '@/components/sign-out-button';
 import { GUYANA_DIAL_CODE, guyanaLocal } from '@/lib/guyana-phone';
 import { forgetSignedIn, markSignedIn, signedInBefore } from '@/lib/session-hint';
+import { roleHome } from '@/lib/role-home';
 
 /**
  * [SIGNUP-PHONE · owner 1 Nov 2026] Sign-in and sign-up recognise a session that is already there (GET /auth/me)
@@ -17,9 +18,9 @@ export type SignedIn = { phone: string; home: string; label: string };
 
 /** Where sign-in sends this account (lib/auth verifyPartnerLogin, signup doVerify): roles first, then a pro profile. */
 export async function homeFor(user: Record<string, unknown>): Promise<{ home: string; label: string }> {
-  const roles = Array.isArray(user['roles']) ? (user['roles'] as unknown[]).filter((r): r is string => typeof r === 'string') : [];
-  if (roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!user['vendorOwner']) return { home: '/dashboard', label: 'Go to your dashboard' };
-  if (roles.some((r) => ['MOVER', 'RIDER', 'DRIVER'].includes(r))) {
+  const { kind } = roleHome(user);
+  if (kind === 'business') return { home: '/dashboard', label: 'Go to your dashboard' };
+  if (kind === 'earner') {
     const movers = await import('@/lib/mover-api');
     // [REVIEW-G G1 · owner rule 3] An account that stopped after its name, before the vehicle step, has no rider or
     // driver profile yet: it goes back to that step (/signup?resume=mover), never to an empty portal.

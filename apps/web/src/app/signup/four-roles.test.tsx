@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
@@ -48,6 +48,8 @@ async function throughName(tile: RegExp) {
   await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
   await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
+  // the partner steps load on demand (partner-steps-loader); a busy run can still be fetching them
+  await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull());
   return user;
 }
 

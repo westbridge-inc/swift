@@ -70,8 +70,8 @@ describe('[Q7b] signing in from the customer app', () => {
     expect(mocked.verifyPartnerLogin).toHaveBeenCalled();
   });
 
-  it('a partner page is still a partner sign-in', async () => {
-    expect(await signIn(`next=${encodeURIComponent('/dashboard/orders')}`)).toBe('/dashboard');
+  it('a partner page is still a partner sign-in, and [FLOW-QA F31] it goes back to that page', async () => {
+    expect(await signIn(`next=${encodeURIComponent('/dashboard/orders')}`)).toBe('/dashboard/orders');
     expect(mocked.verifyPartnerLogin).toHaveBeenCalled();
     expect(mocked.verifyCustomerLogin).not.toHaveBeenCalled();
   });
