@@ -19,3 +19,16 @@ describe('[FLOW-QA F31] private pages keep ?next', () => {
     window.history.replaceState(null, '', '/');
   });
 });
+
+describe('[FLOW-QA F15] a refresh refused for too many checks offers signing in again', () => {
+  it('says what happened and links to sign-in with this page as next; never a sign-out', async () => {
+    const { ConsoleUnreachable } = await import('./console-session');
+    const { render: r, screen } = await import('@testing-library/react');
+    window.history.replaceState(null, '', '/portal/documents');
+    r(<ConsoleUnreachable onRetry={() => {}} rateLimited />);
+    expect(screen.getByText('Too many sign-in checks from your network right now.')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Sign in again' }).getAttribute('href')).toBe(`/login?next=${encodeURIComponent('/portal/documents')}`);
+    expect(screen.queryByText(/can.t be reached/)).toBeNull();
+    window.history.replaceState(null, '', '/');
+  });
+});

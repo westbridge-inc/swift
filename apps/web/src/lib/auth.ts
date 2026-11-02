@@ -128,7 +128,7 @@ export function getSessionPrincipal(): string | null {
  * refreshes the locally tracked principal, which the mid-request account-change
  * guards below compare against.
  */
-export type SessionAnswer = { ok: boolean; unreachable?: true; user?: Record<string, unknown> };
+export type SessionAnswer = { ok: boolean; unreachable?: true; rateLimited?: true; user?: Record<string, unknown> };
 export async function sessionProbe(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   const forget = () => {
@@ -202,6 +202,8 @@ export async function restoreSession(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   const refresh = await tryRefresh();
   if (refresh === 'unreachable') return { ok: false, unreachable: true };
+  // [FLOW-QA F15] still not a sign-out, but the page can offer "Sign in again" instead of only "try again"
+  if (refresh === 'rate-limited') return { ok: false, unreachable: true, rateLimited: true };
   if (refresh === 'signed-out') return { ok: false };
   return sessionProbe();
 }
@@ -296,7 +298,7 @@ export function subscribeSelectedStore(listener: () => void): () => void {
 /** [REVIEW-F2 #1968 S4-4] What the refresh step learned. Only the server saying
  *  no is a sign-out: a 5xx, a timeout (408), a rate limit (429 — refreshes are
  *  limited per address) or a dropped connection says nothing about the session. */
-type RefreshOutcome = 'refreshed' | 'signed-out' | 'unreachable';
+type RefreshOutcome = 'refreshed' | 'signed-out' | 'unreachable' | 'rate-limited';
 let refreshFlight: Promise<RefreshOutcome> | null = null;
 
 /** One refresh at a time: concurrent 401s share the flight, so a rotated
@@ -309,7 +311,8 @@ async function tryRefresh(): Promise<RefreshOutcome> {
           method: 'POST', credentials: 'include', headers: { ...clientHeaders },
         });
         if (res.ok) return 'refreshed';
-        return res.status >= 500 || res.status === 408 || res.status === 429 ? 'unreachable' : 'signed-out';
+        if (res.status === 429) return 'rate-limited';
+        return res.status >= 500 || res.status === 408 ? 'unreachable' : 'signed-out';
       } catch {
         return 'unreachable';
       } finally {
@@ -363,6 +366,9 @@ export async function apiFetch(
     // sign-out: the session is kept, the page stays, and the caller sees an error.
     if (refresh === 'unreachable') {
       throw new ApiRequestError('Swift can\u2019t be reached right now. Check your connection and try again.', 503, 'UNREACHABLE');
+    }
+    if (refresh === 'rate-limited') {
+      throw new ApiRequestError('Too many sign-in checks from your network right now. Wait a minute, or sign in again.', 429, 'RATE_LIMITED');
     }
     if (refresh === 'refreshed' && snapshotIsCurrent(requestSession)) res = await doFetch();
     if (res.status === 401) {

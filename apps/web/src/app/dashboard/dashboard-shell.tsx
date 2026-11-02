@@ -218,7 +218,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   // [W-01 · UI-SWEEP U23] Only the server saying "no session" goes to /login;
   // a check that could not reach Swift says so instead (components/console-session).
   const gate = useConsoleSession();
-  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} />;
+  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} rateLimited={gate.rateLimited} />;
   if (gate.phase !== 'ready') return <div className="sw-page sw-empty" role="status">Opening your business…</div>;
   return (
     <Providers offline="fail" keepFor={KEEP_TABS_FOR}>

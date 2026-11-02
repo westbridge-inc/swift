@@ -29,12 +29,12 @@ export async function checkConsoleSession(): Promise<SessionAnswer> {
 
 export type ConsoleGate =
   | { phase: 'checking' }
-  | { phase: 'unreachable'; retry: () => void }
+  | { phase: 'unreachable'; retry: () => void; rateLimited?: boolean }
   | { phase: 'ready'; person: ShellPerson };
 
 export function useConsoleSession(): ConsoleGate {
   const router = useRouter();
-  const [gate, setGate] = useState<{ phase: 'checking' } | { phase: 'unreachable' } | { phase: 'ready'; person: ShellPerson }>({ phase: 'checking' });
+  const [gate, setGate] = useState<{ phase: 'checking' } | { phase: 'unreachable'; rateLimited?: boolean } | { phase: 'ready'; person: ShellPerson }>({ phase: 'checking' });
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => { setGate({ phase: 'checking' }); setAttempt((n) => n + 1); }, []);
 
@@ -47,18 +47,33 @@ export function useConsoleSession(): ConsoleGate {
       if (session.ok) {
         const name = [session.user?.['firstName'], session.user?.['lastName']].filter((v) => typeof v === 'string').join(' ');
         setGate({ phase: 'ready', person: { name, phone: null } });
-      } else if (session.unreachable) setGate({ phase: 'unreachable' });
+      } else if (session.unreachable) setGate({ phase: 'unreachable', rateLimited: session.rateLimited === true });
       // [FLOW-QA F31] back to the page they asked for, once signed in
       else router.replace(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
     });
     return () => { cancelled = true; };
   }, [router, attempt]);
 
-  return gate.phase === 'unreachable' ? { phase: 'unreachable', retry } : gate;
+  return gate.phase === 'unreachable' ? { phase: 'unreachable', retry, rateLimited: gate.rateLimited } : gate;
 }
 
 /** What a partner sees when the check itself failed: never a sign-out, and a way to try again. */
-export function ConsoleUnreachable({ onRetry }: { onRetry: () => void }) {
+export function ConsoleUnreachable({ onRetry, rateLimited = false }: { onRetry: () => void; rateLimited?: boolean }) {
+  // [FLOW-QA F15] Refused for too many checks from one network (a carrier address many people share): Swift WAS
+  // reached, so the page says so and offers signing in again, back to this page.
+  if (rateLimited) {
+    const here = typeof window === 'undefined' ? '/' : window.location.pathname + window.location.search;
+    return (
+      <div className="sw-page sw-empty" role="alert">
+        <p className="sw-heading">Too many sign-in checks from your network right now.</p>
+        <p className="sw-caption text-[15px] leading-[22px]">
+          This is not a sign-out. Wait a minute and try again, or sign in again now.
+        </p>
+        <a href={`/login?next=${encodeURIComponent(here)}`} className="sw-btn sw-btn-md mt-4">Sign in again</a>
+        <button type="button" onClick={onRetry} className="sw-btn sw-btn-md sw-btn-outline mt-2">Try again</button>
+      </div>
+    );
+  }
   return (
     <div className="sw-page sw-empty" role="alert">
       <p className="sw-heading">Swift can&apos;t be reached right now.</p>
