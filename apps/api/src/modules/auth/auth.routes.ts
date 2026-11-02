@@ -18,6 +18,7 @@ import { ensureProFeeBorn } from '../services/pro-fee';
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
+import { AUTH_LIMITS, bodyPhone, loginCredential, perAddress, perCredential, sessionCookie } from './auth-rate-limits';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -101,12 +102,6 @@ const authRateLimit = {
   },
 };
 
-const otpRateLimit = {
-  config: {
-    rateLimit: { max: 5, timeWindow: '1 minute' },
-  },
-};
-
 // The storage adapters preserve the supplied filename extension. Avatar
 // authority deliberately accepts only the exact server-issued
 // nanoid-plus-alphanumeric-extension shape, so never let a multipart filename
@@ -119,14 +114,21 @@ const SELFIE_FILENAME_BY_MIME: Readonly<Record<string, string>> = {
 
 export async function authRoutes(app: FastifyInstance) {
   const authService = new AuthService(app);
+  // [FLOW-QA F15] Two ceilings per sign-in route (auth-rate-limits.ts): the tight one per address AND number (or
+  // session cookie), and a higher one per address alone, so people sharing one carrier address do not lock each other out.
+  // [REVIEW-GMF2 S4] each code route has its own per-number bucket: a send, three wrong tries and a resend are not one count.
+  const codeLimits = (route: 'send' | 'verify' | 'reset-request' | 'reset') => ({ config: perAddress(AUTH_LIMITS.codePerAddress), preValidation: perCredential(app, `code-${route}`, AUTH_LIMITS.codePerNumber, bodyPhone) });
+  const accountLimits = { config: perAddress(AUTH_LIMITS.accountPerAddress), preValidation: perCredential(app, 'account', AUTH_LIMITS.accountPerNumber, bodyPhone) };
+  const passwordLimits = { config: perAddress(AUTH_LIMITS.passwordPerAddress), preValidation: perCredential(app, 'password', AUTH_LIMITS.passwordPerCredential, loginCredential, 'credential') };
+  const refreshLimits = { config: perAddress(AUTH_LIMITS.refreshPerAddress), preValidation: perCredential(app, 'refresh', AUTH_LIMITS.refreshPerSession, sessionCookie) };
 
-  app.post('/send-otp', otpRateLimit, async (request, reply) => {
+  app.post('/send-otp', codeLimits('send'), async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
     const result = await authService.sendOtp(body.phone, request.ip);
     return reply.send({ success: true, data: result });
   });
 
-  app.post('/verify-otp', otpRateLimit, async (request, reply) => {
+  app.post('/verify-otp', codeLimits('verify'), async (request, reply) => {
     const body = verifyOtpSchema.parse(request.body);
     const result = await authService.verifyOtp(body.phone, body.code, {
       deviceId: (request.headers['x-device-id'] as string) || 'unknown',
@@ -185,7 +187,7 @@ export async function authRoutes(app: FastifyInstance) {
     return { success: true, data: acceptanceStatus({ ...(after ?? user), pro: await proAgreementState(app.prisma, request.user.userId) }) };
   });
 
-  app.post('/register', authRateLimit, async (request, reply) => {
+  app.post('/register', accountLimits, async (request, reply) => {
     const body = registerSchema.parse(request.body);
     // [MC-PR3] "TEST-" names belong to test accounts (+5920…) only — checked before the signup proof is spent.
     assertNameNotReserved(body.firstName, body.phone);
@@ -227,7 +229,7 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.status(201).send({ success: true, data: result });
   });
 
-  app.post('/refresh', authRateLimit, async (request, reply) => {
+  app.post('/refresh', refreshLimits, async (request, reply) => {
     // [A-01 / W-01] a browser refreshes from its HttpOnly refresh cookie (client header + allowed origin), never from a body it could not have
     const credential = refreshCredentialOf(request);
     if (!credential) {
@@ -454,7 +456,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   // ── Email + password (secondary to phone OTP) ──────────────────────────
 
-  app.post('/password/login', authRateLimit, async (request, reply) => {
+  app.post('/password/login', passwordLimits, async (request, reply) => {
     const body = passwordLoginSchema.parse(request.body);
     const result = await authService.loginWithPassword(
       { phone: body.phone, email: body.email },
@@ -503,13 +505,13 @@ export async function authRoutes(app: FastifyInstance) {
 
   // Reset request = the normal OTP send, for the reset purpose only: this code
   // resets a password and cannot sign in [L04 · AUTH-2]
-  app.post('/password/reset-request', otpRateLimit, async (request, reply) => {
+  app.post('/password/reset-request', codeLimits('reset-request'), async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
     const result = await authService.sendOtp(body.phone, request.ip, 'password-reset');
     return reply.send({ success: true, data: result });
   });
 
-  app.post('/password/reset', otpRateLimit, async (request, reply) => {
+  app.post('/password/reset', codeLimits('reset'), async (request, reply) => {
     const body = resetPasswordSchema.parse(request.body);
     await authService.resetPassword(body.phone, body.code, body.newPassword);
     return reply.send({ success: true, data: { message: 'Password reset. All sessions logged out.' } });

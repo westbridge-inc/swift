@@ -33,7 +33,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
 import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-context';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { ridesRoutes } from '../modules/rides/rides.routes';
@@ -150,7 +150,7 @@ beforeAll(async () => {
   recordDispatchQueue(app);
   // As server.ts does: a fresh tenant store per request BEFORE any auth hook.
   app.addHook('onRequest', async () => { beginRequestTenantContext(); });
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
