@@ -101,10 +101,12 @@ describe('[FLOW-QA2 NEW-5] the vendors page asks a business for what the store c
     expect(step).not.toMatch(/\bTIN\b/);
   });
 
-  it('each document it names is on the checklists: owner ID, registration or the own-name declaration, storefront photo, a restaurant’s GRA licence', () => {
+  it('each document it names is on the checklists: owner ID, registration or the own-name declaration, storefront photo, a restaurant’s GRA licence, a service business’s owner ID only', () => {
     for (const key of ['SUPERMARKET', 'STORE']) expect(checklist(key)).toEqual(['owner_national_id', 'business_registration', 'storefront_photo']);
     expect(checklist('RESTAURANT')).toEqual(['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'storefront_photo']);
     expect(checklist('STORE_OWN_NAME')).toEqual(['owner_national_id', 'own_name_declaration', 'storefront_photo']);
-    expect(step).toContain('Owner ID, business registration (or a signed declaration if you trade under your own surname) and a photo of your storefront; a restaurant adds its GRA licence.');
+    // [REVIEW-F3 S3-1] the page covers service businesses too: their checklist is the owner's ID only
+    expect(checklist('SERVICE')).toEqual(['owner_national_id']);
+    expect(step).toContain('Owner ID, business registration (or a signed declaration if you trade under your own surname) and a photo of your storefront; a restaurant adds its GRA licence, and a service business sends only the owner’s ID.');
   });
 });
