@@ -78,16 +78,21 @@ describe('[promo-film finding] the cash card names a store only when one is owed
     expect(owesStore({ payToVendor: Number.NaN })).toBe(false);
   });
 
-  it('the offer card gates "Pay {store} …" on it and keeps the "Cash job — collect" line', () => {
-    const src = readFileSync(join(__dirname, 'MoverHomeScreen.tsx'), 'utf8');
-    const block = src.slice(src.indexOf('{offer.cashMath ? ('), src.indexOf('Judge the bag before you commit'));
-    expect(block).toContain('Cash job — collect {money(offer.cashMath.collectFromCustomer)} from the customer');
-    const gate = block.indexOf('{owesStore(offer.cashMath) ? (');
-    const storeLine = block.indexOf("Pay {offer.vendorName ?? 'the store'}");
+  it('the offer card draws its cash math from OfferCashMath, which gates "Pay {store} …" and keeps the collect line', () => {
+    const screen = readFileSync(join(__dirname, 'MoverHomeScreen.tsx'), 'utf8');
+    expect(screen).toContain('<OfferCashMath cashMath={offer.cashMath} vendorName={offer.vendorName} />');
+    expect(screen).not.toContain("Pay {offer.vendorName ?? 'the store'}");
+    const block = readFileSync(join(__dirname, 'OfferCashMath.tsx'), 'utf8');
+    expect(block).toContain('Cash job — collect {money(cashMath.collectFromCustomer)} from the customer');
+    const gate = block.indexOf('{owesStore(cashMath) ? (');
+    const storeLine = block.indexOf("Pay {vendorName ?? 'the store'}");
+    const otherwise = block.indexOf(') : (', gate);
+    const youKeepAlone = block.indexOf('You keep {money(cashMath.youKeep)}');
+    // the store line is the gate's TRUE branch and "You keep" its FALSE branch (never swapped), once each
     expect(gate).toBeGreaterThan(-1);
     expect(storeLine).toBeGreaterThan(gate);
-    // only one store line, and it is inside the gate
-    expect(block.split("Pay {offer.vendorName ?? 'the store'}").length).toBe(2);
-    expect(block).toContain('You keep {money(offer.cashMath.youKeep)}');
+    expect(otherwise).toBeGreaterThan(storeLine);
+    expect(youKeepAlone).toBeGreaterThan(otherwise);
+    expect(block.split("Pay {vendorName ?? 'the store'}").length).toBe(2);
   });
 });

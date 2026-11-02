@@ -51,7 +51,8 @@ import { dk, withAlpha, DCard, DemandBand, DStat, DWeekBars } from '../surface';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { useBackgroundLocationDisclosure } from './BackgroundLocationDisclosure';
-import { offerEarnings, owesStore } from './offer-earnings';
+import { offerEarnings } from './offer-earnings';
+import { OfferCashMath } from './OfferCashMath';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
@@ -210,30 +211,7 @@ export function DispatchOfferCard({
                     commitment beside it. Every number is server-computed and
                     the block is ABSENT unless the server could reconcile the
                     split — never rendered from client arithmetic. */}
-                {offer.cashMath ? (
-                  <View
-                    style={{
-                      marginTop: space.md,
-                      padding: space.md,
-                      borderRadius: radius.md,
-                      backgroundColor: color.surface.subtle,
-                      gap: 2,
-                    }}
-                  >
-                    <T variant="caption" weight="semibold">
-                      Cash job — collect {money(offer.cashMath.collectFromCustomer)} from the customer
-                    </T>
-                    {/* A store's share only on a store order: a ride or a courier job pays no store. */}
-                    {owesStore(offer.cashMath) ? (
-                      <T variant="caption" tone="muted">
-                        Pay {offer.vendorName ?? 'the store'} {money(offer.cashMath.payToVendor)} · you keep{' '}
-                        {money(offer.cashMath.youKeep)}
-                      </T>
-                    ) : (
-                      <T variant="caption" tone="muted">You keep {money(offer.cashMath.youKeep)}</T>
-                    )}
-                  </View>
-                ) : null}
+                <OfferCashMath cashMath={offer.cashMath} vendorName={offer.vendorName} />
                 {/* Judge the bag before you commit (grocery runs get big) */}
                 {offer.itemCount ? (
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 6 }}>
