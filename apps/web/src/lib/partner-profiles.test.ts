@@ -2,8 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, type ApiRequest } from '@/test/test-utils';
 import { getDriverProfile, getRiderProfile } from './mover-api';
 import { getProviderFee } from './provider-fee-api';
-import { hasProviderProfile, readPartnerProfiles } from './auth';
-import { partnerProfiles } from './partner-profiles';
+import { isProvider, partnerProfiles, readPartnerProfiles } from './partner-profiles';
 
 // ---------------------------------------------------------------------------
 // [PORTAL-404 · FLOW-QA F29] GET /auth/me says which partner profiles the person holds (`data.profiles`); the website
@@ -101,19 +100,19 @@ describe('[F29] the provider fee is asked only of a pro', () => {
     expect(asked).toContain('/api/v1/provider/subscription');
   });
 
-  it('hasProviderProfile reads /auth/me and asks the provider route only when /auth/me does not say', async () => {
+  it('isProvider (the header link, the signed-in card) reads /auth/me and asks the provider route only when it does not say', async () => {
     let asked = server({ rider: false, driver: false, provider: false });
-    expect(await hasProviderProfile()).toBe(false);
+    expect(await isProvider()).toBe(false);
     expect(asked).toEqual([ME]);
     asked = server({ rider: false, driver: false, provider: true });
-    expect(await hasProviderProfile()).toBe(true);
+    expect(await isProvider()).toBe(true);
     expect(asked).toEqual([ME]);
     asked = server(undefined, { '/api/v1/services/providers/me': { body: { success: true, data: { id: 'p1' } } } });
-    expect(await hasProviderProfile()).toBe(true);
+    expect(await isProvider()).toBe(true);
     expect(asked).toEqual([ME, '/api/v1/services/providers/me']);
     // /auth/me failing is not "not a pro": the provider route is asked, as before.
     asked = server('fail', { '/api/v1/services/providers/me': { body: { success: true, data: { id: 'p1' } } } });
-    expect(await hasProviderProfile()).toBe(true);
+    expect(await isProvider()).toBe(true);
     expect(asked).toEqual([ME, '/api/v1/services/providers/me']);
   });
 });

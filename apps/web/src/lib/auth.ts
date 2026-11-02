@@ -416,24 +416,9 @@ export async function apiFetch(
 }
 
 
-/** [PORTAL-404 · FLOW-QA F29] Which of the signed-in person's own partner profiles exist, as GET /auth/me says
- *  (`data.profiles`). Null when the answer does not carry all three as yes/no (an API from before it said so): the
- *  caller then asks the profile route itself, as it always did. */
-export type PartnerProfiles = { rider: boolean; driver: boolean; provider: boolean };
-export function readPartnerProfiles(value: unknown): PartnerProfiles | null {
-  const v = value as Partial<Record<keyof PartnerProfiles, unknown>> | null | undefined;
-  if (!v || typeof v.rider !== 'boolean' || typeof v.driver !== 'boolean' || typeof v.provider !== 'boolean') return null;
-  return { rider: v.rider, driver: v.driver, provider: v.provider };
-}
-
 /** [BILL-PRO PR6] Does the signed-in person have a provider profile (a pro)? Read with the session cookie the
- *  sign-in just set; any failure is "no". [F29] Asked of /auth/me first (a signed-in answer is a 200, never a 404 the
- *  browser logs for a person who is not a pro); only an API that does not say asks the provider route. */
+ *  sign-in just set; any failure is "no". */
 export async function hasProviderProfile(): Promise<boolean> {
-  const known = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', headers: { ...clientHeaders } })
-    .then(async (me) => (me.ok ? readPartnerProfiles((await me.json().catch(() => null))?.data?.profiles) : null))
-    .catch(() => null);
-  if (known) return known.provider;
   try {
     const res = await fetch(`${API_URL}/api/v1/services/providers/me`, { credentials: 'include', headers: { ...clientHeaders } });
     return res.ok;
