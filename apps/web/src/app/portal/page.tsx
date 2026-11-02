@@ -10,7 +10,6 @@ import { readSettlementLedger } from '@/lib/cash-settlement-view';
 import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
 import { NoEarnerProfile } from '@/components/pro-office-note';
-import { partnerSignupHref } from '@/lib/signup-roles';
 import {
   confirmRiderSettlement, getDriverProfile, getDriverSubscription, getDriverSummary, getEarningsStatementPath,
   getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary, getVerificationStatus, type EarningsSummary,
@@ -173,9 +172,10 @@ export default function PortalHome() {
       <NoEarnerProfile>
         {/* [WEB-ONBOARDING · FLOW-QA F27] the website's own doors (partners have no app yet) */}
         <p className="rounded-2xl border border-dashed border-[var(--swift-border)] bg-[var(--swift-card)] p-10 text-center text-sm text-[var(--swift-muted)]">
-          No earner profile on this account. To earn with Swift:{' '}
-          <Link href={partnerSignupHref('rider')} className="font-semibold underline">Deliver with Swift</Link> or{' '}
-          <Link href={partnerSignupHref('driver')} className="font-semibold underline">Drive a taxi with Swift</Link>.
+          {/* [REVIEW-LIGHT2 #2309] a signed-in account adds its vehicle on the sign-up's resume door: the partner doors would
+              show it "Go to your dashboard" instead */}
+          No earner profile on this account.{' '}
+          <Link href="/signup?resume=mover" className="font-semibold underline">Add your vehicle: deliver or drive a taxi with Swift</Link>.
         </p>
       </NoEarnerProfile>
     );

@@ -84,7 +84,9 @@ export default function DocumentsPage() {
         <h1 className="sw-title">Documents</h1>
         {/* [WEB-ONBOARDING · FLOW-QA F18] a new mover reads how to start first; the renewal line is for an approved one */}
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
-          {d?.roleVerified
+          {/* [REVIEW-LIGHT2 #2309] an approved mover whose document lapsed (marked EXPIRED, or approved and past its date)
+              keeps the renewal line: it is exactly when it applies */}
+          {d?.roleVerified || (d?.documents ?? []).some((doc) => doc.status === 'EXPIRED' || (doc.status === 'APPROVED' && !!doc.expiresAt && new Date(doc.expiresAt).getTime() <= Date.now()))
             ? 'Upload renewals on a big screen — we review documents Monday to Saturday, 8:00–16:00 Guyana time. An expired document takes you offline until it is renewed.'
             : 'Send these documents to start. We review documents Monday to Saturday, 8:00–16:00 Guyana time.'}
         </p>

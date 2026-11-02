@@ -55,3 +55,19 @@ describe('[F18] a new mover reads how to start first; the renewal line is for ap
     expect(screen.queryByText(/Send these documents to start/)).toBeNull();
   });
 });
+
+describe('[REVIEW-LIGHT2 #2309] an approved mover whose document has lapsed', () => {
+  it('reads how many to send, and keeps the renewal line (not "Send these documents to start")', async () => {
+    open([doc('drivers_licence', 'EXPIRED'), doc('vehicle_registration', 'APPROVED'), doc('vehicle_insurance', 'APPROVED')]);
+    expect(await screen.findByText('1 document to send before you can go online.')).toBeTruthy();
+    expect(screen.getByText(/^Upload renewals on a big screen/)).toBeTruthy();
+    expect(screen.queryByText(/Send these documents to start/)).toBeNull();
+  });
+
+  it('approved but past its date before the sweep: to send, never "In review"', async () => {
+    open([{ ...doc('drivers_licence', 'APPROVED'), expiresAt: '2020-01-01T00:00:00.000Z' }, doc('vehicle_registration', 'APPROVED'), doc('vehicle_insurance', 'APPROVED')]);
+    expect(await screen.findByText('1 document to send before you can go online.')).toBeTruthy();
+    expect(screen.queryByText(/In review — nothing more needed/)).toBeNull();
+  });
+});
+

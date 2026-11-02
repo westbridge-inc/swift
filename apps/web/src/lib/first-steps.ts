@@ -29,14 +29,18 @@ export type MoverNextStep = { kind: 'send'; count: number } | { kind: 'review' }
 
 /** What a rider or driver not yet cleared does next: send the documents still owed, or wait while Swift reads them. */
 export function moverNextStep(status: {
-  checklist?: string[]; documents?: Array<{ docType: string; status: string }>; roleVerified?: boolean;
-} | null | undefined): MoverNextStep {
+  checklist?: string[]; documents?: Array<{ docType: string; status: string; expiresAt?: string | null }>; roleVerified?: boolean;
+} | null | undefined, now = new Date()): MoverNextStep {
   if (!status || status.roleVerified !== false) return null;
   const list = (status.checklist ?? []).filter((docType) => docType !== OPTIONAL_FOR_MOVERS);
   // Newest document per type wins, as the Documents page reads the list (newest first).
-  const latest = new Map<string, string>();
-  for (const doc of status.documents ?? []) if (!latest.has(doc.docType)) latest.set(doc.docType, doc.status);
-  const toSend = list.filter((docType) => !SENT.has(latest.get(docType) ?? 'MISSING')).length;
+  const latest = new Map<string, { status: string; expiresAt?: string | null }>();
+  for (const doc of status.documents ?? []) if (!latest.has(doc.docType)) latest.set(doc.docType, doc);
+  // [REVIEW-LIGHT2 #2309] An approved copy past its date is out of date the moment it lapses, before the daily sweep
+  // marks it EXPIRED (or while the sweep holds the row): it is the mover's to send again, as the server's checks read it.
+  const sent = (doc: { status: string; expiresAt?: string | null } | undefined) => !!doc && SENT.has(doc.status)
+    && !(doc.status === 'APPROVED' && doc.expiresAt && new Date(doc.expiresAt).getTime() <= now.getTime());
+  const toSend = list.filter((docType) => !sent(latest.get(docType))).length;
   if (toSend > 0) return { kind: 'send', count: toSend };
   return list.length > 0 ? { kind: 'review' } : null;
 }
