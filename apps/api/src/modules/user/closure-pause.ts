@@ -18,8 +18,10 @@ export const CLOSURE_ORDERS_PAUSED = 'ACCOUNT_CLOSURE_ORDERS_PAUSED';
 export const CLOSURE_ORDERS_PAUSE_LIFTED = 'ACCOUNT_CLOSURE_ORDERS_PAUSE_LIFTED';
 export const ACCOUNT_CLOSURE_CANCELLED = 'ACCOUNT_CLOSURE_CANCELLED';
 
-/** What a store's "Resume orders" answers while the request holds the pause. */
-export const CLOSURE_PAUSE_REFUSAL = 'New orders are paused because you asked Swift to close your account. Cancel the closure request (Account, Request account closure) to take new orders again.';
+/** What a store's "Resume orders" answers while the request holds the pause: to the owner (the app has no cancel, so
+ *  it names the website and support), and to a team member (who did not ask). [REVIEW-F #2304 S3-1] */
+export const CLOSURE_PAUSE_REFUSAL = 'New orders are paused because you asked Swift to close your account. To take new orders again, cancel the request on swiftgy.com (Account, Request account closure) or contact Swift support.';
+export const CLOSURE_PAUSE_REFUSAL_TEAM = 'New orders are paused because the store’s owner asked Swift to close their account. Only the owner, or Swift support, can lift the pause.';
 
 /** What the owner's cancel answers once support has the request, or the account is already closed. */
 export const CLOSURE_IN_PROGRESS_REFUSAL = 'Swift is already closing your account, so this request can no longer be cancelled here. Contact Swift support.';

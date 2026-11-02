@@ -12,7 +12,11 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_MESSAGE_WEBSITE, ACCOUNT_CLOSURE_SUBJECT } from '../modules/user/account-closure';
-import { ACCOUNT_CLOSURE_CANCELLED, CLOSURE_ORDERS_PAUSED, CLOSURE_ORDERS_PAUSE_LIFTED, CLOSURE_PAUSE_REFUSAL } from '../modules/user/closure-pause';
+import { ACCOUNT_CLOSURE_CANCELLED, CLOSURE_ORDERS_PAUSED, CLOSURE_ORDERS_PAUSE_LIFTED, CLOSURE_PAUSE_REFUSAL, CLOSURE_PAUSE_REFUSAL_TEAM } from '../modules/user/closure-pause';
+import { BILLING_HELD_FOR_CLOSURE, BILLING_RESUMED_AFTER_CLOSURE, CLOSURE_FEE_HOLD_NOTE } from '../modules/billing/closure-fee-hold';
+import { BillingService } from '../modules/billing/billing.service';
+import { getPaymentProvider } from '../providers/payment/payment-provider';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { restoreBillingAccess } from '../modules/billing/billing-access';
 import { SupportService } from '../modules/support/support.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -32,7 +36,9 @@ const BROWSER = { 'x-swift-client': 'web', origin: ORIGIN } as const;
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const orderIds: string[] = [];
+const subIds: string[] = [];
 let seq = 0;
+const DAY = 86_400_000;
 const phoneBase = 592_018_600_000 + Math.floor(Math.random() * 90_000);
 
 async function owner(stores: Array<Record<string, unknown>> = [{}]) {
@@ -93,6 +99,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   const quiet = <T>(p: Promise<T>) => p.catch(() => undefined);
+  await quiet(cleanupBillingClocks(app.prisma, subIds));
+  await quiet(app.prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } }));
+  await quiet(app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } }));
+  await quiet(app.prisma.vendorStaff.deleteMany({ where: { vendorId: { in: vendorIds } } }));
   await quiet(app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }));
   // The CHECK allows clearing the pause in the same write as anything else, so cleanup never trips it.
   await quiet(app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } }));
@@ -119,7 +129,7 @@ describe('[WEB-DELETE · owner ruling] a store owner\'s closure request pauses n
     const web = await signIn(p.phone, 'website');
     const res = await request(web);
     expect(res.statusCode, res.payload).toBe(202);
-    expect(res.json().data.message, 'the app shows this sentence').toMatch(/New orders at your store are paused now; orders already placed still finish\.$/);
+    expect(res.json().data.message, 'the app shows this sentence').toMatch(/New orders at your store are paused now and your weekly fee stops; orders already placed still finish\.$/);
     const ticketId = res.json().data.ticketId as string;
     for (const id of p.vendorIds) {
       const s = await store(id);
@@ -207,15 +217,127 @@ describe('[WEB-DELETE · owner ruling] a store owner\'s closure request pauses n
     expect((await store(p.vendorIds[0]!)).closurePausedAt).toBeInstanceOf(Date);
   });
 
-  it('Swift staff resolving the request in the support queue lifts the pause, audited', async () => {
+  it('Swift staff resolving the request in the support queue lifts the pause, audited, and the weekly fee resumes', async () => {
     const p = await owner();
+    const sub = await fee(p.vendorIds[0]!);
     const phone = await signIn(p.phone, 'app');
     const ticketId = (await request(phone)).json().data.ticketId as string;
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).autoRenew).toBe(false);
     const staff = await app.prisma.user.create({ data: { phone: `+${phoneBase + 90_000 + seq}`, firstName: 'Support', lastName: 'Staff', roles: ['ADMIN'], activeRole: 'ADMIN' } });
     userIds.push(staff.id);
     await new SupportService(app.prisma, new NotificationService(app.prisma, app.io)).resolve(ticketId, staff.id, { status: 'RESOLVED', resolution: 'ANSWERED', adminNote: 'Closed at the owner\'s request by phone.' });
     expect((await store(p.vendorIds[0]!)).closurePausedAt).toBeNull();
     const [lifted] = await audits(ticketId, CLOSURE_ORDERS_PAUSE_LIFTED);
     expect(lifted).toMatchObject({ userId: staff.id, changes: { by: 'STAFF_RESOLVED', accountId: p.userId } });
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).autoRenew, 'the fee resumes when the request ends').toBe(true);
+  });
+
+  it('a typed ticket with the closure subject, resolved by staff, lifts nothing: only the confirmed request does', async () => {
+    const p = await owner();
+    const phone = await signIn(p.phone, 'app');
+    expect((await request(phone)).statusCode).toBe(202);
+    const typed = await app.prisma.supportTicket.create({ data: { userId: p.userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT, message: 'Typed by hand.' } });
+    const staff = await app.prisma.user.create({ data: { phone: `+${phoneBase + 80_000 + seq}`, firstName: 'Support', lastName: 'Typed', roles: ['ADMIN'], activeRole: 'ADMIN' } });
+    userIds.push(staff.id);
+    await new SupportService(app.prisma, new NotificationService(app.prisma, app.io)).resolve(typed.id, staff.id, { status: 'RESOLVED', resolution: 'ANSWERED' });
+    expect((await store(p.vendorIds[0]!)).closurePausedAt, 'the real request still holds the pause').toBeInstanceOf(Date);
+    expect(await audits(typed.id, CLOSURE_ORDERS_PAUSE_LIFTED)).toHaveLength(0);
+  });
+});
+
+/** A store's weekly fee: ACTIVE, auto-renewing, a paid week still running unless `paidUntil` says otherwise. */
+async function fee(vendorId: string, over: { autoRenew?: boolean; paidUntil?: Date } = {}) {
+  const end = over.paidUntil ?? new Date(Date.now() + 3 * DAY);
+  const start = new Date(end.getTime() - 7 * DAY);
+  const sub = await app.prisma.subscription.create({ data: {
+    vendorId, type: 'RESTAURANT', weeklyRate: 20000, status: 'ACTIVE', billingMethod: 'CASH', autoRenew: over.autoRenew ?? true,
+    currentPeriodStart: start, currentPeriodEnd: end, nextBillingDate: end, prepaidBalance: { create: { balance: 20000 } },
+  } });
+  subIds.push(sub.id);
+  const paymentRef = `wd-paid:${sub.id}`;
+  await app.prisma.subscriptionPayment.create({ data: { subscriptionId: sub.id, amount: 20000, paymentMethod: 'CASH', status: 'CAPTURED', periodStart: start, periodEnd: end, paidAt: start, externalRef: paymentRef } });
+  await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: 20000, currencyCode: 'GYD', paymentRef, idempotencyKey: `success:${sub.id}:${start.toISOString().slice(0, 10)}` } });
+  return sub;
+}
+const subRow = (id: string) => app.prisma.subscription.findUniqueOrThrow({ where: { id } });
+const payments = (id: string) => app.prisma.subscriptionPayment.count({ where: { subscriptionId: id } });
+
+describe('[WEB-DELETE · owner ruling 2 Nov] the weekly fee stops from the moment the closure is requested', () => {
+  it('the request holds every store fee at once (no new week charged or retried), audited and keyed to the request; a paid week still runs', async () => {
+    const p = await owner([{}, {}]);
+    const a = await fee(p.vendorIds[0]!);
+    const b = await fee(p.vendorIds[1]!);
+    const ticketId = (await request(await signIn(p.phone, 'website'))).json().data.ticketId as string;
+    for (const s of [a, b]) {
+      const row = await subRow(s.id);
+      expect(row).toMatchObject({ autoRenew: false, nextRetryAt: null, status: 'ACTIVE' });
+      expect(row.nextBillingDate, 'the paid week keeps its end').toEqual(s.nextBillingDate);
+      expect(await app.prisma.billingEvent.count({ where: { subscriptionId: s.id, note: CLOSURE_FEE_HOLD_NOTE, idempotencyKey: { contains: ticketId } } })).toBe(1);
+      expect(await app.prisma.auditLog.count({ where: { entity: 'Subscription', entityId: s.id, action: BILLING_HELD_FOR_CLOSURE } })).toBe(1);
+      expect(await payments(s.id), 'nothing already paid is refunded or charged').toBe(1);
+    }
+  });
+
+  it('cancelling resumes the held fee from then: a still-paid week renews on its own date, nothing is charged twice', async () => {
+    const p = await owner();
+    const s = await fee(p.vendorIds[0]!);
+    const web = await signIn(p.phone, 'website');
+    expect((await request(web)).statusCode).toBe(202);
+    const res = await cancel(web);
+    expect(res.statusCode, res.payload).toBe(200);
+    expect(res.json().data).toMatchObject({ feesResumed: 1 });
+    expect(res.json().data.message).toMatch(/Your weekly fee starts again from today\./);
+    const row = await subRow(s.id);
+    expect(row).toMatchObject({ autoRenew: true, status: 'ACTIVE' });
+    expect(row.nextBillingDate).toEqual(s.nextBillingDate);
+    expect(await payments(s.id)).toBe(1);
+    expect(await app.prisma.auditLog.count({ where: { entity: 'Subscription', entityId: s.id, action: BILLING_RESUMED_AFTER_CLOSURE } })).toBe(1);
+  });
+
+  it('a paid week that ended while the fee was held lapses owing nothing; cancelling restarts it due now with exactly one new week', async () => {
+    const p = await owner();
+    const s = await fee(p.vendorIds[0]!, { paidUntil: new Date(Date.now() - 2 * DAY) });
+    const web = await signIn(p.phone, 'website');
+    expect((await request(web)).statusCode).toBe(202);
+    const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    await billing.lapseStoppedSubscriptions();
+    expect((await subRow(s.id)).status, 'no new week fell due while the request was open').toBe('PAUSED');
+    expect(await payments(s.id)).toBe(1);
+    const before = Date.now();
+    const res = await cancel(web);
+    expect(res.statusCode, res.payload).toBe(200);
+    const row = await subRow(s.id);
+    expect(row).toMatchObject({ status: 'ACTIVE', autoRenew: true });
+    expect(row.currentPeriodStart.getTime(), 'the new week starts when the request was cancelled').toBeGreaterThanOrEqual(before - 1000);
+    expect(row.currentPeriodEnd.getTime() - row.currentPeriodStart.getTime()).toBe(7 * DAY);
+    expect(await payments(s.id), 'exactly one new week').toBe(2);
+  });
+
+  it('a fee the partner had already stopped is not touched by the request, and not resumed by the cancel', async () => {
+    const p = await owner();
+    const s = await fee(p.vendorIds[0]!, { autoRenew: false });
+    const web = await signIn(p.phone, 'website');
+    expect((await request(web)).statusCode).toBe(202);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: s.id, note: CLOSURE_FEE_HOLD_NOTE } })).toBe(0);
+    expect((await cancel(web)).json().data).toMatchObject({ feesResumed: 0 });
+    expect((await subRow(s.id)).autoRenew).toBe(false);
+  });
+});
+
+describe('[WEB-DELETE · REVIEW-F #2304 S3-1] the "Resume orders" refusal says the right thing to the right person', () => {
+  it('the owner is pointed to the website or support (the app has no cancel); a team member is told the owner asked', async () => {
+    const p = await owner();
+    const phone = await signIn(p.phone, 'app');
+    expect((await request(phone)).statusCode).toBe(202);
+    const mine = await resume(phone, p.vendorIds[0]!);
+    expect(mine.json().error).toMatchObject({ code: 'CLOSURE_REQUESTED', message: CLOSURE_PAUSE_REFUSAL });
+    expect(CLOSURE_PAUSE_REFUSAL).toMatch(/swiftgy\.com.*or contact Swift support\.$/);
+    seq += 1;
+    const member = await app.prisma.user.create({ data: { phone: `+${phoneBase + 70_000 + seq}`, firstName: 'Floor', lastName: 'Staff', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } } });
+    userIds.push(member.id);
+    await app.prisma.vendorStaff.create({ data: { vendorId: p.vendorIds[0]!, userId: member.id, role: 'MANAGER', invitedBy: p.userId } });
+    const theirs = await resume(await signIn(member.phone, 'app'), p.vendorIds[0]!);
+    expect(theirs.json().error).toMatchObject({ code: 'CLOSURE_REQUESTED', message: CLOSURE_PAUSE_REFUSAL_TEAM });
+    expect(CLOSURE_PAUSE_REFUSAL_TEAM).not.toMatch(/you asked/i);
   });
 });

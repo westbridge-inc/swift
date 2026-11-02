@@ -438,3 +438,22 @@ describe('[item 20 · S4-1] support tickets: the person binding is transaction-l
     } finally { await one.$disconnect(); }
   });
 });
+
+// [WEB-DELETE · REVIEW-G #2304 S3, adopted from REVIEW-GMF's probe] With the wall ON the completion's claim on the
+// closure request is written through the support-closure capability, outside the erasure's transaction: a completion
+// the erasure then refuses must give the claim back, or the owner could never cancel (a pause stuck on).
+describe('[WEB-DELETE] wall ON: a refused completion gives the closure claim back', () => {
+  it('a live order refuses completion; the ticket is OPEN again; the owner can still cancel', async () => {
+    const { AccountService } = await import('../modules/user/account.service');
+    const closer = await mkUser(['CUSTOMER'], 'CUSTOMER');
+    const own = await asPerson(closer, () => new AccountService(app).requestClosure(closer));
+    await mkOrder(closer, { status: 'PENDING' });
+    const url = `/api/v1/admin/support/${own.ticketId}/complete-account-closure`;
+    const res = await call('POST', url, tokens.admin, withAdminReason('POST', url, {}) as Record<string, unknown>);
+    expect(res.statusCode).toBe(409);
+    const t = await owner.supportTicket.findUniqueOrThrow({ where: { id: own.ticketId } });
+    expect(t.status).toBe('OPEN');
+    const cancelled = await asPerson(closer, () => new AccountService(app).cancelClosure(closer)).then(() => 'ok', (e: { code?: string }) => e.code);
+    expect(cancelled).toBe('ok');
+  });
+});

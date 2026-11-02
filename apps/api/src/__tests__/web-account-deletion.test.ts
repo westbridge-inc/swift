@@ -166,6 +166,7 @@ describe('[WEB-DELETE] GET /customer/account/deletion-check shows what stops the
     const mine = await order({ customerId: p.userId, status: 'PENDING' });
     const carrying = await order({ riderId: rider.id, status: 'PICKED_UP' });
     await order({ customerId: p.userId, status: 'DELIVERED' }); // finished: never listed
+    const decoy = await order({ status: 'PENDING' }); // [REVIEW-G #2304 S3-1] a stranger's live order: never listed
     const jar = await browserSignIn(p.phone);
 
     const before = await check(jar);
@@ -180,6 +181,7 @@ describe('[WEB-DELETE] GET /customer/account/deletion-check shows what stops the
       expect.objectContaining({ id: carrying.id, orderNumber: carrying.orderNumber, status: 'PICKED_UP', side: 'RIDER' }),
     ]));
     expect(data.openOrders.items).toHaveLength(2);
+    expect(data.openOrders.items.map((i: { id: string }) => i.id), 'a stranger\'s live order is never listed').not.toContain(decoy.id);
     // Only the person's own view of each order travels: no other person's id, name or number.
     expect(JSON.stringify(data)).not.toMatch(/customerId|riderId|phone/);
 

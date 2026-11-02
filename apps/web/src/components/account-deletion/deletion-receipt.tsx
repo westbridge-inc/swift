@@ -2,15 +2,17 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { sessionProbe } from '@/lib/auth';
+import { restoreSession, sessionProbe } from '@/lib/auth';
 import { endErasedSession, readDeletionReceipt } from '@/lib/account-deletion';
 import { DELETION_KEPT } from '@/lib/account-deletion-words';
 
 // ---------------------------------------------------------------------------
 // [WEB-DELETE] "Your account is deleted". The server ended every session when it closed the account; this page
-// asks the server first, and only when no session is left does it expire this browser's cookies and say what was
-// done (the server's own words, handed over by the flow in this tab). A browser still signed in was not deleted:
-// it is told so, and nobody is ever signed out by opening a link to this page.
+// asks the server first, the way the consoles do (lib/auth sessionProbe, then restoreSession: the access cookie lives
+// fifteen minutes, the refresh cookie a month). Only when the refresh too says no session is left does it expire this
+// browser's cookies. It says the account was deleted only with the server's receipt that the delete flow handed over
+// in this tab: a bare link (?status=...) shows the neutral words. A browser still signed in was not deleted: it is
+// told so, and nobody is ever signed out by opening a link to this page. [REVIEW-G/F #2304 S2]
 // ---------------------------------------------------------------------------
 
 /** The app's and the server's words for each receipt (apps/mobile PersonalDataScreen, account.service.ts). */
@@ -30,13 +32,15 @@ export function DeletionReceiptView() {
   useEffect(() => {
     let live = true;
     void (async () => {
-      const answer = await sessionProbe();
+      let answer = await sessionProbe();
+      // An expired access cookie is not "signed out": spend the refresh cookie once, as the consoles do.
+      if (!answer.ok && !answer.unreachable) answer = await restoreSession();
       if (!live) return;
       if (answer.ok) { setView({ phase: 'signed-in' }); return; }
       // Not an answer about the session: nothing is cleared on a guess.
       if (answer.unreachable) { setView({ phase: 'unreachable' }); return; }
       const stashed = readDeletionReceipt();
-      const status = stashed?.status ?? new URLSearchParams(window.location.search).get('status');
+      const status = stashed?.status ?? null;
       await endErasedSession();
       if (live) setView({ phase: 'done', status: status && RECEIPT_WORDS[status] ? status : null, message: stashed?.message ?? null });
     })();

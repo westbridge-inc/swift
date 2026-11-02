@@ -11,8 +11,8 @@ import {
   type DeletionCheck, type DeletionSide,
 } from '@/lib/account-deletion';
 import {
-  CLOSURE_LEAD, DELETE_LEAD, DELETION_GONE, DELETION_KEPT, DELETION_KEPT_LEAD, MOVER_DELETION_EFFECTS, STAFF_DELETION_EFFECTS, STORE_CLOSURE_EFFECTS,
-  STORE_ORDERS_PAUSED, STORE_ORDERS_PAUSE_NOW,
+  CLOSURE_IN_HAND, CLOSURE_LEAD, DELETE_LEAD, DELETION_GONE, DELETION_KEPT, DELETION_KEPT_LEAD, MOVER_DELETION_EFFECTS, STAFF_DELETION_EFFECTS,
+  STORE_CLOSURE_LATER, STORE_CLOSURE_NOW, STORE_ORDERS_PAUSED, STORE_ORDERS_PAUSE_NOW,
 } from '@/lib/account-deletion-words';
 
 // ---------------------------------------------------------------------------
@@ -142,13 +142,18 @@ function Flow({ area, backHref, check, recheck, rechecking }: {
           <p className="text-[var(--swift-muted)]">You keep access while our team resolves listings and anything outstanding. Nothing else is needed from you now; you don&apos;t need to send it again.</p>
           {paused && <p className="font-semibold">{STORE_ORDERS_PAUSED}</p>}
         </div>
-        <div className="sw-card space-y-3 p-5 text-sm">
-          <p className="text-[var(--swift-muted)]">Changed your mind? Cancel the request{check.ownsStore ? ' and your store can take new orders again once you resume them' : ''}.</p>
-          {error && <p role="alert" className="font-semibold text-[var(--swift-red)]">{error}</p>}
-          <button type="button" className="sw-btn sw-btn-md sw-btn-outline" disabled={busy || !check.closureRequest} onClick={() => void cancel()}>
-            {busy ? 'Cancelling…' : 'Cancel my closure request'}
-          </button>
-        </div>
+        {/* [REVIEW-F #2304 S4-1] Once Swift's team has the request (IN_PROGRESS) the server refuses a cancel: no button. */}
+        {check.closureRequest?.status === 'IN_PROGRESS' ? (
+          <p className="sw-card p-5 text-sm">{CLOSURE_IN_HAND} <Link href="/contact" className="font-semibold underline">Contact Swift support</Link>.</p>
+        ) : (
+          <div className="sw-card space-y-3 p-5 text-sm">
+            <p className="text-[var(--swift-muted)]">Changed your mind? Cancel the request{check.ownsStore ? ': your weekly fee starts again from then, and your store can take new orders again once you resume them' : ''}.</p>
+            {error && <p role="alert" className="font-semibold text-[var(--swift-red)]">{error}</p>}
+            <button type="button" className="sw-btn sw-btn-md sw-btn-outline" disabled={busy || !check.closureRequest} onClick={() => void cancel()}>
+              {busy ? 'Cancelling…' : 'Cancel my closure request'}
+            </button>
+          </div>
+        )}
         <LiveWork check={check} closure recheck={recheck} rechecking={rechecking} />
         <Effects area={area} closure ownsStore={check.ownsStore} />
         <Gone />
@@ -173,7 +178,7 @@ function Flow({ area, backHref, check, recheck, rechecking }: {
         <label className="flex min-h-11 items-start gap-3 text-sm font-semibold">
           <input type="checkbox" checked={ticked} disabled={busy || blocked} onChange={(e) => setTicked(e.target.checked)} className="mt-0.5 h-5 w-5 flex-none accent-[var(--swift-red)]" />
           <span>{!closure ? 'I understand that deleting my account cannot be undone.'
-            : check.ownsStore ? 'I want Swift to close my account. I understand my store stops taking new orders now.' : 'I want Swift to close my account.'}</span>
+            : check.ownsStore ? 'I want Swift to close my account. I understand my store stops taking new orders, and my weekly fee stops, now.' : 'I want Swift to close my account.'}</span>
         </label>
         {error && <p role="alert" className="text-sm font-semibold text-[var(--swift-red)]">{error}</p>}
         {error && <p className="text-sm text-[var(--swift-muted)]">Need a hand? <Link href="/contact" className="font-semibold underline">Contact Swift support</Link>.</p>}
@@ -232,7 +237,19 @@ function LiveWork({ check, closure, recheck, rechecking }: { check: DeletionChec
 }
 
 function Effects({ area, closure, ownsStore }: { area: DeletionArea; closure: boolean; ownsStore: boolean }) {
-  const lines = closure ? (ownsStore ? STORE_CLOSURE_EFFECTS : null)
+  if (closure && ownsStore) {
+    // [REVIEW-F #2304 S3-3] What happens now, and what happens when Swift's team closes the account, apart.
+    return (
+      <section aria-label="What happens to your store" className="sw-card p-5 text-sm">
+        <h2 className="font-bold">What happens to your store</h2>
+        <h3 className="mt-2 font-semibold">Now, when you send the request</h3>
+        <ul aria-label="Now" className="mt-1 list-disc space-y-1.5 pl-5 text-[var(--swift-muted)]">{STORE_CLOSURE_NOW.map((line) => <li key={line}>{line}</li>)}</ul>
+        <h3 className="mt-3 font-semibold">When Swift closes your account</h3>
+        <ul aria-label="When Swift closes your account" className="mt-1 list-disc space-y-1.5 pl-5 text-[var(--swift-muted)]">{STORE_CLOSURE_LATER.map((line) => <li key={line}>{line}</li>)}</ul>
+      </section>
+    );
+  }
+  const lines = closure ? null
     : area === 'store' ? STAFF_DELETION_EFFECTS : area === 'mover' ? MOVER_DELETION_EFFECTS : null;
   if (!lines) return null;
   const heading = closure ? 'What happens to your store' : area === 'store' ? 'Your store team' : 'Your rider or driver account';

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi, renderWithQuery, type ApiRequest } from '@/test/test-utils';
 import { DeleteAccountFlow, type DeletionArea } from './delete-account-flow';
 import type { DeletionCheck } from '@/lib/account-deletion';
-import { CLOSURE_LEAD, DELETE_LEAD, DELETION_GONE, DELETION_KEPT, MOVER_DELETION_EFFECTS, STAFF_DELETION_EFFECTS, STORE_CLOSURE_EFFECTS, STORE_ORDERS_PAUSED, STORE_ORDERS_PAUSE_NOW } from '@/lib/account-deletion-words';
+import { CLOSURE_LEAD, DELETE_LEAD, DELETION_GONE, DELETION_KEPT, MOVER_DELETION_EFFECTS, STAFF_DELETION_EFFECTS, CLOSURE_IN_HAND, STORE_CLOSURE_LATER, STORE_CLOSURE_NOW, STORE_ORDERS_PAUSED, STORE_ORDERS_PAUSE_NOW } from '@/lib/account-deletion-words';
 
 // ---------------------------------------------------------------------------
 // [WEB-DELETE · owner 1 Nov 2026] A person who signed up on the website deletes their own account there, as the
@@ -221,12 +221,16 @@ describe('[WEB-DELETE] a store owner closes by a request the team completes', ()
     expect(await screen.findByRole('heading', { name: 'Request account closure', level: 1 })).toBeTruthy();
     expect(screen.getByText(CLOSURE_LEAD)).toBeTruthy();
     const store = screen.getByRole('region', { name: 'What happens to your store' });
-    for (const line of STORE_CLOSURE_EFFECTS) expect(within(store).getByText(line)).toBeTruthy();
-    expect(within(store).getByText(/^New orders stop now/)).toBeTruthy();
+    // [REVIEW-F #2304 S3-3] What happens now, and what happens when Swift closes the account, apart.
+    const now = within(store).getByRole('list', { name: 'Now' });
+    for (const line of STORE_CLOSURE_NOW) expect(within(now).getByText(line)).toBeTruthy();
+    expect(within(now).getByText(/^Your weekly fee stops/)).toBeTruthy();
+    const later = within(store).getByRole('list', { name: 'When Swift closes your account' });
+    for (const line of STORE_CLOSURE_LATER) expect(within(later).getByText(line)).toBeTruthy();
     expect(screen.getByText(STORE_ORDERS_PAUSE_NOW)).toBeTruthy();
     // [owner ruling 1 Nov] The request itself pauses new orders: the old "press Pause new orders" advice is gone.
     expect(screen.queryByText(/Pause new orders/)).toBeNull();
-    await user.click(screen.getByRole('checkbox', { name: 'I want Swift to close my account. I understand my store stops taking new orders now.' }));
+    await user.click(screen.getByRole('checkbox', { name: 'I want Swift to close my account. I understand my store stops taking new orders, and my weekly fee stops, now.' }));
     await user.click(mainButton('Request account closure'));
     expect(await screen.findByRole('heading', { name: 'Your closure request is with our team' })).toBeTruthy();
     expect(await screen.findByText(STORE_ORDERS_PAUSED)).toBeTruthy();
@@ -258,6 +262,14 @@ describe('[WEB-DELETE] a store owner closes by a request the team completes', ()
     expect(calls.filter((c) => c.method === 'POST' && c.path === '/customer/account/closure-request/cancel')).toHaveLength(2);
     expect(calls.some((c) => c.path === '/customer/account/closure-request')).toBe(false);
     expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('once Swift\'s team has the request (IN_PROGRESS) there is no cancel button: the page says so and points to support', async () => {
+    api({ check: { ...OWNER, closureRequest: { ticketId: 't1', status: 'IN_PROGRESS', requestedAt: '2026-11-01T12:00:00.000Z', ordersPaused: true } } });
+    render('store');
+    expect(await screen.findByText(new RegExp(CLOSURE_IN_HAND.slice(0, 40)))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Cancel my closure request' })).toBeNull();
+    expect(screen.getAllByRole('link', { name: 'Contact Swift support' })[0]!.getAttribute('href')).toBe('/contact');
   });
 
   it('a cancel the server refuses is said in its words, and the request stays shown', async () => {

@@ -43,7 +43,7 @@ describe('[WEB-DELETE] the store dashboard\'s Account', () => {
     expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Request account closure' }).getAttribute('href')).toBe('/dashboard/settings/delete-account');
     // [owner ruling 1 Nov] the request itself stops new orders, and the card says so before the owner opens it
-    expect(screen.getByText(/New orders stop as soon as you ask/)).toBeTruthy();
+    expect(screen.getByText(/New orders and your weekly fee stop as soon as you ask/)).toBeTruthy();
   });
 
   it.each(['MANAGER', 'STAFF'])('a %s is offered "Delete my account"', async (role) => {
@@ -108,7 +108,7 @@ describe('[WEB-DELETE] the public how-to page', () => {
       'A rider or driver: Account, then Delete my account',
       'A customer: Account, then Personal details, then Delete my account',
     ]));
-    expect(screen.getByText(/A store owner closes the account by a request/).textContent).toMatch(/stops taking new orders as soon as the request is sent; orders already placed still finish, and cancelling the request lifts the pause/);
+    expect(screen.getByText(/A store owner closes the account by a request/).textContent?.replace(/\s+/g, ' ')).toMatch(/stops taking new orders, and its weekly fee stops, as soon as the request is sent; orders already placed still finish, and cancelling the request lifts the pause \(the weekly fee then starts again\)/);
     // Still no one-click form: the page itself deletes nothing.
     expect(screen.queryByRole('button')).toBeNull();
   });

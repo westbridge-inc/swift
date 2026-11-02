@@ -89,8 +89,10 @@ export default function DeleteAccountPage() {
         </p>
         <p className="mt-3 text-[var(--swift-muted)]">
           A store owner closes the account by a request, in the app or on the website. The store
-          stops taking new orders as soon as the request is sent; orders already placed still finish, and cancelling the request lifts the pause. Our team then
-          takes the store off sale, removes its team members, stops the weekly fee (refunding any week
+          stops taking new orders, and its weekly fee stops, as soon as the request is sent; orders already placed still finish, and
+          cancelling the request lifts the pause (the weekly fee then starts again). Nothing already paid is refunded
+          automatically at that point. Our team then
+          takes the store off sale, removes its team members, ends the weekly fee (refunding any week
           paid for that has not started) and closes the account once every order and payment is
           settled. The owner keeps access until then.
         </p>

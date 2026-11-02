@@ -124,7 +124,7 @@ import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { storeBacklogSentence, storeRiderBacklog } from '../dispatch/delivery-capacity';
 import { deliveryPausedAt } from '../dispatch/delivery-pause';
-import { CLOSURE_PAUSE_REFUSAL } from '../user/closure-pause';
+import { CLOSURE_PAUSE_REFUSAL, CLOSURE_PAUSE_REFUSAL_TEAM } from '../user/closure-pause';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2331,7 +2331,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     // until Swift's team resolves the request or the owner cancels it (user/closure-pause.ts). Said before any other
     // check, so the person reads why; the database CHECK and the guarded write below back it up.
     if (!vendor.acceptingOrders && vendor.closurePausedAt) {
-      throw new AppError(409, 'CLOSURE_REQUESTED', CLOSURE_PAUSE_REFUSAL);
+      const owner = await vendorOwnerUserId(app, vendorId);
+      throw new AppError(409, 'CLOSURE_REQUESTED', owner === request.user.userId ? CLOSURE_PAUSE_REFUSAL : CLOSURE_PAUSE_REFUSAL_TEAM);
     }
 
     // Turning OFF is always allowed and needs no authority — a fast atomic flip.

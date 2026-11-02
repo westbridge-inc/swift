@@ -46,13 +46,43 @@ describe('[WEB-DELETE] the deleted page', () => {
     expect(localStorage.getItem('swift_web_store')).toBeNull();
   });
 
-  it('a full deletion says so in the app\'s words, from the status alone when this tab kept no receipt', async () => {
+  it('a full deletion says so in the app\'s words, from the receipt this tab kept', async () => {
     api(SIGNED_OUT);
+    stashDeletionReceipt({ deleted: true });
     window.history.replaceState(null, '', '/account-deleted?status=DELETED');
     render(<DeletionReceiptView />);
     expect(await screen.findByRole('heading', { name: 'Your account is deleted' })).toBeTruthy();
     expect(screen.getByText('Your account has been deleted.')).toBeTruthy();
     expect(expiries()).toHaveLength(1);
+  });
+
+  it('a bare link (?status=DELETED) with no receipt from this tab never claims a deletion', async () => {
+    api(SIGNED_OUT);
+    window.history.replaceState(null, '', '/account-deleted?status=DELETED');
+    render(<DeletionReceiptView />);
+    expect(await screen.findByText(/There is no account deletion to show here/)).toBeTruthy();
+    expect(screen.queryByText('Your account has been deleted.')).toBeNull();
+  });
+
+  // [REVIEW-G/F #2304 S2-1, adopted from REVIEW-GMF's probe] The access cookie lives fifteen minutes and the refresh
+  // cookie a month: a live session whose access cookie expired answers /auth/me 401. Opening the link must spend the
+  // refresh first (as the consoles do), find the session alive, and sign nobody out.
+  it('a live session with only an expired access cookie is NOT signed out by opening the link, and is told nothing was deleted', async () => {
+    let refreshed = false;
+    mockApi(({ method, url }: ApiRequest) => {
+      calls.push(`${method} ${url.pathname}`);
+      if (url.pathname === '/api/v1/auth/me') return refreshed ? { body: { success: true, data: { user: { id: 'u1' } } } } : SIGNED_OUT;
+      if (url.pathname === '/api/v1/auth/refresh') { refreshed = true; return { body: { success: true } }; }
+      if (url.pathname === '/api/v1/auth/logout/refresh') return { body: { success: true } };
+      return { status: 404, body: {} };
+    });
+    stashDeletionReceipt({ deleted: true });
+    window.history.replaceState(null, '', '/account-deleted?status=DELETED');
+    render(<DeletionReceiptView />);
+    expect(await screen.findByRole('heading', { name: 'Your account is still open' })).toBeTruthy();
+    expect(calls).toContain('POST /api/v1/auth/refresh');
+    expect(calls).not.toContain('POST /api/v1/auth/logout/refresh');
+    expect(screen.queryByText('Your account has been deleted.')).toBeNull();
   });
 
   it('a browser still signed in was not deleted: it is told so and is NOT signed out', async () => {
@@ -71,6 +101,7 @@ describe('[WEB-DELETE] the deleted page', () => {
       if (url.pathname === '/api/v1/auth/me') return up ? SIGNED_OUT : { status: 503, body: {} };
       return { body: { success: true } };
     });
+    stashDeletionReceipt({ deleted: true });
     window.history.replaceState(null, '', '/account-deleted?status=DELETED');
     render(<DeletionReceiptView />);
     expect((await screen.findByRole('alert')).textContent).toMatch(/can’t be reached/);

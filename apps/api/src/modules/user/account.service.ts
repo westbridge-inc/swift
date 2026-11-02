@@ -1,5 +1,6 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
-import { ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF, closureMessageFor, type ClosureSurface } from './account-closure';
+import { ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF, closureMessageFor, type ClosureSurface } from './account-closure';
+import { holdStoreFeesForClosureInTx, resumeStoreFeesAfterClosure } from '../billing/closure-fee-hold';
 import { ACCOUNT_CLOSURE_CANCELLED, CLOSURE_IN_PROGRESS_REFUSAL, liftClosurePause, pauseStoresForClosure } from './closure-pause';
 import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { eraseUserDevices } from '../../lib/owner-rls';
@@ -66,12 +67,7 @@ export function erasedPhoneMarker(userId: string): string {
   return `deleted:${userId}`;
 }
 
-export { ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
-/** The server-written record that a closure request was confirmed in the app
- *  (behind the deletion step-up). Anyone can type the subject into a support
- *  ticket; only the confirmed request writes this record, so support completes
- *  only a ticket that carries it. */
-export const ACCOUNT_CLOSURE_CONFIRMED = 'ACCOUNT_CLOSURE_CONFIRMED_IN_APP';
+export { ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_CLOSURE_CONFIRMED } from './account-closure';
 
 /** The server, not a navigation flag or active role, chooses the business
  *  closure flow: anyone who owns a store or belongs to an advertiser closes
@@ -111,8 +107,10 @@ export class AccountService {
     if (!confirmed) {
       await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id, changes: { surface } } });
     }
-    // [WEB-DELETE · owner ruling 1 Nov 2026] The request stops the stores' NEW orders now, in this same transaction
-    // (website and app alike: this is the one closure path). Orders already placed finish; the team completes.
+    // [WEB-DELETE · owner rulings 1 + 2 Nov 2026] The request stops the stores' weekly fee and their NEW orders now,
+    // in this same transaction (website and app alike: this is the one closure path). The fee first: the billing lock
+    // order is person, subscription, then store. Orders already placed finish; the team completes.
+    await holdStoreFeesForClosureInTx(tx, userId, ticket.id);
     await pauseStoresForClosure(tx, userId, ticket.id);
     return ticket;
   }
@@ -131,7 +129,7 @@ export class AccountService {
     const paused = await this.app.prisma.vendor.count({ where: { owner: { userId }, closurePausedAt: { not: null } } }).catch(() => 0);
     return { deleted: false, status: 'CLOSURE_REQUESTED' as const, ticketId,
       message: `Your account closure request is received. Track it in Get help. Keep access while the team resolves listings, campaigns and any outstanding obligations.${
-        paused > 0 ? ' New orders at your store are paused now; orders already placed still finish.' : ''}` };
+        paused > 0 ? ' New orders at your store are paused now and your weekly fee stops; orders already placed still finish.' : ''}` };
   }
 
   /** The existing support queue owns the human business wind-down. */
@@ -149,7 +147,7 @@ export class AccountService {
    *  its pause on the stores' new orders is lifted (both audited). Order intake stays off until the owner resumes it
    *  with the usual switch. Under the same person lock as the request, so a request and its cancel never interleave. */
   async cancelClosure(userId: string) {
-    return this.app.prisma.$transaction(async (tx) => {
+    const done = await this.app.prisma.$transaction(async (tx) => {
       // [COORD security review #2304] The same person lock support's completion claims the request under
       // (deleteAccount's preflight): a cancel and a completion never interleave. Once support has the request
       // (IN_PROGRESS), or the account is already closed, the cancel is refused: completion is irreversible.
@@ -172,11 +170,18 @@ export class AccountService {
       if (cancelled.count !== 1) throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
       const stores = await liftClosurePause(tx, userId, ticket.id, { kind: 'OWNER_CANCELLED', actorId: userId });
       await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CANCELLED, entity: 'SupportTicket', entityId: ticket.id, changes: { storesLifted: stores } } });
-      return { cancelled: true as const, ticketId: ticket.id, storesLifted: stores.length,
-        message: stores.length > 0
-          ? 'Your closure request is cancelled. Your store still takes no new orders until you press Resume orders on the Orders page.'
-          : 'Your closure request is cancelled.' };
+      return { ticketId: ticket.id, storesLifted: stores.length };
     });
+    // [owner ruling 2 Nov 2026] The weekly fee the request held resumes from now (after the cancel commits: the
+    // partner's own resume takes the same payer lock).
+    const { BillingService } = await import('../billing/billing.service');
+    const { getPaymentProvider } = await import('../../providers/payment/payment-provider');
+    const billing = new BillingService(this.app.prisma, new NotificationService(this.app.prisma, this.app.io), getPaymentProvider());
+    const feesResumed = (await resumeStoreFeesAfterClosure(this.app.prisma, billing, done.ticketId, userId)).length;
+    return { cancelled: true as const, ...done, feesResumed,
+      message: done.storesLifted > 0
+        ? `Your closure request is cancelled.${feesResumed > 0 ? ' Your weekly fee starts again from today.' : ''} Your store still takes no new orders until you press Resume orders on the Orders page.`
+        : 'Your closure request is cancelled.' };
   }
 
   /**

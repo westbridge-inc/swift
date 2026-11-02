@@ -156,6 +156,18 @@ const closureTicket = {
 };
 
 describe('[DELETION-INTEGRITY] an in-app closure request is completed from the queue', () => {
+  // [WEB-DELETE · REVIEW-F #2304 S4-2] Closing the ticket ends the request: staff are told what that undoes.
+  it('closing a closure request\'s ticket says it ends the request: new orders can resume and the weekly fee starts again', async () => {
+    const user = userEvent.setup();
+    mockApi(listOf([closureTicket, ordinaryTicket]));
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Account closure request');
+    const [closureClose] = screen.getAllByRole('button', { name: 'Close this ticket' });
+    await user.click(closureClose!);
+    expect(await screen.findByText(/ends the account closure request without closing the account/)).toBeTruthy();
+    expect(screen.getByText(/weekly fee starts again/)).toBeTruthy();
+  });
+
   it('offers completion only on a closure request', async () => {
     mockApi(listOf([closureTicket, ordinaryTicket]));
     renderWithQuery(<SupportPage />);

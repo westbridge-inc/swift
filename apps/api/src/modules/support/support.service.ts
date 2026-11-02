@@ -5,8 +5,9 @@ import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { log } from '../../utils/logger';
 import { supportResolutionCounter } from '../../plugins/observability';
-import { ACCOUNT_CLOSURE_SUBJECT } from '../user/account-closure';
+import { ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account-closure';
 import { liftClosurePause } from '../user/closure-pause';
+import { resumeStoreFeesAfterClosure } from '../billing/closure-fee-hold';
 
 /** [A-18] What a SAFETY ticket may close on. "Answered" is not one of them. */
 export const SAFETY_RESOLUTIONS: SupportResolution[] = ['ACTION_TAKEN', 'ESCALATED_SAFETY', 'NO_RISK_FOUND'];
@@ -193,21 +194,32 @@ export class SupportService {
       }
     }
 
-    // [WEB-DELETE · owner ruling 1 Nov 2026] Swift staff resolving an account closure request (without completing
-    // it) lifts the request's pause on the stores' new orders, audited, before the ticket closes (a failed close then
-    // leaves nothing half done but the lift, which the resolve the staff member retries repeats harmlessly).
-    if (resolving && ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT) {
-      await this.prisma.$transaction((tx) => liftClosurePause(tx, ticket.userId, ticketId, { kind: 'STAFF_RESOLVED', actorId: adminId }));
+    // [WEB-DELETE · owner rulings 1 + 2 Nov 2026 · REVIEW-G #2304 S4-1] Swift staff resolving an account closure
+    // request (without completing it) ends it: the pause on the stores' new orders is lifted (audited) and the weekly
+    // fee it held resumes. Only a request the holder confirmed counts (a typed ticket with the same subject lifts
+    // nothing). The ticket closes and the pause lifts under the person's lock, the lock a new request takes, so a
+    // request sent meanwhile is never left paused with no open ticket.
+    const closure = resolving && ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT
+      && !!(await this.prisma.auditLog.findFirst({ where: { action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticketId }, select: { id: true } }));
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (closure) await tx.$queryRaw`SELECT id FROM users WHERE id = ${ticket.userId} FOR UPDATE /* closure-resolve-person-lock */`;
+      const row = await this.queue((db, scope) => ((scope ? db : tx) as Prisma.TransactionClient).supportTicket.update({
+        where: scope ? { id: ticketId, AND: [scope] } : { id: ticketId },
+        data: {
+          status: input.status,
+          adminNote: input.adminNote ?? ticket.adminNote,
+          ...(resolving ? { resolvedById: adminId, resolvedAt: new Date(), resolution: input.resolution } : {}),
+        },
+      }));
+      if (closure) await liftClosurePause(tx, ticket.userId, ticketId, { kind: 'STAFF_RESOLVED', actorId: adminId });
+      return row;
+    });
+    if (closure) {
+      const { BillingService } = await import('../billing/billing.service');
+      const { getPaymentProvider } = await import('../../providers/payment/payment-provider');
+      await resumeStoreFeesAfterClosure(this.prisma, new BillingService(this.prisma, this.notifications, getPaymentProvider()), ticketId, adminId)
+        .catch((err: unknown) => log().error({ err, ticketId }, '[WEB-DELETE] weekly fee not resumed after staff ended a closure request'));
     }
-
-    const updated = await this.queue((db, scope) => db.supportTicket.update({
-      where: scope ? { id: ticketId, AND: [scope] } : { id: ticketId },
-      data: {
-        status: input.status,
-        adminNote: input.adminNote ?? ticket.adminNote,
-        ...(resolving ? { resolvedById: adminId, resolvedAt: new Date(), resolution: input.resolution } : {}),
-      },
-    }));
     if (resolving) {
       supportResolutionCounter.labels(ticket.category, input.resolution ?? 'UNSET').inc();
     }

@@ -357,7 +357,7 @@ export default function SettingsPage() {
         <div className="min-w-0 flex-1">
           <h2 className="font-bold">Your Swift account</h2>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
-            {isOwner ? 'Close your account. New orders stop as soon as you ask; our team takes your store off sale once every order and payment is settled.' : 'Delete your account and the personal data Swift holds about you.'}
+            {isOwner ? 'Close your account. New orders and your weekly fee stop as soon as you ask; our team takes your store off sale once every order and payment is settled.' : 'Delete your account and the personal data Swift holds about you.'}
           </p>
         </div>
         <Link href="/dashboard/settings/delete-account" className="sw-chip text-[var(--swift-red)]">{isOwner ? 'Request account closure' : 'Delete my account'}</Link>

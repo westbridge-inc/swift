@@ -1,5 +1,10 @@
 import type { Prisma } from '@prisma/client';
 
+/** The server-written record that a closure request was confirmed (behind the deletion step-up), in the app or on the
+ *  website. Anyone can type the subject into a support ticket; only the confirmed request writes this record, so
+ *  support completes, and a staff resolve lifts the pause of, only a ticket that carries it. (The name is historical.) */
+export const ACCOUNT_CLOSURE_CONFIRMED = 'ACCOUNT_CLOSURE_CONFIRMED_IN_APP';
+
 /** The subject of a closure request confirmed in the app. Support completes
  *  only these: a typed-in ticket is not a confirmed request. */
 export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
