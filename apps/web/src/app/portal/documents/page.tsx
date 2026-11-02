@@ -8,7 +8,8 @@ import {
 } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/legal-url';
-import { deliveryDocumentHint, documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
+import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
+import { vehicleDocumentHint } from '@/lib/vehicle-document-hints';
 import { documentExpiryDay } from '@/lib/documentExpiry';
 import { lazyRetry } from '@/lib/chunk-retry';
 
@@ -117,9 +118,9 @@ export default function DocumentsPage() {
           const tone = doc ? statusTone(doc.status, doc.expiresAt, doc.replaced === true) : null;
           // An approved document stays locked until its renewal window; a copy waiting for review can be replaced.
           const locked = doc?.status === 'APPROVED' && !expiringSoonAt(doc.expiresAt);
-          // [WEB-ONBOARDING] what the reviewer checks, said before the upload: a taxi's documents, or a delivery rider's
-          // motor-vehicle insurance (hire or reward) and motorbike licence
-          const hint = taxiDocumentHint(docType, d?.checklist ?? []) ?? deliveryDocumentHint(docType, d?.checklist ?? [], vehicleType);
+          // [WEB-ONBOARDING] what the reviewer checks, said before the upload: a taxi's documents, and every motor vehicle's
+          // insurance (hire or reward) and a motorbike's licence class
+          const hint = taxiDocumentHint(docType, d?.checklist ?? []) ?? vehicleDocumentHint(docType, d?.checklist ?? [], vehicleType);
           return (
             <div key={docType} className="sw-card p-5">
               <div className="flex flex-wrap items-center gap-3">

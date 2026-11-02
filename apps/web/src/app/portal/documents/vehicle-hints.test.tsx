@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DocumentsPage from './page';
 import { renderWithQuery } from '@/test/test-utils';
 import * as moverApi from '@/lib/mover-api';
-import { DELIVERY_INSURANCE, MOTORBIKE_LICENCE, TAXI_INSURANCE } from '@/lib/taxi-documents';
+import { DELIVERY_INSURANCE, MOTORBIKE_LICENCE, TAXI_INSURANCE } from '@/lib/vehicle-document-hints';
 
 // ---------------------------------------------------------------------------
 // [WEB-ONBOARDING · R13 · owner 15 Oct 2026] A rider or taxi driver used to learn the insurance rule from a rejection:
@@ -66,6 +66,12 @@ describe('[WEB-ONBOARDING] the words are the server’s rule', () => {
     for (const words of [TAXI_INSURANCE, DELIVERY_INSURANCE]) expect(words).toMatch(/hire or reward/);
     expect(TAXI_INSURANCE).toMatch(/passengers carried for hire/);
     expect(DELIVERY_INSURANCE).toMatch(/commercial use/);
+  });
+
+  it('[perf] the lines live apart from taxi-documents, which the sign-up page loads up front', () => {
+    const web = (path: string) => readFileSync(join(__dirname, '..', '..', '..', path), 'utf8');
+    expect(web('lib/taxi-documents.ts')).not.toMatch(/hire or reward|cover motorcycles/);
+    expect(web('app/signup/page.tsx')).not.toMatch(/vehicle-document-hints/);
   });
 
   it('a motorbike is on the licence-and-insurance list, a bicycle is not; the law asks a licence for the class of vehicle', () => {
