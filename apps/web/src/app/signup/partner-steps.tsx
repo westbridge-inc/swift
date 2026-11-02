@@ -17,6 +17,7 @@ import { AGREEMENT, agreementAsk, businessAsk, EXAMPLE, LIMIT, taxiAsk } from '@
 import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT, type MoverRole } from '@/lib/signup-roles';
 import type { StoreLocationPicker as StoreLocationPickerComponent } from '@/components/store-location-picker';
 import { loadStorePicker } from './store-picker-loader';
+import { readBusinessDraft, saveBusinessDraft } from './business-draft';
 // [Row 628] The weekly fee block (its price read, words and tick) loads on the partner steps only.
 import type { WeeklyFee as WeeklyFeeComponent } from './weekly-fee';
 import type { FeeState } from '@/lib/signup-fee';
@@ -95,8 +96,10 @@ function usePartnerTerms() {
     : feeLoadFailed
       ? <button type="button" className={styles.roleButton} onClick={() => setFeeLoadFailed(false)}>Couldn’t load your weekly fee — try again</button>
       : <p role="status" className={styles.smallCopy}>{FEE_LOADING.ask}</p>);
-  // [WEB-ONBOARDING] the agreement is what is missing once the fee block has nothing to ask
-  const agreementWait = (name: string) => (fee.ask || agree ? null : agreementAsk(name));
+  // [WEB-ONBOARDING] the agreement is what is missing once the fee block has nothing to ask. [FLOW-QA2 NEW-10] An
+  // unticked fee is said here too: the block shows only its tick then, so nothing else would say why the button waits
+  // (its loading, failed or missing states say their own words in the block).
+  const agreementWait = (name: string) => (fee.tick ? fee.ask : fee.ask || agree ? null : agreementAsk(name));
   return { agree, setAgree, fee, feeChecked, feeBlock, agreementWait };
 }
 
@@ -120,8 +123,9 @@ const NEW_BUSINESS: BusinessDraft = { biz: { name: '', vendorType: 'RESTAURANT',
 /** [FLOW-QA F9] `note`: said under the heading when an existing account adds a business or a vehicle to itself. */
 export function BusinessStep({ shell, draft, onDraft, note = null }: { shell: StepShell; draft: BusinessDraft | null; onDraft: (_draft: BusinessDraft) => void; note?: string | null }) {
   const { phone, busy, wrap, setError, done } = shell;
-  const [d, setD] = useState<BusinessDraft>(() => draft ?? NEW_BUSINESS);
-  useEffect(() => { onDraft(d); }, [d, onDraft]);
+  // [FLOW-QA2 NEW-6] After a refresh the page holds no draft: what this tab kept comes back (never a tick).
+  const [d, setD] = useState<BusinessDraft>(() => draft ?? readBusinessDraft() ?? NEW_BUSINESS);
+  useEffect(() => { onDraft(d); saveBusinessDraft(d); }, [d, onDraft]);
   const { biz, nameBasis, ownNameTick, storePin } = d;
   const setBiz = (next: BusinessDraft['biz']) => setD((cur) => ({ ...cur, biz: next }));
   const setNameBasis = (next: BusinessDraft['nameBasis']) => setD((cur) => ({ ...cur, nameBasis: next }));
@@ -210,7 +214,7 @@ export function BusinessStep({ shell, draft, onDraft, note = null }: { shell: St
       <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" maxLength={LIMIT.city} placeholder={EXAMPLE.city} disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
       <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region (optional)</label><input id="business-region" autoComplete="address-level1" maxLength={LIMIT.region} placeholder={EXAMPLE.region} disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
       {placingStore ? (
-        StoreLocationPicker ? <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
+        StoreLocationPicker ? <StoreLocationPicker words={biz.vendorType === 'SERVICE' ? 'service' : 'store'} current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
         : pickerFailed ? (
           <div role="alert" className={styles.stackTight}>
             <p className={styles.bodyCopy}>The map didn’t load. Check your connection; what you typed is kept.</p>

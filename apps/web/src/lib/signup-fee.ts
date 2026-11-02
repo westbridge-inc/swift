@@ -43,7 +43,9 @@ export interface WeeklyFeeAck {
 
 /** What the sign-up button may do: `ask` names what is missing (the button waits); with no ask it
  *  may submit, sending `ack` when the server asked for the tick. */
-export type FeeState = { ask: string; ack?: undefined } | { ask: null; ack?: WeeklyFeeAck };
+/** `tick`: [FLOW-QA2 NEW-10] the ask is the fee's own unticked box (the block then shows only the box, so the step's
+ *  "what is missing" line says it). */
+export type FeeState = { ask: string; ack?: undefined; tick?: boolean } | { ask: null; ack?: WeeklyFeeAck; tick?: undefined };
 
 /** Who is being priced: a business by its type, a rider or driver by the vehicle. */
 export type FeeChoice = { role: 'VENDOR'; vendorType: string } | { role: 'MOVER'; vehicleType: string };

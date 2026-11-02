@@ -56,6 +56,33 @@ const button = (name: string) => screen.getByRole('button', { name }) as HTMLBut
 const feeBox = () => screen.findByRole('checkbox', { name: 'I understand the weekly fee.' }) as Promise<HTMLInputElement>;
 const ACK = (amount: number) => ({ version: 'v1', amount, currencyCode: 'GYD' });
 
+describe('[FLOW-QA2 NEW-10] the line under the button names an unticked weekly fee', () => {
+  const ask = () => document.querySelector('[data-signup-ask]')?.textContent ?? null;
+  it('a rider: the fee tick first, then the agreement, then nothing', async () => {
+    const user = await throughName(/Deliver with Swift/);
+    const box = await feeBox();
+    await waitFor(() => expect(ask()).toBe('Tick “I understand the weekly fee” to continue.'));
+    expect(button('Create rider account').disabled).toBe(true);
+    await user.click(box);
+    expect(ask()).toBe('Tick the Mover Agreement to continue');
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
+    expect(ask()).toBeNull();
+    expect(button('Create rider account').disabled).toBe(false);
+  });
+
+  it('a taxi driver: the vehicle details first, then the fee tick', async () => {
+    const user = await throughName(/Drive a taxi with Swift/);
+    await feeBox();
+    expect(ask()).toBe('Add the make');
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Allion'], ['Year', '2016'], ['Colour', 'Silver'], ['Licence plate', 'HC 1234']]) {
+      fireEvent.change(screen.getByLabelText(label!), { target: { value } });
+    }
+    await waitFor(() => expect(ask()).toBe('Tick “I understand the weekly fee” to continue.'));
+    await user.click(await feeBox());
+    expect(ask()).toBe('Tick the Mover Agreement to continue');
+  });
+});
+
 describe('[row 628] the weekly fee is on the page before a partner signs up', () => {
   it('a rider sees the fee for THEIR vehicle, every one of the server’s lines, and an unticked tick; the button waits for it', async () => {
     const user = await throughName(/Deliver with Swift/);

@@ -112,6 +112,34 @@ describe('[WEB-DELETE] the deleted page', () => {
     await waitFor(() => expect(expiries()).toHaveLength(1));
   });
 
+  it('[FLOW-QA2 NEW-3] a visitor that never signed in sends no empty sign-out (the server would refuse it: 400)', async () => {
+    api(SIGNED_OUT);
+    localStorage.removeItem('swift_signed_in_before');
+    render(<DeletionReceiptView />);
+    expect(await screen.findByText(/There is no account deletion to show here/)).toBeTruthy();
+    expect(expiries()).toEqual([]);
+  });
+
+  it('[FLOW-QA2 NEW-3] a browser that signed in before still has its cookies expired, receipt or not', async () => {
+    api(SIGNED_OUT);
+    localStorage.setItem('swift_signed_in_before', '1');
+    setSelectedStore('store-1');
+    render(<DeletionReceiptView />);
+    expect(await screen.findByText(/There is no account deletion to show here/)).toBeTruthy();
+    expect(expiries()).toHaveLength(1);
+    expect(localStorage.getItem('swift_web_store')).toBeNull();
+    localStorage.clear();
+  });
+
+  it('[FLOW-QA2 NEW-3] without the call, the local sign-out still happens', async () => {
+    api(SIGNED_OUT);
+    setSelectedStore('store-1');
+    render(<DeletionReceiptView />);
+    expect(await screen.findByText(/There is no account deletion to show here/)).toBeTruthy();
+    expect(expiries()).toEqual([]);
+    expect(localStorage.getItem('swift_web_store')).toBeNull();
+  });
+
   it('with no deletion to show, it says so rather than claim one', async () => {
     api(SIGNED_OUT);
     render(<DeletionReceiptView />);

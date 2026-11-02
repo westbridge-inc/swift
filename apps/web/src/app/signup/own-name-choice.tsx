@@ -25,7 +25,11 @@ export function OwnNameChoice({ storeName, nameBasis, onNameBasis, tick, onTick 
           <p className={styles.bodyCopy}>The law does not ask you to register your own name as a business name, so you sign a short declaration instead of uploading a business registration. A person on our team checks it against your ID.</p>
           {ownNameSigningFor(storeName) ? <p className={styles.bodyCopy}><strong>{ownNameSigningFor(storeName)}</strong></p> : null}
           <pre className={styles.bodyCopy} style={{ whiteSpace: 'pre-wrap' }}>{OWN_NAME_DECLARATION_WEB}</pre>
-          <label><input type="checkbox" checked={tick} onChange={(e) => onTick(e.target.checked)} /> I have read the declaration above and I sign it.</label>
+          {/* [FLOW-QA2 F24] the same tick as the sign-up's others: a 20 px box in a 44 px row */}
+          <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }} data-own-name-tick>
+            <input type="checkbox" checked={tick} onChange={(e) => onTick(e.target.checked)} />
+            <span>I have read the declaration above and I sign it.</span>
+          </label>
         </>
       ) : null}
     </fieldset>

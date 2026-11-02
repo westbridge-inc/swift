@@ -49,7 +49,7 @@ export function WeeklyFee({ role, type, onChange }: {
     const key = `${terms.version}|${pricing.currencyCode}|${rate}`;
     const state: FeeState = tickedFor === key
       ? { ask: null, ack: { version: terms.version, amount: rate, currencyCode: pricing.currencyCode } }
-      : { ask: FEE_ASK.tick };
+      : { ask: FEE_ASK.tick, tick: true };
     return { amount, steps, terms, key, state };
   }, [pricing, role, type, tickedFor]);
   useEffect(() => { onChange(view.state); }, [onChange, view.state]);

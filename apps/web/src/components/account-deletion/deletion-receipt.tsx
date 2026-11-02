@@ -2,7 +2,8 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { restoreSession, sessionProbe } from '@/lib/auth';
+import { clearSession, restoreSession, sessionProbe } from '@/lib/auth';
+import { signedInBefore } from '@/lib/session-hint';
 import { endErasedSession, readDeletionReceipt } from '@/lib/account-deletion';
 import { DELETION_KEPT } from '@/lib/account-deletion-words';
 
@@ -41,7 +42,11 @@ export function DeletionReceiptView() {
       if (answer.unreachable) { setView({ phase: 'unreachable' }); return; }
       const stashed = readDeletionReceipt();
       const status = stashed?.status ?? null;
-      await endErasedSession();
+      // [FLOW-QA2 NEW-3] Only a browser that holds Swift's cookies has any to expire: the delete flow in this tab (its
+      // receipt) or a browser that signed in before. A visitor that never signed in sends nothing (the server would
+      // refuse an empty sign-out with no cookie to read); the local sign-out still happens.
+      if (stashed || signedInBefore()) await endErasedSession();
+      else clearSession();
       if (live) setView({ phase: 'done', status: status && RECEIPT_WORDS[status] ? status : null, message: stashed?.message ?? null });
     })();
     return () => { live = false; };
