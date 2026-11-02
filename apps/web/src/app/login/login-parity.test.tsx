@@ -8,6 +8,7 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams('next=%2F'),
 }));
 vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: mocked.sendOtp }));
 vi.mock('@/lib/customer-login', () => ({ verifyCustomerLogin: mocked.verifyCustomerLogin }));
 
 beforeEach(() => {

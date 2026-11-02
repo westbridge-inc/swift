@@ -3,12 +3,11 @@
 // Customer ordering client for the web app — talks to the SAME backend the
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
-import { apiFetch, getSessionPrincipal, sendOtp } from './auth';
+import { apiFetch, getSessionPrincipal } from './auth';
 import { formatAmount, parseAmount } from './money';
 import type { StorefrontDetail } from './api';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
-export { sendOtp };
 
 // ── Auth (customer) ────────────────────────────────────────────────────────
 // The customer sign-in code check lives in ./customer-login, so the sign-in

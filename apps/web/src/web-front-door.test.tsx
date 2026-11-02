@@ -14,6 +14,7 @@ const SRC = join(process.cwd(), 'src');
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: vi.fn(), push: vi.fn() }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: vi.fn() }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: vi.fn() }));
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: vi.fn(), registerAccount: vi.fn(), becomePartner: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
 
