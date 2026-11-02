@@ -116,18 +116,19 @@ export async function authRoutes(app: FastifyInstance) {
   const authService = new AuthService(app);
   // [FLOW-QA F15] Two ceilings per sign-in route (auth-rate-limits.ts): the tight one per address AND number (or
   // session cookie), and a higher one per address alone, so people sharing one carrier address do not lock each other out.
-  const codeLimits = { config: perAddress(AUTH_LIMITS.codePerAddress), preValidation: perCredential(app, 'code', AUTH_LIMITS.codePerNumber, bodyPhone) };
+  // [REVIEW-GMF2 S4] each code route has its own per-number bucket: a send, three wrong tries and a resend are not one count.
+  const codeLimits = (route: 'send' | 'verify' | 'reset-request' | 'reset') => ({ config: perAddress(AUTH_LIMITS.codePerAddress), preValidation: perCredential(app, `code-${route}`, AUTH_LIMITS.codePerNumber, bodyPhone) });
   const accountLimits = { config: perAddress(AUTH_LIMITS.accountPerAddress), preValidation: perCredential(app, 'account', AUTH_LIMITS.accountPerNumber, bodyPhone) };
   const passwordLimits = { config: perAddress(AUTH_LIMITS.passwordPerAddress), preValidation: perCredential(app, 'password', AUTH_LIMITS.passwordPerCredential, loginCredential, 'credential') };
   const refreshLimits = { config: perAddress(AUTH_LIMITS.refreshPerAddress), preValidation: perCredential(app, 'refresh', AUTH_LIMITS.refreshPerSession, sessionCookie) };
 
-  app.post('/send-otp', codeLimits, async (request, reply) => {
+  app.post('/send-otp', codeLimits('send'), async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
     const result = await authService.sendOtp(body.phone, request.ip);
     return reply.send({ success: true, data: result });
   });
 
-  app.post('/verify-otp', codeLimits, async (request, reply) => {
+  app.post('/verify-otp', codeLimits('verify'), async (request, reply) => {
     const body = verifyOtpSchema.parse(request.body);
     const result = await authService.verifyOtp(body.phone, body.code, {
       deviceId: (request.headers['x-device-id'] as string) || 'unknown',
@@ -504,13 +505,13 @@ export async function authRoutes(app: FastifyInstance) {
 
   // Reset request = the normal OTP send, for the reset purpose only: this code
   // resets a password and cannot sign in [L04 · AUTH-2]
-  app.post('/password/reset-request', codeLimits, async (request, reply) => {
+  app.post('/password/reset-request', codeLimits('reset-request'), async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
     const result = await authService.sendOtp(body.phone, request.ip, 'password-reset');
     return reply.send({ success: true, data: result });
   });
 
-  app.post('/password/reset', codeLimits, async (request, reply) => {
+  app.post('/password/reset', codeLimits('reset'), async (request, reply) => {
     const body = resetPasswordSchema.parse(request.body);
     await authService.resetPassword(body.phone, body.code, body.newPassword);
     return reply.send({ success: true, data: { message: 'Password reset. All sessions logged out.' } });

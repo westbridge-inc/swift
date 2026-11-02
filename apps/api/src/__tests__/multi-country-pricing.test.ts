@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registrationProofFor, mintedRegistrationProofFor } from './helpers/otp';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { countryFromPhone } from '../utils/phone-country';
@@ -40,7 +40,7 @@ beforeAll(async () => {
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
 });
 

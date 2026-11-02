@@ -125,12 +125,38 @@ describe('[security review · MEDIUM] password login: every login has a per-cred
 describe('[FLOW-QA F15 · security review] auth.routes.ts wires each route to its ceilings', () => {
   const routes = readFileSync(join(__dirname, '..', 'modules', 'auth', 'auth.routes.ts'), 'utf8');
   it.each([
-    ['/send-otp', 'codeLimits'], ['/verify-otp', 'codeLimits'], ['/password/reset-request', 'codeLimits'], ['/password/reset', 'codeLimits'],
+    ['/send-otp', "codeLimits('send')"], ['/verify-otp', "codeLimits('verify')"], ['/password/reset-request', "codeLimits('reset-request')"], ['/password/reset', "codeLimits('reset')"],
     ['/register', 'accountLimits'], ['/password/login', 'passwordLimits'], ['/refresh', 'refreshLimits'],
   ])('%s uses %s', (path, limits) => {
     expect(routes).toContain(`app.post('${path}', ${limits},`);
   });
+  it('[REVIEW-GMF2 S4] each code route counts in its own per-number bucket', () => {
+    expect(routes).toContain("perCredential(app, `code-${route}`, AUTH_LIMITS.codePerNumber, bodyPhone)");
+  });
+
   it('password login counts per phone-or-email from any address, at the old 10 per address', () => {
     expect(routes).toContain("perAddress(AUTH_LIMITS.passwordPerAddress), preValidation: perCredential(app, 'password', AUTH_LIMITS.passwordPerCredential, loginCredential, 'credential')");
+  });
+});
+
+describe('[FLOW-QA F15] the test harness for suites that are not about limits', () => {
+  it('registers the limiter with every request let through, so the auth routes mount and nothing is counted', async () => {
+    const bare = Fastify({ logger: false });
+    registerErrorHandler(bare);
+    await bare.register(rateLimit, { global: false, allowList: () => true });
+    await bare.register(async (scope) => {
+      scope.post('/send', { config: perAddress(AUTH_LIMITS.codePerAddress), preValidation: perCredential(scope, 'code-send', AUTH_LIMITS.codePerNumber, bodyPhone) }, async () => ({ success: true }));
+    });
+    await bare.ready();
+    const statuses: number[] = [];
+    for (let i = 0; i < AUTH_LIMITS.codePerAddress + 5; i++) statuses.push((await bare.inject({ method: 'POST', url: '/send', payload: { phone: '+5926009999' } })).statusCode);
+    expect(statuses.every((s) => s === 200)).toBe(true);
+    await bare.close();
+  });
+
+  it('the harness is what the suites use, and it is the same composition (helpers/auth-routes-harness.ts)', () => {
+    const harness = readFileSync(join(__dirname, 'helpers', 'auth-routes-harness.ts'), 'utf8');
+    expect(harness).toContain("await app.register(rateLimit, { global: false, allowList: () => true });");
+    expect(harness).toContain("if (!app.hasDecorator('createRateLimit'))");
   });
 });
