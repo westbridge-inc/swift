@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Menu, X } from 'lucide-react';
 import { SwiftLogo } from './swift-logo';
+import { signedInBefore } from '@/lib/session-hint';
+import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 
 const NAV = [
   { href: '/how-it-works', label: 'How it works' },
@@ -19,6 +21,16 @@ export function SiteNav() {
   const menuButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (open) closeButton.current?.focus(); }, [open]);
   const close = () => { setOpen(false); menuButton.current?.focus(); };
+  // [FLOW-QA F5b] A signed-in partner sees the way to their own area instead of "Sign in" / "Join Swift".
+  const [account, setAccount] = useState<{ href: string; label: string } | null>(null);
+  useEffect(() => {
+    if (!signedInBefore()) return;
+    let alive = true;
+    import('@/lib/header-session').then((m) => m.headerAccount()).then((a) => { if (alive) setAccount(a); }, () => {});
+    return () => { alive = false; };
+  }, []);
+  // [FLOW-QA F1] Before launch there is no customer sign-in on the site: "Sign in" is the partners' sign-in.
+  const signInHref = useWebOrderingOpen() ? '/login?next=/' : '/login';
 
   return (
     <header className="sticky top-0 z-50 border-b border-[var(--swift-border)] bg-white/95 pt-[env(safe-area-inset-top)]">
@@ -28,8 +40,12 @@ export function SiteNav() {
           {NAV.map((n) => <Link key={n.href} href={n.href} className="transition-colors hover:text-[var(--swift-ink)]">{n.label}</Link>)}
         </nav>
         <div className="flex items-center gap-2 sm:gap-4">
-          <Link href="/login?next=/" className="hidden text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)] sm:inline-flex">Sign in</Link>
-          <Link href="/signup" className="inline-flex min-h-11 items-center rounded-full bg-[var(--swift-red)] px-4 text-sm font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)] sm:px-5">Join Swift</Link>
+          {account ? (
+            <Link href={account.href} data-header-account className="inline-flex min-h-11 items-center rounded-full bg-[var(--swift-red)] px-4 text-sm font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)] sm:px-5">{account.label}</Link>
+          ) : (<>
+            <Link href={signInHref} className="hidden text-sm font-semibold text-[var(--swift-muted)] transition-colors hover:text-[var(--swift-ink)] sm:inline-flex">Sign in</Link>
+            <Link href="/signup" className="inline-flex min-h-11 items-center rounded-full bg-[var(--swift-red)] px-4 text-sm font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)] sm:px-5">Join Swift</Link>
+          </>)}
           <button ref={menuButton} type="button" aria-label="Open menu" aria-expanded={open} onClick={() => setOpen(true)}
             className="grid h-11 w-11 place-items-center rounded-full text-[var(--swift-ink)] md:hidden">
             <Menu className="h-5 w-5" aria-hidden="true" />
@@ -50,7 +66,9 @@ export function SiteNav() {
             <nav aria-label="Mobile main" className="mt-2 divide-y divide-black/10">
               {NAV.map((n) => <Link key={n.href} href={n.href} onClick={close} className="flex min-h-11 items-center py-3 text-base font-semibold">{n.label}</Link>)}
             </nav>
-            <Link href="/login?next=/" onClick={close} className="mt-3 flex min-h-11 items-center font-semibold sm:hidden">Sign in</Link>
+            {account
+              ? <Link href={account.href} onClick={close} className="mt-3 flex min-h-11 items-center font-semibold sm:hidden">{account.label}</Link>
+              : <Link href={signInHref} onClick={close} className="mt-3 flex min-h-11 items-center font-semibold sm:hidden">Sign in</Link>}
           </div>
         </div>
       )}

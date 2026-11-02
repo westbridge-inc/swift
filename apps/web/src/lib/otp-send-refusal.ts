@@ -35,3 +35,16 @@ export function otpSendRefusal(status: number, body: unknown, retryAfterHeader: 
   }
   return message || 'Could not send the code. Check your connection and try again.';
 }
+
+/** [FLOW-QA F16] A refused code check, in plain words. Errors the page raised itself (no status) keep their words. */
+export const CODE_NOT_RIGHT = 'That code isn’t right — check the latest text from Swift.';
+export function otpVerifyRefusal(error: unknown): string {
+  const e = error as { message?: unknown; status?: unknown; code?: unknown; retryAfterSeconds?: unknown } | null;
+  const message = typeof e?.message === 'string' ? e.message : '';
+  if (e?.status === 429) {
+    const seconds = typeof e.retryAfterSeconds === 'number' && e.retryAfterSeconds > 0 ? Math.ceil(e.retryAfterSeconds) : NaN;
+    return Number.isFinite(seconds) ? `Too many tries; wait ${waitWords(seconds)}.` : 'Too many tries; wait a minute, then try again.';
+  }
+  if (e?.code === 'INVALID_OTP' || e?.status === 400) return CODE_NOT_RIGHT;
+  return message || 'Could not check the code. Check your connection and try again.';
+}

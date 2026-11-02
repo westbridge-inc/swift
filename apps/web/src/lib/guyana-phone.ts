@@ -36,3 +36,9 @@ export function guyanaPhoneProblem(typed: string): string | null {
 export function guyanaPhoneReady(typed: string): boolean {
   return /^[67]\d{6}$/.test(guyanaLocal(typed));
 }
+
+/** [FLOW-QA F23] The number as people read it: "+592 600 9121". */
+export function guyanaDisplay(typed: string): string {
+  const local = guyanaLocal(typed);
+  return local.length === 7 ? `${GUYANA_DIAL_CODE} ${local.slice(0, 3)} ${local.slice(3)}` : `${GUYANA_DIAL_CODE} ${local}`;
+}

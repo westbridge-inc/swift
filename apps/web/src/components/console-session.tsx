@@ -48,7 +48,8 @@ export function useConsoleSession(): ConsoleGate {
         const name = [session.user?.['firstName'], session.user?.['lastName']].filter((v) => typeof v === 'string').join(' ');
         setGate({ phase: 'ready', person: { name, phone: null } });
       } else if (session.unreachable) setGate({ phase: 'unreachable' });
-      else router.replace('/login');
+      // [FLOW-QA F31] back to the page they asked for, once signed in
+      else router.replace(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
     });
     return () => { cancelled = true; };
   }, [router, attempt]);

@@ -15,7 +15,8 @@ export async function verifyCustomerLogin(phone: string, code: string): Promise<
     body: JSON.stringify({ phone, code }),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
+  // [FLOW-QA F16] the status and the server's wait ride along, for the page's plain words (lib/otp-send-refusal)
+  if (!res.ok || !json.success) throw Object.assign(new Error(json?.error?.message || 'That code is not valid.'), { status: res.status, code: json?.error?.code, retryAfterSeconds: json?.error?.details?.retryAfterSeconds });
   const data = json.data;
   // [W-01] A browser client is answered with HttpOnly cookies and NO tokens,
   // so the user the server names is the signal a session exists.

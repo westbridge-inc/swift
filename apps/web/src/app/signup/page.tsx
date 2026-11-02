@@ -7,6 +7,9 @@ import { ChevronLeft } from 'lucide-react';
 import { sessionProbe } from '@/lib/auth';
 import { sendOtp } from '@/lib/otp-send';
 import { markSignedIn } from '@/lib/session-hint';
+import { ACCOUNT_STEPS, clearDraft, readDraft, saveDraft, stepOf, stepUrl } from '@/lib/signup-draft';
+import { roleHome } from '@/lib/role-home';
+import { otpVerifyRefusal } from '@/lib/otp-send-refusal';
 import { LEGAL_URL } from '@/lib/legal-url';
 import { verifyOtp, registerAccount, becomePartner, signOwnName } from '@/lib/customer-account';
 import { ownNameStoreType } from '@/lib/own-name-store-type';
@@ -40,7 +43,7 @@ import { CODE_NOT_SEEN_HINT, PhoneField } from '@/components/phone-field';
 import { loadSignedIn } from '@/components/signed-in-loader';
 import type { SignedIn, SignedInAlready as SignedInAlreadyComponent } from '@/components/signed-in-already';
 import { sendCooldownOf, sendLabel, useSendCooldown } from '@/lib/otp-cooldown';
-import { GUYANA_DIAL_CODE, guyanaLocal, guyanaPhone, guyanaPhoneProblem, guyanaPhoneReady } from '@/lib/guyana-phone';
+import { guyanaDisplay, guyanaLocal, guyanaPhone, guyanaPhoneProblem, guyanaPhoneReady } from '@/lib/guyana-phone';
 
 /** The server's rule for a taxi's year (partner.routes vehicle schema): 1980
  *  to next year. Checked here too, so a typo is caught before the round trip. */
@@ -99,6 +102,8 @@ export default function SignupPage() {
   const [role, setRole] = useState<Role>('CUSTOMER');
   // [REVIEW-G G1] A resumed mover account says first whether it delivers or drives a taxi.
   const [pickMover, setPickMover] = useState(false);
+  // [FLOW-QA F9] Set when an existing account goes on to add a business or a vehicle.
+  const [addingTo, setAddingTo] = useState<string | null>(null);
   // [SIGNUP-PHONE] The local number only: the +592 chip sits beside it, as on sign-in and in the app.
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
@@ -115,6 +120,48 @@ export default function SignupPage() {
   }, []);
   const [first, setFirst] = useState('');
   const [last, setLast] = useState('');
+
+  // [FLOW-QA F6] One history entry per step, and what was typed kept for this tab (lib/signup-draft).
+  const fromHistory = useRef(false);
+  const restored = useRef(false);
+  useEffect(() => {
+    const wanted = stepOf(window.location.search);
+    const draft = readDraft();
+    if (wanted && wanted !== 'role' && draft && draft.step === wanted) {
+      fromHistory.current = true;
+      if (draft.role === 'CUSTOMER' || draft.role === 'VENDOR' || draft.role === 'RIDER' || draft.role === 'DRIVER') setRole(draft.role);
+      setPhone(draft.phone); setFirst(draft.first); setLast(draft.last);
+      setStep(wanted);
+    } else if (wanted) {
+      // an old step address with nothing kept for it: start at the beginning, without an extra entry
+      fromHistory.current = true;
+      window.history.replaceState(window.history.state, '', stepUrl('role'));
+    }
+    restored.current = true;
+    const onPop = () => {
+      const popped = stepOf(window.location.search) ?? 'role';
+      setStep((current) => {
+        // Once the account exists, Back never reopens the steps that made it.
+        if (ACCOUNT_STEPS.includes(current) && !ACCOUNT_STEPS.includes(popped)) {
+          window.history.pushState(window.history.state, '', stepUrl(current));
+          return current;
+        }
+        fromHistory.current = true;
+        return popped;
+      });
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+  useEffect(() => {
+    if (!restored.current) return;
+    if (fromHistory.current) { fromHistory.current = false; }
+    else if (stepOf(window.location.search) !== step) {
+      if (stepOf(window.location.search) === null && step === 'role') window.history.replaceState(window.history.state, '', stepUrl(step));
+      else window.history.pushState(window.history.state, '', stepUrl(step));
+    }
+    saveDraft({ step, role, phone, first, last });
+  }, [step, role, phone, first, last]);
   const [biz, setBiz] = useState({ name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' });
   // [ROLE-DOCS · owner 21 Oct 2026] own name (no business registration, BNA s.3) or a business name; the declaration tick
   const [nameBasis, setNameBasis] = useState<'REGISTERED' | 'OWN_NAME'>('REGISTERED');
@@ -234,15 +281,22 @@ export default function SignupPage() {
     }
   });
   const doVerify = () => wrap(async () => {
-    const r = await verifyOtp(guyanaPhone(phone), code.trim());
+    let r: Awaited<ReturnType<typeof verifyOtp>>;
+    // [FLOW-QA F16] a refused code in plain words
+    try { r = await verifyOtp(guyanaPhone(phone), code.trim()); } catch (e) { throw new Error(otpVerifyRefusal(e)); }
     if (r.signedIn) {
       markSignedIn();
       // Existing account: route by its ACTUAL roles, not the tile they tapped.
-      const roles: string[] = r.user?.roles ?? [];
-      const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
-      const isMover = roles.some((x) => ['MOVER', 'RIDER', 'DRIVER'].includes(x));
+      const { kind } = roleHome(r.user);
+      const isVendor = kind === 'business';
+      const isMover = kind === 'earner';
+      // [FLOW-QA F9] An existing account that chose another partner door goes on to that door's step (its account is
+      // kept; a business or a vehicle is added to it), never silently back to its old home.
+      if (role === 'VENDOR' && !isVendor) { setAddingTo('Add a business to your Swift account.'); setStep('business'); return; }
+      if ((role === 'RIDER' || role === 'DRIVER') && !isMover) { setAddingTo('Add your vehicle to your Swift account.'); setStep('vehicle'); return; }
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
       if (customerReturnPath) continueJourney();
+      clearDraft();
       router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
       return;
     }
@@ -271,6 +325,7 @@ export default function SignupPage() {
       // where they were headed (else to ordering), not to the camera.
       const destination = safeReturnPath();
       if (destination) continueJourney();
+      clearDraft();
       router.replace(destination || '/');
     }
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
@@ -285,6 +340,7 @@ export default function SignupPage() {
     await feeChecked(becomePartner({ role: 'VENDOR', acceptAgreement: true, ...(fee.ack && { weeklyFeeAck: fee.ack }), business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: guyanaPhone(phone), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude, ...(ownName ? { nameBasis: 'OWN_NAME' } : {}) } }));
     // The store exists: the ticked declaration is signed now (the app's Documents offers it again if this fails).
     if (ownName) await signOwnName().catch(() => undefined);
+    clearDraft();
     router.replace('/dashboard');
   });
   const editBusinessAddress = (patch: Partial<typeof biz>) => {
@@ -308,6 +364,7 @@ export default function SignupPage() {
     await feeChecked(becomePartner(mover === 'DRIVER'
       ? { role: 'MOVER', acceptAgreement: true, ...weeklyFee, vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } }
       : { role: 'MOVER', acceptAgreement: true, ...weeklyFee, vehicleType: veh.vehicleType }));
+    clearDraft();
     router.replace('/portal');
   });
   const feeBlock = ({ role: feeRole, type }: { role: 'VENDOR' | 'MOVER'; type: string }) => (WeeklyFee
@@ -368,7 +425,7 @@ export default function SignupPage() {
               );
             })}
             <p className={styles.inlineText}>Already on Swift? <Link
-              href="/login?next=/"
+              href={orderingOpen ? '/login?next=/' : '/login'}
               onClick={(event) => {
                 continueJourney();
                 const next = safeReturnPath();
@@ -394,7 +451,7 @@ export default function SignupPage() {
         {step === 'code' && (
           <div className={styles.stack}>
             <h1 id="signup-title" className={styles.heading}>Enter your code</h1>
-            <p className={styles.bodyCopy}>Enter the code sent to {GUYANA_DIAL_CODE} {guyanaLocal(phone)}.</p>
+            <p className={styles.bodyCopy}>Enter the code sent to {guyanaDisplay(phone)}.</p>
             <div className={styles.field}>
               <label htmlFor="signup-code" className={styles.label}>Verification code</label>
               <input id="signup-code" inputMode="numeric" autoComplete="one-time-code" autoFocus value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void doVerify()} placeholder="000000" className={`${styles.input} ${styles.codeInput}`} />
@@ -437,6 +494,7 @@ export default function SignupPage() {
         {step === 'business' && (
           <div className={styles.stackTight}>
             <h1 id="signup-title" className={styles.heading}>Your business</h1>
+            {addingTo ? <p className={styles.bodyCopy} role="status">{addingTo}</p> : null}
             <div className={styles.field}><label htmlFor="business-name" className={styles.label}>Business name</label><input id="business-name" value={biz.name} onChange={(e) => setBiz({ ...biz, name: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
               <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
@@ -484,6 +542,7 @@ export default function SignupPage() {
         {step === 'vehicle' && mover && (
           <div className={styles.stackTight}>
             <h1 id="signup-title" className={styles.heading}>{mover === 'DRIVER' ? 'Your taxi' : 'How you deliver'}</h1>
+            {addingTo ? <p className={styles.bodyCopy} role="status">{addingTo}</p> : null}
             <div className={styles.field}><label htmlFor="vehicle-type" className={styles.label}>Vehicle</label><select id="vehicle-type" value={veh.vehicleType} onChange={(e) => setVeh({ ...veh, vehicleType: e.target.value })} className={styles.input}>
               {MOVER_VEHICLES[mover].map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
             </select></div>
