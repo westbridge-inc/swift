@@ -3606,6 +3606,13 @@ model Subscription {
   isTrialActive      Boolean               @default(false)
   trialEndDate       DateTime?
   autoRenew          Boolean               @default(true)
+  /// [WEB-DELETE · owner ruling 2 Nov 2026] The store owner's account closure request holds this weekly fee from this
+  /// instant (billing/closure-fee-hold.ts): no week that starts at or after it is born, charged or reminded, and at
+  /// the end of the paid week the plan pauses owing nothing. A week owed before it settles exactly as ever (autoRenew
+  /// is untouched). Cleared, and the fee restarted from then, when the request ends without closing the account.
+  closureHoldAt       DateTime?
+  /// The closure request (support ticket) that holds it.
+  closureHoldTicketId String?
   lastPaymentDate    DateTime?
   lastPaymentId      String?
   failedAttempts     Int                   @default(0)

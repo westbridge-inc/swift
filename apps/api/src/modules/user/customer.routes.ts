@@ -863,7 +863,8 @@ export async function customerRoutes(app: FastifyInstance) {
   const support = new SupportService(app.prisma, notificationService);
   const account = new AccountService(app);
   // [WEB-DELETE] Where a closure request was confirmed, for its ticket: the website names itself (W-01 client header).
-  const closureSurfaceOf = (request: AuthRequest) => (browserClientOf(request) === 'web' ? 'website' as const : 'app' as const);
+  // (A request without headers, as some unit doubles build, is the app's.)
+  const closureSurfaceOf = (request: AuthRequest) => ((request.headers ? browserClientOf(request) : null) === 'web' ? 'website' as const : 'app' as const);
   const createTicketSchema = z.object({
     category: z.enum(['ORDER_ISSUE', 'PAYMENT', 'SAFETY', 'ACCOUNT', 'VENDOR', 'MOVER', 'OTHER']),
     subject: z.string().trim().min(3).max(120),

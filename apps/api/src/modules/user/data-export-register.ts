@@ -365,6 +365,9 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
       personApprovalRequired: 'SYSTEM',
       // [CHAINS PR3] Whether Swift lists this branch on its own card: Swift's listing bookkeeping.
       brandListedAlone: 'SYSTEM',
+      // [WEB-DELETE] When the owner's closure request paused new orders: Swift's bookkeeping of that request (the
+      // request itself is exported with the person's support tickets).
+      closurePausedAt: 'SYSTEM',
     },
     fields: [
       'id', 'name', 'slug', 'description', 'vendorType', 'tradesUnderOwnName', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
@@ -410,7 +413,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     // [BILL-PRO] A mover's subscription never has a pro owner (the database allows one owner per subscription).
-    category: 'moverSubscriptions', model: 'Subscription', by: ['riderId', 'driverId'], via: 'mover', key: 'id', omit: { serviceProviderId: 'OTHER_PERSON' },
+    // [WEB-DELETE] closureHold*: a store owner's closure request holding a store fee (Swift's bookkeeping; never a mover fee).
+    category: 'moverSubscriptions', model: 'Subscription', by: ['riderId', 'driverId'], via: 'mover', key: 'id', omit: { serviceProviderId: 'OTHER_PERSON', closureHoldAt: 'SYSTEM', closureHoldTicketId: 'SYSTEM' },
     fields: ['id', 'riderId', 'driverId', 'type', 'status', 'weeklyRate', 'currentPeriodStart', 'currentPeriodEnd', 'nextBillingDate', 'isInGracePeriod', 'gracePeriodEnd', 'isTrialActive', 'trialEndDate', 'autoRenew', 'lastPaymentDate', 'lastPaymentId', 'failedAttempts', 'feeWaived', 'feeWaivedReason', 'customRate', 'currencyCode', 'autoSuspendEnabled', 'billingMethod', 'mmgPayerMsisdn', 'suspendedAt', 'billingConfirmationPausedAt', 'billingEnforcementDueAt', 'san', 'sanAssignedAt', 'createdAt', 'updatedAt'],
   },
   {
@@ -449,7 +453,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     // [BILL-PRO] An independent pro's weekly-fee subscription (none exist until the fee is switched on for pros).
-    category: 'proSubscriptions', model: 'Subscription', by: ['serviceProviderId'], via: 'provider', key: 'id',
+    category: 'proSubscriptions', model: 'Subscription', by: ['serviceProviderId'], via: 'provider', key: 'id', omit: { closureHoldAt: 'SYSTEM', closureHoldTicketId: 'SYSTEM' },
     fields: ['id', 'serviceProviderId', 'type', 'status', 'weeklyRate', 'currentPeriodStart', 'currentPeriodEnd', 'nextBillingDate', 'isInGracePeriod', 'gracePeriodEnd', 'isTrialActive', 'trialEndDate', 'autoRenew', 'lastPaymentDate', 'lastPaymentId', 'failedAttempts', 'feeWaived', 'feeWaivedReason', 'customRate', 'currencyCode', 'autoSuspendEnabled', 'billingMethod', 'mmgPayerMsisdn', 'suspendedAt', 'billingConfirmationPausedAt', 'billingEnforcementDueAt', 'san', 'sanAssignedAt', 'createdAt', 'updatedAt'],
   },
   {

@@ -1,6 +1,6 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
 import { ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF, closureMessageFor, type ClosureSurface } from './account-closure';
-import { holdStoreFeesForClosureInTx, resumeStoreFeesAfterClosure } from '../billing/closure-fee-hold';
+import { endClosureFeeHoldsInTx, feeEndingWords, holdStoreFeesForClosureInTx } from '../billing/closure-fee-hold';
 import { ACCOUNT_CLOSURE_CANCELLED, CLOSURE_IN_PROGRESS_REFUSAL, liftClosurePause, pauseStoresForClosure } from './closure-pause';
 import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { eraseUserDevices } from '../../lib/owner-rls';
@@ -152,8 +152,9 @@ export class AccountService {
       // (deleteAccount's preflight): a cancel and a completion never interleave. Once support has the request
       // (IN_PROGRESS), or the account is already closed, the cancel is refused: completion is irreversible.
       await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
-      const person = await tx.user.findUnique({ where: { id: userId }, select: { status: true, phone: true } });
-      if (!person || person.status !== 'ACTIVE' || person.phone === erasedPhoneMarker(userId)) {
+      // (The erasure's cut-off sets DEACTIVATED with its marker, in one write: the status alone says it.)
+      const person = await tx.user.findUnique({ where: { id: userId }, select: { status: true } });
+      if (!person || person.status !== 'ACTIVE') {
         throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
       }
       const ticket = await tx.supportTicket.findFirst({
@@ -169,19 +170,16 @@ export class AccountService {
       });
       if (cancelled.count !== 1) throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
       const stores = await liftClosurePause(tx, userId, ticket.id, { kind: 'OWNER_CANCELLED', actorId: userId });
-      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CANCELLED, entity: 'SupportTicket', entityId: ticket.id, changes: { storesLifted: stores } } });
-      return { ticketId: ticket.id, storesLifted: stores.length };
+      // [owner ruling 2 Nov 2026 · REVIEW-M #2304 S3] The weekly fee the request held restarts from now, in this same
+      // transaction (no step left for after the commit, nothing a crash can strand).
+      const fees = await endClosureFeeHoldsInTx(tx, ticket.id, userId);
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CANCELLED, entity: 'SupportTicket', entityId: ticket.id, changes: { storesLifted: stores, fees } } });
+      return { ticketId: ticket.id, storesLifted: stores.length, fees };
     });
-    // [owner ruling 2 Nov 2026] The weekly fee the request held resumes from now (after the cancel commits: the
-    // partner's own resume takes the same payer lock).
-    const { BillingService } = await import('../billing/billing.service');
-    const { getPaymentProvider } = await import('../../providers/payment/payment-provider');
-    const billing = new BillingService(this.app.prisma, new NotificationService(this.app.prisma, this.app.io), getPaymentProvider());
-    const feesResumed = (await resumeStoreFeesAfterClosure(this.app.prisma, billing, done.ticketId, userId)).length;
-    return { cancelled: true as const, ...done, feesResumed,
-      message: done.storesLifted > 0
-        ? `Your closure request is cancelled.${feesResumed > 0 ? ' Your weekly fee starts again from today.' : ''} Your store still takes no new orders until you press Resume orders on the Orders page.`
-        : 'Your closure request is cancelled.' };
+    const feesResumed = done.fees.filter((f) => f.outcome === 'RENEWS_ON_ITS_DATE' || f.outcome === 'RESTARTED_NOW').length;
+    return { cancelled: true as const, ticketId: done.ticketId, storesLifted: done.storesLifted, feesResumed,
+      message: `Your closure request is cancelled.${feeEndingWords(done.fees)}${
+        done.storesLifted > 0 ? ' Your store still takes no new orders until you press Resume orders on the Orders page.' : ''}` };
   }
 
   /**

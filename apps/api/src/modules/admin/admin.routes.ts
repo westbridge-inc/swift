@@ -79,7 +79,7 @@ import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
-import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT, erasedPhoneMarker } from '../user/account.service';
+import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -7479,8 +7479,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const outcome = await new AccountService(app).deleteAccount(ticket.userId, false, 'app', {
       claimClosure: async (tx) => (await writeTicket(claimWhere, { status: 'IN_PROGRESS' }, tx)).count === 1,
     }).catch(async (error: unknown) => {
-      const person = await tenantPrisma.user.findUnique({ where: { id: ticket.userId }, select: { phone: true } }).catch(() => null);
-      if (person && person.phone !== erasedPhoneMarker(ticket.userId) && ticket.status !== 'IN_PROGRESS') {
+      // Not after the erasure's cut-off (it sets DEACTIVATED with its marker, in one write).
+      const person = await tenantPrisma.user.findUnique({ where: { id: ticket.userId }, select: { status: true } }).catch(() => null);
+      if (person && person.status !== 'DEACTIVATED' && ticket.status !== 'IN_PROGRESS') {
         await writeTicket({ id, status: 'IN_PROGRESS' }, { status: ticket.status }).catch(() => undefined);
       }
       throw error;

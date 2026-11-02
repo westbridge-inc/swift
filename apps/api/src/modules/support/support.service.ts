@@ -7,7 +7,7 @@ import { log } from '../../utils/logger';
 import { supportResolutionCounter } from '../../plugins/observability';
 import { ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account-closure';
 import { liftClosurePause } from '../user/closure-pause';
-import { resumeStoreFeesAfterClosure } from '../billing/closure-fee-hold';
+import { endClosureFeeHoldsInTx } from '../billing/closure-fee-hold';
 
 /** [A-18] What a SAFETY ticket may close on. "Answered" is not one of them. */
 export const SAFETY_RESOLUTIONS: SupportResolution[] = ['ACTION_TAKEN', 'ESCALATED_SAFETY', 'NO_RISK_FOUND'];
@@ -202,8 +202,14 @@ export class SupportService {
     const closure = resolving && ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT
       && !!(await this.prisma.auditLog.findFirst({ where: { action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticketId }, select: { id: true } }));
     const updated = await this.prisma.$transaction(async (tx) => {
-      if (closure) await tx.$queryRaw`SELECT id FROM users WHERE id = ${ticket.userId} FOR UPDATE /* closure-resolve-person-lock */`;
-      const row = await this.queue((db, scope) => ((scope ? db : tx) as Prisma.TransactionClient).supportTicket.update({
+      if (closure) {
+        await tx.$queryRaw`SELECT id FROM users WHERE id = ${ticket.userId} FOR UPDATE /* closure-resolve-person-lock */`;
+        // [REVIEW-G #2304 S4-new] The lift and the fee's restart first, in this transaction: with the owner wall ON the
+        // ticket below is written on another connection, so a failure here must come before that write, never after.
+        await liftClosurePause(tx, ticket.userId, ticketId, { kind: 'STAFF_RESOLVED', actorId: adminId });
+        await endClosureFeeHoldsInTx(tx, ticketId, adminId);
+      }
+      return this.queue((db, scope) => ((scope ? db : tx) as Prisma.TransactionClient).supportTicket.update({
         where: scope ? { id: ticketId, AND: [scope] } : { id: ticketId },
         data: {
           status: input.status,
@@ -211,15 +217,7 @@ export class SupportService {
           ...(resolving ? { resolvedById: adminId, resolvedAt: new Date(), resolution: input.resolution } : {}),
         },
       }));
-      if (closure) await liftClosurePause(tx, ticket.userId, ticketId, { kind: 'STAFF_RESOLVED', actorId: adminId });
-      return row;
     });
-    if (closure) {
-      const { BillingService } = await import('../billing/billing.service');
-      const { getPaymentProvider } = await import('../../providers/payment/payment-provider');
-      await resumeStoreFeesAfterClosure(this.prisma, new BillingService(this.prisma, this.notifications, getPaymentProvider()), ticketId, adminId)
-        .catch((err: unknown) => log().error({ err, ticketId }, '[WEB-DELETE] weekly fee not resumed after staff ended a closure request'));
-    }
     if (resolving) {
       supportResolutionCounter.labels(ticket.category, input.resolution ?? 'UNSET').inc();
     }

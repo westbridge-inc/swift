@@ -6,6 +6,8 @@ import { useQuery } from '@tanstack/react-query';
 import { ApiRequestError } from '@/lib/auth';
 import { isStepUpDismissed, useStepUp } from '@/lib/step-up';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { storeOrderStatusWords } from '@swift/types';
+import { orderStatusLabel } from '@/lib/order-words';
 import {
   DELETED_PAGE, cancelAccountClosure, deleteMyAccount, getDeletionCheck, requestAccountClosure, stashDeletionReceipt,
   type DeletionCheck, type DeletionSide,
@@ -26,8 +28,14 @@ import {
 
 export type DeletionArea = 'store' | 'mover' | 'customer';
 
-/** "PICKED_UP" -> "Picked up": any status the server sends is shown, never hidden. */
-const statusWords = (status: string) => (status.charAt(0) + status.slice(1).toLowerCase()).replace(/_/g, ' ');
+/** An order's status in words for the person's side of it: their own order in the customer's words, a store's or a
+ *  delivery's in the store board's words (never the code: the raw-codes census). */
+const orderWords = (o: { status: string; orderType: string; side: DeletionSide }) =>
+  o.side === 'CUSTOMER' ? orderStatusLabel(o.status, o.orderType) : storeOrderStatusWords(o.status);
+const SERVICE_JOB_WORDS: Readonly<Record<string, string>> = {
+  REQUESTED: 'Requested', QUOTED: 'Quoted', SCHEDULED: 'Booked', IN_PROGRESS: 'In progress',
+};
+const jobWords = (status: string) => SERVICE_JOB_WORDS[status] ?? 'Open';
 
 function orderLine(side: DeletionSide, storeName: string | null): string {
   if (side === 'CUSTOMER') return storeName ? `your order from ${storeName}` : 'your order';
@@ -218,12 +226,12 @@ function LiveWork({ check, closure, recheck, rechecking }: { check: DeletionChec
           <ul className="mt-3 space-y-2">
             {openOrders.items.map((o) => (
               <li key={o.id} className="rounded-lg bg-[var(--swift-subtle)] px-3 py-2">
-                <span className="font-semibold">#{o.orderNumber}</span> · {statusWords(o.status)} · {orderLine(o.side, o.storeName)}
+                <span className="font-semibold">#{o.orderNumber}</span> · {orderWords(o)} · {orderLine(o.side, o.storeName)}
               </li>
             ))}
             {openServiceJobs.items.map((j) => (
               <li key={j.id} className="rounded-lg bg-[var(--swift-subtle)] px-3 py-2">
-                <span className="font-semibold">Service job</span> · {statusWords(j.status)} · {j.side === 'CUSTOMER' ? 'a service you booked' : 'a job you are booked for'}
+                <span className="font-semibold">Service job</span> · {jobWords(j.status)} · {j.side === 'CUSTOMER' ? 'a service you booked' : 'a job you are booked for'}
               </li>
             ))}
           </ul>

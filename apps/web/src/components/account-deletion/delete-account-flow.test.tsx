@@ -164,8 +164,8 @@ describe('[WEB-DELETE] deleting an account on the website', () => {
     } });
     render();
     const list = await screen.findByRole('region', { name: 'Finish these first' });
-    expect(within(list).getByText(/A100/).closest('li')!.textContent).toBe('#A100 · Preparing · your order from Sample Kitchen');
-    expect(within(list).getByText(/A101/).closest('li')!.textContent).toBe('#A101 · Picked up · a delivery assigned to you');
+    expect(within(list).getByText(/A100/).closest('li')!.textContent).toBe('#A100 · Being prepared · your order from Sample Kitchen');
+    expect(within(list).getByText(/A101/).closest('li')!.textContent).toBe('#A101 · Out for delivery · a delivery assigned to you');
     expect(within(list).getByText(/a job you are booked for/)).toBeTruthy();
     expect(within(list).getByText('And 10 more.')).toBeTruthy();
     expect(within(list).getByText('You are holding vendor cash from a delivery that has not been settled.')).toBeTruthy();

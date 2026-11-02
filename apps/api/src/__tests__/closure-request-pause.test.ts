@@ -13,7 +13,8 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_MESSAGE_WEBSITE, ACCOUNT_CLOSURE_SUBJECT } from '../modules/user/account-closure';
 import { ACCOUNT_CLOSURE_CANCELLED, CLOSURE_ORDERS_PAUSED, CLOSURE_ORDERS_PAUSE_LIFTED, CLOSURE_PAUSE_REFUSAL, CLOSURE_PAUSE_REFUSAL_TEAM } from '../modules/user/closure-pause';
-import { BILLING_HELD_FOR_CLOSURE, BILLING_RESUMED_AFTER_CLOSURE, CLOSURE_FEE_HOLD_NOTE } from '../modules/billing/closure-fee-hold';
+import { BILLING_HELD_FOR_CLOSURE, BILLING_RESUMED_AFTER_CLOSURE, CLOSURE_FEE_HOLD_NOTE, CLOSURE_FEE_HOLD_REFUSAL, CLOSURE_LAPSE_NOTE } from '../modules/billing/closure-fee-hold';
+import { CLOSURE_HOLD_WORDS, feeStatusFor } from '../modules/billing/fee-status';
 import { BillingService } from '../modules/billing/billing.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
@@ -222,14 +223,14 @@ describe('[WEB-DELETE · owner ruling] a store owner\'s closure request pauses n
     const sub = await fee(p.vendorIds[0]!);
     const phone = await signIn(p.phone, 'app');
     const ticketId = (await request(phone)).json().data.ticketId as string;
-    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).autoRenew).toBe(false);
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).closureHoldAt).toBeInstanceOf(Date);
     const staff = await app.prisma.user.create({ data: { phone: `+${phoneBase + 90_000 + seq}`, firstName: 'Support', lastName: 'Staff', roles: ['ADMIN'], activeRole: 'ADMIN' } });
     userIds.push(staff.id);
     await new SupportService(app.prisma, new NotificationService(app.prisma, app.io)).resolve(ticketId, staff.id, { status: 'RESOLVED', resolution: 'ANSWERED', adminNote: 'Closed at the owner\'s request by phone.' });
     expect((await store(p.vendorIds[0]!)).closurePausedAt).toBeNull();
     const [lifted] = await audits(ticketId, CLOSURE_ORDERS_PAUSE_LIFTED);
     expect(lifted).toMatchObject({ userId: staff.id, changes: { by: 'STAFF_RESOLVED', accountId: p.userId } });
-    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).autoRenew, 'the fee resumes when the request ends').toBe(true);
+    expect(await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } }), 'the fee restarts when the request ends').toMatchObject({ autoRenew: true, closureHoldAt: null });
   });
 
   it('a typed ticket with the closure subject, resolved by staff, lifts nothing: only the confirmed request does', async () => {
@@ -263,14 +264,19 @@ const subRow = (id: string) => app.prisma.subscription.findUniqueOrThrow({ where
 const payments = (id: string) => app.prisma.subscriptionPayment.count({ where: { subscriptionId: id } });
 
 describe('[WEB-DELETE · owner ruling 2 Nov] the weekly fee stops from the moment the closure is requested', () => {
-  it('the request holds every store fee at once (no new week charged or retried), audited and keyed to the request; a paid week still runs', async () => {
+  const billing = () => new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
+  const events = (id: string, type: 'CHARGE_ATTEMPT' | 'CHARGE_SUCCESS' | 'PREPAID_TOPUP') => app.prisma.billingEvent.count({ where: { subscriptionId: id, type } });
+
+  it('the request holds every store fee at once with its own marker, audited and keyed to the request: auto-renew and the paid week are untouched', async () => {
     const p = await owner([{}, {}]);
     const a = await fee(p.vendorIds[0]!);
     const b = await fee(p.vendorIds[1]!);
     const ticketId = (await request(await signIn(p.phone, 'website'))).json().data.ticketId as string;
     for (const s of [a, b]) {
       const row = await subRow(s.id);
-      expect(row).toMatchObject({ autoRenew: false, nextRetryAt: null, status: 'ACTIVE' });
+      // [REVIEW-M #2304 S2] Never auto-renew: settlement keys on it, so a week owed must still settle (below).
+      expect(row).toMatchObject({ autoRenew: true, status: 'ACTIVE', closureHoldTicketId: ticketId });
+      expect(row.closureHoldAt).toBeInstanceOf(Date);
       expect(row.nextBillingDate, 'the paid week keeps its end').toEqual(s.nextBillingDate);
       expect(await app.prisma.billingEvent.count({ where: { subscriptionId: s.id, note: CLOSURE_FEE_HOLD_NOTE, idempotencyKey: { contains: ticketId } } })).toBe(1);
       expect(await app.prisma.auditLog.count({ where: { entity: 'Subscription', entityId: s.id, action: BILLING_HELD_FOR_CLOSURE } })).toBe(1);
@@ -278,7 +284,47 @@ describe('[WEB-DELETE · owner ruling 2 Nov] the weekly fee stops from the momen
     }
   });
 
-  it('cancelling resumes the held fee from then: a still-paid week renews on its own date, nothing is charged twice', async () => {
+  it('[REVIEW-M #2304 S2] a week already owed when the request comes is charged and settled during the hold as ever: nothing banked', async () => {
+    const p = await owner();
+    const s = await fee(p.vendorIds[0]!, { paidUntil: new Date(Date.now() - 2 * DAY) }); // the week from 2 days ago is owed
+    expect((await request(await signIn(p.phone, 'website'))).statusCode).toBe(202);
+    const balanceBefore = Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: s.id } })).balance);
+    // The lapse sweep first: an owed week (it began before the hold) is never paused away.
+    await billing().lapseStoppedSubscriptions();
+    expect((await subRow(s.id)).status).toBe('ACTIVE');
+    await billing().runBillingCycle();
+    expect(await events(s.id, 'CHARGE_SUCCESS'), 'the owed week settles once').toBe(2);
+    expect(await events(s.id, 'PREPAID_TOPUP'), 'nothing is banked as credit').toBe(0);
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: s.id } })).balance)).toBe(balanceBefore - 20000);
+    const row = await subRow(s.id);
+    expect(row.currentPeriodStart).toEqual(s.nextBillingDate);
+    expect(row).toMatchObject({ status: 'ACTIVE', autoRenew: true });
+  });
+
+  it('a new week is not born during the hold: the billing run neither charges it nor reminds about it', async () => {
+    const p = await owner();
+    const s = await fee(p.vendorIds[0]!);
+    expect((await request(await signIn(p.phone, 'website'))).statusCode).toBe(202);
+    const after = new Date(s.nextBillingDate.getTime() + DAY);
+    await billing().runBillingCycle(after);
+    expect(await events(s.id, 'CHARGE_ATTEMPT')).toBe(0);
+    expect(await events(s.id, 'CHARGE_SUCCESS'), 'only the week paid before').toBe(1);
+    expect(await billing().sendUpcomingReminders(new Date(s.nextBillingDate.getTime() - 12 * 60 * 60 * 1000))).toBe(0);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: s.id, type: 'REMINDER' } })).toBe(0);
+  });
+
+  it('the partner\'s own resume is refused in plain words while the request holds the fee; the fee screens say it is on hold', async () => {
+    const p = await owner();
+    const s = await fee(p.vendorIds[0]!);
+    expect((await request(await signIn(p.phone, 'website'))).statusCode).toBe(202);
+    await expect(billing().setBillingRail(s.id, 'CASH')).rejects.toMatchObject({ code: 'CLOSURE_REQUESTED', message: CLOSURE_FEE_HOLD_REFUSAL });
+    const status = await feeStatusFor(app.prisma, await subRow(s.id), { amountDueGyd: 0, weeklyFeeGyd: 20000, walletBalanceGyd: 20000 });
+    expect(status).toMatchObject({ state: 'FEE_PAUSED', headline: 'Weekly fee on hold' });
+    expect(status.detail).toContain(CLOSURE_HOLD_WORDS);
+    expect(status.detail).not.toMatch(/Resume weekly billing|stopped/i);
+  });
+
+  it('cancelling ends the hold in its own transaction: a still-paid week renews on its own date, nothing is charged twice', async () => {
     const p = await owner();
     const s = await fee(p.vendorIds[0]!);
     const web = await signIn(p.phone, 'website');
@@ -288,29 +334,38 @@ describe('[WEB-DELETE · owner ruling 2 Nov] the weekly fee stops from the momen
     expect(res.json().data).toMatchObject({ feesResumed: 1 });
     expect(res.json().data.message).toMatch(/Your weekly fee starts again from today\./);
     const row = await subRow(s.id);
-    expect(row).toMatchObject({ autoRenew: true, status: 'ACTIVE' });
+    expect(row).toMatchObject({ autoRenew: true, status: 'ACTIVE', closureHoldAt: null, closureHoldTicketId: null });
     expect(row.nextBillingDate).toEqual(s.nextBillingDate);
     expect(await payments(s.id)).toBe(1);
-    expect(await app.prisma.auditLog.count({ where: { entity: 'Subscription', entityId: s.id, action: BILLING_RESUMED_AFTER_CLOSURE } })).toBe(1);
+    expect(await app.prisma.auditLog.findFirst({ where: { entity: 'Subscription', entityId: s.id, action: BILLING_RESUMED_AFTER_CLOSURE } })).toMatchObject({ changes: { outcome: 'RENEWS_ON_ITS_DATE' } });
   });
 
-  it('a paid week that ended while the fee was held lapses owing nothing; cancelling restarts it due now with exactly one new week', async () => {
+  it('a paid week that ended during the hold lapses owing nothing; cancelling restarts it due now and the run bills exactly one new week', async () => {
     const p = await owner();
-    const s = await fee(p.vendorIds[0]!, { paidUntil: new Date(Date.now() - 2 * DAY) });
+    const end = new Date(Date.now() - 2 * DAY);
+    const s = await fee(p.vendorIds[0]!, { paidUntil: end });
     const web = await signIn(p.phone, 'website');
     expect((await request(web)).statusCode).toBe(202);
-    const billing = new BillingService(app.prisma, new NotificationService(app.prisma, app.io), getPaymentProvider());
-    await billing.lapseStoppedSubscriptions();
-    expect((await subRow(s.id)).status, 'no new week fell due while the request was open').toBe('PAUSED');
+    // The request came during the paid week (its hold is dated then), so the week from `end` is a new one.
+    await app.prisma.subscription.update({ where: { id: s.id }, data: { closureHoldAt: new Date(end.getTime() - DAY) } });
+    await billing().runBillingCycle();
+    expect(await events(s.id, 'CHARGE_ATTEMPT'), 'the new week is not charged').toBe(0);
+    await billing().lapseStoppedSubscriptions();
+    const lapsed = await subRow(s.id);
+    expect(lapsed, 'no new week fell due while the request was open').toMatchObject({ status: 'PAUSED', autoRenew: false });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: s.id, note: CLOSURE_LAPSE_NOTE } })).toBe(1);
     expect(await payments(s.id)).toBe(1);
     const before = Date.now();
     const res = await cancel(web);
     expect(res.statusCode, res.payload).toBe(200);
+    expect(await subRow(s.id)).toMatchObject({ status: 'ACTIVE', autoRenew: true, closureHoldAt: null });
+    await billing().runBillingCycle();
     const row = await subRow(s.id);
-    expect(row).toMatchObject({ status: 'ACTIVE', autoRenew: true });
     expect(row.currentPeriodStart.getTime(), 'the new week starts when the request was cancelled').toBeGreaterThanOrEqual(before - 1000);
     expect(row.currentPeriodEnd.getTime() - row.currentPeriodStart.getTime()).toBe(7 * DAY);
     expect(await payments(s.id), 'exactly one new week').toBe(2);
+    await billing().runBillingCycle();
+    expect(await payments(s.id), 'and never twice').toBe(2);
   });
 
   it('a fee the partner had already stopped is not touched by the request, and not resumed by the cancel', async () => {
@@ -319,6 +374,7 @@ describe('[WEB-DELETE · owner ruling 2 Nov] the weekly fee stops from the momen
     const web = await signIn(p.phone, 'website');
     expect((await request(web)).statusCode).toBe(202);
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: s.id, note: CLOSURE_FEE_HOLD_NOTE } })).toBe(0);
+    expect((await subRow(s.id)).closureHoldAt).toBeNull();
     expect((await cancel(web)).json().data).toMatchObject({ feesResumed: 0 });
     expect((await subRow(s.id)).autoRenew).toBe(false);
   });
