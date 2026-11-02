@@ -1607,6 +1607,11 @@ model Vendor {
   // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT
   // lift it). Reinstatement CAS-matches BILLING only.
   suspensionSource        String?
+  /// [WEB-DELETE · owner ruling 1 Nov 2026] When the owner's account closure request paused this store's NEW orders
+  /// (user/closure-pause.ts). While it is set nothing turns order intake back on (a database CHECK keeps
+  /// acceptingOrders false): only Swift staff resolving the request, or the owner cancelling it, clears it. Orders
+  /// already placed still finish.
+  closurePausedAt         DateTime?
   isFeatured              Boolean                  @default(false)
   averageRating           Float                    @default(5.0)
   totalRatings            Int                      @default(0)
@@ -3601,6 +3606,13 @@ model Subscription {
   isTrialActive      Boolean               @default(false)
   trialEndDate       DateTime?
   autoRenew          Boolean               @default(true)
+  /// [WEB-DELETE · owner ruling 2 Nov 2026] The store owner's account closure request holds this weekly fee from this
+  /// instant (billing/closure-fee-hold.ts): no week that starts at or after it is born, charged or reminded, and at
+  /// the end of the paid week the plan pauses owing nothing. A week owed before it settles exactly as ever (autoRenew
+  /// is untouched). Cleared, and the fee restarted from then, when the request ends without closing the account.
+  closureHoldAt       DateTime?
+  /// The closure request (support ticket) that holds it.
+  closureHoldTicketId String?
   lastPaymentDate    DateTime?
   lastPaymentId      String?
   failedAttempts     Int                   @default(0)

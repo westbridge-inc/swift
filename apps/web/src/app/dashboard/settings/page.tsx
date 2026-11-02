@@ -351,6 +351,17 @@ export default function SettingsPage() {
       <SubscriptionCard isOwner={isOwner} />
       <SettlementsCard />
       <HoursEditor />
+      {/* [WEB-DELETE · owner 1 Nov 2026] The phone's Personal data -> Delete my account; a store owner's account
+          closes by a request the team completes (the next page asks the server which, and shows what happens). */}
+      <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+        <div className="min-w-0 flex-1">
+          <h2 className="font-bold">Your Swift account</h2>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">
+            {isOwner ? 'Close your account. New orders and your weekly fee stop as soon as you ask; our team takes your store off sale once every order and payment is settled.' : 'Delete your account and the personal data Swift holds about you.'}
+          </p>
+        </div>
+        <Link href="/dashboard/settings/delete-account" className="sw-chip text-[var(--swift-red)]">{isOwner ? 'Request account closure' : 'Delete my account'}</Link>
+      </div>
     </div>
   );
 }

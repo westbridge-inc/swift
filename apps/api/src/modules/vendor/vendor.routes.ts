@@ -124,6 +124,7 @@ import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { storeBacklogSentence, storeRiderBacklog } from '../dispatch/delivery-capacity';
 import { deliveryPausedAt } from '../dispatch/delivery-pause';
+import { CLOSURE_PAUSE_REFUSAL, CLOSURE_PAUSE_REFUSAL_TEAM } from '../user/closure-pause';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2326,6 +2327,14 @@ export async function vendorRoutes(app: FastifyInstance) {
       return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
     }
 
+    // [WEB-DELETE · owner ruling 1 Nov 2026] The owner asked Swift to close the account: new orders stay paused
+    // until Swift's team resolves the request or the owner cancels it (user/closure-pause.ts). Said before any other
+    // check, so the person reads why; the database CHECK and the guarded write below back it up.
+    if (!vendor.acceptingOrders && vendor.closurePausedAt) {
+      const owner = await vendorOwnerUserId(app, vendorId);
+      throw new AppError(409, 'CLOSURE_REQUESTED', owner === request.user.userId ? CLOSURE_PAUSE_REFUSAL : CLOSURE_PAUSE_REFUSAL_TEAM);
+    }
+
     // Turning OFF is always allowed and needs no authority — a fast atomic flip.
     if (vendor.acceptingOrders) {
       await app.prisma.vendor.updateMany({
@@ -2399,7 +2408,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // matches nothing (it changed one of these) — but it cannot, because it
       // waits on the FOR UPDATE lock this transaction holds.
       const won = await tx.vendor.updateMany({
-        where: { id: vendorId, acceptingOrders: false, status: 'ACTIVE', isVerified: locked.isVerified },
+        where: { id: vendorId, acceptingOrders: false, status: 'ACTIVE', isVerified: locked.isVerified, closurePausedAt: null },
         data: { acceptingOrders: true },
       });
       if (won.count === 0) {

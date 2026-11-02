@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { runAsSystem } from '../../plugins/tenant-context';
-import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, erasureExceptionOpen } from './account-closure';
+import { ACCOUNT_CLOSURE_MESSAGES, ACCOUNT_CLOSURE_SUBJECT, erasureExceptionOpen } from './account-closure';
 import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION } from '../../utils/public-photo-deletion';
 import { eraseNoticesOf } from '../../lib/owner-wall-notices';
@@ -203,7 +203,7 @@ export async function deidentifyCaseRecords(db: PrismaClient, userId: string): P
     // The closure request's subject and message are server-written (the support queue completes by them), and
     // so is its completion note: they stay. Every other ticket's text goes.
     await tx.supportTicket.updateMany({ where: { userId, subject: { notIn: [TICKET_TEXT_REMOVED, ACCOUNT_CLOSURE_SUBJECT] } }, data: { subject: TICKET_TEXT_REMOVED } });
-    await tx.supportTicket.updateMany({ where: { userId, message: { notIn: [TICKET_TEXT_REMOVED, ACCOUNT_CLOSURE_MESSAGE] } }, data: { message: TICKET_TEXT_REMOVED } });
+    await tx.supportTicket.updateMany({ where: { userId, message: { notIn: [TICKET_TEXT_REMOVED, ...ACCOUNT_CLOSURE_MESSAGES] } }, data: { message: TICKET_TEXT_REMOVED } });
     await tx.supportTicket.updateMany({ where: { userId, adminNote: { not: null }, subject: { not: ACCOUNT_CLOSURE_SUBJECT } }, data: { adminNote: null } });
     await tx.complianceViolation.updateMany({ where: { userId, NOT: { evidence: { equals: {} } } }, data: { evidence: {} } });
     await tx.complianceReviewCase.updateMany({ where: { userId, note: { not: null } }, data: { note: null } });

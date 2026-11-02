@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
 import { site } from '@/site.config';
+import { DELETION_GONE, DELETION_KEPT, DELETION_KEPT_LEAD } from '@/lib/account-deletion-words';
 
 // Google Play's account-deletion policy requires a PUBLICLY reachable URL, in
 // addition to the in-app path — reachable by someone who has already
@@ -12,38 +13,19 @@ import { site } from '@/site.config';
 //
 // Deliberately NOT a self-serve form: an unauthenticated "delete this number"
 // endpoint is an account-takeover primitive. Deletion is either performed by
-// the signed-in person in the app (immediate) or requested by email with
-// identity verification. Play accepts a documented request route.
+// the signed-in person in the app or on the website (immediate; [WEB-DELETE]
+// the website's signed-in flow is components/account-deletion) or requested by
+// email with identity verification. Play accepts a documented request route.
 
 export const metadata: Metadata = {
   title: 'Delete your Swift account',
   description:
-    'How to delete your Swift account and what happens to your data — in the app, or by request if you no longer have it installed.',
+    'How to delete your Swift account and what happens to your data — in the app, on the website, or by request if you can’t sign in.',
 };
 
-const KEPT = [
-  {
-    what: 'Order, trip and delivery records',
-    why: 'Kept in de-identified form for the period required for disputes, guarantees, tax and legal record-keeping. They stop being linked to a person.',
-  },
-  {
-    what: 'Money records — payouts, invoices, settlement',
-    why: 'Financial records have their own statutory retention duty. If money is still owed in either direction, that is settled before the account closes.',
-  },
-  {
-    what: 'Safety and incident evidence',
-    why: 'Where an incident or a legal hold exists, the case-bound evidence is retained under that hold rather than the account.',
-  },
-];
-
-const GONE = [
-  'Your name, phone number and email',
-  'Your profile photo and verification selfie',
-  'Your identity documents — deleted so they cannot be recovered, even from a backup',
-  'Your saved addresses and precise locations',
-  'Your cart, favourites, emergency contacts and any active trip-share links',
-  'Your sign-ins on all devices and the details Swift uses to send app notifications',
-];
+// [WEB-DELETE] The lists live in lib/account-deletion-words.ts: the website's delete flow shows the same ones.
+const KEPT = DELETION_KEPT;
+const GONE = DELETION_GONE;
 
 export default function DeleteAccountPage() {
   return (
@@ -56,10 +38,9 @@ export default function DeleteAccountPage() {
           required to keep.
         </p>
 
-        <h2 className="mt-12 text-2xl font-bold tracking-tight">In the app — the fastest way</h2>
+        <h2 className="mt-12 text-2xl font-bold tracking-tight">In the app or on the website — the fastest way</h2>
         <p className="mt-3 text-[var(--swift-muted)]">
-          If you still have Swift installed and can sign in, delete the account yourself and it
-          happens immediately:
+          If you can sign in, delete the account yourself and it happens immediately. In the app:
         </p>
         <ol className="mt-4 list-decimal space-y-2 pl-5 text-[var(--swift-muted)]">
           <li>Open Swift and go to the <b>Profile</b> tab</li>
@@ -67,13 +48,25 @@ export default function DeleteAccountPage() {
           <li>Tap <b>Delete my account</b> and confirm</li>
         </ol>
         <p className="mt-4 text-[var(--swift-muted)]">
+          On the website, sign in at {site.domain} with your phone number and open:
+        </p>
+        <ul className="mt-4 list-disc space-y-2 pl-5 text-[var(--swift-muted)]">
+          <li>A store: <b>Account</b>, then <b>Request account closure</b> (owners) or <b>Delete my account</b> (managers and staff)</li>
+          <li>A rider or driver: <b>Account</b>, then <b>Delete my account</b></li>
+          <li>A customer: <b>Account</b>, then <b>Personal details</b>, then <b>Delete my account</b></li>
+        </ul>
+        <p className="mt-4 text-[var(--swift-muted)]">
+          The website shows what is deleted and what is kept, asks you to confirm, and may text a code to
+          the phone on the account to check it is you.
+        </p>
+        <p className="mt-4 text-[var(--swift-muted)]">
           You will be asked to finish or cancel anything still in progress first — an open order or
           an unfinished job cannot be abandoned by deleting the account, because someone on the
-          other side of it is waiting.
+          other side of it is waiting. The website lists each one.
         </p>
 
         <h2 className="mt-12 text-2xl font-bold tracking-tight">
-          If you no longer have the app
+          If you can&apos;t sign in
         </h2>
         <p className="mt-3 text-[var(--swift-muted)]">
           Email <b><a className="underline" href="mailto:privacy@swiftgy.com">privacy@swiftgy.com</a></b> from
@@ -94,6 +87,15 @@ export default function DeleteAccountPage() {
           or for at most 90 days; the cash record is kept as part of the order record. A
           customer&apos;s own deletion is never blocked by this.
         </p>
+        <p className="mt-3 text-[var(--swift-muted)]">
+          A store owner closes the account by a request, in the app or on the website. The store
+          stops taking new orders, and its weekly fee stops, as soon as the request is sent; orders already placed still finish, and
+          cancelling the request lifts the pause (the weekly fee then starts again). Nothing already paid is refunded
+          automatically at that point. Our team then
+          takes the store off sale, removes its team members, ends the weekly fee (refunding any week
+          paid for that has not started) and closes the account once every order and payment is
+          settled. The owner keeps access until then.
+        </p>
 
         <h2 className="mt-12 text-2xl font-bold tracking-tight">What is deleted</h2>
         <ul className="mt-4 space-y-2 text-[var(--swift-muted)]">
@@ -109,14 +111,13 @@ export default function DeleteAccountPage() {
           What is kept, and why
         </h2>
         <p className="mt-3 text-[var(--swift-muted)]">
-          We do not keep anything we are not required to. Where a legal duty applies, the record is
-          retained but stripped of the person it belonged to.
+          {DELETION_KEPT_LEAD}
         </p>
         <dl className="mt-4 space-y-5">
           {KEPT.map((row) => (
             <div key={row.what}>
               <dt className="font-semibold text-[var(--swift-ink)]">{row.what}</dt>
-              <dd className="mt-1 text-[var(--swift-muted)]">{row.why}</dd>
+              <dd className="mt-1 text-[var(--swift-muted)]">{row.why} {row.howLong}</dd>
             </div>
           ))}
         </dl>

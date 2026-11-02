@@ -418,10 +418,15 @@ export class PartnerService {
         where: { userId },
         select: {
           id: true,
-          vendors: { select: { id: true, name: true, status: true, isVerified: true, suspensionSource: true, mmgCheckoutHeldAt: true, subscription: { select: { status: true } } } },
+          vendors: { select: { id: true, name: true, status: true, isVerified: true, suspensionSource: true, mmgCheckoutHeldAt: true, closurePausedAt: true, subscription: { select: { status: true } } } },
         },
       });
       if (!owner || owner.vendors.length === 0) throw new AppError(404, 'VENDOR_NOT_FOUND', 'Set up your first store before adding a branch.');
+      // [WEB-DELETE · REVIEW-M #2304 S3-1] An open closure request holds the owner's stores (closure-pause.ts): a branch
+      // added now would be born outside that pause. Read under the account lock above, which the request also takes.
+      if (owner.vendors.some((v) => v.closurePausedAt)) {
+        throw new AppError(409, 'CLOSURE_REQUESTED', 'You asked Swift to close your account, so a new branch can’t be added while that request is open. To keep trading, cancel the request on swiftgy.com (Account, Request account closure) or contact Swift support.');
+      }
       assertOwnerInGoodStanding(owner.vendors, (await hasActiveHold(tx as unknown as PrismaClient, userId)).held);
       const limit = branchLimit(env);
       if (owner.vendors.length >= limit) {
