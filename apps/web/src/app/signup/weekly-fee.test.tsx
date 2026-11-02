@@ -62,7 +62,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     const box = await feeBox();
     expect(box.checked).toBe(false);
     const fee = screen.getByRole('region', { name: 'Your weekly fee' });
-    expect(fee.textContent).toContain('Your weekly fee: $6,000/week');
+    expect(fee.textContent).toContain('Your weekly fee: GY$6,000 a week');
     for (const item of FEE_TERMS_V1.items) expect(fee.textContent).toContain(`${item.heading}: ${item.text}`);
     // The price is read fresh from the API, never a cached page's figure.
     expect(fx.fetch).toHaveBeenCalledWith(expect.stringMatching(/\/api\/v1\/auth\/pricing$/), expect.objectContaining({ cache: 'no-store' }));
@@ -83,7 +83,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     await user.click(await feeBox());
     await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     fireEvent.change(screen.getByLabelText('Vehicle'), { target: { value: 'BICYCLE' } });
-    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('Your weekly fee: $5,000/week');
+    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('Your weekly fee: GY$5,000 a week');
     expect((await feeBox()).checked).toBe(false);
     expect(button('Create rider account').disabled).toBe(true);
     await user.click(await feeBox());
@@ -93,7 +93,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
 
   it('a taxi driver is quoted the taxi fee; a business its own type’s fee', async () => {
     const user = await throughName(/Drive a taxi with Swift/);
-    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('$8,000/week');
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('GY$8,000 a week');
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
@@ -107,9 +107,9 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
   it('a business sees the first step of its catalogue fee, or the services fee', async () => {
     await throughName(/Put my business on Swift/);
     const region = await screen.findByRole('region', { name: 'Your weekly fee' });
-    expect(region.textContent).toContain('$9,000/week');
+    expect(region.textContent).toContain('GY$9,000 a week');
     fireEvent.change(screen.getByLabelText('Business type'), { target: { value: 'SERVICE' } });
-    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('$7,000/week');
+    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('GY$7,000 a week');
     expect(button('Create business').disabled).toBe(true);
   });
 
@@ -117,7 +117,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     // [RETIER PR-A · R27] priced for its size when approved, ticked first; never "it steps up as you list more items"
     const LADDER = 'This is the starting rate. If your store has more items by the time Swift approves it (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. After that, the rate does not change as your catalogue grows.';
     await throughName(/Put my business on Swift/);
-    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain(`Your weekly fee: $9,000/week${LADDER}`);
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain(`Your weekly fee: GY$9,000 a week${LADDER}`);
     fireEvent.change(screen.getByLabelText('Business type'), { target: { value: 'SERVICE' } });
     expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).not.toContain(LADDER);
   });
@@ -184,7 +184,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     expect(button('Create rider account').disabled).toBe(true);
     await user.click(button('Try again'));
     expect((await feeBox()).checked).toBe(false);
-    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('$6,000/week');
+    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('GY$6,000 a week');
   });
 
   it('no fee for the choice keeps the button waiting', async () => {
@@ -207,7 +207,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
   it('an API older than the tick (an amount, no words): the amount is shown, nothing is ticked or sent', async () => {
     fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, feeTerms: undefined }));
     const user = await throughName(/Deliver with Swift/);
-    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('$6,000/week');
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('GY$6,000 a week');
     expect(screen.queryByRole('checkbox', { name: /weekly fee/ })).toBeNull();
     await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(button('Create rider account'));
@@ -223,7 +223,7 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, movers: [{ vehicleType: 'MOTORCYCLE', rate: 6500 }, { vehicleType: 'BICYCLE', rate: 5000 }] }));
     await user.click(button('Create rider account'));
     expect((await screen.findByText(/The weekly fee is now \$6,500 a week/)).getAttribute('role')).toBe('alert');
-    await waitFor(() => expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('$6,500/week'));
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('GY$6,500 a week'));
     expect((await feeBox()).checked).toBe(false);
     expect(fx.replace).not.toHaveBeenCalled();
   });

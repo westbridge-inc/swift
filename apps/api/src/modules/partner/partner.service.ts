@@ -14,7 +14,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
 import {
-  assertSawQuote, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
+  assertSawQuote, signupQuote, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
 } from './weekly-fee-ack';
 import { assertStorePinInMarket } from '../vendor/store-pin';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
@@ -195,7 +195,7 @@ export class PartnerService {
     // [Row 628] The weekly-fee tick anchors to its own published words, the same way.
     const feeAck = consent?.weeklyFeeAck;
     if (feeAck) {
-      await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+      await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
     }
     const feeSubject = input.role === 'VENDOR'
       ? { role: 'VENDOR' as const, vendorType: input.business!.vendorType }
@@ -394,7 +394,7 @@ export class PartnerService {
     if (consent.foodHandlers && !foodHandlerTickApplies({ vendorType: business.vendorType })) {
       throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', 'Only a restaurant confirms its food handlers.');
     }
-    await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+    await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
     if (consent.foodHandlers) {
       await publishLegalDocumentOnce(this.prisma, { documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION, renderedText: FOOD_HANDLERS_TICK_V1 });
     }

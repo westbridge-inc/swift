@@ -66,7 +66,8 @@ export const REPLACE_BODY = 'Your new upload replaces the one waiting for review
 export const STILL_UPLOADING = 'Still uploading — keep this screen open. Slow connections can take a minute.';
 
 /** Under the list (DocumentChecklist's last note). */
-export const DOCUMENTS_FOOTNOTE = "We confirm your documents are genuine and that they're yours, and re‑check expiry every day — we'll remind you before anything lapses so you stay verified.";
+// [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D5)] What happens, not a claim Swift cannot prove ("genuine"): the phone's checklist says the same.
+export const DOCUMENTS_FOOTNOTE = "A person at Swift checks every document, and we re‑check expiry every day — we'll remind you before anything lapses so you stay verified.";
 
 /** The checklist's first lines (DocumentChecklist). */
 export const REQUIRED_HEADING = 'Required steps';
