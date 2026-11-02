@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { offerEarnings } from './offer-earnings';
+import { offerEarnings, owesStore } from './offer-earnings';
 
 describe('offerEarnings', () => {
   it('adds a delivery tip to the fare — the defect this exists to fix', () => {
@@ -62,5 +64,30 @@ describe('offerEarnings', () => {
     expect(offerEarnings(1200, 300, true).total).toBe(1500);
     expect(offerEarnings(800, 300, true).total).toBe(1100);
     expect(offerEarnings(800, 300, true).tip).toBe(300);
+  });
+});
+
+describe('[promo-film finding] the cash card names a store only when one is owed', () => {
+  it('a store order hands the store its share; a taxi ride or a courier job owes no store', () => {
+    expect(owesStore({ payToVendor: 4200 })).toBe(true);
+    // the server's cash math for a ride and for a courier job: collect the total, pay no store
+    expect(owesStore({ payToVendor: 0 })).toBe(false);
+    expect(owesStore({ payToVendor: '0.00' })).toBe(false);
+    expect(owesStore(null)).toBe(false);
+    expect(owesStore(undefined)).toBe(false);
+    expect(owesStore({ payToVendor: Number.NaN })).toBe(false);
+  });
+
+  it('the offer card gates "Pay {store} …" on it and keeps the "Cash job — collect" line', () => {
+    const src = readFileSync(join(__dirname, 'MoverHomeScreen.tsx'), 'utf8');
+    const block = src.slice(src.indexOf('{offer.cashMath ? ('), src.indexOf('Judge the bag before you commit'));
+    expect(block).toContain('Cash job — collect {money(offer.cashMath.collectFromCustomer)} from the customer');
+    const gate = block.indexOf('{owesStore(offer.cashMath) ? (');
+    const storeLine = block.indexOf("Pay {offer.vendorName ?? 'the store'}");
+    expect(gate).toBeGreaterThan(-1);
+    expect(storeLine).toBeGreaterThan(gate);
+    // only one store line, and it is inside the gate
+    expect(block.split("Pay {offer.vendorName ?? 'the store'}").length).toBe(2);
+    expect(block).toContain('You keep {money(offer.cashMath.youKeep)}');
   });
 });
