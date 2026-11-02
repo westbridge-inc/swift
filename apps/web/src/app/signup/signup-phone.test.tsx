@@ -335,6 +335,18 @@ describe('a browser already signed in is not asked for a code again', () => {
     expect(screen.queryByRole('link', { name: 'Keep browsing as a guest' })).toBeNull();
   });
 
+  it('[FLOW-QA2 NEW-9 · REVIEW-F3 S4-1] a customer sign-in (?next=/store/…): the guest link shows signed out, never signed in', async () => {
+    mocked.query = 'next=/store/sample-kitchen';
+    const { unmount } = render(<LoginPage />);
+    expect(await screen.findByRole('link', { name: 'Keep browsing as a guest' })).toBeTruthy();
+    unmount();
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['CUSTOMER'] } });
+    render(<LoginPage />);
+    expect(await screen.findByText(/You’re signed in/)).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Keep browsing as a guest' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Create an account' })).toBeNull();
+  });
+
   it('[REVIEW-G G3] a self-employed pro goes where sign-in sends them: their weekly fee', async () => {
     mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 'u1', phone: '+5926001234', roles: ['CUSTOMER'] } });
     mocked.pro.mockResolvedValue(true);
