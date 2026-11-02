@@ -132,6 +132,17 @@ describe('[FLOW-QA2 F24] the own-name tick is the same size as the other ticks',
 });
 
 describe('[FLOW-QA2 NEW-6] a refresh on the business step keeps what was typed', () => {
+  it('[REVIEW-F3 S4-2] a finished business sign-up clears what the tab kept, so the next business step starts empty', async () => {
+    const user = await businessStep('Finished Kitchen');
+    await placePin(user, /Place your store on the map/);
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Business Agreement/ }));
+    await waitFor(() => expect(sessionStorage.getItem('swift_signup_business')).toContain('Finished Kitchen'));
+    await user.click(screen.getByRole('button', { name: 'Create business' }));
+    await waitFor(() => expect(fx.replace).toHaveBeenCalledWith('/dashboard'));
+    expect(sessionStorage.getItem('swift_signup_business')).toBeNull();
+    expect(sessionStorage.getItem('swift_signup_draft')).toBeNull();
+  });
+
   it('the name, type and address come back after a refresh; the ticks do not', async () => {
     const user = await businessStep('Refresh Kitchen', 'SUPERMARKET');
     fireEvent.change(screen.getByLabelText('Region (optional)'), { target: { value: 'Demerara-Mahaica' } });

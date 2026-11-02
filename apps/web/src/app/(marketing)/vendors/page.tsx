@@ -118,7 +118,8 @@ export default function VendorsPage() {
               {
                 n: '2',
                 t: 'Send your documents',
-                b: 'Owner ID, business registration, TIN and a photo of your storefront. Photograph them with your phone — the camera guides the frame.',
+                // [FLOW-QA2 NEW-5] What the store checklists ask (platform-config): never a TIN (dropped 6 Oct 2026).
+                b: 'Owner ID, business registration (or a signed declaration if you trade under your own surname) and a photo of your storefront; a restaurant adds its GRA licence. Photograph them with your phone — the camera guides the frame.',
               },
               {
                 n: '3',

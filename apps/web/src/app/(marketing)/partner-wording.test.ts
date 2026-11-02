@@ -88,3 +88,23 @@ describe('the pricing Services card names only trades open today', () => {
     expect(card).toMatch(/Plumbers, electricians, mechanics, tutors/);
   });
 });
+
+describe('[FLOW-QA2 NEW-5] the vendors page asks a business for what the store checklists ask, never a TIN', () => {
+  const page = read('vendors/page.tsx');
+  // the step's words as the page shows them (its code comment may name what it no longer asks)
+  const step = page.slice(page.indexOf("t: 'Send your documents'"), page.indexOf("t: 'We review them'")).replace(/\/\/.*$/gm, '');
+
+  it('no checklist asks for a TIN certificate (dropped 6 Oct 2026), so the page does not either', () => {
+    for (const key of ['RESTAURANT', 'SUPERMARKET', 'STORE', 'RESTAURANT_OWN_NAME', 'SUPERMARKET_OWN_NAME', 'STORE_OWN_NAME']) {
+      expect(checklist(key), key).not.toContain('tin_certificate');
+    }
+    expect(step).not.toMatch(/\bTIN\b/);
+  });
+
+  it('each document it names is on the checklists: owner ID, registration or the own-name declaration, storefront photo, a restaurant’s GRA licence', () => {
+    for (const key of ['SUPERMARKET', 'STORE']) expect(checklist(key)).toEqual(['owner_national_id', 'business_registration', 'storefront_photo']);
+    expect(checklist('RESTAURANT')).toEqual(['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'storefront_photo']);
+    expect(checklist('STORE_OWN_NAME')).toEqual(['owner_national_id', 'own_name_declaration', 'storefront_photo']);
+    expect(step).toContain('Owner ID, business registration (or a signed declaration if you trade under your own surname) and a photo of your storefront; a restaurant adds its GRA licence.');
+  });
+});

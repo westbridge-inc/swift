@@ -45,6 +45,15 @@ function serve(profile: unknown, list: unknown, onWrite?: (_r: ApiRequest) => { 
   });
 }
 
+describe('[FLOW-QA2] a mover with no subscription yet', () => {
+  it('says it starts when Swift approves them (the server makes it on approval: verification afterApproval -> startTrialForRider/Driver)', async () => {
+    serve(rider, checklist('NEEDS_DOCUMENTS'));
+    renderWithQuery(<MoverDetail id="rider-1" kind="rider" />);
+    expect(await screen.findByText('No subscription yet. It starts when Swift approves them.')).toBeTruthy();
+    expect(screen.queryByText(/documents are verified/)).toBeNull();
+  });
+});
+
 describe('[MC-PR2] rider page', () => {
   it('waiting for documents: shows the checklist and the next step, and offers no Verify', async () => {
     serve(rider, checklist('NEEDS_DOCUMENTS'));
