@@ -258,11 +258,15 @@ describe('[W-01] the gate is the server’s word, not a token’s presence', () 
   // no (401/403, or another plain 4xx) is a sign-out; a 5xx, a timeout, a rate
   // limit or a dropped connection is "unreachable" and keeps the person signed in.
   it('a restore whose refresh could not reach Swift is "unreachable", never a sign-out', async () => {
-    for (const status of [500, 503, 408, 429]) {
+    for (const status of [500, 503, 408]) {
       const auth = await loadAuth();
       mockApi(({ url }) => (url.pathname.endsWith('/auth/refresh') ? { status, body: { success: false } } : { status: 401, body: {} }));
       expect(await auth.restoreSession(), String(status)).toEqual({ ok: false, unreachable: true });
     }
+    // [FLOW-QA F15] a rate-limited refresh is still never a sign-out; it is marked so the page can offer "Sign in again"
+    const limited = await loadAuth();
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/refresh') ? { status: 429, body: { success: false } } : { status: 401, body: {} }));
+    expect(await limited.restoreSession()).toEqual({ ok: false, unreachable: true, rateLimited: true });
     const offline = await loadAuth();
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
     expect(await offline.restoreSession()).toEqual({ ok: false, unreachable: true });

@@ -14,6 +14,7 @@ const SRC = join(process.cwd(), 'src');
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: vi.fn(), push: vi.fn() }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: vi.fn() }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: vi.fn() }));
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: vi.fn(), registerAccount: vi.fn(), becomePartner: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
 
@@ -246,8 +247,10 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
     const { default: SignupPage } = await import('@/app/signup/page');
     render(<SignupPage />);
     await answered();
-    const customer = screen.getByRole('button', { name: /Order on Swift/ });
-    expect((customer as HTMLButtonElement).disabled).toBe(true);
+    // [FLOW-QA F28] the closed door is a link to the launching-soon page, not a dead button: no customer sign-up starts
+    const customer = screen.getByRole('link', { name: /Order on Swift/ });
+    expect(customer.getAttribute('href')).toBe('/launching-soon');
+    expect(screen.queryByRole('button', { name: /Order on Swift/ })).toBeNull();
     expect(customer.textContent).toContain('Launching soon in Georgetown');
     expect((screen.getByRole('button', { name: /Put my business on Swift/ }) as HTMLButtonElement).disabled).toBe(false);
     // [W9] Riders and taxi drivers are now two doors; both stay open.
@@ -309,11 +312,12 @@ describe('[Item 7] the CTAs that lead to ordering follow the switch', () => {
     const { default: SignupPage } = await import('@/app/signup/page');
     render(<SignupPage />);
     await waitFor(() => expect(fetch).toHaveBeenCalled());
-    // Waiting for the answer: closed, even though the server's switch is live.
-    expect((screen.getByRole('button', { name: /Order on Swift/ }) as HTMLButtonElement).disabled).toBe(true);
+    // Waiting for the answer: closed (the launching-soon link, [FLOW-QA F28]), even though the server's switch is live.
+    expect(screen.getByRole('link', { name: /Order on Swift/ }).getAttribute('href')).toBe('/launching-soon');
     await act(async () => { answer(new Response('busy', { status: 503 })); await new Promise((resolve) => setTimeout(resolve, 0)); });
     // The question failed: still closed.
-    expect((screen.getByRole('button', { name: /Order on Swift/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('link', { name: /Order on Swift/ }).getAttribute('href')).toBe('/launching-soon');
+    expect(screen.queryByRole('button', { name: /Order on Swift/ })).toBeNull();
   });
 
   it('sign-up on staging, or once live, starts a customer account as before', async () => {

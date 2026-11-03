@@ -27,7 +27,9 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
     ],
     users: {
       // [ROLE-DOCS #2046] sign-up signs the own-name declaration for the store it just created
-      'app/signup/page.tsx': "import { verifyOtp, registerAccount, becomePartner, signOwnName } from '@/lib/customer-account';",
+      'app/signup/page.tsx': "import { verifyOtp, registerAccount } from '@/lib/customer-account';",
+      // [D6] the business and vehicle steps load on demand, and provision the partner from there
+      'app/signup/partner-steps.tsx': "import { becomePartner, signOwnName } from '@/lib/customer-account';",
       'app/selfie/page.tsx': "import { uploadSelfie } from '@/lib/customer-account';",
     },
   },

@@ -61,7 +61,12 @@ export interface FeeStatusFacts {
   checking: FeeCheck | null;
   /** No partner can pay right now, so no weekly fee is charged (mmg-pause.ts). */
   feePaused: boolean;
+  /** [WEB-DELETE] A store owner's open closure request holds the fee from this instant (closure-fee-hold.ts). */
+  closureHoldAt?: Date | null;
 }
+
+/** [REVIEW-F #2304 S3-1] The fee screens' words while a closure request holds the fee. */
+export const CLOSURE_HOLD_WORDS = 'Your weekly fee is on hold while your closure request is open. It restarts if you cancel the request.';
 
 const GUYANA_DAY = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'America/Guyana' });
 const day = (at: Date) => GUYANA_DAY.format(at);
@@ -83,6 +88,14 @@ export function feeStatusWords(f: FeeStatusFacts, now: Date): FeeStatus {
       : `Checking your payment${c.amount != null && c.amount > 0 ? ` of ${money(c.amount)}` : ''}${c.beganAt ? ` (began ${day(c.beganAt)})` : ''}`;
     const paidUntil = !due && f.paidThroughProven && (status === 'ACTIVE' || status === 'PAST_DUE') && !f.isTrialActive ? `Paid until ${day(f.nextBillingDate)}. ` : '';
     return { state: 'CHECKING', headline, detail: `${paidUntil}Don't pay again while we check.`, date: c.beganAt?.toISOString() ?? null };
+  }
+
+  // [WEB-DELETE · owner ruling 2 Nov 2026 · REVIEW-F #2304 S3-1] An open closure request holds the fee: its next week
+  // is not born, and a plan it paused at the end of the paid week restarts only when the request ends. Never "stopped"
+  // with a resume to press: the partner did not stop it. (A week owed from before the hold reads as owed, below.)
+  if (f.closureHoldAt && (status === 'PAUSED' || (f.autoRenew && f.nextBillingDate.getTime() >= f.closureHoldAt.getTime()))) {
+    const paidUntil = !due && f.paidThroughProven && status === 'ACTIVE' ? `Paid until ${day(f.nextBillingDate)}. ` : '';
+    return { state: 'FEE_PAUSED', headline: 'Weekly fee on hold', detail: `${paidUntil}${CLOSURE_HOLD_WORDS}`, date: null };
   }
 
   const owed = f.amountDue > 0 ? f.amountDue : f.weeklyFee;
@@ -142,7 +155,8 @@ export function feeStatusWords(f: FeeStatusFacts, now: Date): FeeStatus {
 }
 
 type StatusDb = Pick<PrismaClient, 'paymentConfirmationHold' | 'billingDunningClock' | 'moverFeeAuthority' | 'cardSession' | 'mmgFeeReversal' | 'platformConfig' | 'subscriptionPayment'>;
-type StatusSub = Pick<Subscription, 'id' | 'status' | 'nextBillingDate' | 'isTrialActive' | 'trialEndDate' | 'isInGracePeriod' | 'gracePeriodEnd' | 'autoRenew' | 'feeWaived' | 'currencyCode'>;
+type StatusSub = Pick<Subscription, 'id' | 'status' | 'nextBillingDate' | 'isTrialActive' | 'trialEndDate' | 'isInGracePeriod' | 'gracePeriodEnd' | 'autoRenew' | 'feeWaived' | 'currencyCode'>
+  & { closureHoldAt?: Date | null };
 
 /**
  * The check a partner's fee is under, read only (a GET must not lock or move
@@ -194,6 +208,6 @@ export async function feeStatusFor(
     status: sub.status, nextBillingDate: sub.nextBillingDate, isTrialActive: sub.isTrialActive, trialEndDate: sub.trialEndDate,
     isInGracePeriod: sub.isInGracePeriod, gracePeriodEnd: sub.gracePeriodEnd, autoRenew: sub.autoRenew, feeWaived: sub.feeWaived,
     currencyCode: sub.currencyCode, amountDue: fee.amountDueGyd, weeklyFee: fee.weeklyFeeGyd, paidAhead: fee.walletBalanceGyd,
-    paidThroughProven: !!paid, checking, feePaused,
+    paidThroughProven: !!paid, checking, feePaused, closureHoldAt: sub.closureHoldAt ?? null,
   }, now);
 }

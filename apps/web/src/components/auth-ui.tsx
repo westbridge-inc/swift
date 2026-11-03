@@ -4,6 +4,8 @@ import Link from 'next/link';
 import { useState, type ReactNode } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
 
+export { CODE_NOT_SEEN_HINT, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/phone-field';
+
 /**
  * [WEB-REDESIGN] Sign-in in the owner's design: the mark at the top of a
  * paper page, a small eyebrow, one question in Bricolage, and the +592 chip
@@ -11,30 +13,6 @@ import { SwiftLogo } from '@/components/swift-logo';
  * as one flow.
  */
 
-export const DIAL_CODE = '+592';
-
-/**
- * The number the server is sent. The field holds the local number beside the
- * +592 chip:
- *  - a local number ("600 1234") is sent as +5926001234;
- *  - a number typed or pasted with Guyana's code ("+592 600 1234",
- *    "5926001234") is the same number, never +592592…;
- *  - any other number typed with a leading "+" is sent as typed (digits only),
- *    exactly as sign-in sent it before the redesign.
- */
-export function fullPhone(local: string): string {
-  const trimmed = local.trim();
-  const digits = trimmed.replace(/\D/g, '');
-  if (trimmed.startsWith('+')) return `+${digits}`;
-  if (digits.startsWith('592') && digits.length >= 10) return `+${digits}`;
-  return `${DIAL_CODE}${digits}`;
-}
-
-/** Enough to send: seven digits after +592, or eight after another code. */
-export function phoneReady(local: string): boolean {
-  const number = fullPhone(local);
-  return number.startsWith(DIAL_CODE) ? number.length - DIAL_CODE.length >= 7 : number.replace(/\D/g, '').length >= 8;
-}
 
 export function AuthPage({ children, onBrandClick }: { children: ReactNode; onBrandClick?: () => void }) {
   return (
@@ -59,26 +37,6 @@ export function AuthHeading({ eyebrow, title, id, children }: { eyebrow: string;
   );
 }
 
-export function PhoneField({ id, value, onChange, onEnter, autoFocus = false }: { id: string; value: string; onChange: (_value: string) => void; onEnter?: () => void; autoFocus?: boolean }) {
-  return (
-    <div className="flex gap-2">
-      <span className="flex h-14 flex-none items-center rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-base font-semibold" aria-hidden="true">{DIAL_CODE}</span>
-      <label htmlFor={id} className="sr-only">Phone number</label>
-      <input
-        id={id}
-        type="tel"
-        inputMode="tel"
-        autoComplete="tel-national"
-        autoFocus={autoFocus}
-        value={value}
-        onChange={(event) => onChange(event.target.value.replace(/[^0-9+ ]/g, '').slice(0, 16))}
-        onKeyDown={(event) => { if (event.key === 'Enter') onEnter?.(); }}
-        placeholder="600 1234"
-        className="sw-input h-14 flex-1 rounded-2xl"
-      />
-    </div>
-  );
-}
 
 /** Six boxes over one real input: typing, pasting and the phone's one-time
  *  code suggestion all land in the input; the boxes only draw it. While the
@@ -121,6 +79,7 @@ export function CodeBoxes({ id, value, onChange, onEnter }: { id: string; value:
     </div>
   );
 }
+
 
 export function AuthError({ children }: { children: ReactNode }) {
   return <p className="sw-note sw-note-error" role="alert" aria-live="assertive">{children}</p>;

@@ -25,6 +25,8 @@ type LocationStore = {
   region?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  /** [FLOW-QA2 F26] a Services business's map asks where it is based, not for a store's entrance */
+  vendorType?: string | null;
 };
 type ProfileStores = { vendors?: LocationStore[]; myRole?: string };
 
@@ -123,7 +125,7 @@ export function StoreLocationCard({ storeId }: { storeId: string | null }) {
       {placing ? (
         <div className="mt-4">
           {Picker ? (
-            <Picker current={current} address={where} onConfirm={(pin) => { if (!movePin.isPending) movePin.mutate(pin); }} onClose={() => { setPlacing(false); setError(null); }} />
+            <Picker words={store.vendorType === 'SERVICE' ? 'service' : 'store'} current={current} address={where} onConfirm={(pin) => { if (!movePin.isPending) movePin.mutate(pin); }} onClose={() => { setPlacing(false); setError(null); }} />
           ) : pickerFailed ? (
             <div role="alert" className="space-y-2">
               <p className="text-sm">The map didn&apos;t load. Check your connection and try again.</p>

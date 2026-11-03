@@ -338,6 +338,16 @@ const PUBLISHED: Record<
     driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
     vendor_agreement: '3df0fa20578a9639996dd8c77f653d0e9e5a7f2d595ea03273ae87ec1176576d',
   },
+  // [EXPRESS-FEE · owner ruling 1 Nov 2026 · NON-material, pre-launch] The bump for the express wording on the website's
+  // Delivery policy (express = the delivery fee + a flat GYD 1,000, any distance). No served text mentions express, so
+  // every document changes only by its "Last updated" date: putting "29 October 2026" back in place of "1 November 2026"
+  // reproduces each 2026-10-29.2 pin above exactly (checked mechanically before pinning).
+  '2026-11-01': {
+    terms: '0f03a5c2c29d481f7bbd916f9ee5191056f9a213639c5f3f9845d80eb3ddd853',
+    privacy: '935cf822433948c619c70cdde2149b53918ff2ab10f2d4ba22e24496e4c42461',
+    driver_agreement: '65168219ab4b9e6781eaf545510294db837f80bcb2a98cd0067cd43c428aa1f0',
+    vendor_agreement: '62c6c9d31e881482d6e8303c10a012abb75a75b25a5305959cb6aacb2625e115',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

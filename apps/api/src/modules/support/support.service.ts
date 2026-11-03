@@ -5,6 +5,9 @@ import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { log } from '../../utils/logger';
 import { supportResolutionCounter } from '../../plugins/observability';
+import { ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account-closure';
+import { liftClosurePause } from '../user/closure-pause';
+import { endClosureFeeHoldsInTx } from '../billing/closure-fee-hold';
 
 /** [A-18] What a SAFETY ticket may close on. "Answered" is not one of them. */
 export const SAFETY_RESOLUTIONS: SupportResolution[] = ['ACTION_TAKEN', 'ESCALATED_SAFETY', 'NO_RISK_FOUND'];
@@ -191,14 +194,30 @@ export class SupportService {
       }
     }
 
-    const updated = await this.queue((db, scope) => db.supportTicket.update({
-      where: scope ? { id: ticketId, AND: [scope] } : { id: ticketId },
-      data: {
-        status: input.status,
-        adminNote: input.adminNote ?? ticket.adminNote,
-        ...(resolving ? { resolvedById: adminId, resolvedAt: new Date(), resolution: input.resolution } : {}),
-      },
-    }));
+    // [WEB-DELETE · owner rulings 1 + 2 Nov 2026 · REVIEW-G #2304 S4-1] Swift staff resolving an account closure
+    // request (without completing it) ends it: the pause on the stores' new orders is lifted (audited) and the weekly
+    // fee it held resumes. Only a request the holder confirmed counts (a typed ticket with the same subject lifts
+    // nothing). The ticket closes and the pause lifts under the person's lock, the lock a new request takes, so a
+    // request sent meanwhile is never left paused with no open ticket.
+    const closure = resolving && ticket.category === 'ACCOUNT' && ticket.subject === ACCOUNT_CLOSURE_SUBJECT
+      && !!(await this.prisma.auditLog.findFirst({ where: { action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticketId }, select: { id: true } }));
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (closure) {
+        await tx.$queryRaw`SELECT id FROM users WHERE id = ${ticket.userId} FOR UPDATE /* closure-resolve-person-lock */`;
+        // [REVIEW-G #2304 S4-new] The lift and the fee's restart first, in this transaction: with the owner wall ON the
+        // ticket below is written on another connection, so a failure here must come before that write, never after.
+        await liftClosurePause(tx, ticket.userId, ticketId, { kind: 'STAFF_RESOLVED', actorId: adminId });
+        await endClosureFeeHoldsInTx(tx, ticketId, adminId);
+      }
+      return this.queue((db, scope) => ((scope ? db : tx) as Prisma.TransactionClient).supportTicket.update({
+        where: scope ? { id: ticketId, AND: [scope] } : { id: ticketId },
+        data: {
+          status: input.status,
+          adminNote: input.adminNote ?? ticket.adminNote,
+          ...(resolving ? { resolvedById: adminId, resolvedAt: new Date(), resolution: input.resolution } : {}),
+        },
+      }));
+    });
     if (resolving) {
       supportResolutionCounter.labels(ticket.category, input.resolution ?? 'UNSET').inc();
     }

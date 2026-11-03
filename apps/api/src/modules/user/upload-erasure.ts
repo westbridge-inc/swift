@@ -8,6 +8,7 @@ import { censusSeesEveryRow, type CensusVisibilityRow } from '../../lib/census-v
 import { runAsSystem } from '../../plugins/tenant-context';
 import { writeDeletionReceipt } from '../verification/purge-receipt';
 import { UNCLAIMED_UPLOAD_DAYS, UPLOAD_DAY_MS } from '../verification/upload-window';
+import { closeSealedPhotoEnvelope, isSealedPhotoKey, SEALED_PHOTO_KEY_WHERE, shredSealedPhotoKey } from '../../providers/storage/sealed-photo';
 
 /**
  * [Row 331 · DSAR-ERASURE · GUARDRAILS §2 "honour deletion end to end"]
@@ -200,7 +201,8 @@ export async function sweepStaleUnclaimedUploads(
   const people = new Set<string>();
   for (let after: string | undefined; ;) {
     const rows = await db.encryptedObject.findMany({
-      where: { shreddedAt: null, createdAt: { lt: olderThan }, ...(after ? { fileKey: { gt: after } } : {}) },
+      // [DOC-SECURITY G2] A sealed photo (the profile photo, a shift selfie) is not an upload: its own pass owns it.
+      where: { shreddedAt: null, createdAt: { lt: olderThan }, NOT: SEALED_PHOTO_KEY_WHERE, ...(after ? { fileKey: { gt: after } } : {}) },
       select: { fileKey: true, createdBy: true }, orderBy: { fileKey: 'asc' }, take: opts.page ?? 500,
     });
     if (!rows.length) break;
@@ -208,7 +210,7 @@ export async function sweepStaleUnclaimedUploads(
     const named = new Set((await db.verificationDocument.findMany({
       where: { fileUrl: { in: rows.map((r) => r.fileKey) } }, select: { fileUrl: true },
     })).map((d) => d.fileUrl));
-    for (const r of rows) if (!named.has(r.fileKey)) people.add(r.createdBy);
+    for (const r of rows) if (!named.has(r.fileKey) && !isSealedPhotoKey(r.fileKey)) people.add(r.createdBy);
   }
   const total = { people: people.size, erased: 0, held: 0, pending: 0 };
   for (const userId of [...people].sort()) {
@@ -233,7 +235,8 @@ async function eraseUnclaimed(db: PrismaClient, storage: StorageProvider, userId
     const named = new Set((await tx.verificationDocument.findMany({
       where: { fileUrl: { in: own.map((c) => c.fileKey) } }, select: { fileUrl: true },
     })).map((d) => d.fileUrl));
-    const candidates = own.filter((c) => !named.has(c.fileKey));
+    // [DOC-SECURITY G2] A sealed photo is the avatar's or the liveness pass's, never an unclaimed upload.
+    const candidates = own.filter((c) => !named.has(c.fileKey) && !isSealedPhotoKey(c.fileKey));
     if (!candidates.length) return { pending: 0, held: 0, erased: 0 };
     // Erasure: only a committed closure authorizes it. The open-account sweep: only the age of an unclaimed upload.
     const user = mode.scope === 'closure'
@@ -335,7 +338,10 @@ export async function eraseLivenessSelfies(db: PrismaClient, storage: StoragePro
           /* upload-erasure-liveness-references */
         `;
         if (refs.some((r) => sameObject(r.key, key) && (r.owner !== userId || r.key !== key))) { leavePending(key, 'Shared liveness object'); continue; }
+        // [DOC-SECURITY G2] A sealed photo: crypto-shred first (every copy is then unreadable), then the bytes.
+        await shredSealedPhotoKey(tx, key, userId);
         if (!await deleteStorageObjectAndConfirmAbsent(storage, key)) { leavePending(key, 'Liveness absence not confirmed'); continue; }
+        await closeSealedPhotoEnvelope(tx, key, userId);
         erased += 1;
       }
     }

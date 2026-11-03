@@ -6,8 +6,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
-import { loginWithOtp } from './helpers/otp';
+import { nanoid } from 'nanoid';
 import { testPhone } from './helpers/fixture-ids';
 let app: FastifyInstance;
 let token: string;
@@ -19,13 +18,21 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  token = (await loginWithOtp(app, '+5926001000')).json().data.tokens.accessToken;
+  // [DOC-SECURITY G3] The queue is a document reviewer's read: an admin holding the grant reads it.
+  const reviewer = await app.prisma.user.create({ data: {
+    phone: testPhone(), firstName: 'Synthetic', lastName: 'Reviewer', roles: ['ADMIN', 'CUSTOMER'], activeRole: 'ADMIN', status: 'ACTIVE', isPhoneVerified: true,
+    admin: { create: { permissions: ['*', 'documents.review'] } },
+  } });
+  users.push(reviewer.id);
+  token = app.jwt.sign({ userId: reviewer.id, role: 'ADMIN', jti: nanoid(8) });
+  await app.prisma.session.create({ data: { userId: reviewer.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: 'previous-decision', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
 });
 afterAll(async () => {
   await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
+  await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
+  await app.prisma.admin.deleteMany({ where: { userId: { in: users } } });
   await app.prisma.user.deleteMany({ where: { id: { in: users } } });
   await app.close();
 });

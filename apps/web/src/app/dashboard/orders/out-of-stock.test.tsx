@@ -171,3 +171,46 @@ describe('[REVIEW-F S3-2 on #2048] the last item out of stock is Reject (out of 
     await waitFor(() => expect(writes).toEqual([{ method: 'PUT', path: '/vendor/orders/p-2/reject' }]));
   });
 });
+
+// [PROMO-FILM finding] A booking (fulfillment APPOINTMENT) is a service at a time, not goods: it has no stock. The
+// popup showed "Out of stock — reject the order" on a booking's one line. The shared rule (storeOrderRules
+// canMarkOutOfStock, the phone's too) now says no for a booking, so no surface offers it; the booking is accepted or
+// declined with a booking reason.
+describe('a booking has no "Out of stock"', () => {
+  const booking = (over: Record<string, unknown> = {}) => wireVendorOrder({
+    id: 'b-1', orderNumber: 'SW-9301', status: 'PENDING', fulfillment: 'APPOINTMENT', appointmentSlot: '2026-11-04T13:00:00.000Z', ...over,
+  });
+
+  it('new-order popup: a one-line booking has no "Out of stock — reject the order"', async () => {
+    api([]);
+    const view = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    view.rerender(<NewOrderTakeover orders={[normalizeVendorOrder(booking({ items: lines({ name: 'Haircut' }) }))]} />);
+    await screen.findByText('NEW BOOKING');
+    expect(screen.queryByRole('button', { name: /Out of stock/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Decline — tell us why' })).toBeTruthy();
+    expect(writes).toEqual([]);
+  });
+
+  it('new-order popup: a two-line booking has no per-line "Out of stock"', async () => {
+    api([]);
+    const view = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    view.rerender(<NewOrderTakeover orders={[normalizeVendorOrder(booking({ items: lines({ name: 'Haircut' }, { name: 'Beard trim' }) }))]} />);
+    await screen.findByText('NEW BOOKING');
+    expect(screen.getByText(/Beard trim/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Out of stock/ })).toBeNull();
+  });
+
+  it('order window: a waiting booking has no "Out of stock" on its lines', async () => {
+    api([booking({ items: lines({ name: 'Haircut' }, { name: 'Beard trim' }) })]);
+    const view = renderWithQuery(<OrdersPage />);
+    const dialog = await openWindow('SW-9301', view);
+    expect(within(dialog).queryByRole('button', { name: /Out of stock/ })).toBeNull();
+  });
+
+  it('control: the same order as a delivery keeps them', async () => {
+    api([booking({ fulfillment: 'DELIVERY', appointmentSlot: null, items: lines({ name: 'Pepperpot' }, { name: 'Sorrel' }) })]);
+    const view = renderWithQuery(<OrdersPage />);
+    const dialog = await openWindow('SW-9301', view);
+    expect(within(dialog).getAllByRole('button', { name: /^Out of stock: / })).toHaveLength(2);
+  });
+});

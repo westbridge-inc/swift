@@ -33,10 +33,11 @@ describe('the partner office for a pro with no delivery or taxi profile', () => 
     expect(screen.queryByText('No earner profile on this account.')).toBeNull();
   });
 
-  it('someone with no profile at all is told as before', async () => {
+  it('someone with no profile at all is told as before, with the website’s doors (FLOW-QA F27)', async () => {
     mockApi(({ url }) => noMover(url.pathname) ?? (url.pathname === '/api/v1/provider/subscription' ? notPro : (() => { throw new Error(url.pathname); })()));
     renderWithQuery(<PortalHome />);
-    expect(await screen.findByText(/No earner profile on this account — start driving or delivering/)).toBeTruthy();
+    expect(await screen.findByText(/No earner profile on this account\./)).toBeTruthy();
+    expect(screen.getByRole('link', { name: /Add your vehicle/ }).getAttribute('href')).toBe('/signup?resume=mover');
   });
 });
 

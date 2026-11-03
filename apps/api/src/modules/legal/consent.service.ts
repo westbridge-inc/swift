@@ -25,7 +25,9 @@ export type ConsentDocumentType =
   | 'vendor_agreement'
   | 'marketing_consent'
   | 'location_bg_consent'
-  /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger */
+  /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger.
+   *  [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] RETIRED with its tier: nothing records it any more; the type stays because
+   *  the ledger is append-only and rows already written keep their type. */
   | 'unregistered_trader_declaration'
   /** [ROLE-DOCS · owner 21 Oct 2026] "I trade under my own name" (vendor/own-name.ts; Business Names Act s.3).
    *  The same code as its document: the registry's text names it (DOC-INV-2). */

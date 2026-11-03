@@ -152,6 +152,23 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
     expect(await system(() => app.prisma.deletionReceipt.count({ where: { submissionId: d.id, deletedBy: ABANDON_PURGE_ACTOR } }))).toBe(1);
   });
 
+  // [DOC-SECURITY G2] A profile photo and a shift selfie are sealed in the same envelope table as an upload. They are
+  // no activity of the APPLICATION: a person who only retook a selfie is noticed on the documents' own clock.
+  it('a sealed profile photo or shift selfie taken since is no activity of the application: still noticed at day 76+', async () => {
+    const u = await person('RIDER');
+    await doc(u, 'RIDER', 'INFO_REQUESTED', 80);
+    for (const folder of ['avatars', 'liveness']) {
+      const bytes = Buffer.from(`sealed photo ${nanoid(12)}`);
+      const { url } = await storage.upload({ buffer: bytes, filename: 'photo.enc', mimeType: 'application/octet-stream', folder: `${folder}/${u}` });
+      keys.push(url);
+      await app.prisma.encryptedObject.create({ data: {
+        fileKey: url, createdBy: u, iv: Buffer.alloc(12, 1), authTag: Buffer.alloc(16, 2), wrappedDek: Buffer.alloc(60, 3),
+        mimeType: 'image/jpeg', sizeBytes: bytes.length, sha256: sha(bytes),
+      } });
+    }
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1, purged: 0 });
+  });
+
   it('day 75 of inactivity: no notice, nothing deleted', async () => {
     const u = await person('DRIVER');
     const d = await doc(u, 'DRIVER', 'REJECTED', 75);

@@ -2,7 +2,6 @@ import { accountErasedUnderLock } from '../user/account-closure';
 import { documentLapsesAt, isDocumentValidAt, lapsedExpiryAnd, validExpiryOr } from './document-validity';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
-import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
@@ -53,6 +52,7 @@ import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../bill
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { SEALED_PHOTO_KEY_WHERE } from '../../providers/storage/sealed-photo';
 import { assertClaimableUpload } from './upload-window';
 import { liveDuplicateHolders } from './duplicate-holders';
 import {
@@ -2030,8 +2030,8 @@ export class VerificationService {
       const { providerChecklist } = await import('../services/services.service');
       return providerChecklist(db, userId);
     }
-    // [DOC-1 §3.6 · P3-2] A store owner on the UNREGISTERED tier reads the role's
-    // unregistered requirement set; everyone else the standard one.
+    // [ROLE-DOCS] A store trading under its owner's own name reads the role's own-name set; everyone else the standard
+    // one. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] There is no other tier: the self-declared one is removed.
     return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, roleKey, db, vendorId), db);
   }
 
@@ -2061,15 +2061,15 @@ export class VerificationService {
     return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
   }
 
-  /** UNREGISTERED when any store the owner holds is on that tier. [ROLE-DOCS · owner 21 Oct 2026 · REVIEW-G #2046 S2-1,
+  /** [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] Never UNREGISTERED: that tier is removed, and a store row still marked
+   *  with it (written before the migration) reads as a standard store. [ROLE-DOCS · owner 21 Oct 2026 · REVIEW-G #2046 S2-1,
    *  COORD 23 Oct: PER STORE] OWN_NAME is a property of ONE store: a store's own gate (`vendorId`) reads that store's
    *  flag, so a trading-name store of the same type keeps needing its business registration (BNA s.3(b)). Without a
    *  store (the owner's Documents view) it is OWN_NAME only when every store of the type trades under the owner's own
    *  name — while any one does not, the registration is asked for. Otherwise undefined (standard). */
   private async vendorTierOf(userId: string, roleKey: ChecklistRole, db: Prisma.TransactionClient | PrismaClient, vendorId?: string): Promise<string | undefined> {
-    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, tier: true, vendorType: true, tradesUnderOwnName: true } } } });
+    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, vendorType: true, tradesUnderOwnName: true } } } });
     if (!owner) return undefined;
-    if (owner.vendors.some((v) => v.tier === 'UNREGISTERED')) return 'UNREGISTERED';
     if (vendorId !== undefined) {
       const store = owner.vendors.find((v) => v.id === vendorId);
       return store && store.vendorType === roleKey && store.tradesUnderOwnName ? OWN_NAME_TIER : undefined;
@@ -2300,7 +2300,8 @@ export class VerificationService {
     let checklist = gate;
     let homeVisits: { offered: boolean; cleared: boolean } | undefined;
     // [ROLE-DOCS · owner 21 Oct 2026] A store says on what its name stands: its owner's OWN name (the declaration in
-    // place of a business registration), the self-declared tier, or a registered business name. Additive field.
+    // place of a business registration) or a registered business name. Additive field. [CHECKLIST-LEGAL · owner 1 Nov
+    // 2026 (a)] Never the self-declared tier: it is removed.
     const nameBasis = roleKey === 'RESTAURANT' || roleKey === 'SUPERMARKET' || roleKey === 'STORE'
       ? ((await this.vendorTierOf(userId, roleKey, this.prisma)) ?? 'REGISTERED') : undefined;
     if (roleKey === 'SERVICE') {
@@ -2566,7 +2567,7 @@ export class VerificationService {
   async vendorGoLive(vendorId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VendorGoLive | null> {
     const vendor = await db.vendor.findUnique({
       where: { id: vendorId },
-      select: { vendorType: true, tier: true, publicPhone: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
+      select: { vendorType: true, publicPhone: true, owner: { select: { userId: true, user: { select: { countryCode: true, tenantId: true } } } } },
     });
     if (!vendor) return null;
     const role = vendor.vendorType as ChecklistRole;
@@ -2612,7 +2613,7 @@ export class VerificationService {
     if (vendorIds.length === 0) return out;
     const stores = await db.vendor.findMany({
       where: { id: { in: [...vendorIds] }, status: 'PENDING_APPROVAL' },
-      select: { id: true, status: true, vendorType: true, tier: true, publicPhone: true, owner: { select: { userId: true } } },
+      select: { id: true, status: true, vendorType: true, publicPhone: true, owner: { select: { userId: true } } },
     });
     for (const store of stores) {
       const checklist = await this.activationChecklist(store.owner.userId, store.vendorType as ChecklistRole, { db, vendorId: store.id });
@@ -2702,24 +2703,13 @@ export class VerificationService {
           // without this the daily belt took the reviewer's stores down. Every
           // other tenant's store is projected exactly as before.
           where: { tenant: { kind: { not: 'REVIEW' } }, ...(scope.vendorId ? { id: scope.vendorId } : {}) },
-          select: { id: true, name: true, vendorType: true, tier: true, isVerified: true, status: true, publicPhone: true, personApprovalRequired: true },
+          select: { id: true, name: true, vendorType: true, isVerified: true, status: true, publicPhone: true, personApprovalRequired: true, closurePausedAt: true },
         },
       },
     });
     if (!owner) return;
-    // [DOC-1 §3.6 · P3-2] A VALID registration record promotes every UNREGISTERED store the
-    // owner holds — automatic, audited, once. Runs before the activation projection so the
-    // promoted store's checklist is read at its new tier.
-    await promoteIfRegistered(db, userId, new Date(), async (vendorId, ownerUserId) => {
-      const notice = await insertNoticeFor(db, {
-        userId: ownerUserId,
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Your store is now a registered seller',
-        body: 'Your business registration is on file. The unregistered-seller limits on orders and weekly sales are lifted, and promoted placement is open to you.',
-        data: { kind: 'vendor_tier_promoted', vendorId },
-      });
-      this.projectionNotices.get(db)?.push(notice.id);
-    });
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No store is promoted here any more: the self-declared (unregistered)
+    // tier a VALID registration record used to lift is removed.
     // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
     // store cannot go live with an incomplete disclosure block: it joins the checklist as a
     // go-live gate. Before activation the block is compiled and shown, but does not gate.
@@ -2767,7 +2757,8 @@ export class VerificationService {
         const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
         await db.vendor.update({
           where: { id: vendor.id },
-          data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
+          // [WEB-DELETE] A store whose owner asked Swift to close the account goes live paused (closure-pause.ts).
+          data: { isVerified: true, activationValidUntil, ...(vendor.isVerified || vendor.closurePausedAt ? {} : { acceptingOrders: true }) },
         });
         // [RETIER PR-A] The first time a store is made live, for good (partner/store-fee.ts: only a never-live store is
         // priced on its catalogue).
@@ -3404,7 +3395,8 @@ export class VerificationService {
     // The applicant's last activity: a submission, a decision of ours, an upload.
     const [docs, upload] = await Promise.all([
       this.prisma.verificationDocument.findMany({ where: { userId }, select: { createdAt: true, reviewedAt: true } }),
-      this.prisma.encryptedObject.findFirst({ where: { createdBy: userId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
+      // [DOC-SECURITY G2] An upload of the application: a sealed photo (a profile photo, a shift selfie) is not one.
+      this.prisma.encryptedObject.findFirst({ where: { createdBy: userId, NOT: SEALED_PHOTO_KEY_WHERE }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
     ]);
     let last = upload?.createdAt.getTime() ?? 0;
     for (const d of docs) last = Math.max(last, d.createdAt.getTime(), d.reviewedAt?.getTime() ?? 0);

@@ -3,7 +3,7 @@ import { AppError } from '../../utils/errors';
 import { formatMoney } from '../../utils/currency-amount';
 import { PricingConfigError, partnerRateFor, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
-import { assertSawQuote, assertWeeklyFeeAck, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck } from './weekly-fee-ack';
+import { assertSawQuote, assertWeeklyFeeAck, WEEKLY_FEE_ACK_HONOURED_VERSIONS, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck } from './weekly-fee-ack';
 
 // ---------------------------------------------------------------------------
 // [RETIER PR-A · owner 30 Oct 2026 15:54Z "okay" · GUARDRAILS §1 + §7 standing rule 2] A NEW store's weekly fee is
@@ -138,7 +138,8 @@ export interface StoreFeeTick { amount: number; currencyCode: string }
 export async function latestStoreFeeTick(db: Db, ownerUserId: string, vendorId: string): Promise<StoreFeeTick | null> {
   const tick = await db.consentRecord.findFirst({
     where: {
-      subjectId: ownerUserId, documentType: WEEKLY_FEE_ACK_TYPE, documentVersion: WEEKLY_FEE_ACK_VERSION,
+      // [WEB-ONBOARDING · owner 1 Nov 2026 (D3)] a tick on the v1 words still stands (the v2 change names the website)
+      subjectId: ownerUserId, documentType: WEEKLY_FEE_ACK_TYPE, documentVersion: { in: [...WEEKLY_FEE_ACK_HONOURED_VERSIONS] },
       AND: [{ evidence: { path: ['path'], equals: STORE_FEE_ACK_PATH } }, { evidence: { path: ['vendorId'], equals: vendorId } }],
     },
     orderBy: [{ capturedAt: 'desc' }, { id: 'desc' }],
@@ -232,7 +233,7 @@ export async function recordStoreFeeAck(
   input: { userId: string; vendorId: string; ack: WeeklyFeeAck; surface: ConsentSurface; ip?: string | null },
 ): Promise<{ recorded: boolean; quote: StoreFeeQuote }> {
   assertWeeklyFeeAck(true, input.ack);
-  await publishLegalDocumentOnce(prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+  await publishLegalDocumentOnce(prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
   return prisma.$transaction(async (tx) => {
     // One tick per store at a time: the store row is the lock, and the quote is read again under it.
     await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${input.vendorId} FOR UPDATE /* store-weekly-fee-tick */`;

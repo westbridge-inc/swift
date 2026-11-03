@@ -10,7 +10,7 @@ import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
 import { CatalogueApproverAccess } from '@/components/verification/CatalogueApproverAccess';
 import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
-import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
+import { approveDoc, rejectDoc, errorCode, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
 import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
@@ -30,9 +30,6 @@ const EXPIRING_DOC_TYPES = [
   // The restaurant licence, sanitary certificate and trade licence ask for their YEAR (reviewerTypes).
   // [ROLE-DOCS · owner 21 Oct 2026] no liquor licence: alcohol is banned outright and no gate names it.
   'sanitary_certificate', 'trade_licence',
-  // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
-  // validity like a licence, so the console must ask for its date too.
-  'self_declaration_unregistered',
   // [TRADES · 13 Oct 2026; R15] the service-trade licences and certificates. The ones checked again
   // every January ask for the certificate's YEAR instead of a date (reviewerTypes 'certificateYear').
   'pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration',
@@ -298,13 +295,16 @@ export default function VerificationPage() {
       {!applicant ? <>
         <button className="rc-filter-toggle" aria-expanded={filtersOpen} aria-controls="review-filters" onClick={() => setFiltersOpen(!filtersOpen)}>Filters{search || role || type || age ? " · active" : ""}</button>
         <div id="review-filters" className={`rc-filters${filtersOpen ? " rc-filters-open" : ""}`}>
-          <label>Search applicants<input aria-label="Search applicants" type="search" placeholder="Name or phone" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
+          <label>Search applicants<input aria-label="Search applicants" type="search" placeholder="Name or last 4 digits of the phone" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
           <label>Applicant role<select aria-label="Applicant role" value={role} onChange={(e) => setRole(e.target.value)}><option value="">All roles</option>{[...new Set(['CUSTOMER', ...(queue.data ?? []).map((d) => d.role)])].sort().map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}</select></label>
           <label>Document type<select aria-label="Document type" value={type} onChange={(e) => setType(e.target.value)}><option value="">All documents</option>{[...new Set((queue.data ?? []).map((d) => d.docType))].sort().map((t) => <option key={t} value={t}>{docLabel(t)}</option>)}</select></label>
           <label>Waiting time<select aria-label="Waiting time" value={age} onChange={(e) => setAge(e.target.value)}><option value="">Any age</option><option value="24">Over 24 hours</option><option value="72">Over 3 days</option><option value="168">Over 7 days</option></select></label>
           <button onClick={clearFilters}>Clear filters</button>
         </div>
-        {queue.isLoading ? <div className="rc-skeleton" aria-label="Loading verification queue">Loading the complete queue…</div> : queue.isError ? <DataUnavailable what="the verification queue" notAnAllClear="This is not an empty queue — we could not read it." onRetry={() => void queue.refetch()} /> : <section className="rc-queue" aria-label="Applicants">
+        {/* [DOC-SECURITY G3] The queue is a document reviewer's read: a refusal says so, it is not a failed load. */}
+        {queue.isLoading ? <div className="rc-skeleton" aria-label="Loading verification queue">Loading the complete queue…</div> : queue.isError ? (errorCode(queue.error) === 'DOCUMENT_REVIEWER_REQUIRED'
+          ? <p role="status" aria-label="Document-reviewer permission needed" className="rc-notice">You need the document-reviewer permission to see the documents waiting for review. A super-admin grants it under Document reviewers at the top of the Review Center.</p>
+          : <DataUnavailable what="the verification queue" notAnAllClear="This is not an empty queue — we could not read it." onRetry={() => void queue.refetch()} />) : <section className="rc-queue" aria-label="Applicants">
           {newDocuments > 0 && <p className="rc-new-banner" role="status">{newDocuments} new {newDocuments === 1 ? 'document' : 'documents'} since this list loaded. <button onClick={() => void queue.refetch()} disabled={queue.isFetching}>Show {newDocuments === 1 ? 'it' : 'them'}</button></p>}
           <div className="rc-queue-summary"><strong>{filtered.length} applicants</strong><span>{queue.data?.length ?? 0} documents in this lane</span><button onClick={() => void queue.refetch()} disabled={queue.isFetching}>Refresh queue</button></div>
           {!filtered.length ? <p className="rc-empty"><span>{groups.length ? 'No applicants match these filters.' : 'No documents'}</span> {groups.length ? 'Clear a filter to see more applicants.' : 'This lane has no documents with the selected status.'}</p> :

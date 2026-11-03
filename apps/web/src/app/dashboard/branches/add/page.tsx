@@ -133,7 +133,7 @@ export default function AddBranchPage() {
           <input className={`${input} mt-1`} inputMode="tel" autoComplete="tel" value={biz.phone} onChange={(e) => edit({ phone: e.target.value })} />
         </label>
         <label className="block text-sm font-semibold">The number customers can call
-          <input className={`${input} mt-1`} inputMode="tel" placeholder="+592 225 1234" aria-describedby="call-us-help" value={callUs} onChange={(e) => { setCallUs(e.target.value); setError(null); }} />
+          <input className={`${input} mt-1`} inputMode="tel" placeholder="e.g. +592 6XX XXXX" aria-describedby="call-us-help" value={callUs} onChange={(e) => { setCallUs(e.target.value); setError(null); }} />
         </label>
         <p id="call-us-help" className="text-xs text-[var(--swift-muted)]">Shown on the branch&apos;s page so customers can call before they order. The branch goes live only with one. This is separate from the number you sign in with, which stays private.</p>
         {food && (

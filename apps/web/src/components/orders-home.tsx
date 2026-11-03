@@ -24,6 +24,9 @@ import {
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
+import { ownerSteps } from '@/lib/branch-go-live';
+import { waitingFor } from '@/lib/branch-label';
+import { NOT_LIVE } from '@/lib/first-steps';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
 // The app's own O-4 rules and words (plain file, imported as is).
@@ -35,6 +38,9 @@ import { billingHeadline, billingPill } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '@/lib/mmg-dispute';
+// [REVIEW-LIGHT2 #2306 S3] the app's own reading of a held store (plain file), and its words
+import { storeHoldOf } from '../../../mobile/src/lib/vendorProfile';
+import { STORE_HOLD_WORDS } from '@/lib/store-hold-words';
 
 export type { HubStore };
 
@@ -252,6 +258,37 @@ export function FirstOrderGuide({ store, manager, listening }: { store: HubStore
   );
 }
 
+/**
+ * [WEB-ONBOARDING · owner 1 Nov 2026] A store not live yet (never approved): in place of the first-order guide, what is
+ * left and whose turn it is, as the app's waiting store screen (VendorOnboarding) says it. The owner's steps are the
+ * server's (`goLive`), each opening where it is done on this website; adding items works while the store waits.
+ */
+export function NotLiveGuide({ store, manager, owner }: { store: HubStore; manager: boolean; owner: boolean }) {
+  const itemsQ = useItems();
+  const catalogue = catalogueName(store.vendorType).toLowerCase();
+  const swiftsTurn = waitingFor(store) === 'SWIFT';
+  const steps = owner && !swiftsTurn ? ownerSteps(store) : [];
+  const body = swiftsTurn ? NOT_LIVE.swiftBody : !owner ? NOT_LIVE.staffBody : steps.length > 0 ? NOT_LIVE.ownerBody : NOT_LIVE.noWord;
+  const emptyCatalogue = manager && itemsQ.isSuccess && (itemsQ.data ?? []).length === 0;
+  return (
+    <section aria-label="Your store is not live yet" className="rounded-2xl bg-[var(--swift-red-600)] p-6 text-white">
+      <p className="text-[11px] font-bold tracking-[0.1em] opacity-80">{NOT_LIVE.kicker}</p>
+      <p className="mt-1 text-[24px] font-semibold leading-8 [font-family:var(--swift-face-display)]">{swiftsTurn ? NOT_LIVE.swiftTurn : NOT_LIVE.ownerTurn}</p>
+      <p className="mt-2 opacity-90">{body}</p>
+      {(steps.length > 0 || emptyCatalogue) && (
+        <div className="mt-4 space-y-2">
+          {steps.map((step, i) => (
+            <GuideRow key={step.words} index={i + 1} label={step.words} href={step.where === 'documents' ? '/dashboard/documents' : '/dashboard/settings'}
+              detail={step.where === 'documents' ? 'A person at Swift checks each one' : 'In your store’s Settings'} />
+          ))}
+          {emptyCatalogue && <GuideRow index={steps.length + 1} label="Add your first item" detail={`Your ${catalogue} is empty — nothing to order yet`} href="/dashboard/inventory" />}
+        </div>
+      )}
+      <p className="mt-4 text-sm opacity-90">{NOT_LIVE.wait}</p>
+    </section>
+  );
+}
+
 /** VendorBoardQuiet: an experienced store with nothing open. */
 export function BoardQuiet({ lastOrderAt }: { lastOrderAt?: string }) {
   return (
@@ -391,6 +428,11 @@ export function StoreStatusCard({ store, manager, owner = false, readFailed = fa
   // A store that is not live yet (being reviewed) cannot open: as in the app,
   // the switch is locked and Pause is not offered.
   const inPreview = store.status != null && store.status !== 'ACTIVE';
+  // [REVIEW-LIGHT2 #2306 S3] A store held from orders is told its real hold, in the app's words, never "opens once
+  // verification is approved" (that is a store waiting for approval).
+  const hold = inPreview ? storeHoldOf(store) : null;
+  const holdTitle = hold === 'FEE_UNPAID' ? STORE_HOLD_WORDS.FEE_UNPAID.title : hold ? STORE_HOLD_WORDS[hold].title : null;
+  const holdBody = hold === 'FEE_UNPAID' ? (owner ? STORE_HOLD_WORDS.FEE_UNPAID.owner : STORE_HOLD_WORDS.FEE_UNPAID.staff) : hold ? STORE_HOLD_WORDS[hold].body : null;
   // [PERF row 562] Both controls move at the tap (dimmed until the server
   // answers) and go back, with the server's words, if it refuses. The server
   // FLIPS what it holds and answers with both flags: that answer is shown at
@@ -428,8 +470,8 @@ export function StoreStatusCard({ store, manager, owner = false, readFailed = fa
   const text = (
     <span className="min-w-0 flex-1">
       <span className="flex items-center gap-2 font-semibold"><span className={`h-2.5 w-2.5 rounded-full ${open && accepting ? 'bg-[var(--swift-success)]' : 'bg-[var(--swift-muted)]'}`} aria-hidden="true" />
-        {inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}</span>
-      <span className="sw-caption mt-1 block">{inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}</span>
+        {holdTitle ?? (inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused')}</span>
+      <span className="sw-caption mt-1 block">{holdBody ?? (inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders')}</span>
     </span>
   );
   return (
@@ -439,7 +481,8 @@ export function StoreStatusCard({ store, manager, owner = false, readFailed = fa
           className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">{text}<Switch on={!inPreview && open} /></button>
       ) : <div className="flex min-h-12 items-center">{text}</div>}
       {/* [OPEN-EARLY PR-2] A store not live yet: its owner sends its documents on this website (Documents). */}
-      {owner && inPreview && <Link href="/dashboard/documents" className="sw-btn sw-btn-md mt-4 w-full">Upload your documents</Link>}
+      {owner && inPreview && !hold && <Link href="/dashboard/documents" className="sw-btn sw-btn-md mt-4 w-full">Upload your documents</Link>}
+      {owner && hold === 'FEE_UNPAID' && <Link href="/dashboard/weekly-fee" className="sw-btn sw-btn-md mt-4 w-full">Weekly fee</Link>}
       {manager && !inPreview && (
         <button type="button" disabled={locked} onClick={() => ordersMut.mutate(!accepting)} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
           {accepting ? 'Pause new orders' : 'Resume orders'}

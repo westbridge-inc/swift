@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { offerEarnings } from './offer-earnings';
+import { offerEarnings, owesStore } from './offer-earnings';
 
 describe('offerEarnings', () => {
   it('adds a delivery tip to the fare — the defect this exists to fix', () => {
@@ -62,5 +64,35 @@ describe('offerEarnings', () => {
     expect(offerEarnings(1200, 300, true).total).toBe(1500);
     expect(offerEarnings(800, 300, true).total).toBe(1100);
     expect(offerEarnings(800, 300, true).tip).toBe(300);
+  });
+});
+
+describe('[promo-film finding] the cash card names a store only when one is owed', () => {
+  it('a store order hands the store its share; a taxi ride or a courier job owes no store', () => {
+    expect(owesStore({ payToVendor: 4200 })).toBe(true);
+    // the server's cash math for a ride and for a courier job: collect the total, pay no store
+    expect(owesStore({ payToVendor: 0 })).toBe(false);
+    expect(owesStore({ payToVendor: '0.00' })).toBe(false);
+    expect(owesStore(null)).toBe(false);
+    expect(owesStore(undefined)).toBe(false);
+    expect(owesStore({ payToVendor: Number.NaN })).toBe(false);
+  });
+
+  it('the offer card draws its cash math from OfferCashMath, which gates "Pay {store} …" and keeps the collect line', () => {
+    const screen = readFileSync(join(__dirname, 'MoverHomeScreen.tsx'), 'utf8');
+    expect(screen).toContain('<OfferCashMath cashMath={offer.cashMath} vendorName={offer.vendorName} />');
+    expect(screen).not.toContain("Pay {offer.vendorName ?? 'the store'}");
+    const block = readFileSync(join(__dirname, 'OfferCashMath.tsx'), 'utf8');
+    expect(block).toContain('Cash job — collect {money(cashMath.collectFromCustomer)} from the customer');
+    const gate = block.indexOf('{owesStore(cashMath) ? (');
+    const storeLine = block.indexOf("Pay {vendorName ?? 'the store'}");
+    const otherwise = block.indexOf(') : (', gate);
+    const youKeepAlone = block.indexOf('You keep {money(cashMath.youKeep)}');
+    // the store line is the gate's TRUE branch and "You keep" its FALSE branch (never swapped), once each
+    expect(gate).toBeGreaterThan(-1);
+    expect(storeLine).toBeGreaterThan(gate);
+    expect(otherwise).toBeGreaterThan(storeLine);
+    expect(youKeepAlone).toBeGreaterThan(otherwise);
+    expect(block.split("Pay {vendorName ?? 'the store'}").length).toBe(2);
   });
 });

@@ -8,7 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { loginWithOtp } from './helpers/otp';
 import { testPhone } from './helpers/fixture-ids';
 import { runWithoutTenant } from '../plugins/tenant-context';
@@ -74,7 +74,7 @@ beforeAll(async () => {
   await server.register(redisPlugin);
   await server.register(authPlugin);
   await server.register(socketPlugin);
-  await server.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(server);
   await server.register(adminRoutes, { prefix: '/api/v1/admin' });
   await server.ready();
   app = server;

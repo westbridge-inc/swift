@@ -7,7 +7,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
@@ -117,7 +117,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
@@ -1171,7 +1171,8 @@ describe('[A-19] the reviewer can see what they are asked to cross-check', () =>
       expect(withDriver.user!.driver).toHaveProperty('vehicleMake');
     } else {
       // no driver applicant in this fixture run — assert the selection exists
-      const routes = readFileSync(join(__dirname, '../modules/admin/admin.routes.ts'), 'utf8');
+      // [DOC-SECURITY G3] The queue's allow-listed selection lives beside the row it builds.
+      const routes = readFileSync(join(__dirname, '../modules/admin/review-queue-row.ts'), 'utf8');
       expect(routes).toMatch(/driver: \{ select: \{ licensePlate: true/);
     }
   });

@@ -95,13 +95,6 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
         next: `${NOTHING_CHANGED} Open the owner's documents in the Review Center and decide each one that is still waiting.`,
         link: { label: 'Open in Review Center', href: reviewCenterHref(ctx.applicantId) },
       };
-    case 'VENDOR_TIER_NO_PROMOTION':
-      return {
-        tone: 'refused',
-        title: "This store can't be featured yet",
-        next: `${NOTHING_CHANGED} Featuring opens once a business registration is approved for the owner.`,
-        link: { label: 'Open in Review Center', href: reviewCenterHref(ctx.applicantId) },
-      };
     case 'DISCLOSURE_INCOMPLETE':
       return {
         tone: 'refused',

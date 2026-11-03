@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { guyanaDayKey } from '../utils/guyana-day';
+import { AUTH_LIMITS } from '../modules/auth/auth-rate-limits';
 
 // ---------------------------------------------------------------------------
 // SEC-4 regression — auth endpoints are rate limited.
@@ -16,7 +17,10 @@ import { guyanaDayKey } from '../utils/guyana-day';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const phones = Array.from({ length: 6 }, (_, i) => `+59288800${10 + i}`);
+// [FLOW-QA F15] one more number than the per-address ceiling (the per-number ceiling is unit-tested in
+// auth-rate-limits.unit.test.ts; here each number is asked once, so only the address ceiling can stop the last)
+const PER_ADDRESS = AUTH_LIMITS.codePerAddress;
+const phones = Array.from({ length: PER_ADDRESS + 1 }, (_, i) => `+5928880${String(100 + i).padStart(3, '0')}`);
 // A TEST-NET-3 address reserved for this suite: keeps the fake-token bucket
 // isolated from the loopback bucket the first test exhausts.
 const ROTATOR_IP = '203.0.113.45';
@@ -58,9 +62,9 @@ afterAll(async () => {
 });
 
 describe('SEC-4 regression — auth endpoint rate limiting', () => {
-  it('returns 429 from the route limiter on the 6th send-otp within a minute', async () => {
-    // Six distinct phones dodge the per-phone cooldown, so only the
-    // per-IP route limit (max 5/min) can stop the 6th request.
+  it('returns 429 from the route limiter once one address passes its per-address ceiling within a minute', async () => {
+    // Distinct phones dodge the per-phone cooldown and the per-number ceiling, so only the
+    // per-address route limit (AUTH_LIMITS.codePerAddress a minute) can stop the last request.
     const statuses: number[] = [];
     for (const phone of phones) {
       // Same hygiene as helpers/otp.ts: the trial-integrity hourly cap
@@ -75,14 +79,14 @@ describe('SEC-4 regression — auth endpoint rate limiting', () => {
       });
       statuses.push(res.statusCode);
     }
-    expect(statuses.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
-    expect(statuses[5]).toBe(429);
+    expect(statuses.slice(0, PER_ADDRESS)).toEqual(Array(PER_ADDRESS).fill(200));
+    expect(statuses[PER_ADDRESS]).toBe(429);
   });
 
   it('rotating fake bearer tokens share one IP bucket and are still limited', async () => {
-    // Audit High #1 exploit: six DIFFERENT made-up bearer tokens. Today each
-    // mints its own bucket and all six pass; verified-identity keying must
-    // land them all on the client-IP bucket so the 6th request 429s. A fresh
+    // Audit High #1 exploit: DIFFERENT made-up bearer tokens. Each would
+    // mint its own bucket; verified-identity keying must land them all on the
+    // client-IP bucket so the request past the ceiling 429s. A fresh
     // remoteAddress keeps this bucket isolated from the first test's.
     const statuses: number[] = [];
     for (let i = 0; i < phones.length; i++) {
@@ -97,7 +101,7 @@ describe('SEC-4 regression — auth endpoint rate limiting', () => {
       });
       statuses.push(res.statusCode);
     }
-    expect(statuses.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
-    expect(statuses[5]).toBe(429);
+    expect(statuses.slice(0, PER_ADDRESS)).toEqual(Array(PER_ADDRESS).fill(200));
+    expect(statuses[PER_ADDRESS]).toBe(429);
   });
 });

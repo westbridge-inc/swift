@@ -95,10 +95,12 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
     expect(await countryConfig.getOptionalDocuments('GY', 'MOVER_TAXI_EXTRA', [])).toEqual(['police_clearance']);
     const restaurantDocs = await countryConfig.getDocumentChecklist('GY', 'RESTAURANT');
     // [FOOD-PERMIT · owner ruling 24 Oct 2026 — a DELIBERATE change to this pin] a registered restaurant's food handler's
-    // certificate is optional (its owner ticks for its food handlers instead); a home cook keeps it required
+    // certificate is optional (its owner ticks for its food handlers instead). [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)
+    // — a DELIBERATE change to this pin] the self-declared tier whose home cook kept it required is removed: its list
+    // is a retired key, read as no list at all
     expect(restaurantDocs).not.toContain('food_handler_cert');
     expect(await countryConfig.getDocumentChecklist('GY', 'RESTAURANT_OPTIONAL')).toEqual(['food_handler_cert']);
-    expect(await countryConfig.getDocumentChecklist('GY', 'RESTAURANT_UNREGISTERED')).toContain('food_handler_cert');
+    expect(await countryConfig.getDocumentChecklist('GY', 'RESTAURANT_UNREGISTERED')).toEqual([]);
   });
 
   it('scales the mover checklist to the vehicle (no docs a vehicle can\'t have)', async () => {

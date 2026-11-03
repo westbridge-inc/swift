@@ -141,14 +141,14 @@ describe('[SMS allowlist] send-otp gives no oracle', () => {
     const { authPlugin } = await import('../plugins/auth');
     const { socketPlugin } = await import('../plugins/socket');
     const { registerErrorHandler } = await import('../middleware/error-handler');
-    const { authRoutes } = await import('../modules/auth/auth.routes');
+    const { registerAuthRoutes } = await import('./helpers/auth-routes-harness');
     app = Fastify({ logger: false });
     registerErrorHandler(app);
     await app.register(prismaPlugin);
     await app.register(redisPlugin);
     await app.register(authPlugin);
     await app.register(socketPlugin);
-    await app.register(authRoutes, { prefix: '/api/v1/auth' });
+    await registerAuthRoutes(app);
     await app.ready();
   });
   afterAll(async () => {

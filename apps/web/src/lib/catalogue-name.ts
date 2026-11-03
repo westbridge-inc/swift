@@ -24,6 +24,10 @@ export function catalogueName(vendorType: string | null | undefined): CatalogueN
   return CATALOGUE_LABEL[(vendorType ?? 'RESTAURANT') as keyof typeof CATALOGUE_LABEL] ?? CATALOGUE_LABEL.RESTAURANT;
 }
 
+/** [WEB-ONBOARDING · FLOW-QA F20] The line under the items tab's name, by the store's type: "Your menu", "Your inventory",
+ *  "Your products", "Your services" (a supermarket's page said "Your menu"). */
+export const yourCatalogue = (name: CatalogueName): string => `Your ${name.toLowerCase()}`;
+
 /** The selected store's items-tab name, from the same stores read the console shell makes. */
 export function useCatalogueName(): CatalogueName {
   const storeId = useStoreId();

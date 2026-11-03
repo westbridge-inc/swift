@@ -16,6 +16,7 @@ const fx = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, apiFetch: fx.api }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: fx.send }));
 vi.mock('@/lib/customer-account', () => ({
   verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become,
 }));
@@ -58,7 +59,7 @@ async function business() {
   await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
   fireEvent.change(await screen.findByLabelText('Business name'), { target: { value: 'Test shop' } });
-  for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
+  for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region (optional)', 'Demerara-Mahaica']]) {
     fireEvent.change(screen.getByLabelText(label!), { target: { value } });
   }
   return user;

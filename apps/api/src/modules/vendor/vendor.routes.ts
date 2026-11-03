@@ -47,18 +47,16 @@ import { bookingLimitsFor } from '../booking/booking-limits';
 import { MAX_BOOKING_CAPACITY } from '../booking/one-at-a-time';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { VerificationService } from '../verification/verification.service';
-import { CountryConfigService } from '../country/country-config.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { encryptBuffer, generateDek, getKeyProvider } from '../../providers/storage/envelope';
 import { createHash } from 'node:crypto';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION } from '../legal/legal.routes';
-import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGISTERED_TRADER_DECLARATION_V1, renderDeclarationPdf } from './unregistered-declaration';
 import { OWN_NAME_CONSENT_TYPE, OWN_NAME_DECLARATION_V1, OWN_NAME_DECLARATION_VERSION, OWN_NAME_VENDOR_TYPES, renderOwnNamePdf, storeNameIsOwnName } from './own-name';
 import { FOOD_HANDLERS_CONSENT_TYPE, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, foodHandlerTickApplies, storeAttested } from './food-handlers';
-import { DECLARATION_DOC_TYPE, OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
-import { validRegistrationRecord } from './vendor-tier';
+import { OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
+import { UNREGISTERED_TIER_REMOVED_WORDS, validRegistrationRecord } from './registration-record';
 import { parseCsvWithHeader } from '../../utils/csv';
 import {
   applyMapping, toImportCsv, toSourceCsv, planColumns, unknownOverrideHeaders, missingForSync,
@@ -105,7 +103,7 @@ import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { maskedMmgNumber, mmgNumberForWrite, safeMmgNumber } from '../../utils/mmg-number';
 import { assertStoreMmgPayLinkWritable, storeMmgPayLinkEnabled } from '../../utils/store-mmg';
 import { requireStepUp } from '../auth/step-up';
-import { BRANCH_TIER, PartnerService, branchLimit } from '../partner/partner.service';
+import { PartnerService, branchLimit } from '../partner/partner.service';
 import { assertStoreNameAllowed, businessSchema, weeklyFeeAckSchema } from '../partner/business-input';
 import { assertWeeklyFeeAck, signupQuote, weeklyFeeTerms, WEEKLY_FEE_ACK_VERSION } from '../partner/weekly-fee-ack';
 import { recordStoreFeeAck, storeFeeStanding, storeFeeWhy } from '../partner/store-fee';
@@ -126,6 +124,7 @@ import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { storeBacklogSentence, storeRiderBacklog } from '../dispatch/delivery-capacity';
 import { deliveryPausedAt } from '../dispatch/delivery-pause';
+import { CLOSURE_PAUSE_REFUSAL, CLOSURE_PAUSE_REFUSAL_TEAM } from '../user/closure-pause';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1225,9 +1224,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         dealWeeklyRate: owner.dealWeeklyRate === null ? null : Number(owner.dealWeeklyRate),
         dealCurrencyCode: owner.dealCurrencyCode,
         // [REVIEW-F #2220 S3-1] A restaurant branch goes live only with its owner's food handlers tick: the form
-        // offers it here, in the words and version the tick is recorded in. A branch is born a registered seller
-        // (the tier column's default), so every restaurant branch is asked.
-        foodHandlers: foodHandlerTickApplies({ vendorType, tier: BRANCH_TIER }) ? { version: FOOD_HANDLERS_VERSION, tick: FOOD_HANDLERS_TICK_V1 } : null,
+        // offers it here, in the words and version the tick is recorded in: every restaurant branch is asked.
+        foodHandlers: foodHandlerTickApplies({ vendorType }) ? { version: FOOD_HANDLERS_VERSION, tick: FOOD_HANDLERS_TICK_V1 } : null,
       },
     };
   });
@@ -1258,7 +1256,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // storefront's own validator before anything else is checked or written.
     const publicPhone = publicPhoneForWrite(body.publicPhone);
     if (publicPhone === null) throw new AppError(400, 'PUBLIC_PHONE_REQUIRED', 'Enter the number customers can call at this branch, including +592.');
-    if (body.foodHandlers && !foodHandlerTickApplies({ vendorType: body.business.vendorType, tier: BRANCH_TIER })) {
+    if (body.foodHandlers && !foodHandlerTickApplies({ vendorType: body.business.vendorType })) {
       throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', 'Only a restaurant confirms its food handlers.');
     }
     await assertStoreNameAllowed(app.prisma, request.user.userId, body.business);
@@ -1689,84 +1687,15 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /profile — Update vendor profile details */
   /**
-   * [DOC-1 §3.2/§3.6 · P3-2] POST /onboarding/declaration — the unregistered trader signs the
-   * versioned self-declaration. One call does the whole thing, in this order: refuse if a
-   * registration is already on file (then the tier is REGISTERED and the declaration is
-   * moot); put the store on the UNREGISTERED tier; write the signature to the consent
-   * ledger (words hashed, version pinned); render the signed declaration as a PDF and file
-   * it as the BUSINESS document the tier's checklist requires. Owner only.
+   * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] POST /onboarding/declaration — the self-declared (unregistered) tier
+   * is REMOVED: only a registered business, or a trader under their own name, joins Swift. The route that signed a
+   * store onto the tier answers 410 for any client that still calls it (no shipped app does: builds 9-12 never offered
+   * it), names the two ways in, and writes nothing. The same hands as before (the store's OWNER; anyone else is refused
+   * as on every store route), answered before the body is read, so an old-shaped body gets the same polite answer.
    */
-  app.post('/onboarding/declaration', auth, async (request, reply) => {
-    const access = await requireVendor(app, request, 'OWNER');
-    const { vendorId } = access;
-    const userId = request.user.userId;
-    const body = z.object({
-      tradingName: z.string().trim().min(2).max(80),
-      activityClass: z.enum(ACTIVITY_CLASSES),
-      declaredAddress: z.string().trim().min(5).max(200),
-      attestationVersion: z.literal(DECLARATION_VERSION),
-      privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
-    }).parse(request.body ?? {});
-    // [R15 · owner 15 Oct 2026, research D9] Home cooks are held: a home kitchen needs the council's
-    // registration, and whether one can be registered is not confirmed yet. Refused before anything is written.
-    if (body.activityClass === 'home_cook') {
-      throw new AppError(409, 'HOME_COOK_HELD', 'Swift can’t take home cooks yet: a home kitchen needs a council registration that is still being confirmed. We’ll tell you when it opens.');
-    }
-    const [vendor, user, registered, existing] = await Promise.all([
-      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true } }),
-      app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true, countryCode: true } }),
-      validRegistrationRecord(app.prisma, userId),
-      app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE, status: { in: ['PENDING', 'APPROVED'] } }, select: { id: true, status: true } }),
-    ]);
-    if (registered) throw new AppError(409, 'ALREADY_REGISTERED', 'A business registration is on file for this store, so it is a registered seller — no declaration is needed.');
-    if (existing) throw new AppError(409, 'DECLARATION_EXISTS', `A self-declaration is already ${existing.status === 'APPROVED' ? 'on file' : 'under review'} for this store.`);
-
-    // Preflight the same country/tier checklist used by intake. SERVICE has
-    // no declaration checklist by default; this route cannot invent one.
-    const checklist = await new CountryConfigService(app.prisma).getDocumentChecklist(user.countryCode, vendor.vendorType, 'UNREGISTERED');
-    if (!checklist.includes(DECLARATION_DOC_TYPE)) {
-      throw new AppError(400, 'DECLARATION_UNSUPPORTED', 'A self-declaration is not supported for this store type in your country.');
-    }
-    // Acquire and wrap the key BEFORE publishing words, changing tier, or
-    // recording consent. No generated declaration may fall back to plaintext.
-    const dek = generateDek();
-    let wrappedDek: Buffer;
-    try {
-      const keys = getKeyProvider();
-      if (!keys) throw new Error('Envelope encryption unavailable');
-      wrappedDek = await keys.wrapDek(dek);
-    } catch {
-      throw new AppError(503, 'VERIFICATION_UPLOAD_UNAVAILABLE', 'Verification uploads are temporarily unavailable. Try again later.');
-    }
-
-    await publishLegalDocumentOnce(app.prisma, { documentType: DECLARATION_CONSENT_TYPE, version: DECLARATION_VERSION, renderedText: UNREGISTERED_TRADER_DECLARATION_V1 });
-    const signedAt = new Date();
-    const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
-    const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
-    await app.prisma.$transaction(async (tx) => {
-      await tx.vendor.update({ where: { id: vendorId }, data: { tier: 'UNREGISTERED', tierChangedAt: signedAt, tierNote: `self-declared unregistered trader (${body.activityClass}) — declaration ${DECLARATION_VERSION}` } });
-      await recordConsent(tx, {
-        subjectType: 'vendor_user', subjectId: userId, documentType: DECLARATION_CONSENT_TYPE, version: DECLARATION_VERSION,
-        action: 'granted', surface, ip: request.ip,
-        evidence: { vendorId, tradingName: body.tradingName, activityClass: body.activityClass, declaredAddress: body.declaredAddress, signedAt: signedAt.toISOString() },
-      });
-    });
-
-    // The signed words, filed as the document the tier's checklist requires — encrypted like every upload.
-    const pdf = await renderDeclarationPdf({
-      tradingName: body.tradingName, activityClass: body.activityClass, declaredAddress: body.declaredAddress,
-      legalName: `${user.firstName} ${user.lastName}`.trim(), signedAt, storeName: vendor.name,
-    });
-    const storage = getStorageProvider();
-    const { ciphertext, iv, authTag } = encryptBuffer(pdf, dek);
-    const { url: fileUrl } = await storage.upload({ buffer: ciphertext, filename: `declaration-${DECLARATION_VERSION}.pdf.enc`, mimeType: 'application/octet-stream', folder: `verification/${userId}` });
-    await app.prisma.encryptedObject.create({ data: {
-      fileKey: fileUrl, iv: new Uint8Array(iv), authTag: new Uint8Array(authTag), wrappedDek: new Uint8Array(wrappedDek),
-      mimeType: 'application/pdf', sizeBytes: pdf.length, sha256: createHash('sha256').update(pdf).digest('hex'), createdBy: userId,
-    } });
-    const doc = await verification.submitDocument(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE', DECLARATION_DOC_TYPE, fileUrl, body.privacyNoticeVersion);
-    reply.code(201);
-    return { success: true, data: { tier: 'UNREGISTERED', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE') } };
+  app.post('/onboarding/declaration', auth, async (request) => {
+    await requireVendor(app, request, 'OWNER');
+    throw new AppError(410, 'UNREGISTERED_TIER_REMOVED', UNREGISTERED_TIER_REMOVED_WORDS);
   });
 
   // =========================================================================
@@ -1843,7 +1772,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    * OWN name (Business Names (Registration) Act s.3: their true surname, with nothing added except their first names
    * or initials) signs the own-name declaration instead of uploading a business registration (vendor/own-name.ts).
    * Refused when the store's name clearly is not the account's own name, when the store is a service business (no
-   * registration is asked of it) or on the self-declared tier, and when a business registration is already on file.
+   * registration is asked of it), and when a business registration is already on file.
    * Records the signature in the consent ledger (words hashed, version pinned), files the signed words as the
    * `own_name_declaration` document a person reviews against the owner's ID, and marks THIS store — only this one —
    * as trading under the owner's own name [REVIEW-G #2046 S2-1, COORD 23 Oct: per store, never per type]: another
@@ -1859,7 +1788,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
     }).parse(request.body ?? {});
     const [vendor, user, registered, existing] = await Promise.all([
-      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true, ownerId: true, tradesUnderOwnName: true } }),
+      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, vendorType: true, ownerId: true, tradesUnderOwnName: true } }),
       app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true } }),
       validRegistrationRecord(app.prisma, userId),
       app.prisma.verificationDocument.findFirst({ where: { userId, docType: OWN_NAME_DOC_TYPE, status: { in: ['PENDING', 'APPROVED'] } }, select: { id: true, status: true } }),
@@ -1867,7 +1796,6 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (!(OWN_NAME_VENDOR_TYPES as readonly string[]).includes(vendor.vendorType)) {
       throw new AppError(400, 'OWN_NAME_NOT_APPLICABLE', 'A service business is not asked for a business registration, so it needs no own-name declaration.');
     }
-    if (vendor.tier === 'UNREGISTERED') throw new AppError(409, 'OWN_NAME_NOT_APPLICABLE', 'This store is on the self-declared tier. Contact support to change how it is registered.');
     if (registered) throw new AppError(409, 'ALREADY_REGISTERED', 'A business registration is on file for this store, so it needs no own-name declaration.');
     if (existing?.status === 'PENDING' || (existing && vendor.tradesUnderOwnName)) {
       throw new AppError(409, 'OWN_NAME_DECLARATION_EXISTS', `Your own-name declaration is already ${existing.status === 'APPROVED' ? 'on file' : 'waiting for review'}.`);
@@ -1943,23 +1871,21 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /**
-   * [FOOD-PERMIT · owner ruling 24 Oct 2026] POST /onboarding/food-handlers — the owner of a REGISTERED restaurant
+   * [FOOD-PERMIT · owner ruling 24 Oct 2026] POST /onboarding/food-handlers — the owner of a restaurant
    * ticks, for the selected store: "Everyone who handles food here holds a current food handler's certificate."
    * (vendor/food-handlers.ts). The words are published as their own versioned document and the tick is a row in the
    * consent ledger (append-only): who (the owner), which store (evidence.vendorId), when, the words' version and hash.
    * A store that was waiting only for it goes live now (the activation projection), not at the next daily belt.
-   * Refused for a home cook (self-declared tier: the certificate itself is required) and every other store type.
+   * Refused for every other store type.
    * Ticking again changes nothing. Owner only.
    */
   app.post('/onboarding/food-handlers', auth, async (request, reply) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     const userId = request.user.userId;
     z.object({ accept: z.literal(true), attestationVersion: z.literal(FOOD_HANDLERS_VERSION) }).parse(request.body ?? {});
-    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, vendorType: true, tier: true } });
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, vendorType: true } });
     if (!foodHandlerTickApplies(vendor)) {
-      throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', vendor.vendorType === 'RESTAURANT'
-        ? 'A self-declared food seller uploads their own food handler’s certificate under Documents. This tick is for registered restaurants.'
-        : 'Only a restaurant confirms its food handlers.');
+      throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', 'Only a restaurant confirms its food handlers.');
     }
     await publishLegalDocumentOnce(app.prisma, { documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION, renderedText: FOOD_HANDLERS_TICK_V1 });
     const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
@@ -2040,36 +1966,25 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /**
-   * [DOC-1 §3.6 · P3-2] GET /tier — the store's tier as the owner sees it: caps, today's and this
-   * week's usage, whether promoted placement is open, what would promote the store, and the
-   * declaration on file. Everything is the server's; the screen decides nothing.
+   * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] GET /tier — kept for the Seller status screen of the shipped apps
+   * (builds 9-12 and vc7/vc8 read it). The self-declared tier is removed, so no store has caps, a nudge or a promotion
+   * to wait for: every store answers "no limits", promoted placement open, no declaration, with the caps and usage
+   * shapes those builds read present and zero. Whether a business registration is on file is still the server's.
    */
   app.get('/tier', auth, async (request) => {
-    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    await requireVendor(app, request, 'MANAGER');
     const userId = request.user.userId;
-    const { tierUsage, vendorTierCapsFor, judgeTierCap, validRegistrationRecord } = await import('./vendor-tier');
-    const { CountryConfigService } = await import('../country/country-config.service');
-    const { DECLARATION_DOC_TYPE, REGISTRATION_DOC_TYPES } = await import('../verification/doc-registry');
-    const [vendor, user] = await Promise.all([
-      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, tierChangedAt: true, isFeatured: true } }),
-      app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { countryCode: true } }),
-    ]);
-    const now = new Date();
-    const [caps, usage, registration, declaration, registrationDoc] = await Promise.all([
-      vendorTierCapsFor(new CountryConfigService(app.prisma), user.countryCode),
-      tierUsage(app.prisma, vendorId, now, { storeView: true }),
-      validRegistrationRecord(app.prisma, userId, now),
-      app.prisma.verificationDocument.findFirst({ where: { userId, docType: DECLARATION_DOC_TYPE }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true, expiresAt: true } }),
+    const { REGISTRATION_DOC_TYPES } = await import('../verification/doc-registry');
+    const [registration, registrationDoc] = await Promise.all([
+      validRegistrationRecord(app.prisma, userId, new Date()),
       app.prisma.verificationDocument.findFirst({ where: { userId, docType: { in: [...REGISTRATION_DOC_TYPES] } }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true } }),
     ]);
-    const verdict = judgeTierCap(usage, caps, 0);
     return { success: true, data: {
-      tier: vendor.tier, tierChangedAt: vendor.tierChangedAt?.toISOString() ?? null, capped: vendor.tier === 'UNREGISTERED',
-      caps, usage: { ordersToday: usage.ordersToday, grossThisWeek: usage.grossThisWeek },
-      nearCap: vendor.tier === 'UNREGISTERED' && verdict.nudge,
-      promotedPlacement: vendor.tier !== 'UNREGISTERED',
+      tier: 'REGISTERED', tierChangedAt: null, capped: false,
+      caps: { ordersPerDay: 0, grossPerWeek: 0, nudgeAtFraction: 0 }, usage: { ordersToday: 0, grossThisWeek: 0 },
+      nearCap: false, promotedPlacement: true,
       registration: registration ? { onFile: true, recordId: registration.id } : { onFile: false, submission: registrationDoc ? { status: registrationDoc.status, submittedAt: registrationDoc.createdAt.toISOString() } : null },
-      declaration: declaration ? { status: declaration.status, signedAt: declaration.createdAt.toISOString(), expiresAt: declaration.expiresAt?.toISOString() ?? null } : null,
+      declaration: null,
     } };
   });
 
@@ -2412,6 +2327,14 @@ export async function vendorRoutes(app: FastifyInstance) {
       return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
     }
 
+    // [WEB-DELETE · owner ruling 1 Nov 2026] The owner asked Swift to close the account: new orders stay paused
+    // until Swift's team resolves the request or the owner cancels it (user/closure-pause.ts). Said before any other
+    // check, so the person reads why; the database CHECK and the guarded write below back it up.
+    if (!vendor.acceptingOrders && vendor.closurePausedAt) {
+      const owner = await vendorOwnerUserId(app, vendorId);
+      throw new AppError(409, 'CLOSURE_REQUESTED', owner === request.user.userId ? CLOSURE_PAUSE_REFUSAL : CLOSURE_PAUSE_REFUSAL_TEAM);
+    }
+
     // Turning OFF is always allowed and needs no authority — a fast atomic flip.
     if (vendor.acceptingOrders) {
       await app.prisma.vendor.updateMany({
@@ -2485,7 +2408,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // matches nothing (it changed one of these) — but it cannot, because it
       // waits on the FOR UPDATE lock this transaction holds.
       const won = await tx.vendor.updateMany({
-        where: { id: vendorId, acceptingOrders: false, status: 'ACTIVE', isVerified: locked.isVerified },
+        where: { id: vendorId, acceptingOrders: false, status: 'ACTIVE', isVerified: locked.isVerified, closurePausedAt: null },
         data: { acceptingOrders: true },
       });
       if (won.count === 0) {

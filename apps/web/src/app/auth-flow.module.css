@@ -69,6 +69,9 @@
 
 .smallCopy,
 .legal { font-size: 12px; line-height: 16px; }
+/* [FLOW-QA F24] A tick's whole row is 44 px tall to tap, and the box itself is easy to hit. */
+.legal { min-height: 44px; }
+.legal input[type='checkbox'] { width: 20px; height: 20px; flex: none; margin: 0; }
 
 /* What brings you to Swift: hairline rows with a soft tile, like Switch app. */
 .roleButton {
@@ -138,6 +141,8 @@
 }
 
 .input:focus { border-color: var(--swift-red); outline: none; }
+/* [WEB-ONBOARDING] The example in a box is greyed, in light and dark, and goes as soon as the person types. */
+.input::placeholder { color: var(--swift-muted); opacity: 1; }
 
 .codeInput {
   font: 700 24px/28px var(--swift-face-display), system-ui, sans-serif;
@@ -180,6 +185,8 @@
 .inlineLink {
   color: var(--swift-red);
   font-weight: 600;
+  /* [FLOW-QA F24] 44 px to tap: vertical padding on an inline link widens what a finger hits without moving the text. */
+  padding-block: 13px;
 }
 
 .inlineLink:hover { color: var(--swift-red-600); }

@@ -9,7 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { AccountService, ACCOUNT_CLOSURE_SUBJECT } from '../modules/user/account.service';
 import { SupportService } from '../modules/support/support.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -84,7 +84,7 @@ beforeAll(async () => {
   await server.register(redisPlugin);
   await server.register(authPlugin);
   await server.register(socketPlugin);
-  await server.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(server);
   await server.register(adminRoutes, { prefix: '/api/v1/admin' });
   await server.ready();
   app = server;
@@ -264,5 +264,95 @@ describe('[DELETION-INTEGRITY] support completes an in-app closure request', () 
     expect(res.statusCode, res.payload).toBe(404);
     expect(await runWithoutTenant(() => app.prisma.user.findUniqueOrThrow({ where: { id: user.id } }))).toMatchObject({ status: 'ACTIVE', firstName: 'Closure' });
     expect(await runWithoutTenant(() => app.prisma.supportTicket.findUniqueOrThrow({ where: { id: receipt.ticketId } }))).toMatchObject({ status: 'OPEN', resolvedAt: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [WEB-DELETE · COORD security review on #2304, MEDIUM] The owner can cancel their closure request while support is
+// completing it. Completion is irreversible, so the two are serialised on the person's row lock: support claims the
+// request (IN_PROGRESS) under that lock inside the erasure's first transaction, and a request the owner already
+// cancelled is refused there before anything is erased; once support has claimed it, the owner's cancel is refused
+// in plain words. Both interleavings are forced below at the exact seam (the moment between the route's check and
+// the erasure, and the moment the erasure has committed but the route has not yet resolved the ticket).
+// ---------------------------------------------------------------------------
+describe('[WEB-DELETE] cancelling and completing a closure request never interleave', () => {
+  const realDelete = AccountService.prototype.deleteAccount;
+
+  it('cancel lands after support\'s check but before the erasure: the completion is refused and nothing is erased', async () => {
+    const b = await makeBusiness();
+    vi.spyOn(AccountService.prototype, 'deleteAccount').mockImplementationOnce(async function (this: AccountService, ...args) {
+      await new AccountService(app).cancelClosure(b.userId);
+      return realDelete.apply(this, args);
+    });
+    const res = await complete(b.ticketId);
+    vi.restoreAllMocks();
+    expect(res.statusCode, res.payload).toBe(409);
+    expect(res.json().error.code).toBe('CLOSURE_REQUEST_NOT_OPEN');
+    expect(res.json().error.message).toMatch(/Nothing was erased/);
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: b.userId } })).toMatchObject({ status: 'ACTIVE', firstName: 'Closure', phone: expect.stringMatching(/^\+/) });
+    expect(await app.prisma.session.count({ where: { userId: b.userId } })).toBe(1);
+    expect(await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: b.ticketId } })).toMatchObject({ status: 'RESOLVED', adminNote: 'The account holder cancelled this closure request.' });
+  });
+
+  it('the erasure has committed but the ticket is not resolved yet: the owner\'s cancel is refused in plain words, and the ticket says what support did', async () => {
+    const b = await makeBusiness();
+    let cancel: Promise<unknown> = Promise.resolve();
+    vi.spyOn(AccountService.prototype, 'deleteAccount').mockImplementationOnce(async function (this: AccountService, ...args) {
+      const outcome = await realDelete.apply(this, args);
+      cancel = new AccountService(app).cancelClosure(b.userId).then(() => 'cancelled', (e: unknown) => e);
+      await cancel;
+      return outcome;
+    });
+    const res = await complete(b.ticketId);
+    vi.restoreAllMocks();
+    expect(res.statusCode, res.payload).toBe(200);
+    const refused = await cancel;
+    expect(refused).toMatchObject({ code: 'CLOSURE_IN_PROGRESS', message: expect.stringMatching(/^Swift is already closing your account.*Contact Swift support\.$/) });
+    expect(await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: b.ticketId } })).toMatchObject({ status: 'RESOLVED', resolution: 'ACTION_TAKEN' });
+    expect(await app.prisma.auditLog.count({ where: { entityId: b.ticketId, action: 'ACCOUNT_CLOSURE_CANCELLED' } })).toBe(0);
+  });
+
+  it('while support holds the request (claimed, the erasure running under the person\'s lock), the owner\'s cancel waits for it, then is refused', async () => {
+    const b = await makeBusiness();
+    let cancel: Promise<unknown> = Promise.resolve();
+    let waited = false;
+    vi.spyOn(AccountService.prototype, 'deleteAccount').mockImplementationOnce(async function (this: AccountService, userId, selfServe, surface, opts) {
+      const claim = opts?.claimClosure;
+      return realDelete.call(this, userId, selfServe, surface, {
+        ...opts,
+        claimClosure: claim && (async (tx) => {
+          const claimed = await claim(tx);
+          // The owner presses Cancel now: it must wait for the person's lock this transaction holds.
+          let settled = false;
+          cancel = new AccountService(app).cancelClosure(userId).then(() => 'cancelled', (e: unknown) => e).finally(() => { settled = true; });
+          await new Promise((r) => setTimeout(r, 400));
+          waited = !settled;
+          return claimed;
+        }),
+      });
+    });
+    const res = await complete(b.ticketId);
+    vi.restoreAllMocks();
+    expect(res.statusCode, res.payload).toBe(200);
+    expect(waited, 'the cancel waited on the person\'s lock while the erasure held it').toBe(true);
+    expect(await cancel).toMatchObject({ code: 'CLOSURE_IN_PROGRESS' });
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: b.userId } })).toMatchObject({ status: 'DEACTIVATED' });
+  });
+
+  it('an account Swift closed another way (its ticket still OPEN) is not "un-closed" by the owner\'s cancel', async () => {
+    const b = await makeBusiness();
+    await expect(new AccountService(app).deleteAccount(b.userId)).resolves.toMatchObject({ deleted: true });
+    expect((await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: b.ticketId } })).status).toBe('OPEN');
+    await expect(new AccountService(app).cancelClosure(b.userId)).rejects.toMatchObject({ code: 'CLOSURE_IN_PROGRESS' });
+    expect((await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: b.ticketId } })).status).toBe('OPEN');
+  });
+
+  it('a request support has taken up (IN_PROGRESS) is not cancelled by the owner; an OPEN one still is', async () => {
+    const b = await makeBusiness();
+    await app.prisma.supportTicket.update({ where: { id: b.ticketId }, data: { status: 'IN_PROGRESS' } });
+    await expect(new AccountService(app).cancelClosure(b.userId)).rejects.toMatchObject({ code: 'CLOSURE_IN_PROGRESS' });
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: b.vendorId } })).closurePausedAt).toBeInstanceOf(Date);
+    await app.prisma.supportTicket.update({ where: { id: b.ticketId }, data: { status: 'OPEN' } });
+    await expect(new AccountService(app).cancelClosure(b.userId)).resolves.toMatchObject({ cancelled: true });
   });
 });

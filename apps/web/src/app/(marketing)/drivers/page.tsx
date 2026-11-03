@@ -5,6 +5,7 @@ import { Section } from '@/components/site';
 import { launch } from '@/site.config';
 import { partnerSignupHref } from '@/lib/signup-roles';
 import { PrelaunchPartnerNote, ReviewTime } from '@/components/prelaunch-partner-note';
+import { VEHICLE_DOCUMENTS } from '@/lib/vehicle-documents';
 
 export const metadata: Metadata = {
   title: 'For riders and drivers',
@@ -12,16 +13,6 @@ export const metadata: Metadata = {
     'Deliver or drive on Swift and keep 100% of every delivery fee, fare and tip. One flat weekly fee, paid by you — no commission on orders.',
   alternates: { canonical: 'https://swiftgy.com/drivers' },
 };
-
-const DOCUMENTS = [
-  { t: 'A government ID', b: 'Confirms you are who you say you are.' },
-  { t: "A driver's licence", b: 'Valid, and matching the vehicle class you drive.' },
-  { t: 'Vehicle registration', b: 'For the vehicle you will actually be working in.' },
-  {
-    t: 'Insurance with HIRE cover',
-    b: 'This one matters most. A private policy does not cover carrying fare-paying passengers, so Swift reads the coverage class off your policy — it cannot be waved through.',
-  },
-];
 
 const SAFETY = [
   {
@@ -122,27 +113,27 @@ export default function DriversPage() {
         <div className="max-w-3xl">
           <h2 className="text-2xl font-bold tracking-tight md:text-3xl">What you need to sign up</h2>
           <p className="mt-3 text-[var(--swift-muted)]">
-            Four documents. Photograph them with your phone — the camera frames each one for you.
+            What you need depends on what you ride or drive. Photograph each document with your phone — the camera frames each one for you.
             {/* [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day. */}
             {' '}<ReviewTime live="Most riders clear review within a day, and you can browse the whole app while you wait." after="You can browse the whole app while you wait." />
           </p>
+          {/* The server's own launch checklists, per vehicle (lib/vehicle-documents; parity pinned by partner-wording.test). */}
           <ul className="mt-7 space-y-4">
-            {DOCUMENTS.map((d) => (
-              <li
-                key={d.t}
-                className="flex items-start gap-4 sw-card p-5"
-              >
+            {VEHICLE_DOCUMENTS.map((v) => (
+              <li key={v.vehicle} className="flex items-start gap-4 sw-card p-5">
                 <FileCheck2 className="mt-0.5 h-5 w-5 shrink-0 text-[var(--swift-red)]" aria-hidden />
                 <div>
-                  <h3 className="font-bold">{d.t}</h3>
-                  <p className="mt-1 text-sm leading-relaxed text-[var(--swift-muted)]">{d.b}</p>
+                  <h3 className="font-bold">{v.vehicle}</h3>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-[15px] leading-relaxed">
+                    {v.labels.map((label) => (
+                      <li key={label}>{label}</li>
+                    ))}
+                  </ul>
+                  <p className="mt-2 text-sm leading-relaxed text-[var(--swift-muted)]">{v.note}</p>
                 </div>
               </li>
             ))}
           </ul>
-          <p className="mt-6 text-sm text-[var(--swift-muted)]">
-            Riding a bicycle? You will not be asked for a licence, registration or motor insurance.
-          </p>
 
           {/* [OPEN-EARLY] Two doors, each opening sign-up on its own option: a delivery rider and a taxi driver. */}
           <div className="mt-10">

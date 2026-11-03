@@ -12,6 +12,7 @@
     "dpa:readiness": "tsx scripts/dpa-readiness.ts",
     "doc1:rehearse": "tsx scripts/doc1-rehearse-activation.ts",
     "doc1:backfill-subjects": "tsx scripts/doc1-backfill-subjects.ts",
+    "photos:seal-existing": "tsx scripts/seal-existing-photos.ts",
     "review:provision": "tsx scripts/review-provision.ts provision",
     "review:seed": "tsx scripts/review-provision.ts seed",
     "review:status": "tsx scripts/review-provision.ts status",
