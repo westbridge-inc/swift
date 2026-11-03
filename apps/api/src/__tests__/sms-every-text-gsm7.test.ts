@@ -24,7 +24,7 @@ import { inactivityNoticeText } from '../modules/user/inactivity';
 import { marketingSmsText } from '../modules/notification/marketing-message';
 import { vendorAlertSmsText } from '../modules/notification/vendor-alert-sms';
 import { passengerCheckinSms } from '../modules/safety/guardian-delivery';
-import { sosContactText } from '../modules/safety/sos-escalation';
+import { sosContactText, SOS_SMS_NAME_MAX } from '../modules/safety/sos-escalation';
 import { sosClosedContactText } from '../modules/safety/sos.service';
 import { FEE_RESTORE_LINE, feeCoveredLine, feeDueLine, mmgPayLine } from '../modules/billing/fee-notice-copy';
 import { whenSentence } from '../modules/integrity/money-surface';
@@ -267,6 +267,8 @@ describe('[SMS-COST 2] every SMS text builder renders GSM-7; ops texts fit two p
     expect(sosContactText('Ana Mar\u00eda', '')).toMatch(/^URGENT: Ana Maria triggered/);
     expect(sosClosedContactText('\u674e\u660e')).toMatch(/^Update from Swift: the emergency alert involving the person you were alerted about has been closed/);
     expect(sosClosedContactText('Jos\u00e9')).toMatch(/^Update from Swift: the emergency alert involving Jos\u00e9 has been closed/);
+    expect(sosContactText('x'.repeat(80), '')).toBe(`URGENT: ${'x'.repeat(SOS_SMS_NAME_MAX)} triggered an emergency SOS on Swift and may need help. Please check on them and contact local emergency services if you cannot reach them.`);
+    expect(sosClosedContactText('x'.repeat(80))).toContain(`involving ${'x'.repeat(SOS_SMS_NAME_MAX)} has been closed`);
     for (const t of [sosContactText('\u674e\u660e', ' Last known location: https://maps.google.com/?q=6.8,-58.1.'), sosClosedContactText('x'.repeat(80))]) {
       expect(isGsm7Message(t)).toBe(true);
       expect(gsm7Parts(t)).toBeLessThanOrEqual(2);
