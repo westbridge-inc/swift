@@ -48,21 +48,16 @@ export function gsm7Parts(text: string): number {
 }
 
 /**
- * A person's name made safe to put in a text: letters outside the GSM alphabet
- * fall back to their base letter where there is one (ā → a), anything else is
- * dropped, whitespace collapses, and the result is cut to `max` characters.
- * Returns '' when nothing usable is left — the caller supplies its own words.
+ * A person's name made safe to put in a text: `toGsm7` (look-alikes mapped, so
+ * O\u2019Neil keeps its apostrophe; letters outside the GSM alphabet fall back
+ * to their base letter, ā → a; anything else dropped), cut to `max` characters.
+ * Returns '' when no letter or digit is left: punctuation alone is not a name,
+ * and the caller supplies its own words.
  */
 export function gsm7Name(raw: string | null | undefined, max: number): string {
   if (!raw) return '';
-  let out = '';
-  for (const ch of raw.normalize('NFC')) {
-    if (GSM7_BASIC.has(ch)) { out += ch; continue; }
-    if (/\s/.test(ch)) { out += ' '; continue; }
-    const base = ch.normalize('NFD').replace(/\p{M}+/gu, '');
-    if (base.length === 1 && GSM7_BASIC.has(base)) out += base;
-  }
-  return out.replace(/ +/g, ' ').trim().slice(0, max).trim();
+  const out = toGsm7(raw.normalize('NFC')).slice(0, max).trim();
+  return /[\p{L}\p{N}]/u.test(out) ? out : '';
 }
 
 // ---------------------------------------------------------------------------

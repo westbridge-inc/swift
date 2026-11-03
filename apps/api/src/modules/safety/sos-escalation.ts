@@ -339,7 +339,7 @@ export const FAILURE_PAGE_LEASE_SECONDS = 120;
 const FAILURE_PAGE_WORDS: Record<SosEscalationChannel, { title: string; body: (sosAlertId: string) => string }> = {
   CONTACT_SMS: {
     title: 'URGENT: SOS contact text failed — call the person now',
-    body: (id) => `The emergency text to the contact of the person who raised SOS alert ${id} did not go through (number hidden). Call the person who raised it now.`,
+    body: (id) => `The text to the contact for SOS alert ${id} failed (number hidden). Call the person who raised it now.`,
   },
   OPS_PAGE: {
     title: 'URGENT: SOS page failed — open the war room now',
@@ -354,6 +354,12 @@ const FAILURE_PAGE_WORDS: Record<SosEscalationChannel, { title: string; body: (s
     body: (id) => `The evidence record for SOS alert ${id} could not be opened. Check the alert now.`,
   },
 };
+/** The page for a failed delivery. Its text must keep the last sentence inside two parts (ops-alert opsSmsText). */
+export function failurePageWords(channel: SosEscalationChannel, sosAlertId: string, row: { status: string; attempts: number }): { title: string; body: string } {
+  const words = FAILURE_PAGE_WORDS[channel];
+  const retrying = row.status === 'FAILED' ? ` Swift stopped retrying after ${row.attempts} attempts.` : ' Swift keeps retrying.';
+  return { title: words.title, body: `${words.body(sosAlertId)}${retrying}` };
+}
 
 /**
  * [AUD-L4-016 · S1] ANY failed delivery of a live, real SOS pages on-call
@@ -417,12 +423,11 @@ export async function pageFailedSosEscalations(
     if (alert.tenantId && await isReviewTenantId(prisma, alert.tenantId)) { review.push(row.id); continue; }
     const claim = await prisma.sosEscalation.updateMany({ where: { id: row.id, ...claimable, AND: [failedNow], sosAlert: liveAlert }, data: { failurePageClaimedAt: now } });
     if (claim.count !== 1) continue; // another tick holds it, it is already covered, it delivered, or the emergency ended
-    const words = FAILURE_PAGE_WORDS[row.channel];
-    const retrying = row.status === 'FAILED' ? ` Swift stopped retrying after ${row.attempts} attempts.` : ' Swift keeps retrying.';
+    const words = failurePageWords(row.channel, alert.id, row);
     try {
       const page = await openOpsAlert(prisma, notifications, {
         kind: 'SOS', tenantId: alert.tenantId, sosAlertId: alert.id,
-        title: words.title, body: `${words.body(alert.id)}${retrying}`,
+        title: words.title, body: words.body,
         data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId, failedDelivery: row.channel },
         now,
         ...(options.sms !== undefined ? { sms: options.sms } : {}),

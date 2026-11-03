@@ -198,17 +198,17 @@ describe('[SMS-COST 2b · REVIEW-G4 S4-1 · REVIEW-M3 S4-2] the day count is per
     const b = await open(mine, 'PLATFORM', t0, [responder]);
     expect(textsToOncall()).toHaveLength(2); // two first pages
     const dayEnd = 86_400 - 60;
-    const run = await series(t0, mine, responder, 60, dayEnd + TWO_HOURS, 60);
+    const run = await series(t0, mine, responder, 60, dayEnd + 7 * TWO_HOURS, 60);
     // day 1: one collapsed reminder text names both alerts, five times (with a shared counter the pair would stop after three)
     const today = run.texts.filter((x) => x < dayEnd);
     expect(today).toEqual([7200, 14400, 21600, 28800, 36000]);
-    expect(textsToOncall().filter((e) => e.body.startsWith('Swift ops: 2 ops alerts are UNACKNOWLEDGED'))).toHaveLength(5 + 2);
-    // day 2: a fresh count (a key without the day would stop at one text): two texts 2 hours apart
-    expect(run.texts.filter((x) => x >= dayEnd)).toEqual([86_340, 86_340 + TWO_HOURS]);
+    expect(textsToOncall().filter((e) => e.body.startsWith('Swift ops: 2 ops alerts are UNACKNOWLEDGED'))).toHaveLength(5 + 6);
+    // day 2: a fresh count, a full six (the first page was yesterday's), 2 hours apart, the seventh held
+    expect(run.texts.filter((x) => x >= dayEnd)).toEqual([0, 1, 2, 3, 4, 5].map((n) => 86_340 + n * TWO_HOURS));
     const day1 = at(t0, 3_600); const day2 = at(t0, dayEnd + 60);
     for (const id of [a, b]) {
       expect(await app.redis.get(smsDayKey(id, day1))).toBe('5');
-      expect(await app.redis.get(smsDayKey(id, day2))).toBe('2');
+      expect(await app.redis.get(smsDayKey(id, day2))).toBe('6');
       const ttl = await app.redis.ttl(smsDayKey(id, day1));
       expect(ttl).toBeGreaterThan(0);
       expect(ttl).toBeLessThanOrEqual(172_800);
@@ -260,6 +260,19 @@ describe('[SMS-COST 2b · REVIEW-G4 S4-1 · REVIEW-M3 S4-2] the day count is per
     await sweep(at(t0, TWO_HOURS), mine, late);
     expect(textsToOncall()).toHaveLength(1);
     await vi.waitFor(() => expect(expired).toEqual([172_800]), { timeout: 3_000 });
+  });
+
+  it('[REVIEW-M4 S4-A] a day key left without an expiry (a crash between the two commands) is healed by the next count', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const page = await open(mine, 'PLATFORM', t0, [responder]);
+    await sweep(at(t0, 120), mine);
+    const key = smsDayKey(page, at(t0, TWO_HOURS));
+    await app.redis.set(key, '1');
+    expect(await app.redis.ttl(key)).toBe(-1);
+    await sweep(at(t0, TWO_HOURS), mine);
+    expect(await app.redis.get(key)).toBe('2');
+    expect(await app.redis.ttl(key)).toBeGreaterThan(0);
   });
 
   it('[REVIEW-M3 S4-6] a last text dated after the sweep (a skewed clock) never holds a reminder back', async () => {
@@ -326,6 +339,52 @@ describe('[SMS-COST 3] an SOS is texted exactly as before', () => {
 });
 
 describe('[SMS-COST 4] bounded, never silenced', () => {
+  it('[REVIEW-G5 S3-2] a first text that has never left is not held for 2 hours: refused twice, the next escalation texts', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const refused: OpsSms = { sendSms: async () => ({ ref: 'not-allowlisted' }) };
+    const page = await open(mine, 'PLATFORM', t0, [responder], refused);
+    await sweep(at(t0, 120), mine, redisDay(), refused);
+    expect((await alertRow(page)).oncallTextedAt).toBeNull();
+    resetDevChannelLog();
+    await sweep(at(t0, 420), mine);
+    expect(textsToOncall()).toHaveLength(1);
+    expect((await alertRow(page)).oncallTextedAt).toEqual(at(t0, 420));
+  });
+
+  it('[REVIEW-G5 S3-2] a refused REMINDER keeps its 2-hour clock: the list already has its first text', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const page = await open(mine, 'PLATFORM', t0, [responder]);
+    const refused: OpsSms = { sendSms: async () => ({ ref: 'not-allowlisted' }) };
+    await sweep(at(t0, 120), mine);
+    await sweep(at(t0, TWO_HOURS), mine, redisDay(), refused);
+    expect((await alertRow(page)).oncallTextedAt).toEqual(at(t0, TWO_HOURS));
+    resetDevChannelLog();
+    await sweep(at(t0, TWO_HOURS + 1_800), mine);
+    expect(textsToOncall()).toHaveLength(0);
+  });
+
+  it('[REVIEW-G5 S3-2] an SOS row is left as the ladder wrote it when a send is refused: SOS paging is unchanged', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const refused: OpsSms = { sendSms: async () => ({ ref: 'not-allowlisted' }) };
+    const sos = await open(mine, 'SOS', t0, [responder], refused);
+    await sweep(at(t0, 120), mine, redisDay(), refused);
+    expect((await alertRow(sos)).oncallTextedAt).toEqual(at(t0, 120));
+  });
+
+  it('[REVIEW-M3 S4-5 · REVIEW-G5 S4-5] a first page no provider accepted does not use up the day: a cap of 1 still texts', async () => {
+    process.env['OPS_ALERT_SMS_MAX_PER_DAY'] = '1';
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const refused: OpsSms = { sendSms: async () => ({ ref: 'not-allowlisted' }) };
+    await open(mine, 'PLATFORM', t0, [responder], refused);
+    resetDevChannelLog();
+    await sweep(at(t0, 120), mine);
+    expect(textsToOncall()).toHaveLength(1);
+  });
+
   it('a first page whose text no provider accepted texts at the first escalation', async () => {
     const t0 = epoch(); const mine: string[] = [];
     const responder = await person();

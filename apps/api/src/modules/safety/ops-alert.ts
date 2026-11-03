@@ -561,9 +561,10 @@ async function repageOwed(prisma: PrismaClient, notifications: NotificationServi
   }
 }
 
-/** [SMS-COST] Texts this alert already had today (UTC): its first page, if opened today, and the reminders counted. */
+/** [SMS-COST] Texts this alert already had today (UTC): its first page, if opened today and a text has left for it
+ *  (a first page no provider accepted never used up the day), and the reminders counted. */
 async function textsToday(store: OpsSmsDayStore | null, a: SweptAlert, now: Date): Promise<number> {
-  const first = utcDay(a.createdAt) === utcDay(now) ? 1 : 0;
+  const first = a.oncallTextedAt && utcDay(a.createdAt) === utcDay(now) ? 1 : 0;
   if (!store) return first;
   try {
     return first + (Number(await bounded(store.get(smsDayKey(a.id, now)))) || 0);
@@ -587,8 +588,9 @@ async function countReminder(store: OpsSmsDayStore | null, a: SweptAlert, now: D
   if (!store) return;
   try {
     const key = smsDayKey(a.id, now);
-    // The expiry rides on the count: a count that lands after the bound still gets its expiry, so no day key outlives it.
-    await bounded(store.incr(key).then((n) => (n === 1 ? store.expire(key, 2 * 86_400) : n)));
+    // The expiry rides on every count: a count that lands after the bound still gets its expiry, and a key left
+    // without one (a crash between the two commands) is healed by the next count.
+    await bounded(store.incr(key).then(() => store.expire(key, 2 * 86_400)));
   } catch (err) {
     opsAlertCounter.labels('oncall_text_day_unknown').inc();
     log().error({ err, opsAlertId: a.id }, '[SMS-COST] the on-call text day count could not be written');
@@ -618,9 +620,16 @@ async function textOnCallOwed(prisma: PrismaClient, sms: OpsSms | null, alerts: 
   if (claimed.length === 0) return 0;
   const sorted = [...claimed].sort(byUrgency);
   const sent = await textOnCall(sms, phones, sorted[0]!.id, repageWords(sorted).text);
-  // [REVIEW-M3 S4-3] A reminder counts against its alert's day only when a provider took it. (Its claim keeps the
-  // 2-hour clock either way, the ladder's rule for a send that fails after its claim: no retry every sweep.)
-  if (sent > 0) await Promise.all(claimed.filter((a) => a.kind !== 'SOS').map((a) => countReminder(smsDay, a, now)));
+  const reminders = claimed.filter((a) => a.kind !== 'SOS');
+  // [REVIEW-M3 S4-3] A reminder counts against its alert's day only when a provider took it.
+  if (sent > 0) await Promise.all(reminders.map((a) => countReminder(smsDay, a, now)));
+  else {
+    // [REVIEW-G5 S3-2] No provider took it. An alert the list has had a text for keeps its 2-hour clock. One that has
+    // never had a text starts none: a refused send is no text, and the level stays claimed, so the retry waits for the
+    // next escalation, never every sweep.
+    const neverTexted = reminders.filter((a) => !a.oncallTextedAt).map((a) => a.id);
+    if (neverTexted.length > 0) await prisma.opsAlert.updateMany({ where: { id: { in: neverTexted }, oncallTextedAt: now }, data: { oncallTextedAt: null } });
+  }
   return sent;
 }
 

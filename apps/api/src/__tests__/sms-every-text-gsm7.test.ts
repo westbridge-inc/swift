@@ -24,7 +24,7 @@ import { inactivityNoticeText } from '../modules/user/inactivity';
 import { marketingSmsText } from '../modules/notification/marketing-message';
 import { vendorAlertSmsText } from '../modules/notification/vendor-alert-sms';
 import { passengerCheckinSms } from '../modules/safety/guardian-delivery';
-import { sosContactText, SOS_SMS_NAME_MAX } from '../modules/safety/sos-escalation';
+import { failurePageWords, sosContactText, SOS_SMS_NAME_MAX } from '../modules/safety/sos-escalation';
 import { sosClosedContactText } from '../modules/safety/sos.service';
 import { FEE_RESTORE_LINE, feeCoveredLine, feeDueLine, mmgPayLine } from '../modules/billing/fee-notice-copy';
 import { whenSentence } from '../modules/integrity/money-surface';
@@ -269,9 +269,27 @@ describe('[SMS-COST 2] every SMS text builder renders GSM-7; ops texts fit two p
     expect(sosClosedContactText('Jos\u00e9')).toMatch(/^Update from Swift: the emergency alert involving Jos\u00e9 has been closed/);
     expect(sosContactText('x'.repeat(80), '')).toBe(`URGENT: ${'x'.repeat(SOS_SMS_NAME_MAX)} triggered an emergency SOS on Swift and may need help. Please check on them and contact local emergency services if you cannot reach them.`);
     expect(sosClosedContactText('x'.repeat(80))).toContain(`involving ${'x'.repeat(SOS_SMS_NAME_MAX)} has been closed`);
+    // [REVIEW-G5 S4-2, S4-3] punctuation alone is not a name; a phone's curly apostrophe stays an apostrophe
+    expect(sosContactText('\u674e.', '')).toMatch(/^URGENT: Someone you know triggered/);
+    expect(sosClosedContactText('\u{1F600}!')).toMatch(/involving the person you were alerted about has been closed/);
+    expect(sosContactText('D\u2019Aguiar', '')).toMatch(/^URGENT: D'Aguiar triggered/);
     for (const t of [sosContactText('\u674e\u660e', ' Last known location: https://maps.google.com/?q=6.8,-58.1.'), sosClosedContactText('x'.repeat(80))]) {
       expect(isGsm7Message(t)).toBe(true);
       expect(gsm7Parts(t)).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('[REVIEW-M3 S4-1 · REVIEW-G5 S4-4] a failed-delivery SOS page keeps its last sentence inside two parts, first page and re-page', () => {
+    const id = 'c'.repeat(25);
+    for (const channel of ['CONTACT_SMS', 'OPS_PAGE', 'WAR_ROOM', 'EVIDENCE'] as const) {
+      for (const [row, last] of [[{ status: 'FAILED', attempts: 20 }, 'Swift stopped retrying after 20 attempts.'], [{ status: 'PENDING', attempts: 3 }, 'Swift keeps retrying.']] as const) {
+        const { title, body } = failurePageWords(channel, id, row);
+        expect(body.endsWith(last), `${channel}: ${body}`).toBe(true);
+        for (const text of [firstPageSms({ kind: 'SOS', title, body }), repageWords([alert('SOS', title, body, 16)]).text]) {
+          expect(gsm7Parts(text), `${channel}: ${text}`).toBeLessThanOrEqual(2);
+          expect(text.endsWith(last), `${channel}: ${text}`).toBe(true);
+        }
+      }
     }
   });
 
