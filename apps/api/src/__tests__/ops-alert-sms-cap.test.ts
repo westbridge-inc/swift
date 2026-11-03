@@ -294,6 +294,7 @@ describe('[SMS-COST 3] an SOS is texted exactly as before', () => {
     expect(run.texts).toEqual(escalations);
     expect(run.repages).toEqual(escalations);
     expect(1 + run.texts.length).toBeGreaterThan(12);
+    expect(await app.redis.get(smsDayKey(sos, t0))).toBeNull(); // an SOS never counts against a day
     // the text keeps an SOS's own short line
     expect(textsToOncall().at(-1)!.body).toContain('synthetic body');
     expect(isGsm7Message(textsToOncall().at(-1)!.body)).toBe(true);
