@@ -91,18 +91,28 @@ export const ACK_WHERE = 'Mission Control > Ops alerts';
  * An SOS is texted exactly as before. Every text is GSM-7 and at most
  * OPS_SMS_MAX_PARTS parts: the title, the count and where to acknowledge it
  * (an SOS adds its short who/which-order line); the push keeps the full words.
- * The day count lives in Redis (no schema change). Without it (no store
- * handed in, or Redis failing) the 2-hour spacing still bounds the texts to 12
- * a day: an unreadable counter never stops a text.
+ * The day count lives in Redis (no schema change), and counts a reminder only
+ * when a provider took it. Without it (no store handed in, Redis failing, or a
+ * read slower than OPS_SMS_DAY_STORE_WAIT_MS) the 2-hour spacing still bounds
+ * the texts to 12 a day: an unreadable counter never stops or delays a text.
  */
-export const smsReminderSeconds = () => { const n = Number(process.env['OPS_ALERT_SMS_REMINDER_SECONDS'] ?? 7200); return Math.max(Number.isFinite(n) && n > 0 ? n : 7200, repageSpacingSeconds()); };
+/** [REVIEW-M3 S4-4] Clamped to [the re-page spacing, 6 hours]: a typo can never make reminders stop. */
+export const smsReminderSeconds = () => { const n = Number(process.env['OPS_ALERT_SMS_REMINDER_SECONDS'] ?? 7200); return Math.min(Math.max(Number.isFinite(n) && n > 0 ? n : 7200, repageSpacingSeconds()), 21_600); };
 export const smsMaxPerDay = () => { const n = Number(process.env['OPS_ALERT_SMS_MAX_PER_DAY'] ?? 6); return Number.isInteger(n) && n >= 1 && n <= 24 ? n : 6; };
 export const OPS_SMS_MAX_PARTS = 2;
 /** The day counter's store: the worker's Redis in production. */
 export type OpsSmsDayStore = { get(key: string): Promise<string | null>; incr(key: string): Promise<number>; expire(key: string, seconds: number): Promise<number> };
 const OPS_SMS_DAY_PREFIX = 'ops_alert_sms_day:';
 const utcDay = (at: Date) => at.toISOString().slice(0, 10);
-const smsDayKey = (opsAlertId: string, now: Date) => `${OPS_SMS_DAY_PREFIX}${utcDay(now)}:${opsAlertId}`;
+export const smsDayKey = (opsAlertId: string, now: Date) => `${OPS_SMS_DAY_PREFIX}${utcDay(now)}:${opsAlertId}`;
+/** [REVIEW-G4 S4-2] The longest the ladder waits on the day counter: a Redis that queues commands while it
+ *  reconnects must never hold a text (an SOS's included) back. A slow read is an unknown count. */
+export const OPS_SMS_DAY_STORE_WAIT_MS = 1_000;
+function bounded<T>(op: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('day counter slower than its bound')), OPS_SMS_DAY_STORE_WAIT_MS); timer.unref?.(); });
+  return Promise.race([op, late]).finally(() => clearTimeout(timer));
+}
 /** A title as a text carries it: GSM-7, at most 100 characters, no closing full stop. */
 function smsTitle(title: string): string {
   const t = toGsm7(title).replace(/\.+$/u, '');
@@ -556,7 +566,7 @@ async function textsToday(store: OpsSmsDayStore | null, a: SweptAlert, now: Date
   const first = utcDay(a.createdAt) === utcDay(now) ? 1 : 0;
   if (!store) return first;
   try {
-    return first + (Number(await store.get(smsDayKey(a.id, now))) || 0);
+    return first + (Number(await bounded(store.get(smsDayKey(a.id, now)))) || 0);
   } catch (err) {
     opsAlertCounter.labels('oncall_text_day_unknown').inc();
     log().error({ err, opsAlertId: a.id }, '[SMS-COST] the on-call text day count could not be read: only the 2-hour spacing bounds this reminder');
@@ -577,7 +587,8 @@ async function countReminder(store: OpsSmsDayStore | null, a: SweptAlert, now: D
   if (!store) return;
   try {
     const key = smsDayKey(a.id, now);
-    if ((await store.incr(key)) === 1) await store.expire(key, 2 * 86_400);
+    // The expiry rides on the count: a count that lands after the bound still gets its expiry, so no day key outlives it.
+    await bounded(store.incr(key).then((n) => (n === 1 ? store.expire(key, 2 * 86_400) : n)));
   } catch (err) {
     opsAlertCounter.labels('oncall_text_day_unknown').inc();
     log().error({ err, opsAlertId: a.id }, '[SMS-COST] the on-call text day count could not be written');
@@ -590,11 +601,10 @@ async function textOnCallOwed(prisma: PrismaClient, sms: OpsSms | null, alerts: 
   const due = alerts.filter((a) => a.escalationLevel > a.oncallTextedLevel);
   const phones = onCallPhones();
   if (due.length === 0 || phones.length === 0) return 0;
-  const owed: SweptAlert[] = [];
-  for (const a of due) {
-    if (a.kind === 'SOS' || await smsReminderAllowed(smsDay, a, now)) owed.push(a);
-    else opsAlertCounter.labels('oncall_text_held').inc();
-  }
+  // An SOS is owed at once; every other alert's reminder is checked in parallel, each read bounded.
+  const allowed = await Promise.all(due.map((a) => (a.kind === 'SOS' ? true : smsReminderAllowed(smsDay, a, now))));
+  const owed = due.filter((_a, i) => allowed[i]);
+  if (owed.length < due.length) opsAlertCounter.labels('oncall_text_held').inc(due.length - owed.length);
   if (owed.length === 0) return 0;
   const list = oncallListKey(phones);
   const recent = await prisma.opsAlert.findFirst({ where: { oncallTextedList: list, oncallTextedAt: { gt: new Date(now.getTime() - repageSpacingSeconds() * 1000), lte: now } }, select: { id: true } });
@@ -603,11 +613,15 @@ async function textOnCallOwed(prisma: PrismaClient, sms: OpsSms | null, alerts: 
   const claimed: SweptAlert[] = [];
   for (const a of owed) {
     const c = await prisma.opsAlert.updateMany({ where: { id: a.id, oncallTextedLevel: a.oncallTextedLevel }, data: { oncallTextedLevel: a.escalationLevel, oncallTextedAt: now, oncallTextedList: list } });
-    if (c.count === 1) { claimed.push(a); if (a.kind !== 'SOS') await countReminder(smsDay, a, now); }
+    if (c.count === 1) claimed.push(a);
   }
   if (claimed.length === 0) return 0;
   const sorted = [...claimed].sort(byUrgency);
-  return textOnCall(sms, phones, sorted[0]!.id, repageWords(sorted).text);
+  const sent = await textOnCall(sms, phones, sorted[0]!.id, repageWords(sorted).text);
+  // [REVIEW-M3 S4-3] A reminder counts against its alert's day only when a provider took it. (Its claim keeps the
+  // 2-hour clock either way, the ladder's rule for a send that fails after its claim: no retry every sweep.)
+  if (sent > 0) await Promise.all(claimed.filter((a) => a.kind !== 'SOS').map((a) => countReminder(smsDay, a, now)));
+  return sent;
 }
 
 /** [DRILL-STORM] ONE notice to platform operators for the drills this sweep closed as FAILED. */

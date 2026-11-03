@@ -24,6 +24,8 @@ import { inactivityNoticeText } from '../modules/user/inactivity';
 import { marketingSmsText } from '../modules/notification/marketing-message';
 import { vendorAlertSmsText } from '../modules/notification/vendor-alert-sms';
 import { passengerCheckinSms } from '../modules/safety/guardian-delivery';
+import { sosContactText } from '../modules/safety/sos-escalation';
+import { sosClosedContactText } from '../modules/safety/sos.service';
 import { FEE_RESTORE_LINE, feeCoveredLine, feeDueLine, mmgPayLine } from '../modules/billing/fee-notice-copy';
 import { whenSentence } from '../modules/integrity/money-surface';
 import { guyanaTime as adminGuyanaTime } from '../modules/admin/solo-approval';
@@ -124,8 +126,8 @@ const SMS_TEXT_FILES: Record<string, { min: number; why: string }> = {
   'modules/notification/marketing-message.ts': { min: 0, why: 'the marketing door (marketingSmsText)' },
   'modules/safety/emergency-contact.service.ts': { min: 0, why: 'emergency-contact code (emergencyContactCodeText)' },
   'modules/safety/ops-alert.ts': { min: 0, why: 'on-call pages (firstPageSms, repageWords)' },
-  'modules/safety/sos-escalation.ts': { min: 2, why: 'SOS to emergency contacts' },
-  'modules/safety/sos.service.ts': { min: 1, why: 'SOS closed notice to emergency contacts' },
+  'modules/safety/sos-escalation.ts': { min: 2, why: 'SOS to emergency contacts (sosContactText + its location line)' },
+  'modules/safety/sos.service.ts': { min: 0, why: 'SOS closed notice to emergency contacts (sosClosedContactText)' },
   'modules/safety/trip-share.service.ts': { min: 2, why: 'trip-share link' },
   'modules/user/inactivity.ts': { min: 1, why: 'inactive-account notice' },
   'modules/billing/billing.service.ts': { min: 5, why: 'weekly-fee texts (feeSms / sms)' },
@@ -249,8 +251,26 @@ describe('[SMS-COST 2] every SMS text builder renders GSM-7; ops texts fit two p
       ['money notice: when', `Swift: the MMG number on your store account changes ${whenSentence(now)}. If this wasn't you, open Swift > Account and cancel it now.`],
       ['solo approval: time', `It can be approved after ${adminGuyanaTime(now)}.`],
       ['ops: time', guyanaTime(now)],
+      ['SOS to a contact', sosContactText('Jos\u00e9', ' Last known location: https://maps.google.com/?q=6.80448,-58.15527.')],
+      ['SOS to a contact, a name outside GSM-7', sosContactText('\u674e\u660e', '')],
+      ['SOS closed', sosClosedContactText('Ana Mar\u00eda')],
+      ['SOS closed, an emoji-only name', sosClosedContactText('\u{1F600}')],
     ];
     for (const [name, text] of texts) expect(isGsm7Message(text), `${name}: ${JSON.stringify(text)}`).toBe(true);
+  });
+
+  it('[REVIEW-G4 S3-1] an SOS text never loses the person: a name GSM-7 cannot carry falls back to words', () => {
+    expect(sosContactText('Jos\u00e9', '')).toBe('URGENT: Jos\u00e9 triggered an emergency SOS on Swift and may need help. Please check on them and contact local emergency services if you cannot reach them.');
+    expect(sosContactText('\u674e\u660e', '')).toMatch(/^URGENT: Someone you know triggered an emergency SOS/);
+    expect(sosContactText('\u{1F600}\u{1F600}', '')).toMatch(/^URGENT: Someone you know triggered/);
+    expect(sosContactText(null, '')).toMatch(/^URGENT: Someone you know triggered/);
+    expect(sosContactText('Ana Mar\u00eda', '')).toMatch(/^URGENT: Ana Maria triggered/);
+    expect(sosClosedContactText('\u674e\u660e')).toMatch(/^Update from Swift: the emergency alert involving the person you were alerted about has been closed/);
+    expect(sosClosedContactText('Jos\u00e9')).toMatch(/^Update from Swift: the emergency alert involving Jos\u00e9 has been closed/);
+    for (const t of [sosContactText('\u674e\u660e', ' Last known location: https://maps.google.com/?q=6.8,-58.1.'), sosClosedContactText('x'.repeat(80))]) {
+      expect(isGsm7Message(t)).toBe(true);
+      expect(gsm7Parts(t)).toBeLessThanOrEqual(2);
+    }
   });
 
   it('toGsm7 maps the characters that cost the most, and fitGsm7 keeps a text inside its parts', () => {

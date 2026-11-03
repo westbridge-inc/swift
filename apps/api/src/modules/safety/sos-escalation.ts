@@ -7,6 +7,7 @@ import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { isOwnNumber } from './emergency-contact.service';
 import { log } from '../../utils/logger';
 import { maskPii } from '../rating/review-scrub';
+import { gsm7Name } from '../../utils/sms-text';
 import { sosEscalationCounter, sosEscalationGauge } from '../../plugins/observability';
 
 /**
@@ -96,6 +97,15 @@ async function claimNext(prisma: PrismaClient, leaseMs: number, alertIds?: strin
 
 const TERMINAL = new Set(['RESOLVED', 'CANCELLED']);
 
+/** [SMS-COST] The longest name an SOS text to an emergency contact carries (as the contact's code text). */
+export const SOS_SMS_NAME_MAX = 30;
+/** The SOS text to an emergency contact. [SMS-COST · REVIEW-G4 S3-1] Texts leave as GSM-7, so the name travels
+ *  only as GSM-7 can carry it: a name it cannot carry falls back to words, never to nothing. */
+export function sosContactText(rawWho: string | null | undefined, where: string): string {
+  const who = gsm7Name(rawWho, SOS_SMS_NAME_MAX) || 'Someone you know';
+  return `URGENT: ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`;
+}
+
 /** Deliver one claimed row. Returns the receipt, or 'skipped' with a reason. */
 async function deliver(prisma: PrismaClient, io: Server, notifications: NotificationService, row: Claimed): Promise<{ status: 'SENT' | 'SKIPPED'; receipt: Record<string, unknown> }> {
   const alert = await prisma.sosAlert.findUnique({ where: { id: row.sosAlertId } });
@@ -158,11 +168,10 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       // [Q9] Staged before its number became the person's own: skipped, and the receipt says why.
       if (!contact) return { status: 'SKIPPED', receipt: { skipped: authority.ownNumberContactIds.includes(row.targetKey) ? 'contact-is-own-number' : 'contact-unverified-or-gone' } };
       const { getChannels } = await import('../../providers/notifications/channels');
-      const who = authority.who || 'Someone you know';
       const where = alert.triggerLat != null && alert.triggerLng != null ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.` : '';
       // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.
       const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
-      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, `URGENT: ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`));
+      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, sosContactText(authority.who, where)));
       return { status: 'SENT', receipt: { id: contact.id, ok: true, ...(authority.fromEscrow ? { source: 'safety-escrow' } : {}) } };
     }
     case 'EVIDENCE': {

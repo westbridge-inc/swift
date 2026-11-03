@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -9,7 +9,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { NotificationService } from '../modules/notification/notification.service';
-import { openOpsAlert, escalateOverdueOpsAlerts, type OpsSms, type OpsSmsDayStore } from '../modules/safety/ops-alert';
+import { openOpsAlert, escalateOverdueOpsAlerts, smsDayKey, smsReminderSeconds, OPS_SMS_DAY_STORE_WAIT_MS, type OpsSms, type OpsSmsDayStore } from '../modules/safety/ops-alert';
 import { devChannelLog, getChannels, resetDevChannelLog } from '../providers/notifications/channels';
 import { gsm7Parts, isGsm7Message } from '../utils/sms-text';
 import { testPhone } from './helpers/fixture-ids';
@@ -72,8 +72,8 @@ async function open(mine: string[], kind: OpsAlertKind, now: Date, recipients: P
   return res.opsAlertId;
 }
 const redisDay = (): OpsSmsDayStore => app.redis;
-const sweep = (now: Date, ids: string[], smsDay: OpsSmsDayStore | null = redisDay()) =>
-  runWithoutTenant(() => escalateOverdueOpsAlerts(app.prisma, notifications(), getChannels().sms, { now, limit: 1_000, alertIds: ids, smsDay }), 'test:sms-cap');
+const sweep = (now: Date, ids: string[], smsDay: OpsSmsDayStore | null = redisDay(), sms: OpsSms = getChannels().sms) =>
+  runWithoutTenant(() => escalateOverdueOpsAlerts(app.prisma, notifications(), sms, { now, limit: 1_000, alertIds: ids, smsDay }), 'test:sms-cap');
 const repagesTo = (p: Person) => devChannelLog.filter((e) => e.channel === 'push' && e.to === p.device && e.data?.['kind'] === 'ops_alert_escalated');
 const textsToOncall = () => devChannelLog.filter((e) => e.channel === 'sms' && e.to === ONCALL);
 const alertRow = (id: string) => runWithoutTenant(() => app.prisma.opsAlert.findUniqueOrThrow({ where: { id } }), 'test-read:sms-cap');
@@ -188,6 +188,98 @@ describe('[SMS-COST 2] at most 6 texts per alert per UTC day: the 7th is held, t
     expect(row.acknowledgedAt).toBeNull();
     expect(row.closedAt).toBeNull();
   }, 300_000);
+});
+
+describe('[SMS-COST 2b · REVIEW-G4 S4-1 · REVIEW-M3 S4-2] the day count is per alert and per UTC day, and expires', () => {
+  it('two alerts opened together: each has its own six a day; the next UTC day starts fresh for both; each key expires within two days', async () => {
+    const t0 = epoch(60); const mine: string[] = [];
+    const responder = await person();
+    const a = await open(mine, 'PLATFORM', t0, [responder]);
+    const b = await open(mine, 'PLATFORM', t0, [responder]);
+    expect(textsToOncall()).toHaveLength(2); // two first pages
+    const dayEnd = 86_400 - 60;
+    const run = await series(t0, mine, responder, 60, dayEnd + TWO_HOURS, 60);
+    // day 1: one collapsed reminder text names both alerts, five times (with a shared counter the pair would stop after three)
+    const today = run.texts.filter((x) => x < dayEnd);
+    expect(today).toEqual([7200, 14400, 21600, 28800, 36000]);
+    expect(textsToOncall().filter((e) => e.body.startsWith('Swift ops: 2 ops alerts are UNACKNOWLEDGED'))).toHaveLength(5 + 2);
+    // day 2: a fresh count (a key without the day would stop at one text): two texts 2 hours apart
+    expect(run.texts.filter((x) => x >= dayEnd)).toEqual([86_340, 86_340 + TWO_HOURS]);
+    const day1 = at(t0, 3_600); const day2 = at(t0, dayEnd + 60);
+    for (const id of [a, b]) {
+      expect(await app.redis.get(smsDayKey(id, day1))).toBe('5');
+      expect(await app.redis.get(smsDayKey(id, day2))).toBe('2');
+      const ttl = await app.redis.ttl(smsDayKey(id, day1));
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(172_800);
+    }
+  }, 300_000);
+
+  it('a reminder no provider took is not counted against the day; the next one that goes is', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const page = await open(mine, 'PLATFORM', t0, [responder]);
+    const refused: OpsSms = { sendSms: async () => ({ ref: 'not-allowlisted' }) };
+    await sweep(at(t0, 120), mine);
+    await sweep(at(t0, TWO_HOURS), mine, redisDay(), refused);
+    expect(await app.redis.get(smsDayKey(page, at(t0, TWO_HOURS)))).toBeNull();
+    resetDevChannelLog();
+    await sweep(at(t0, 2 * TWO_HOURS), mine);
+    expect(textsToOncall()).toHaveLength(1);
+    expect(await app.redis.get(smsDayKey(page, at(t0, 2 * TWO_HOURS)))).toBe('1');
+  });
+
+  it('a day counter that never answers holds no text back: the sweep texts within its bound', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    await open(mine, 'PLATFORM', t0, [responder]);
+    const sos = await open(mine, 'SOS', at(t0, 60), [responder]);
+    await sweep(at(t0, 120), mine);
+    const hung: OpsSmsDayStore = { get: () => new Promise(() => {}), incr: () => new Promise(() => {}), expire: () => new Promise(() => {}) };
+    resetDevChannelLog();
+    const started = Date.now();
+    const res = await sweep(at(t0, TWO_HOURS), mine, hung);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(res.escalated).toContain(sos);
+    expect(textsToOncall()).toHaveLength(1);
+    expect(textsToOncall()[0]!.body).toMatch(/^Swift ops: 2 ops alerts are UNACKNOWLEDGED, including an SOS\./);
+  });
+
+  it('a count that lands after the bound still gets its expiry: no day key outlives its day', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    await open(mine, 'PLATFORM', t0, [responder]);
+    await sweep(at(t0, 120), mine);
+    const expired: number[] = [];
+    const late: OpsSmsDayStore = {
+      get: async () => null,
+      incr: () => new Promise((resolve) => { setTimeout(() => resolve(1), OPS_SMS_DAY_STORE_WAIT_MS + 200); }),
+      expire: async (_key, seconds) => { expired.push(seconds); return 1; },
+    };
+    resetDevChannelLog();
+    await sweep(at(t0, TWO_HOURS), mine, late);
+    expect(textsToOncall()).toHaveLength(1);
+    await vi.waitFor(() => expect(expired).toEqual([172_800]), { timeout: 3_000 });
+  });
+
+  it('[REVIEW-M3 S4-6] a last text dated after the sweep (a skewed clock) never holds a reminder back', async () => {
+    const t0 = epoch(); const mine: string[] = [];
+    const responder = await person();
+    const page = await open(mine, 'PLATFORM', t0, [responder]);
+    await runWithoutTenant(() => app.prisma.opsAlert.update({ where: { id: page }, data: { oncallTextedAt: at(t0, 3_600) } }), 'test-fixture:sms-cap');
+    resetDevChannelLog();
+    await sweep(at(t0, 120), mine);
+    expect(textsToOncall()).toHaveLength(1);
+  });
+
+  it('[REVIEW-M3 S4-4] the reminder spacing setting is clamped: a typo never stops reminders', () => {
+    process.env['OPS_ALERT_SMS_REMINDER_SECONDS'] = '7200000';
+    expect(smsReminderSeconds()).toBe(21_600);
+    process.env['OPS_ALERT_SMS_REMINDER_SECONDS'] = '1';
+    expect(smsReminderSeconds()).toBe(300);
+    delete process.env['OPS_ALERT_SMS_REMINDER_SECONDS'];
+    expect(smsReminderSeconds()).toBe(TWO_HOURS);
+  });
 });
 
 describe('[SMS-COST 3] an SOS is texted exactly as before', () => {
