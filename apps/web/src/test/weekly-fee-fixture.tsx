@@ -14,7 +14,8 @@ export function WeeklyFee({ onChange }: { onChange: (_state: FeeState) => void }
   return null;
 }
 
-/** The server's v1 fee words, as GET /auth/pricing serves them (apps/api partner/weekly-fee-ack.ts). */
+/** The server's v1 fee words (apps/api partner/weekly-fee-ack.ts; served until 1 Nov 2026, when v2 named the website in
+ *  "How you pay"). The block shows whatever words and version the server sends, so these stand for any served words. */
 export const FEE_TERMS_V1 = {
   version: 'v1',
   items: [

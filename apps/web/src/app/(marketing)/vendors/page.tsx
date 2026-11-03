@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CheckCircle2, Store, ClipboardList, Boxes, QrCode, LineChart, Users } from 'lucide-react';
 import { Section } from '@/components/site';
-import { launch } from '@/site.config';
 import { partnerSignupHref } from '@/lib/signup-roles';
 import { PrelaunchPartnerNote, ReviewTime } from '@/components/prelaunch-partner-note';
 
@@ -71,8 +70,8 @@ export default function VendorsPage() {
             <span className="text-[var(--swift-red)]">every dollar stays yours</span>
           </h1>
           <p className="mt-5 max-w-xl text-lg leading-relaxed text-[var(--swift-muted)]">
-            Swift is the only delivery platform in {launch.markets[0]} that takes no cut of what you
-            sell. One flat weekly fee, and the commission line on your P&amp;L simply is not there.
+            Swift takes no cut. You keep 100% of every sale, for one flat weekly fee. The commission
+            line on your P&amp;L simply is not there.
           </p>
 
           <div className="mt-9 grid gap-3 sm:grid-cols-2">
@@ -119,7 +118,8 @@ export default function VendorsPage() {
               {
                 n: '2',
                 t: 'Send your documents',
-                b: 'Owner ID, business registration, TIN and a photo of your storefront. Photograph them with your phone — the camera guides the frame.',
+                // [FLOW-QA2 NEW-5] What the store checklists ask (platform-config): never a TIN (dropped 6 Oct 2026).
+                b: 'Owner ID, business registration (or a signed declaration if you trade under your own surname) and a photo of your storefront; a restaurant adds its GRA licence, and a service business sends only the owner’s ID. Photograph them with your phone — the camera guides the frame.',
               },
               {
                 n: '3',

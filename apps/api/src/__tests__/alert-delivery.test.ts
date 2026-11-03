@@ -8,7 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { NotificationService, acknowledgeAlert } from '../modules/notification/notification.service';
 import { loginWithOtp } from './helpers/otp';
 import { testPhone } from './helpers/fixture-ids';
@@ -36,7 +36,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
 

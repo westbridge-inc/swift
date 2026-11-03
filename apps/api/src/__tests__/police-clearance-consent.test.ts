@@ -6,7 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { runWithTenant } from '../plugins/tenant-context';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { VerificationService, isPoliceCleared } from '../modules/verification/verification.service';
@@ -110,7 +110,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.ready();
   await cleanup();
@@ -345,8 +345,9 @@ describe('[POLICE-CLEARANCE] the Privacy Policy says it (COORD 25 Oct: non-mater
   // [TERMS] ... and under 2026-10-29 (Terms s.7 pro appointments) on top of that.
   // [BOOK-P3] ... and under 2026-10-29.1 (the free cancel after a move) on top of that.
   // [BILL-PRO] ... and under 2026-10-29.2 (the Business Agreement covers Providers) on top of that.
-  it('published as 2026-10-25.2 (served now under 2026-10-29.2), classed non-material (it narrows what is kept and adds a withdrawal right)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-29.2');
+  // [EXPRESS-FEE] ... and under 2026-11-01 (the express Delivery-policy wording, non-material) on top of that.
+  it('published as 2026-10-25.2 (served now under 2026-11-01), classed non-material (it narrows what is kept and adds a withdrawal right)', () => {
+    expect(LEGAL_VERSION).toBe('2026-11-01');
     expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-10-25.2')).toHaveLength(1);
     expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-25.2');
   });

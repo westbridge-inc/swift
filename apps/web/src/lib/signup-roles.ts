@@ -12,9 +12,6 @@ export const LAUNCH_HIDDEN_BUSES: readonly string[] = ['BUS_9', 'BUS_15'];
  *  buses (LAUNCH_HIDDEN_BUSES above). A Rider's vehicles provision a delivery
  *  Rider and a Driver's a taxi Driver on the server (apps/api
  *  config/vehicle-classes moverRoleFor). */
-/** [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] A bicycle is a PEDAL bicycle. Any bike with a motor (an e-bike or an
- *  e-scooter) signs up as a motorbike, with a motorbike's documents. Said where the rider picks a vehicle. */
-export const BIKE_WITH_A_MOTOR = 'Bicycle means a pedal bike. A bike with a motor, such as an e-bike or an e-scooter, signs up as a motorbike, with a motorbike’s documents: a driver’s licence, the registration and insurance.';
 export const MOVER_VEHICLES: Record<MoverRole, { value: string; label: string }[]> = {
   RIDER: [{ value: 'MOTORCYCLE', label: 'Motorbike' }, { value: 'BICYCLE', label: 'Bicycle' }],
   DRIVER: [{ value: 'CAR', label: 'Car' }, { value: 'WAGON_CAR', label: 'Wagon Car' }],

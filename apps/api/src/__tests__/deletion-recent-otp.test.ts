@@ -8,7 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED } from '../modules/user/account.service';
 import { loginWithOtp } from './helpers/otp';
@@ -60,7 +60,7 @@ beforeAll(async () => {
   await server.register(redisPlugin);
   await server.register(authPlugin);
   await server.register(socketPlugin);
-  await server.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(server);
   await server.register(customerRoutes, { prefix: '/api/v1/customer' });
   await server.ready();
   app = server;

@@ -41,3 +41,15 @@ describe('business console before the store exists', () => {
     expect(screen.queryByRole('link', { name: /Finish setting up your business/ })).toBeNull();
   });
 });
+
+describe('[FLOW-QA F10] an account with no business at all', () => {
+  it('a 403 from the stores list is "No business on this account" with "Add a business", never a board that may have orders', async () => {
+    fx.getStores.mockRejectedValue(new ApiRequestError('Not a vendor', 403, 'FORBIDDEN'));
+    render(<DashboardShell><p>console</p></DashboardShell>);
+    expect(await screen.findByText('No business on this account.')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Add a business' }).getAttribute('href')).toBe('/signup?resume=business');
+    expect(screen.queryByText('console')).toBeNull();
+    expect(screen.queryByText(/orders may be waiting/)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+});

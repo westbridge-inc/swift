@@ -33,7 +33,7 @@ import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
 import { seedDocRegistry } from '../modules/verification/doc-registry';
 import { vendorActivationNext } from '../modules/admin/vendor-activation';
 import { feePausePredicate } from '../modules/billing/mmg-pause';
-import { WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
+import { WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
 import { publishLegalDocumentOnce, recordConsent } from '../modules/legal/consent.service';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { reviewerTyped } from './helpers/reviewer-typed';
@@ -234,7 +234,7 @@ describe('[RETIER PR-A] a department-size store is born on the department fee, o
     const [row] = await ticks(o);
     expect(row).toMatchObject({
       subjectType: 'vendor_user', documentVersion: WEEKLY_FEE_ACK_VERSION, action: 'granted',
-      documentContentHash: createHash('sha256').update(WEEKLY_FEE_ACK_TEXT_V1, 'utf8').digest('hex'),
+      documentContentHash: createHash('sha256').update(WEEKLY_FEE_ACK_TEXT, 'utf8').digest('hex'),
     });
     expect(row!.evidence).toMatchObject({ path: STORE_FEE_ACK_PATH, kind: 'STORE', vendorId: o.vendorId, weeklyFee: { amount: dept, currencyCode: 'GYD', tier: 'department', items: deptFloor } });
 
@@ -483,7 +483,7 @@ describe('[RETIER PR-A] existing fees never move', () => {
   it('a tick to the same amount in another currency is no tick: the birth refuses', async () => {
     const o = await owner();
     await addItems(o.vendorId, largeFloor);
-    await system(() => publishLegalDocumentOnce(app.prisma, { documentType: 'weekly_fee_acknowledgement', version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 }));
+    await system(() => publishLegalDocumentOnce(app.prisma, { documentType: 'weekly_fee_acknowledgement', version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT }));
     await system(() => app.prisma.$transaction((tx) => recordConsent(tx, {
       subjectType: 'vendor_user', subjectId: o.userId, documentType: 'weekly_fee_acknowledgement', version: WEEKLY_FEE_ACK_VERSION, action: 'granted', surface: 'web', ip: null,
       evidence: { control: 'weekly_fee_checkbox', path: STORE_FEE_ACK_PATH, kind: 'STORE', vendorId: o.vendorId, weeklyFee: { amount: large, currencyCode: 'USD', tier: 'large' } },

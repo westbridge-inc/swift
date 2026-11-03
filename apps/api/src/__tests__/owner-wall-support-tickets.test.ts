@@ -381,7 +381,10 @@ describe('[item 20] support tickets: the census', () => {
       'modules/support/support.service.ts findUnique': 1,
       'modules/support/support.service.ts findFirst': 1,
       'modules/support/support.service.ts update': 1,
-      'modules/user/account.service.ts findFirst': 1,
+      // [WEB-DELETE] + the deletion check's read of the person's own open closure request, and the owner cancelling
+      // their own request (read + close, keyed by userId, under the person lock).
+      'modules/user/account.service.ts findFirst': 3,
+      'modules/user/account.service.ts updateMany': 1,
       'modules/user/account.service.ts create': 1,
       // The admin closure completion: tenantPrisma off, the capability on (read and close).
       'modules/admin/admin.routes.ts findFirst': 1,
@@ -433,5 +436,24 @@ describe('[item 20 · S4-1] support tickets: the person binding is transaction-l
       expect(await count(one)).toBe(0);
       expect(await tenant.runWithTenant(PRODUCTION, () => count(one))).toBe(0);
     } finally { await one.$disconnect(); }
+  });
+});
+
+// [WEB-DELETE · REVIEW-G #2304 S3, adopted from REVIEW-GMF's probe] With the wall ON the completion's claim on the
+// closure request is written through the support-closure capability, outside the erasure's transaction: a completion
+// the erasure then refuses must give the claim back, or the owner could never cancel (a pause stuck on).
+describe('[WEB-DELETE] wall ON: a refused completion gives the closure claim back', () => {
+  it('a live order refuses completion; the ticket is OPEN again; the owner can still cancel', async () => {
+    const { AccountService } = await import('../modules/user/account.service');
+    const closer = await mkUser(['CUSTOMER'], 'CUSTOMER');
+    const own = await asPerson(closer, () => new AccountService(app).requestClosure(closer));
+    await mkOrder(closer, { status: 'PENDING' });
+    const url = `/api/v1/admin/support/${own.ticketId}/complete-account-closure`;
+    const res = await call('POST', url, tokens.admin, withAdminReason('POST', url, {}) as Record<string, unknown>);
+    expect(res.statusCode).toBe(409);
+    const t = await owner.supportTicket.findUniqueOrThrow({ where: { id: own.ticketId } });
+    expect(t.status).toBe('OPEN');
+    const cancelled = await asPerson(closer, () => new AccountService(app).cancelClosure(closer)).then(() => 'ok', (e: { code?: string }) => e.code);
+    expect(cancelled).toBe('ok');
   });
 });

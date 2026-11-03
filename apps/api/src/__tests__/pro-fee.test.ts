@@ -7,7 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { servicesRoutes } from '../modules/services/services.routes';
 import { providerChecklist, refreshProviderVerification } from '../modules/services/services.service';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { LEGAL_VERSION } from '../modules/legal/legal.routes';
 import { providerShowsPhoto } from '../utils/public-store-photos';
 import { registerErrorHandler } from '../middleware/error-handler';
@@ -117,7 +117,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   app.addHook('onRequest', async () => { beginRequestTenantContext(); });
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
 });
 

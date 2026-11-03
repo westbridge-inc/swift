@@ -14,8 +14,9 @@
  * showed that; the business states it for all of them. Swift's own exposure is dispatching for a business it knows (or
  * failed to check) is unlicensed (B19), hence a required, recorded statement.
  *
- * A home cook selling on the self-declared tier IS the food handler: it keeps the certificate REQUIRED and never sees
- * this tick. Chefs and caterers (service trades) keep theirs.
+ * Chefs and caterers (service trades) keep the certificate itself REQUIRED. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)]
+ * The home cook of the self-declared tier, who also kept it required, is gone with the tier: only registered and
+ * own-name restaurants join, and every one of them ticks.
  *
  * How it is kept: the consent ledger (append-only, the words hashed and versioned) — who ticked (the store's owner),
  * for which store (`evidence.vendorId`), when, and the words' version. A tick counts while the store's CURRENT owner's
@@ -41,9 +42,10 @@ export const FOOD_HANDLERS_TICK_V1 = 'Everyone who handles food here holds a cur
 /** The notice that asks the owner to tick (its tap opens the store's Documents, on Account). */
 export const FOOD_HANDLERS_NOTICE_KIND = 'vendor_needs_food_handler_tick';
 
-/** Who ticks: a registered restaurant. Never a home cook (self-declared tier), never another store type. */
-export function foodHandlerTickApplies(store: { vendorType: string; tier: string | null }): boolean {
-  return store.vendorType === 'RESTAURANT' && store.tier !== 'UNREGISTERED';
+/** Who ticks: a restaurant, never another store type. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] Every restaurant: the
+ *  self-declared (unregistered) tier, whose home cook uploaded the certificate itself, is removed. */
+export function foodHandlerTickApplies(store: { vendorType: string }): boolean {
+  return store.vendorType === 'RESTAURANT';
 }
 
 /** What the apps show: the words, their version, and (status) each store's state. */
@@ -85,7 +87,7 @@ export async function storeAttested(db: Db, ownerUserId: string, vendorId: strin
 export async function foodHandlerStoresOf(db: Db, ownerUserId: string): Promise<FoodHandlerStore[]> {
   const owner = await db.vendorOwner.findUnique({
     where: { userId: ownerUserId },
-    select: { vendors: { select: { id: true, name: true, vendorType: true, tier: true }, orderBy: { createdAt: 'asc' } } },
+    select: { vendors: { select: { id: true, name: true, vendorType: true }, orderBy: { createdAt: 'asc' } } },
   });
   const stores = (owner?.vendors ?? []).filter(foodHandlerTickApplies);
   const attested = await attestedStoreIds(db, ownerUserId, stores.map((s) => s.id));

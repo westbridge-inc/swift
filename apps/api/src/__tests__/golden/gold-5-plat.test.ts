@@ -20,6 +20,7 @@ import { adminRoutes } from '../../modules/admin/admin.routes';
 import { RATE_LIMIT_NAMESPACE, rateLimitOptions, watchRateLimitStore } from '../../utils/rate-limit-options';
 import { devChannelLog, getChannels } from '../../providers/notifications/channels';
 import { OTP_RESEND_WINDOW_S } from '../../utils/otp';
+import { AUTH_LIMITS } from '../../modules/auth/auth-rate-limits';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
 
 // ---------------------------------------------------------------------------
@@ -563,23 +564,27 @@ describe('GOLD-5 · PLAT-03 — OTP and rate-limit abuse', () => {
     await clearLimiterNamespace();
     const [a, b] = instances;
     const caller = '10.35.2.1';
-    const phones = Array.from({ length: 6 }, () => nextPhone());
-    for (let i = 0; i < 5; i += 1) {
+    // [FLOW-QA F15 · COORD OK 2 Nov] the per-address send ceiling was 5 a minute and is now
+    // AUTH_LIMITS.codePerAddress (30), with 5 per address AND number: the shared counter still holds.
+    const ceiling = AUTH_LIMITS.codePerAddress;
+    const phones = Array.from({ length: ceiling + 1 }, () => nextPhone());
+    for (let i = 0; i < ceiling; i += 1) {
       const res = await post(i % 2 === 0 ? a! : b!, 'send-otp', { phone: phones[i]! }, caller);
       expect(res.statusCode, res.body).toBe(200);
       expect(codeSentTo(phones[i]!)).toHaveLength(1);
     }
-    const sixth = await post(b!, 'send-otp', { phone: phones[5]! }, caller);
+    const last = phones[ceiling]!;
+    const sixth = await post(b!, 'send-otp', { phone: last }, caller);
     expect(sixth.statusCode).toBe(429);
-    expect(codeSentTo(phones[5]!)).toHaveLength(0);
+    expect(codeSentTo(last)).toHaveLength(0);
     const restarted = await buildInstance('d');
-    expect((await post(restarted, 'send-otp', { phone: phones[5]! }, caller)).statusCode).toBe(429);
-    expect(codeSentTo(phones[5]!)).toHaveLength(0);
+    expect((await post(restarted, 'send-otp', { phone: last }, caller)).statusCode).toBe(429);
+    expect(codeSentTo(last)).toHaveLength(0);
 
     // Not a global switch: a different caller is served.
-    const other = await post(restarted, 'send-otp', { phone: phones[5]! }, '10.35.2.2');
+    const other = await post(restarted, 'send-otp', { phone: last }, '10.35.2.2');
     expect(other.statusCode, other.body).toBe(200);
-    expect(codeSentTo(phones[5]!)).toHaveLength(1);
+    expect(codeSentTo(last)).toHaveLength(1);
 
     // The per-phone cooldown is the number's, whoever asks and wherever. The
     // refusal says so honestly: the first code is out, and when the next
@@ -635,7 +640,8 @@ describe('GOLD-5 · PLAT-03 — G5-F2', () => {
     server.addHook('onRequest', async () => { beginRequestTenantContext(); });
     await server.register(authRoutes, { prefix: '/api/v1/auth' });
     await server.ready();
-    for (let i = 0; i < 5; i += 1) {
+    // [FLOW-QA F15 · COORD OK 2 Nov] the per-address send ceiling: was 5, now AUTH_LIMITS.codePerAddress (30)
+    for (let i = 0; i < AUTH_LIMITS.codePerAddress; i += 1) {
       const phone = nextPhone();
       const res = await server.inject({ method: 'POST', url: '/api/v1/auth/send-otp', payload: { phone }, remoteAddress: caller, headers: { 'content-type': 'application/json', ...invented() } });
       expect(res.statusCode, res.body).toBe(200);
@@ -650,7 +656,7 @@ describe('GOLD-5 · PLAT-03 — G5-F2', () => {
     if (keys.length > 0) await app.redis.del(...keys);
   });
 
-  it('[G5-F2] a caller inventing a new bearer per request is still held to the 5-per-minute send ceiling', async () => {
+  it('[G5-F2] a caller inventing a new bearer per request is still held to the per-address send ceiling', async () => {
     const sixth = await server.inject({ method: 'POST', url: '/api/v1/auth/send-otp', payload: { phone: sixthPhone }, remoteAddress: caller, headers: { 'content-type': 'application/json', ...invented() } });
     expect(sixth.statusCode).toBe(429);
     expect(devChannelLog.filter((e) => e.channel === 'sms' && e.to === sixthPhone)).toHaveLength(0);

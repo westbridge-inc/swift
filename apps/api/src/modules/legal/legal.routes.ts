@@ -150,8 +150,14 @@ import { OPERATOR, OPERATOR_ADDRESS } from './operator';
 // from it (COORD 16:13Z), which the server enforces (services/pro-menu-agreement.ts, BOOK-P3: no booking from a
 // pro's list until they accepted a version with this clause). MATERIAL for Providers only (owner B3: a fresh tick):
 // reaccept.ts asks a pro, and nobody else, for it. Same day as 2026-10-29: LAST_UPDATED is unchanged.
-export const LEGAL_VERSION = '2026-10-29.2';
-const LAST_UPDATED = '29 October 2026'; // human form of LEGAL_VERSION
+// [2026-11-01 · EXPRESS-FEE · owner ruling 1 Nov 2026] Express delivery on a store or food order is now the delivery
+// fee plus a flat GYD 1,000, any distance (utils/markup.ts EXPRESS_DELIVERY_SURCHARGE), and the website's Delivery
+// policy says so (apps/web/src/app/legal/delivery/page.tsx). The owner ruled that this legal wording takes a
+// LEGAL_VERSION bump (GUARDRAILS: any change to legal wording = bump + pinned hashes + legal:sync). None of the texts
+// served here mentions express, so they change only by their "Last updated" date (a new day: LAST_UPDATED moves).
+// NON-material, pre-launch (reaccept.ts NON_MATERIAL_CHANGES says why): nobody is asked again.
+export const LEGAL_VERSION = '2026-11-01';
+const LAST_UPDATED = '1 November 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>

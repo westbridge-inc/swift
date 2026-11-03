@@ -6,10 +6,10 @@ import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LEGAL_VERSION, TERMS, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
-import { MATERIAL_CHANGES, PRO_AGREEMENT_VERSION, acceptanceStatus, materialVersion } from '../modules/legal/reaccept';
+import { MATERIAL_CHANGES, PRO_AGREEMENT_VERSION, acceptanceStatus, compareLegalVersions, materialVersion } from '../modules/legal/reaccept';
 import { providerChecklist } from '../modules/services/services.service';
 import { testPhone } from './helpers/fixture-ids';
 
@@ -64,9 +64,11 @@ describe('the Business Agreement covers Providers (section 12)', () => {
 describe('the fresh tick is asked of Providers, and nobody else', () => {
   const CUSTOMER = ['CUSTOMER'] as UserRole[];
 
-  it('is a material version for Providers only, served now; the version everyone else answers to is unchanged', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-29.2');
-    expect(PRO_AGREEMENT_VERSION).toBe(LEGAL_VERSION);
+  // [EXPRESS-FEE · owner 1 Nov] Served now under 2026-11-01 (non-material): the agreement version stays 2026-10-29.2.
+  it('is a material version for Providers only, served (now under 2026-11-01); the version everyone else answers to is unchanged', () => {
+    expect(LEGAL_VERSION).toBe('2026-11-01');
+    expect(PRO_AGREEMENT_VERSION).toBe('2026-10-29.2');
+    expect(compareLegalVersions(PRO_AGREEMENT_VERSION, LEGAL_VERSION)).toBeLessThan(0);
     expect(MATERIAL_CHANGES.find((c) => c.version === PRO_AGREEMENT_VERSION)).toMatchObject({ audience: 'provider' });
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');
     expect(proSummary().join(' ')).toMatch(/list of services with bookable times/);
@@ -136,7 +138,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
 });
 

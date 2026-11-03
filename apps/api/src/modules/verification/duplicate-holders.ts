@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { runAsSystem } from '../../plugins/tenant-context';
+import { SEALED_PHOTO_KEY_WHERE } from '../../providers/storage/sealed-photo';
 
 /**
  * [SWIFT-078 · DOC-INV-11 · Row 331 DSAR-ERASURE (c)] The OTHER accounts that
@@ -18,7 +19,8 @@ export async function liveDuplicateHolders(
   userId: string,
 ): Promise<string[]> {
   const rows = await db.encryptedObject.findMany({
-    where: { sha256, createdBy: { not: userId } },
+    // [DOC-SECURITY G2] A sealed photo (a profile photo, a shift selfie) is no document: it never makes a duplicate.
+    where: { sha256, createdBy: { not: userId }, NOT: SEALED_PHOTO_KEY_WHERE },
     select: { createdBy: true, sha256: true },
     distinct: ['createdBy'],
     orderBy: { createdBy: 'asc' },

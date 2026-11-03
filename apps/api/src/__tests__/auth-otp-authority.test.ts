@@ -5,7 +5,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { devChannelLog } from '../providers/notifications/channels';
 import { guyanaDayKey } from '../utils/guyana-day';
@@ -114,7 +114,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
   await cleanup();
 });

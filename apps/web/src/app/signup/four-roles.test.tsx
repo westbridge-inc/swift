@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
@@ -17,6 +17,7 @@ import { LAUNCH_HIDDEN_BUSES, MOVER_VEHICLES } from '@/lib/signup-roles';
 const fx = vi.hoisted(() => ({ send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(), replace: vi.fn(), probe: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: vi.fn() }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: fx.send }));
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become }));
 vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: vi.fn(), placeDetails: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
@@ -47,6 +48,8 @@ async function throughName(tile: RegExp) {
   await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
   await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
+  // the partner steps load on demand (partner-steps-loader); a busy run can still be fetching them
+  await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull());
   return user;
 }
 
@@ -66,12 +69,14 @@ describe('[W9] four ways to join', () => {
     const user = await throughName(/Deliver with Swift/);
     expect(fx.register.mock.calls[0]![0]).toMatchObject({ role: 'MOVER' });
     expect(options()).toEqual([['MOTORCYCLE', 'Motorbike'], ['BICYCLE', 'Bicycle']]);
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] said where the rider picks: a bicycle is pedal only.
+    expect(screen.getByText(/^Bicycle means a pedal bike\./)).toBeTruthy();
     expect(screen.queryByLabelText('Make')).toBeNull();
     expect(screen.queryByLabelText('Licence plate')).toBeNull();
     const create = screen.getByRole('button', { name: 'Create rider account' }) as HTMLButtonElement;
     expect(create.disabled).toBe(true);
     fireEvent.change(screen.getByLabelText('Vehicle'), { target: { value: 'BICYCLE' } });
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(create);
     expect(fx.become).toHaveBeenCalledTimes(1);
     expect(fx.become.mock.calls[0]![0]).toEqual({ role: 'MOVER', acceptAgreement: true, vehicleType: 'BICYCLE' });
@@ -82,10 +87,11 @@ describe('[W9] four ways to join', () => {
     const user = await throughName(/Drive a taxi with Swift/);
     expect(fx.register.mock.calls[0]![0]).toMatchObject({ role: 'MOVER' });
     expect(options()).toEqual([['CAR', 'Car'], ['WAGON_CAR', 'Wagon Car']]);
+    expect(screen.queryByText(/^Bicycle means a pedal bike\./)).toBeNull();
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(screen.getByRole('button', { name: 'Create driver account' }));
     expect(fx.become.mock.calls[0]![0]).toEqual({
       role: 'MOVER', acceptAgreement: true, vehicleType: 'CAR',
@@ -99,7 +105,7 @@ describe('[W9] four ways to join', () => {
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     const create = () => screen.getByRole('button', { name: 'Create driver account' }) as HTMLButtonElement;
     expect(screen.getByText(/Taxi plates in Guyana start with H — e\.g\. HC 1234\./)).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'PLX4821' } });
@@ -114,7 +120,7 @@ describe('[W9] four ways to join', () => {
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     const create = () => screen.getByRole('button', { name: 'Create driver account' }) as HTMLButtonElement;
     const next = new Date().getFullYear() + 1;
     for (const [year, open] of [['1979', false], ['1980', true], [String(next), true], [String(next + 1), false]] as const) {

@@ -24,7 +24,10 @@ export interface SignupPricing {
   currencyCode: string;
   currencySymbol: string;
   movers?: { vehicleType: string; rate: number }[];
-  vendors?: { service: number; catalogue: { minItems: number; rate: number }[] };
+  /** [D1] A catalogue step may carry its own free trial (a NEW department store: 7 days). */
+  vendors?: { service: number; catalogue: { minItems: number; rate: number; trialDays?: unknown }[] };
+  /** [D1] The free trial every new partner starts on (14 days), in days. */
+  trialDays?: unknown;
   /** Absent from an API older than the tick: then there is nothing to tick and nothing is sent. */
   feeTerms?: FeeTerms;
   /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
@@ -40,7 +43,9 @@ export interface WeeklyFeeAck {
 
 /** What the sign-up button may do: `ask` names what is missing (the button waits); with no ask it
  *  may submit, sending `ack` when the server asked for the tick. */
-export type FeeState = { ask: string; ack?: undefined } | { ask: null; ack?: WeeklyFeeAck };
+/** `tick`: [FLOW-QA2 NEW-10] the ask is the fee's own unticked box (the block then shows only the box, so the step's
+ *  "what is missing" line says it). */
+export type FeeState = { ask: string; ack?: undefined; tick?: boolean } | { ask: null; ack?: WeeklyFeeAck; tick?: undefined };
 
 /** Who is being priced: a business by its type, a rider or driver by the vehicle. */
 export type FeeChoice = { role: 'VENDOR'; vendorType: string } | { role: 'MOVER'; vehicleType: string };
@@ -73,6 +78,24 @@ export function feeLadderLine(pricing: SignupPricing): string {
 /** True when this choice starts on a catalogue step the price list goes beyond. */
 export function feeSteps(pricing: SignupPricing, choice: FeeChoice): boolean {
   return choice.role === 'VENDOR' && choice.vendorType !== 'SERVICE' && (pricing.vendors?.catalogue?.length ?? 0) > 1;
+}
+
+/** [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D1)] A free trial the price list states: a whole number of days above zero,
+ *  else null, and no trial is claimed (the app's partnerPricing bandTrialDays reads it the same way). */
+export function trialDaysOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/** [D1] The app's price card's sentence for each catalogue step above the first with a trial of its own (apps/mobile
+ *  PricingCard): a NEW store at the department step when Swift approves it gets 7 days (api subscription/trial-length.ts).
+ *  Nothing for a rider, a services business, or a list without a trial length. */
+export function stepTrialLines(pricing: SignupPricing, choice: FeeChoice): string[] {
+  const days = trialDaysOf(pricing.trialDays);
+  if (days === null || choice.role !== 'VENDOR' || choice.vendorType === 'SERVICE') return [];
+  return (pricing.vendors?.catalogue ?? []).slice(1).flatMap((step) => {
+    const own = trialDaysOf(step.trialDays) ?? days;
+    return own === days ? [] : [`A new store with ${step.minItems.toLocaleString()}+ items when Swift approves it gets ${own} days free.`];
+  });
 }
 
 /** The server's refusals of the tick: the form reads the price again when it sees one. */

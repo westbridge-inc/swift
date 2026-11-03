@@ -8,6 +8,7 @@ import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
+import { browserClientOf } from '../auth/browser-session';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
@@ -861,6 +862,9 @@ export async function customerRoutes(app: FastifyInstance) {
 
   const support = new SupportService(app.prisma, notificationService);
   const account = new AccountService(app);
+  // [WEB-DELETE] Where a closure request was confirmed, for its ticket: the website names itself (W-01 client header).
+  // (A request without headers, as some unit doubles build, is the app's.)
+  const closureSurfaceOf = (request: AuthRequest) => ((request.headers ? browserClientOf(request) : null) === 'web' ? 'website' as const : 'app' as const);
   const createTicketSchema = z.object({
     category: z.enum(['ORDER_ISSUE', 'PAYMENT', 'SAFETY', 'ACCOUNT', 'VENDOR', 'MOVER', 'OTHER']),
     subject: z.string().trim().min(3).max(120),
@@ -1040,12 +1044,28 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data };
   });
 
+  /** GET /account/deletion-check — [WEB-DELETE] what Delete would meet now, by the deletion's own rules and words:
+   *  closure by request or deletion, the live orders and jobs to finish first, the money to settle first. Reads only;
+   *  the delete re-checks everything under its locks. */
+  app.get('/account/deletion-check', async (request: AuthRequest) => {
+    const data = await account.deletionCheck(request.user.userId);
+    return { success: true, data };
+  });
+
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
   app.post('/account/closure-request', async (request: AuthRequest, reply) => {
     await requireRecentOtpOrStepUp(app, request);
-    const result = await account.requestClosure(request.user.userId);
+    const result = await account.requestClosure(request.user.userId, closureSurfaceOf(request));
     reply.code(202);
+    return { success: true, data: result };
+  });
+
+  /** POST /account/closure-request/cancel — [WEB-DELETE · owner ruling 1 Nov 2026] the owner takes the request back:
+   *  resolved, and its pause on the stores' new orders lifted (audited). The same fresh code as asking. */
+  app.post('/account/closure-request/cancel', async (request: AuthRequest) => {
+    await requireRecentOtpOrStepUp(app, request);
+    const result = await account.cancelClosure(request.user.userId);
     return { success: true, data: result };
   });
 
@@ -1066,7 +1086,7 @@ export async function customerRoutes(app: FastifyInstance) {
       }
       throw error;
     });
-    const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
+    const result = await account.deleteAccount(request.user.userId, true, closureSurfaceOf(request)).catch(async (error: unknown) => {
       const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
       if (user?.phone !== `deleted:${request.user.userId}`) throw error;
       app.log.error({ err: error, userId: request.user.userId }, 'Account erasure pending automatic retry');

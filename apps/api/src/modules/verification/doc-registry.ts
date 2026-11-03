@@ -17,8 +17,11 @@ import { isProduction } from '../../utils/runtime-mode';
 
 export const REGISTRY_TIER = 'STANDARD';
 /** [ROLE-DOCS · owner 21 Oct 2026] Lists retired by the owner (country-config RETIRED_LIST_KEYS says the same; a test
- *  keeps them equal). Kept here too so the registry never imports the country service. */
-export const RETIRED_REGISTRY_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
+ *  keeps them equal). Kept here too so the registry never imports the country service. [CHECKLIST-LEGAL · owner 1 Nov
+ *  2026 (a)] The self-declared (unregistered) tier's three lists joined them: the tier is removed. */
+export const RETIRED_REGISTRY_LIST_KEYS: ReadonlySet<string> = new Set([
+  'MOVER_OPTIONAL', 'CUSTOMER_L2', 'RESTAURANT_UNREGISTERED', 'SUPERMARKET_UNREGISTERED', 'STORE_UNREGISTERED',
+]);
 /** Provisional. The onboarding spec these checklists were built to is dated 2026-06. */
 export const REGISTRY_EFFECTIVE_FROM = new Date('2026-06-01T00:00:00.000Z');
 /** [R24 · research C4] A persisted (vehicle / business) image is kept while the relationship is
@@ -83,7 +86,8 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   // banned outright, GUARDRAILS §8; NIS registration is not Swift's concern). The bucket stays so a copy
   // already stored keeps its retention class until the migration's clock deletes it.
   liquor_licence: 'BUSINESS', pharmacy_authorisation: 'BUSINESS', nis_employer_reg: 'BUSINESS',
-  // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration (versioned, hashed, consent-ledger row)
+  // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)]
+  // RETIRED with its tier: nothing asks for it; the bucket stays so a stored copy keeps its retention class.
   self_declaration_unregistered: 'BUSINESS',
   // [ROLE-DOCS · owner 21 Oct 2026] the signed "I trade under my own name" declaration (vendor/own-name.ts)
   own_name_declaration: 'BUSINESS',
@@ -119,8 +123,6 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   trade_licence: 365,
   // [VERIFY-DOCS · ruling 8] A Guyana driver's licence is valid 5 years (GRA).
   drivers_licence: 5 * 365,
-  // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
-  self_declaration_unregistered: 365,
   // [TRADES · 13 Oct 2026] service-trade documents. The reviewer keys the printed date; these are
   // the longest validity each is issued for (a later date is refused as a typo).
   pesticide_applicator_certificate: 730,  // two years (Pesticides regulations, reg. 89)
@@ -182,8 +184,10 @@ export const registryCode = (countryCode: string, legacyCode: string) => `${coun
  * joined them: no list or gate asks for them, but stored copies wait out their retention clock, and staging
  * and production already hold their rows from the earlier seed. The seed rewrites such a row's expiry facts
  * from the code (the liquor licence's annual printed expiry is gone), so the registry never carries recall.
+ * [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] The unregistered trader's self-declaration joined them with its tier: the
+ * route that filed it is gone, and a stored copy is described (BUSINESS bucket, no expiry) until its retention clock.
  */
-export const RETIRED_DOC_TYPES: readonly string[] = ['vehicle_plate_photo', 'tin_certificate', 'hire_car_permit', 'liquor_licence', 'pharmacy_authorisation', 'nis_employer_reg'];
+export const RETIRED_DOC_TYPES: readonly string[] = ['vehicle_plate_photo', 'tin_certificate', 'hire_car_permit', 'liquor_licence', 'pharmacy_authorisation', 'nis_employer_reg', 'self_declaration_unregistered'];
 const humanize = (code: string) => code.split('_').map((w) => (w === 'id' || w === 'tin' || w === 'gra' || w === 'gei' ? w.toUpperCase() : w[0]!.toUpperCase() + w.slice(1))).join(' ');
 
 export interface RegistrySeedResult { docTypes: number; requirementSets: number; requirementItems: number; validators: number; extraDocTypes: number; categoryGates: number }
@@ -256,7 +260,6 @@ export interface ExtraDocType {
  * types carry needsSpecimen so nothing can be submitted against them (FD-DOC-15).
  */
 export const EXTRA_DOC_TYPES: readonly ExtraDocType[] = [
-  { legacyCode: 'self_declaration_unregistered', displayName: 'Unregistered trader self-declaration', bucket: 'BUSINESS', issuer: 'The trader (signed in-app; attestation version + content hash in the consent ledger)', hasExpiry: true, defaultValidityDays: 365, expirySource: 'DEFAULT', needsSpecimen: false, note: '§3.2/§3.6 · P3-2: blocking for the MICRO_VENDOR set; 365 d; fields trading_name, activity_class, declared_address, signed_at, attestation_version' },
   { legacyCode: 'sanitary_certificate', displayName: 'Sanitary certificate', bucket: 'BUSINESS', issuer: 'Public health / local authority', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: printed expiry, else 365 days' },
   { legacyCode: 'trade_licence', displayName: 'Trade licence', bucket: 'BUSINESS', issuer: 'GRA', hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED', needsSpecimen: false, note: '§18.1: annual; licence_type per the GRA schedule' },
   { legacyCode: 'digital_id', displayName: 'Guyana digital ID', bucket: 'PERSONAL', issuer: 'Government of Guyana', hasExpiry: false, defaultValidityDays: null, expirySource: 'NONE', needsSpecimen: true, note: '§18.1: stub until a specimen is reviewed (Digital Identity Card Act 2023, commenced 31 Mar 2026)' },
@@ -461,8 +464,9 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
     // longer name is removed — so the registry never keeps a requirement the owner has lifted.
     const declared = new Map<string, { actorRole: string; tier: string; items: Map<string, { isBlocking: boolean; sortOrder: number }> }>();
     for (const [listKey, codes] of Object.entries(lists)) {
-      // [DOC-1 §3.6 · P3-2] A <ROLE>_UNREGISTERED list is the same role's requirement set at the
-      // UNREGISTERED tier — the registry's own tier column, not a second role.
+      // [ROLE-DOCS] A <ROLE>_OWN_NAME list is the same role's requirement set at the OWN_NAME tier — the registry's
+      // own tier column, not a second role. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] The unregistered tier's lists are
+      // retired keys (removed above), so a set at that tier is never declared and the stale-set pass below drops it.
       const { actorRole, tier, optional } = splitChecklistKey(listKey);
       const key = `${actorRole}|${tier}`;
       const entry = declared.get(key) ?? { actorRole, tier, items: new Map() };
@@ -558,13 +562,6 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   owner_national_id: IDENTITY,
   passport: IDENTITY,
   digital_id: IDENTITY,
-  self_declaration_unregistered: [
-    { fieldCode: 'trading_name', dataType: 'text', identifier: true },
-    { fieldCode: 'activity_class', dataType: 'enum' },
-    { fieldCode: 'declared_address', dataType: 'text', isPii: true },
-    { fieldCode: 'signed_at', dataType: 'date' },
-    { fieldCode: 'attestation_version', dataType: 'text' },
-  ],
   // A photo declares no EXTRACTED fields: its capture metadata (captured_at, geo_point, device_attestation —
   // §3.2) is recorded by the capture attestation (P22), not read from the image. Photo types stay field-less.
   storefront_photo: [],
@@ -747,19 +744,16 @@ export async function seedDocFields(prisma: PrismaClient): Promise<number> {
  * document types still inactive (legal facts unverified). The facade falls
  * back to the JSON on null, so behaviour is unchanged until activation.
  */
-export const UNREGISTERED_TIER = 'UNREGISTERED';
-export const UNREGISTERED_LIST_SUFFIX = '_UNREGISTERED';
 /** [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's own name: `<ROLE>_OWN_NAME`, the registry's OWN_NAME tier. */
 export const OWN_NAME_TIER = 'OWN_NAME';
 export const OWN_NAME_LIST_SUFFIX = '_OWN_NAME';
 /** [VERIFY-DOCS] `<KEY>_OPTIONAL` names documents the same role MAY add: never a gate. */
 export const OPTIONAL_LIST_SUFFIX = '_OPTIONAL';
-/** RESTAURANT_UNREGISTERED → { actorRole: 'RESTAURANT', tier: 'UNREGISTERED' }; MOVER_OPTIONAL → { actorRole: 'MOVER', optional };
+/** RESTAURANT_OWN_NAME → { actorRole: 'RESTAURANT', tier: 'OWN_NAME' }; MOVER_OPTIONAL → { actorRole: 'MOVER', optional };
  *  anything else is the STANDARD tier's required list. */
 export function splitChecklistKey(listKey: string): { actorRole: string; tier: string; optional: boolean } {
   const optional = listKey.endsWith(OPTIONAL_LIST_SUFFIX);
   const key = optional ? listKey.slice(0, -OPTIONAL_LIST_SUFFIX.length) : listKey;
-  if (key.endsWith(UNREGISTERED_LIST_SUFFIX)) return { actorRole: key.slice(0, -UNREGISTERED_LIST_SUFFIX.length), tier: UNREGISTERED_TIER, optional };
   if (key.endsWith(OWN_NAME_LIST_SUFFIX)) return { actorRole: key.slice(0, -OWN_NAME_LIST_SUFFIX.length), tier: OWN_NAME_TIER, optional };
   return { actorRole: key, tier: REGISTRY_TIER, optional };
 }
@@ -793,7 +787,9 @@ export const LICENCE_NUMBER_DOC_TYPES: ReadonlySet<string> = new Set(['drivers_l
 /** [VERIFY-DOCS · same ruling] The documents whose ISSUE date a reviewer types at approval (the yearly re-check). Registry text (DOC-INV-2). */
 export const ISSUE_DATE_DOC_TYPES: ReadonlySet<string> = new Set(['police_clearance']);
 /** [DOC-1 Part XIX · P19] Licence-class types disclosed on the storefront while VALID (number when read, else "on file"). Registry text (DOC-INV-2). */
-/** [DOC-1 §3.6 · P3-2] The registration records that promote an UNREGISTERED store, and the declaration that puts it there. */
+/** [DOC-1 §3.6 · P3-2] The registration records: a VALID one is a store's business registration on file (the own-name
+ *  route refuses a store that already holds one). [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No tier is promoted by it any
+ *  more: the self-declared tier is removed. */
 export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration'];
 /**
  * [R16 · owner 15 Oct 2026, research D7] What a business registration certificate is, decided by the
@@ -803,11 +799,10 @@ export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration
  */
 export const REGISTRATION_KINDS = ['BUSINESS_NAME', 'COMPANY'] as const;
 export type RegistrationKind = (typeof REGISTRATION_KINDS)[number];
-export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
 /** [ROLE-DOCS · owner 21 Oct 2026] The signed "I trade under my own name" declaration. Registry text (DOC-INV-2). */
 export const OWN_NAME_DOC_TYPE = 'own_name_declaration';
-/** [FOOD-PERMIT · owner ruling 24 Oct 2026] A food handler's certificate. Required of a home cook (the self-declared
- *  tier), a chef and a caterer; OPTIONAL for a registered restaurant, which ticks the statement below instead. */
+/** [FOOD-PERMIT · owner ruling 24 Oct 2026] A food handler's certificate. Required of a chef and a caterer; OPTIONAL for a
+ *  restaurant, which ticks the statement below instead. */
 export const FOOD_HANDLER_CERT_DOC_TYPE = 'food_handler_cert';
 /** [FOOD-PERMIT · owner ruling 24 Oct 2026] A registered restaurant's owner ticks "Everyone who handles food here holds
  *  a current food handler's certificate." (vendor/food-handlers.ts). Not a document and on no list: a statement in the

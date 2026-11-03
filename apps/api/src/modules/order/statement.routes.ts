@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import type { PrismaClient } from '@prisma/client';
 import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
+import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import {
   buildDriverStatement,
   buildRiderStatement,
@@ -8,6 +10,27 @@ import {
   verifyStatementSignature,
   type StatementKind,
 } from './statement';
+
+/**
+ * [TENANT-WALL] The one system read of a statement link: the operator of the
+ * store or mover whose statement it is, and nothing else. The link is opened
+ * without a session, so nothing binds a tenant, and under the tenant wall every
+ * unbound read of the ledger was refused (TENANT_CONTEXT_REQUIRED): every
+ * statement link answered 500. Called only after the link's expiry and
+ * signature are verified; the statement itself is then built bound to that
+ * operator, so the wall confines what it can read.
+ */
+export const STATEMENT_RENDER_LINK_CAPABILITY = 'statement-render-link';
+
+export function statementHolderTenant(prisma: PrismaClient, kind: StatementKind, actorId: string): Promise<string | null> {
+  return runAsSystem(STATEMENT_RENDER_LINK_CAPABILITY, async () => {
+    if (kind === 'vendor') return (await prisma.vendor.findUnique({ where: { id: actorId }, select: { tenantId: true } }))?.tenantId ?? null;
+    const mover = kind === 'driver'
+      ? await prisma.driver.findUnique({ where: { id: actorId }, select: { user: { select: { tenantId: true } } } })
+      : await prisma.rider.findUnique({ where: { id: actorId }, select: { user: { select: { tenantId: true } } } });
+    return mover?.user.tenantId ?? null;
+  });
+}
 
 /**
  * Signed statement render (marketplace §12): the browser can't send a JWT, so
@@ -64,14 +87,20 @@ export async function statementRoutes(app: FastifyInstance) {
     }
 
     const period = { from: new Date(q.from), to: new Date(q.to), label: periodLabel(q.from, q.to) };
+    // [TENANT-WALL] Built bound to the holder's own operator (see statementHolderTenant).
+    // A holder that no longer exists answers as the unbound read did: 404 NOT_FOUND.
+    const holderTenant = await statementHolderTenant(app.prisma, q.kind as StatementKind, q.actor);
+    if (!holderTenant) throw new AppError(404, 'NOT_FOUND', 'Record not found');
     reply.type('text/html; charset=utf-8');
-    if (q.kind === 'vendor') return buildVendorStatement(app.prisma, q.actor, period);
-    if (q.kind === 'driver') {
-      const driver = await app.prisma.driver.findUniqueOrThrow({ where: { id: q.actor }, select: { userId: true } });
-      return buildDriverStatement(app.prisma, q.actor, driver.userId, period);
-    }
-    const rider = await app.prisma.rider.findUniqueOrThrow({ where: { id: q.actor }, select: { userId: true } });
-    return buildRiderStatement(app.prisma, q.actor, rider.userId, period);
+    return runWithTenant(holderTenant, async () => {
+      if (q.kind === 'vendor') return buildVendorStatement(app.prisma, q.actor, period);
+      if (q.kind === 'driver') {
+        const driver = await app.prisma.driver.findUniqueOrThrow({ where: { id: q.actor }, select: { userId: true } });
+        return buildDriverStatement(app.prisma, q.actor, driver.userId, period);
+      }
+      const rider = await app.prisma.rider.findUniqueOrThrow({ where: { id: q.actor }, select: { userId: true } });
+      return buildRiderStatement(app.prisma, q.actor, rider.userId, period);
+    });
   });
 }
 
