@@ -55,6 +55,7 @@ import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, r
 import { lockFeeCollectionAuthority, lockMoverFeeAuthority, lockSubscriptionPayer, moverFeeTariffSubject, resolveMoverFeeAuthority, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { moverUserIdOf, PAYER_INCLUDE, payerAudienceOf, payerOf, payerUserIdOf } from '../subscription/subscription-owner';
 import { sweepChainDealChanges } from '../vendor/chain-deal';
+import { CLOSURE_FEE_HOLD_REFUSAL, CLOSURE_LAPSE_NOTE, closureHoldsWeek } from './closure-fee-hold';
 
 // ---------------------------------------------------------------------------
 // BillingService — the one place V1 touches money: Swift's own weekly fee.
@@ -533,8 +534,10 @@ export class BillingService {
    * the history says why the plan stopped. Runs in the process-billing job.
    */
   async lapseStoppedSubscriptions(now = new Date()): Promise<{ paused: number; failed: number }> {
+    // [WEB-DELETE · owner ruling 2 Nov 2026] A fee a store owner's closure request holds lapses the same way at the
+    // end of its paid week, when that week ends after the hold began (a week due before the hold is owed and billed).
     const due = await this.prisma.subscription.findMany({
-      where: { status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
+      where: { status: 'ACTIVE', currentPeriodEnd: { lte: now }, OR: [{ autoRenew: false }, { closureHoldAt: { not: null } }] },
       select: { id: true, currencyCode: true, updatedAt: true },
       take: 500,
     });
@@ -549,6 +552,9 @@ export class BillingService {
         const done = await this.prisma.$transaction(async (tx) => {
           if (!(await lockFeeCollectionAuthority(tx, sub.id)).allowed) return false;
           const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id } });
+          // Stopped by the partner, or held by a closure request through the week that begins at the period end.
+          const byClosure = fresh.autoRenew && closureHoldsWeek(fresh, fresh.currentPeriodEnd);
+          if (fresh.autoRenew && !byClosure) return false;
           const clock = await currentDunningClock(tx, sub.id, now);
           // A resumed but uncollected obligation is still owed. A stopped
           // flag and an old period end cannot erase that liability.
@@ -556,15 +562,16 @@ export class BillingService {
           // [E12] A trial that ended while billing was stopped owed nothing:
           // its free period is recorded as zero-fee coverage, then it lapses
           // like any covered period (and resumes charged at the resume).
-          if (!proof && await stoppedTrialOwesNothingInTx(tx, fresh, clock)) {
+          if (!proof && await stoppedTrialOwesNothingInTx(tx, { ...fresh, autoRenew: false }, clock)) {
             await recordTrialCoverageInTx(tx, fresh);
             proof = await voluntaryResumeProofInTx(tx, fresh, clock);
           }
           if (!proof) return false;
-          // Guarded: a resume that armed autoRenew in between wins.
+          // Guarded: a resume that armed autoRenew in between wins (a held fee is still auto-renewing until here; it
+          // pauses owing nothing, in the shape the partner's own lapse has, so its resume meets the same rules).
           const flipped = await tx.subscription.updateMany({
-            where: { id: sub.id, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: { lte: now } },
-            data: { status: 'PAUSED', nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null },
+            where: { id: sub.id, status: 'ACTIVE', autoRenew: fresh.autoRenew, currentPeriodEnd: { lte: now }, ...(byClosure ? { closureHoldAt: fresh.closureHoldAt } : {}) },
+            data: { status: 'PAUSED', autoRenew: false, nextRetryAt: null, isInGracePeriod: false, gracePeriodEnd: null },
           });
           if (flipped.count !== 1) return false;
           await tx.billingEvent.create({
@@ -576,7 +583,7 @@ export class BillingService {
               // resumed obligation cannot reuse the old period's proof.
               idempotencyKey: `pause:${sub.id}:${clock.id}:${clock.epoch}`,
               amount: proof.payment.amount, paymentRef: proof.payment.externalRef,
-              note: 'Plan paused at the end of the paid period — weekly billing was stopped by the partner',
+              note: byClosure ? CLOSURE_LAPSE_NOTE : 'Plan paused at the end of the paid period — weekly billing was stopped by the partner',
             },
           });
           return true;
@@ -620,6 +627,10 @@ export class BillingService {
     });
     if (!candidate) return 'skipped';
     sub = candidate;
+    // [WEB-DELETE · owner ruling 2 Nov 2026] A store owner's open closure request holds the weekly fee: a week that
+    // starts at or after the hold is not born (no attempt, no prepaid spend, no grace). A week owed from before the
+    // hold is billed and settled exactly as ever (closure-fee-hold.ts).
+    if (closureHoldsWeek(sub, sub.nextBillingDate)) return 'skipped';
     // An unresolved positive observation may concern this or an older attempt.
     // A new retry key, rail choice or wallet top-up is not manual disposition.
     // [PROD-PATH] No live way to pay (MMG off, no live card rail: fee-pause.ts):
@@ -3582,6 +3593,8 @@ export class BillingService {
         throw new AppError(409, 'MOVER_FEE_REVIEW_REQUIRED', 'This weekly fee needs review before billing can resume.');
       }
       const { sub: fresh } = await lockBillingAuthority(tx, subscriptionId);
+      // [WEB-DELETE · REVIEW-M #2304 S3] While a closure request holds the fee, it restarts only when the request ends.
+      if (fresh.closureHoldAt) throw new AppError(409, 'CLOSURE_REQUESTED', CLOSURE_FEE_HOLD_REFUSAL);
       const clock = await currentDunningClock(tx, subscriptionId, resumedAt);
       if (fresh.status === 'CANCELLED' || fresh.status === 'CHURNED') {
         throw new AppError(
@@ -4982,7 +4995,8 @@ export class BillingService {
     if (await feePauseSpanOpen(this.prisma)) return 0;
     const dayAhead = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     const upcoming = await this.prisma.subscription.findMany({
-      where: { status: 'ACTIVE', autoRenew: true, nextBillingDate: { gt: now, lte: dayAhead } },
+      // [WEB-DELETE] A held fee's next week is not born: no reminder for it (closure-fee-hold.ts).
+      where: { status: 'ACTIVE', autoRenew: true, closureHoldAt: null, nextBillingDate: { gt: now, lte: dayAhead } },
       include: PAYER_INCLUDE,
     });
 

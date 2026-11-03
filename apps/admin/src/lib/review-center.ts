@@ -47,7 +47,8 @@ const LABELS: Record<string, string> = {
   liquor_licence: 'Liquor licence', sanitary_certificate: 'Sanitary certificate',
   trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
-  self_declaration_unregistered: 'Unregistered business declaration',
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] retired with its tier: only a copy filed before shows this label
+  self_declaration_unregistered: 'Unregistered business declaration (no longer accepted)',
   // [MC-PR2] checklist photo types the queue and the activation checklist both name
   storefront_photo: 'Storefront photo', own_name_declaration: 'Own-name declaration (no business registration)', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
   // [TRADES · 13 Oct 2026; R15] service-trade documents

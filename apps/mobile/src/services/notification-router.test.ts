@@ -528,11 +528,11 @@ const CENSUS: Case[] = [
   { k: 'rlp_sla_breached', d: { breached: 2, date: '2026-09-06' }, to: null, why: 'admins — approved payouts past the SLA' },
   { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'admins — the reserve line is below its floor' },
   { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'admins — the monthly provisioning notice' },
-  { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6)' },
+  { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6). [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No longer sent (the self-declared tier is removed): kept for inbox rows sent before', scan: false },
   { k: 'vendor_needs_public_phone', d: { vendorId: 'v1' }, to: { screen: 'Main' }, why: 'vendor owner — [owner #51] documents done, the store goes live once it publishes a number customers can call; the waiting store\'s own screen asks for it' },
   { k: 'vendor_needs_food_handler_tick', d: { vendorId: 'v1' }, to: { screen: 'VendorRoot', params: { screen: 'Account' } }, why: 'vendor owner — [FOOD-PERMIT · owner 24 Oct] a registered restaurant ticks that everyone who handles its food holds a current certificate; the store\'s Documents (on Account) show the tick' },
   { k: 'vendor_needs_weekly_fee_tick', d: { vendorId: 'v1', weeklyFee: 45000, currencyCode: 'GYD' }, to: { screen: 'VendorRoot', params: { screen: 'Account' } }, why: 'vendor owner — [RETIER PR-A · owner 30 Oct] a store whose fee follows its catalogue above the first step goes live once its owner ticks that exact fee; the store\'s go-live steps (on Account) show it' },
-  { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps' },
+  { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps. [CHECKLIST-LEGAL] No longer sent: kept for inbox rows sent before', scan: false },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
   // console's Background jobs page — there is no mobile admin surface, so the

@@ -12,7 +12,7 @@ import { registerEmptyJsonBodyParser } from '../../plugins/empty-json';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
-import { authRoutes } from '../../modules/auth/auth.routes';
+import { registerAuthRoutes } from '../helpers/auth-routes-harness';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
 
 // GOLD-7 shares the GOLD-2/6 composition and fixture helpers, not product
@@ -176,7 +176,7 @@ export function createGolden(phonePrefix: string, fixture: string) {
     registerTenantHeaderScope(app);
     await app.register(customerRoutes, { prefix: '/api/v1/customer' });
     await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
-    await app.register(authRoutes, { prefix: '/api/v1/auth' });
+    await registerAuthRoutes(app);
     if (extra) await extra(app);
     await app.ready();
     // [G7-01] Track both production write paths, for every alert kind. A single

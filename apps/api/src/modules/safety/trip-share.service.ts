@@ -9,7 +9,7 @@ import { log } from '../../utils/logger';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { tripShareCounter, tripShareGauge } from '../../plugins/observability';
 import { parseEmergencyPolicy } from '../country/emergency-policy';
-import { runWithoutTenant } from '../../plugins/tenant-context';
+import { runAsSystem, runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import type { NotificationService } from '../notification/notification.service';
 
@@ -41,6 +41,8 @@ export const MAX_LIVE_SHARES_PER_TRIP = 5;
  * plaintext is never restored.
  */
 export const tripShareDigest = (secret: string): string => createHash('sha256').update(secret).digest('hex');
+/** [TENANT-WALL] The one system read of the public trip page: whose trip a link is. */
+export const TRIP_SHARE_PUBLIC_LINK_CAPABILITY = 'trip-share-public-link';
 export const tripSharePublicLookupKilled = (env: Record<string, string | undefined> = process.env) => env['TRIP_SHARE_PUBLIC_LOOKUP_KILL'] === '1';
 const VIEWS_PER_MINUTE = Number(process.env['TRIP_SHARE_VIEWS_PER_MINUTE'] ?? 60);
 const ENUMERATION_MISSES_PER_MINUTE = Number(process.env['TRIP_SHARE_ENUMERATION_MISSES_PER_MINUTE'] ?? 20);
@@ -216,6 +218,22 @@ export class TripShareService {
     if (typeof token !== 'string' || token.length < 16 || token.length > 128) { await this.recordMiss(caller); return null; }
     // A caller that keeps guessing is blocked; a caller that keeps reading is throttled.
     if (caller && !(await this.callerAllowed(caller))) { tripShareCounter.labels('blocked').inc(); return null; }
+    // [TENANT-WALL] The page is opened without a session, so nothing binds a
+    // tenant, and under the tenant wall an unbound read of the link was refused
+    // (TENANT_CONTEXT_REQUIRED): every shared trip answered 500. ONE named
+    // system read learns whose trip the link is (its operator, by its digest,
+    // nothing else); only a link that matches is read further, bound to that
+    // operator, so the wall itself confines what the page can reach.
+    const link = await runAsSystem(TRIP_SHARE_PUBLIC_LINK_CAPABILITY, () => this.prisma.tripShareToken.findUnique({
+      where: { tokenDigest: tripShareDigest(token) },
+      select: { tenantId: true, tokenDigest: true },
+    }));
+    if (!link || !link.tokenDigest || !digestMatches(token, link.tokenDigest)) { await this.recordMiss(caller); return null; }
+    return runWithTenant(link.tenantId, () => this.publicViewOfOperator(token, now, caller));
+  }
+
+  /** The public read of a matched link, bound to its operator (publicView). */
+  private async publicViewOfOperator(token: string, now: Date, caller?: string) {
     const row = await this.prisma.tripShareToken.findUnique({
       where: { tokenDigest: tripShareDigest(token) },
       select: {

@@ -5,6 +5,7 @@ import type { ConsentDocumentType } from '../legal/consent.service';
 import { browserClientOf } from '../auth/browser-session';
 import { moverRoleFor } from '../../config/vehicle-classes';
 import { partnerRateFor, PricingConfigError, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
+import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../subscription/trial-length';
 
 /**
  * [COORD ruling 22 Oct 2026 · row 628 · GUARDRAILS §1 + §7 standing rule 2] The weekly fee at partner sign-up.
@@ -14,7 +15,7 @@ import { partnerRateFor, PricingConfigError, type PartnerTier, type Subscription
  * ticks "I understand the weekly fee" next to the partner agreement. Nobody pays at sign-up: the fee starts only
  * after approval (the billing flow then opens MMG's checkout page in the app).
  *
- * The words below are served with the price list (`feeTerms`), so the phone and the website show exactly them,
+ * The current words below are served with the price list (`feeTerms`), so the phone and the website show exactly them,
  * and the tick is recorded in the consent ledger anchored to them (their own versioned document, like the 18+
  * tick) in the transaction that provisions the partner, with the amount the partner saw. That amount must be the
  * server's quote at that moment, or the sign-up is refused before anything is written (WEEKLY_FEE_CHANGED).
@@ -29,12 +30,20 @@ import { partnerRateFor, PricingConfigError, type PartnerTier, type Subscription
  * Once the oldest phone build in use ships the tick, requiring it from every client is a one-line change here.
  */
 export const WEEKLY_FEE_ACK_TYPE: ConsentDocumentType = 'weekly_fee_acknowledgement';
-export const WEEKLY_FEE_ACK_VERSION = 'v1';
+/** The words served now, and the only version a NEW tick is taken on (assertWeeklyFeeAck). */
+export const WEEKLY_FEE_ACK_VERSION = 'v2';
+/**
+ * [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D3)] The versions whose tick still stands. v2 only adds the website as a
+ * place to pay ("How you pay"); nothing about the fee changed, so a partner who ticked v1 is not asked again: a store
+ * owner's store-fee tick (store-fee.ts latestStoreFeeTick) and a pro's fee tick (services/pro-fee.ts latestProFeeTick)
+ * are read across these. The ledger keeps each row anchored to the words it was given to.
+ */
+export const WEEKLY_FEE_ACK_HONOURED_VERSIONS: readonly string[] = ['v1', 'v2'];
 
 /**
- * The v1 words, in the order they are shown. A change is a new version — a version is a promise about specific words.
- * "When it starts" says approval, not going live: a rider's or driver's fee (trial or first week) is born at approval.
- * Card-rail switch-on checklist: before card payment is offered, "How you pay" must change, and that is v2.
+ * The v1 words, in the order they were shown until 1 Nov 2026. Never edited: rows already in the ledger are anchored
+ * to them (a version is a promise about specific words). "When it starts" says approval, not going live: a rider's or
+ * driver's fee (trial or first week) is born at approval.
  */
 export const WEEKLY_FEE_TERMS_V1 = {
   items: [
@@ -52,11 +61,46 @@ export const WEEKLY_FEE_ACK_TEXT_V1 = [
   WEEKLY_FEE_TERMS_V1.tick,
 ].join('\n');
 
+/**
+ * [WEB-ONBOARDING · owner rulings 1 Nov 2026 (D3, D1/F13)] The v2 words, two lines changed from v1:
+ *  - "How you pay" names the website too (the weekly fee is paid on MMG's checkout page from swiftgy.com as well as
+ *    from the app);
+ *  - "When it starts" says the free trial plainly, and true on EVERY screen these words are ticked on [REVIEW-LIGHT2 M]:
+ *    v1's "after your free trial if you get one" stays (the trial law can refuse one); how long a NEW partner's lasts
+ *    (subscription/trial-length.ts TRIAL_DAYS, and DEPARTMENT_TRIAL_DAYS for a store at the department step, 10,000+
+ *    items, when approved), counted from approval, and for a pro from the day the Pro Agreement says (the last of the
+ *    fee's start for Providers, approval, acceptance and the fee tick: pros tick these same words); that a new branch
+ *    (Add a branch ticks them too) has no trial of its own and shares its business's; and that each person gets one
+ *    per kind of partner (the trial entitlement law: one per person, per role), none while an earlier subscription in
+ *    their accounts is overdue, paused or ended (DEBT_REINSTATE_FIRST: PAST_DUE, SUSPENDED, CHURNED). A change to any
+ *    of those numbers is a new version (the unit test pins them together).
+ * "What it covers", "If the price changes" and the tick are v1's, word for word. Card-rail switch-on checklist: before
+ * card payment is offered, "How you pay" must change again, and that is v3.
+ */
+export const WEEKLY_FEE_TERMS_V2 = {
+  items: [
+    { heading: 'What it covers', text: 'The Swift app and its tools for your work. Swift takes no commission: you keep 100% of your sales, fares, delivery fees and tips.' },
+    { heading: 'When it starts', text: `Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one. A new partner’s free trial lasts ${TRIAL_DAYS} days, or ${DEPARTMENT_TRIAL_DAYS} days for a store with 10,000 or more items when Swift approves it, counted from the day Swift approves you (for a service provider, from the day the Pro Agreement says). A new branch has no trial of its own: it shares its business’s. Each person gets one free trial for each kind of partner, and none while an earlier Swift subscription of theirs is overdue, paused or ended.` },
+    { heading: 'How you pay', text: 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.' },
+    { heading: 'If the price changes', text: 'Swift tells you in the app at least 14 days before. A new price applies only from your first weekly fee due after that, never to a week you have already paid.' },
+  ],
+  tick: 'I understand the weekly fee.',
+} as const;
+
+export const WEEKLY_FEE_ACK_TEXT_V2 = [
+  ...WEEKLY_FEE_TERMS_V2.items.map((item) => `${item.heading}: ${item.text}`),
+  WEEKLY_FEE_TERMS_V2.tick,
+].join('\n');
+
+/** The words of WEEKLY_FEE_ACK_VERSION: what is served, and what a new tick is published and anchored to. */
+export const WEEKLY_FEE_TERMS = WEEKLY_FEE_TERMS_V2;
+export const WEEKLY_FEE_ACK_TEXT = WEEKLY_FEE_ACK_TEXT_V2;
+
 export interface WeeklyFeeTerms { version: string; items: { heading: string; text: string }[]; tick: string }
 
 /** What GET /auth/pricing serves beside the amounts. */
 export function weeklyFeeTerms(): WeeklyFeeTerms {
-  return { version: WEEKLY_FEE_ACK_VERSION, items: WEEKLY_FEE_TERMS_V1.items.map((item) => ({ ...item })), tick: WEEKLY_FEE_TERMS_V1.tick };
+  return { version: WEEKLY_FEE_ACK_VERSION, items: WEEKLY_FEE_TERMS.items.map((item) => ({ ...item })), tick: WEEKLY_FEE_TERMS.tick };
 }
 
 export const WEEKLY_FEE_ACK_REQUIRED = 'WEEKLY_FEE_ACK_REQUIRED';

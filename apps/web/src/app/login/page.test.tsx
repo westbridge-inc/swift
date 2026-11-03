@@ -16,6 +16,7 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(mocked.query),
 }));
 vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, verifyPartnerLogin: mocked.verifyPartnerLogin }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: mocked.sendOtp }));
 vi.mock('@/lib/customer-login', () => ({ verifyCustomerLogin: mocked.verifyCustomerLogin }));
 vi.mock('@/components/swift-logo', () => ({ SwiftLogo: () => <span>Swift</span> }));
 
@@ -69,8 +70,8 @@ describe('[Q7b] signing in from the customer app', () => {
     expect(mocked.verifyPartnerLogin).toHaveBeenCalled();
   });
 
-  it('a partner page is still a partner sign-in', async () => {
-    expect(await signIn(`next=${encodeURIComponent('/dashboard/orders')}`)).toBe('/dashboard');
+  it('a partner page is still a partner sign-in, and [FLOW-QA F31] it goes back to that page', async () => {
+    expect(await signIn(`next=${encodeURIComponent('/dashboard/orders')}`)).toBe('/dashboard/orders');
     expect(mocked.verifyPartnerLogin).toHaveBeenCalled();
     expect(mocked.verifyCustomerLogin).not.toHaveBeenCalled();
   });

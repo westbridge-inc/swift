@@ -27,6 +27,8 @@ const routes = new Map<string, (...args: any[]) => any>();
 const log = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
 const app: any = {
   prisma, log, io: {}, redis: {}, prefix: '', authenticate: vi.fn(), addHook: vi.fn(),
+  // [FLOW-QA F15] the auth routes build their per-number sign-in ceiling from the limiter; this stand-in lets all through
+  createRateLimit: () => async () => ({ isAllowed: true, key: '' }),
 };
 for (const verb of ['get', 'post', 'put', 'patch', 'delete']) {
   app[verb] = (path: string, ...args: any[]) => { routes.set(`${verb} ${path}`, args.at(-1)); };

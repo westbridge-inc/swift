@@ -25,6 +25,7 @@ export function SignOutButton({
   body,
   title = 'Sign out of Swift?',
   redirectTo,
+  onSignedOut,
 }: {
   /** The control's own look: each surface keeps its button as it was. */
   className: string;
@@ -34,6 +35,8 @@ export function SignOutButton({
   title?: string;
   /** Where the page goes once the server has ended the session. */
   redirectTo: string;
+  /** Told once the server has ended the session, before the page moves (a page that stays put resets itself). */
+  onSignedOut?: () => void;
 }) {
   const router = useRouter();
   const [asking, setAsking] = useState(false);
@@ -64,7 +67,7 @@ export function SignOutButton({
     signingOut.current = true;
     setLeaving(true);
     // the session lives in a cookie only the server can expire
-    void logout().then(() => router.replace(redirectTo));
+    void logout().then(() => { onSignedOut?.(); router.replace(redirectTo); });
   };
 
   if (!asking) {

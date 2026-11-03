@@ -6,7 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { runWithTenant } from '../plugins/tenant-context';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { VerificationService, isPoliceCleared } from '../modules/verification/verification.service';
@@ -110,7 +110,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.ready();
   await cleanup();

@@ -13,7 +13,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { OrderService, reconcileMissingEarnings } from '../modules/order/order.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { loginWithOtp } from './helpers/otp';
@@ -143,7 +143,7 @@ beforeAll(async () => {
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   orders = new OrderService(app.prisma, app.io);

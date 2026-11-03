@@ -133,11 +133,14 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
     queryKey: ['stores'],
     queryFn: getStores,
     // "No store yet" (404) is an answer, not a hiccup: never retried.
-    retry: (failures, error) => !(error instanceof ApiRequestError && error.status === 404) && failures < 1,
+    retry: (failures, error) => !(error instanceof ApiRequestError && (error.status === 404 || error.status === 403)) && failures < 1,
   });
   // A business account whose store was never created: the server answers 404.
   // That is a step still to do, not a failure.
   const noStoreYet = stores.error instanceof ApiRequestError && stores.error.status === 404;
+  // [FLOW-QA F10] An account with no business at all (a rider, a driver, a customer) is refused the store list (403):
+  // that is "no business on this account", never a board that "may have orders waiting".
+  const noBusiness = stores.error instanceof ApiRequestError && stores.error.status === 403;
   const list: Store[] = useMemo(() => stores.data?.stores ?? [], [stores.data?.stores]);
 
   const onSwitch = useCallback(
@@ -180,10 +183,18 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
   return (<>
     {feedStore && <StoreLiveFeed key={feedStore} storeId={feedStore} />}
     <ConsoleShell person={person} home="/dashboard" title="Business" navigation={navigation}
-      switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet} />}
+      switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet && !noBusiness} />}
       signOutBody="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
       contentKey={storeId ?? 'no-store'}>
-      {noStoreYet ? (
+      {noBusiness ? (
+        <div className="sw-card p-6" data-no-business>
+          <p className="text-sm font-semibold">No business on this account.</p>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">Add a business to this Swift account to take orders here.</p>
+          <Link href="/signup?resume=business" className="sw-btn sw-btn-md mt-4">
+            Add a business
+          </Link>
+        </div>
+      ) : noStoreYet ? (
         <div className="sw-card p-6">
           <p className="text-sm font-semibold">Your business isn&apos;t set up yet.</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">Add your store&apos;s details and location to start taking orders.</p>
@@ -207,7 +218,7 @@ export function DashboardShell({ children }: { children: React.ReactNode }) {
   // [W-01 · UI-SWEEP U23] Only the server saying "no session" goes to /login;
   // a check that could not reach Swift says so instead (components/console-session).
   const gate = useConsoleSession();
-  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} />;
+  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} rateLimited={gate.rateLimited} />;
   if (gate.phase !== 'ready') return <div className="sw-page sw-empty" role="status">Opening your business…</div>;
   return (
     <Providers offline="fail" keepFor={KEEP_TABS_FOR}>

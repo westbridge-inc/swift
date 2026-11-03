@@ -282,6 +282,12 @@ export default function SupportPage() {
                         <p className="font-semibold">
                           {isSafety ? 'Closing a safety report — what was done?' : 'What happened?'}
                         </p>
+                        {/* [WEB-DELETE · REVIEW-F #2304 S4-2] Closing a closure request without closing the account ends it. */}
+                        {isClosureRequest(t) && (
+                          <p className="mc-muted mt-1 text-sm">
+                            Closing this ticket ends the account closure request without closing the account: the owner’s stores can take new orders again once the owner resumes them, and their weekly fee starts again.
+                          </p>
+                        )}
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {choices.map((r) => (
                             <button

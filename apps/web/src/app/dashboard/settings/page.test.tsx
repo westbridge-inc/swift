@@ -181,11 +181,30 @@ describe('dashboard settings: the subscription card (U18 / U20 / U46)', () => {
     unmount();
     vi.restoreAllMocks();
 
-    stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'TRIAL', isTrialActive: true, trialEndDate: '2026-11-02T16:00:00.000Z' })) });
+    // The trial end is a fixed date, so the clock is frozen before it (only Date: timers stay real for the renders);
+    // read against the real clock, this case failed for good once that date passed.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-30T12:00:00.000Z'));
+    try {
+      stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'TRIAL', isTrialActive: true, trialEndDate: '2026-11-02T16:00:00.000Z' })) });
+      renderWithQuery(<SettingsPage />);
+      card = await subscriptionCard();
+      expect(card.textContent).toContain('Status: Free trial');
+      expect(card.textContent).toContain(`Free trial until 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('[FLOW-QA2 NEW-8] no subscription yet: it starts when Swift approves the store, as the Weekly fee tab says', async () => {
+    // The server makes a store's weekly fee only when it makes the store live: on Swift's approval (verification
+    // projectVendorActivation -> startTrialForVendor), not when the documents alone are verified.
+    stubSettings({ subscription: () => Promise.resolve(null) });
+    setSelectedStore('store-1');
     renderWithQuery(<SettingsPage />);
-    card = await subscriptionCard();
-    expect(card.textContent).toContain('Status: Free trial');
-    expect(card.textContent).toContain(`Free trial until 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
+    const card = await subscriptionCard();
+    expect(card.textContent).toContain('No subscription on this store yet — it starts when Swift approves your store.');
+    expect(card.textContent).not.toMatch(/documents are verified/);
   });
 
   it('a failed read is not "no subscription": it says it could not check, and retries', async () => {

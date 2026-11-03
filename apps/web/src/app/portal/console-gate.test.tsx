@@ -33,6 +33,9 @@ beforeEach(() => { fx.probe.mockReset(); fx.restore.mockReset(); fx.replace.mock
 
 const shells = [['the earner office', PortalShell], ['the store dashboard', DashboardShell]] as const;
 
+/** [FLOW-QA F31] The consoles send the page they were opened on as next. */
+const consoleLogin = () => `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+
 describe('[U23] a check that could not reach Swift is not a sign-out', () => {
   it.each(shells)('%s says Swift cannot be reached, stays put, and checks again on request', async (_name, Shell) => {
     fx.probe.mockResolvedValueOnce({ ok: false, unreachable: true }).mockResolvedValueOnce({ ok: true, user: { id: 'u1', firstName: 'Sample' } });
@@ -49,7 +52,8 @@ describe('[U23] a check that could not reach Swift is not a sign-out', () => {
     fx.probe.mockResolvedValue({ ok: false });
     fx.restore.mockResolvedValue({ ok: false });
     render(<Shell><p>console body</p></Shell>);
-    await waitFor(() => expect(fx.replace).toHaveBeenCalledWith('/login'));
+    // [FLOW-QA F31] with the page they asked for, so sign-in brings them back
+    await waitFor(() => expect(fx.replace).toHaveBeenCalledWith(consoleLogin()));
     expect(screen.queryByText("Swift can't be reached right now.")).toBeNull();
   });
 });
@@ -60,7 +64,7 @@ describe('[U23] a check that could not reach Swift is not a sign-out', () => {
 // morning) while their session was alive. The customer shell already restores
 // first ((app)/layout). Now every console does too: once, before /login.
 const allShells = [...shells, ['the ads console', AdvertiserShell]] as const;
-const loginFor = (Shell: unknown) => (Shell === AdvertiserShell ? '/login?next=%2Fadvertiser' : '/login');
+const loginFor = (Shell: unknown) => (Shell === AdvertiserShell ? '/login?next=%2Fadvertiser' : consoleLogin());
 
 describe('[S3-1] an expired access cookie is restored before any sign-in page', () => {
   it.each(allShells)('%s spends the refresh cookie once and opens, with no sign-in page', async (_name, Shell) => {

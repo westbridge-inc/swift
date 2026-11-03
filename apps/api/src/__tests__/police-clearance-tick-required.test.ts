@@ -68,7 +68,7 @@ describe('[WEB-POLICE (a)] where POST /verification/documents applies it', () =>
   it('this is the only route that files a document of the client’s choosing (the vendor doors file fixed types)', () => {
     const all = ['verification/verification.routes.ts', 'vendor/vendor.routes.ts'].map((f) => readFileSync(join(process.cwd(), 'src/modules', f), 'utf8'));
     expect(all[0]!.match(/verification\.submitDocument\(/g)).toHaveLength(1);
-    for (const call of all[1]!.match(/verification\.submitDocument\([^)]*\)/g) ?? []) expect(call).toMatch(/DECLARATION_DOC_TYPE|VAT_CERTIFICATE_DOC_TYPE|OWN_NAME_DOC_TYPE/);
+    for (const call of all[1]!.match(/verification\.submitDocument\([^)]*\)/g) ?? []) expect(call).toMatch(/VAT_CERTIFICATE_DOC_TYPE|OWN_NAME_DOC_TYPE/); // [CHECKLIST-LEGAL] no self-declaration door any more
   });
 
   it('the follow-up (b) is named where the rule lives', () => {

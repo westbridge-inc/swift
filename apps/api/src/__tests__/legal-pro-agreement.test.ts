@@ -6,7 +6,7 @@ import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LEGAL_VERSION, TERMS, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
 import { MATERIAL_CHANGES, PRO_AGREEMENT_VERSION, acceptanceStatus, compareLegalVersions, materialVersion } from '../modules/legal/reaccept';
@@ -139,7 +139,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
 });
 

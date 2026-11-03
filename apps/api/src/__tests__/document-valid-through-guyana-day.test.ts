@@ -10,7 +10,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { recordEvidenceFor } from '../modules/verification/evidence';
 import { holdsValidDocument } from '../modules/verification/category-gate';
-import { validRegistrationRecord } from '../modules/vendor/vendor-tier';
+import { validRegistrationRecord } from '../modules/vendor/registration-record';
 import { dueRenewalNotices } from '../modules/verification/renewal-schedule';
 import { guyanaDayKey } from '../utils/guyana-day';
 import { evaluateMoverDocuments } from '../modules/verification/mover-document-authority';

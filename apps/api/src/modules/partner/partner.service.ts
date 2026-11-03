@@ -14,7 +14,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
 import {
-  assertSawQuote, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
+  assertSawQuote, signupQuote, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
 } from './weekly-fee-ack';
 import { assertStorePinInMarket } from '../vendor/store-pin';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
@@ -133,17 +133,13 @@ export function assertOwnerInGoodStanding(stores: readonly StandingStore[], owne
   }
 }
 
-/** [CHAINS] A branch is born a registered seller (the tier column's default, written out): the add-a-branch terms
- *  ask a restaurant branch for its food handlers tick by this tier (vendor/food-handlers.ts). */
-export const BRANCH_TIER = 'REGISTERED' as const;
-
 /** A new store of an owner, waiting for Swift's approval: sign-up's first store and every branch after it. */
 async function createStore(tx: Tx, ownerId: string, business: Business, opts: { branch?: boolean; publicPhone?: string | null } = {}) {
   return tx.vendor.create({
     data: {
       ownerId,
       // [CHAINS · COORD ruling] A branch waits for a person at Swift to approve it before it can go live.
-      ...(opts.branch ? { personApprovalRequired: true, tier: BRANCH_TIER } : {}),
+      ...(opts.branch ? { personApprovalRequired: true } : {}),
       // [REVIEW-F #2220 S3-1] The number customers can call, published by the owner on the add-a-branch form.
       ...(opts.publicPhone ? { publicPhone: opts.publicPhone } : {}),
       name: business.name,
@@ -199,7 +195,7 @@ export class PartnerService {
     // [Row 628] The weekly-fee tick anchors to its own published words, the same way.
     const feeAck = consent?.weeklyFeeAck;
     if (feeAck) {
-      await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+      await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
     }
     const feeSubject = input.role === 'VENDOR'
       ? { role: 'VENDOR' as const, vendorType: input.business!.vendorType }
@@ -395,10 +391,10 @@ export class PartnerService {
   ): Promise<{ id: string; name: string; status: string; ownerId: string }> {
     assertStorePinInMarket(business.latitude, business.longitude);
     const publicPhone = publicPhoneForWrite(setup.publicPhone);
-    if (consent.foodHandlers && !foodHandlerTickApplies({ vendorType: business.vendorType, tier: BRANCH_TIER })) {
+    if (consent.foodHandlers && !foodHandlerTickApplies({ vendorType: business.vendorType })) {
       throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', 'Only a restaurant confirms its food handlers.');
     }
-    await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+    await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
     if (consent.foodHandlers) {
       await publishLegalDocumentOnce(this.prisma, { documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION, renderedText: FOOD_HANDLERS_TICK_V1 });
     }
@@ -422,10 +418,15 @@ export class PartnerService {
         where: { userId },
         select: {
           id: true,
-          vendors: { select: { id: true, name: true, status: true, isVerified: true, suspensionSource: true, mmgCheckoutHeldAt: true, subscription: { select: { status: true } } } },
+          vendors: { select: { id: true, name: true, status: true, isVerified: true, suspensionSource: true, mmgCheckoutHeldAt: true, closurePausedAt: true, subscription: { select: { status: true } } } },
         },
       });
       if (!owner || owner.vendors.length === 0) throw new AppError(404, 'VENDOR_NOT_FOUND', 'Set up your first store before adding a branch.');
+      // [WEB-DELETE · REVIEW-M #2304 S3-1] An open closure request holds the owner's stores (closure-pause.ts): a branch
+      // added now would be born outside that pause. Read under the account lock above, which the request also takes.
+      if (owner.vendors.some((v) => v.closurePausedAt)) {
+        throw new AppError(409, 'CLOSURE_REQUESTED', 'You asked Swift to close your account, so a new branch can’t be added while that request is open. To keep trading, cancel the request on swiftgy.com (Account, Request account closure) or contact Swift support.');
+      }
       assertOwnerInGoodStanding(owner.vendors, (await hasActiveHold(tx as unknown as PrismaClient, userId)).held);
       const limit = branchLimit(env);
       if (owner.vendors.length >= limit) {

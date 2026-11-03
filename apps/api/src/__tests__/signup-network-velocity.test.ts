@@ -5,7 +5,7 @@ import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { asFastifyTrustProxy } from '../config/trust-proxy';
@@ -97,7 +97,7 @@ async function buildApp(trustProxy: string | undefined): Promise<FastifyInstance
   await instance.register(redisPlugin);
   await instance.register(authPlugin);
   await instance.register(socketPlugin);
-  await instance.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(instance);
   await instance.ready();
   return instance;
 }
