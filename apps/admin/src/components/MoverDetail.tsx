@@ -266,7 +266,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
                 {sub.nextBillingDate ? <Row label={billDateLabel(sub.nextBillingDate)}>{when(sub.nextBillingDate)}</Row> : null}
               </dl>
             ) : (
-              <p className="mc-muted">No subscription yet. It starts when their documents are verified.</p>
+              <p className="mc-muted">No subscription yet. It starts when Swift approves them.</p>
             )}
           </section>
 

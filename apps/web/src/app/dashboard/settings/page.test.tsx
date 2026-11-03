@@ -181,11 +181,19 @@ describe('dashboard settings: the subscription card (U18 / U20 / U46)', () => {
     unmount();
     vi.restoreAllMocks();
 
-    stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'TRIAL', isTrialActive: true, trialEndDate: '2026-11-02T16:00:00.000Z' })) });
-    renderWithQuery(<SettingsPage />);
-    card = await subscriptionCard();
-    expect(card.textContent).toContain('Status: Free trial');
-    expect(card.textContent).toContain(`Free trial until 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
+    // The trial end is a fixed date, so the clock is frozen before it (only Date: timers stay real for the renders);
+    // read against the real clock, this case failed for good once that date passed.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-30T12:00:00.000Z'));
+    try {
+      stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'TRIAL', isTrialActive: true, trialEndDate: '2026-11-02T16:00:00.000Z' })) });
+      renderWithQuery(<SettingsPage />);
+      card = await subscriptionCard();
+      expect(card.textContent).toContain('Status: Free trial');
+      expect(card.textContent).toContain(`Free trial until 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('[FLOW-QA2 NEW-8] no subscription yet: it starts when Swift approves the store, as the Weekly fee tab says', async () => {
