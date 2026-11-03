@@ -9,7 +9,7 @@ services:
   # ── Routing and ETA ────────────────────────────────────────────────────
   # MAPS_PROVIDER=osrm  OSRM_URL=http://osrm:5000
   osrm:
-    image: osrm/osrm-backend:v5.25.0
+    image: osrm/osrm-backend:v5.25.0@sha256:bdfa60e64ae1376bff6ff5605991be50600132a27469a4a9e77c23afd3a6d555
     container_name: swift-osrm
     command: osrm-routed --algorithm mld --max-table-size 10000 /data/guyana-latest.osrm
     volumes:
@@ -21,7 +21,7 @@ services:
   # BATCH_PLANNER=vroom  VROOM_URL=http://vroom:3000
   # Sits on OSRM for travel times; stateless, so it needs no data build.
   vroom:
-    image: vroomvrp/vroom-docker:v1.13.0
+    image: vroomvrp/vroom-docker:v1.13.0@sha256:2e417553320bf68a25f6614ba8bdc31b0b2fc1172f8c25518c4656f488031c2a
     container_name: swift-vroom
     profiles: ["planner"]
     environment:
@@ -71,7 +71,7 @@ services:
   # The heavy one: it imports the extract into its own PostgreSQL. One-time,
   # disk- and RAM-hungry, and the only member of this stack that is.
   nominatim:
-    image: mediagis/nominatim:4.4
+    image: mediagis/nominatim:4.4@sha256:b772911424d31f8c36b337fe4b8d4ef3b93d4bf09f96407905a1e9d475d42632
     container_name: swift-nominatim
     profiles: ["geocoding"]
     environment:

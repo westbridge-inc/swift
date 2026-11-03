@@ -64,3 +64,31 @@ updates:
         update-types:
           - "patch"
           - "minor"
+
+  # [SUP-001] Container images are pinned to digests (container-image-pinning
+  # test). A pin trades "the tag silently picks up the base-OS fix" for "the fix
+  # never arrives" unless something re-resolves it, so every directory holding a
+  # pinned image is watched. Dockerfiles use the "docker" ecosystem and compose
+  # files the "docker-compose" one. CI's service containers in ci.yml are not
+  # watched by either: the test keeps them equal to deploy/docker-compose.yml,
+  # so a compose bump goes red until ci.yml moves with it, on purpose.
+  - package-ecosystem: "docker"
+    directories:
+      - "/apps/api"
+      - "/apps/admin"
+      - "/apps/web"
+      - "/infrastructure/docker"
+      - "/tools/analytics"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "docker-compose"
+    directories:
+      - "/deploy"
+      - "/infrastructure/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5

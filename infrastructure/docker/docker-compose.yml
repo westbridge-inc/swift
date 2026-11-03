@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgis/postgis:16-3.4
+    image: postgis/postgis:16-3.4@sha256:44126d872ac91993766c341e369c539e8196614321765d36a6f1bab0419a5fa5
     container_name: swift-postgres
     environment:
       POSTGRES_USER: swift
@@ -14,7 +14,7 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
     container_name: swift-redis
     # Append-only persistence: dispatch offer state + delayed BullMQ jobs live
     # here, so a restart without AOF silently strands in-flight orders. fsync
@@ -26,7 +26,7 @@ services:
       - redisdata:/data
 
   meilisearch:
-    image: getmeili/meilisearch:v1.11
+    image: getmeili/meilisearch:v1.11@sha256:6f8f1fc29d1ff67b4d8d503bb4e0a69b55c8d42600decafde951344218193a27
     container_name: swift-search
     environment:
       MEILI_NO_ANALYTICS: true
