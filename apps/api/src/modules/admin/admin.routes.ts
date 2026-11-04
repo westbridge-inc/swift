@@ -3555,13 +3555,13 @@ export async function adminRoutes(app: FastifyInstance) {
         { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
         ...(driver ? [{ userId: driver.userId, body: `${closed} You are offline until you go online again. If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
       ];
-      const { identityUnderReview } = await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
+      const { identityReviewReasons } = await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
       if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
         throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
       }
       await tx.auditLog.create({ data: {
         userId: request.user.userId, action: 'END_STUCK_RIDE', entity: 'Order', entityId: id,
-        changes: { reason, previousStatus: neverStarted ? 'DRIVER_ARRIVED' : 'RIDE_IN_PROGRESS', ...(identityUnderReview ? { identityUnderReview } : {}) },
+        changes: { reason, previousStatus: neverStarted ? 'DRIVER_ARRIVED' : 'RIDE_IN_PROGRESS', ...(identityReviewReasons.length > 0 ? { identityUnderReview: true, identityReviewReasons } : {}) },
         ipAddress: request.ip, userAgent: request.headers['user-agent'],
       } });
       for (const party of parties) {

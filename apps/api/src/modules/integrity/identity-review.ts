@@ -37,6 +37,24 @@ export async function identityAuthority(db: Db, accountId: string): Promise<Iden
   return { status: 'REVIEW_REQUIRED', clusterId: root, memberIds: [accountId], reason: 'LINEAGE_LIMIT' };
 }
 
+const LINEAGE_WALK_LIMIT = 256;
+
+/**
+ * Every cluster an account's membership passes through, read from its own side, whatever state the lineage is in. The
+ * walk keeps what it saw and stops at a cycle, a missing row or the limit, so a damaged lineage still names what it can.
+ * Empty for an account in no cluster.
+ */
+export async function identityLineage(db: Db, accountId: string): Promise<string[]> {
+  const member = await db.identityClusterMember.findUnique({ where: { accountId }, select: { clusterId: true } });
+  const seen: string[] = [];
+  let at = member?.clusterId ?? null;
+  while (at && !seen.includes(at) && seen.length < LINEAGE_WALK_LIMIT) {
+    seen.push(at);
+    at = (await db.identityCluster.findUnique({ where: { id: at }, select: { mergedIntoId: true } }))?.mergedIntoId ?? null;
+  }
+  return seen;
+}
+
 export async function requireIdentityAuthority(db: Db, accountId: string): Promise<IdentityAuthority> {
   const resolution = await identityAuthority(db, accountId);
   if (resolution.status === 'REVIEW_REQUIRED') throw new IdentityReviewRequiredError();
