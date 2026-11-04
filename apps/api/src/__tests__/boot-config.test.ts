@@ -1385,8 +1385,21 @@ describe('[LAUNCH-LOCK] production refuses to boot with card payments or ads on'
     expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_ENROLL: '1' })).toThrow(/^FATAL: CARD_RAIL_ENROLL must be unset or 0 in production/);
   });
 
-  it.each(['1', 'true', 'yes', 'on', ' 1', '01'])('refuses ADS_ENABLED=%j: no ads in production, and no near miss either', (value) => {
-    expect(() => assertSafeBootConfig({ ...good, ADS_ENABLED: value })).toThrow(/^FATAL: ADS_ENABLED must be unset or 0 in production/);
+  // [ADS-ON · owner ruling, 3 Nov] The ads half of the lock is lifted; the card half is not. The switch
+  // decides, only the owner flips it, with or after ordering day, and a near miss still refuses.
+  it('boots with ADS_ENABLED exactly 1: the boot guard no longer decides whether ads run', () => {
+    expect(() => assertSafeBootConfig({ ...good, ADS_ENABLED: '1' })).not.toThrow();
+  });
+
+  it.each(['true', 'TRUE', 'yes', 'on', ' 1', '1 ', '01', '2', '-1'])('refuses ADS_ENABLED=%j: only exactly 1 opens the ads routes, so a near miss is never a silent off', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, ADS_ENABLED: value })).toThrow(/^FATAL: ADS_ENABLED must be unset, 0 or exactly 1 in production/);
+  });
+
+  it('the card lock stands with ads on: every card switch still refuses beside ADS_ENABLED=1', () => {
+    expect(() => assertSafeBootConfig({ ...good, ...liveCardRail, ADS_ENABLED: '1', CARD_RAIL_V2: '1' })).toThrow(/^FATAL: CARD_RAIL_V2 must be unset or 0 in production — no card payment until an attorney signs off/);
+    expect(() => assertSafeBootConfig({ ...good, ...liveCardRail, ADS_ENABLED: '1', CARD_RAIL_V2_DRAIN: '1' })).toThrow(/^FATAL: CARD_RAIL_V2_DRAIN must be unset or 0 in production — no card payment until an attorney signs off/);
+    expect(() => assertSafeBootConfig({ ...good, ADS_ENABLED: '1', CARD_RAIL_ENROLL: '1' })).toThrow(/^FATAL: CARD_RAIL_ENROLL must be unset or 0 in production — no card payment until an attorney signs off/);
+    expect(() => assertSafeBootConfig({ ...good, ...liveStripe, ADS_ENABLED: '1' })).toThrow(/^FATAL: PAYMENT_PROVIDER must be exactly disabled in production/);
   });
 
   it.each(['true', 'yes', 'on', ' 1'])('refuses CARD_RAIL_ENROLL=%j: no near miss is read as off', (value) => {
@@ -1408,11 +1421,18 @@ describe('[LAUNCH-LOCK] production refuses to boot with card payments or ads on'
   });
 
   it('the value-free preflight names each locked switch and walks past them', () => {
-    const result = runPreflight({ ...good, ...liveStripe, ADS_ENABLED: '1', CARD_RAIL_ENROLL: '1' });
+    const result = runPreflight({ ...good, ...liveStripe, ADS_ENABLED: 'true', CARD_RAIL_ENROLL: '1' });
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stdout).toContain('PAYMENT_PROVIDER must be exactly disabled');
     expect(result.stdout).toContain('CARD_RAIL_ENROLL must be unset or 0');
-    expect(result.stdout).toContain('ADS_ENABLED must be unset or 0');
+    expect(result.stdout).toContain('ADS_ENABLED must be unset, 0 or exactly 1');
+  });
+
+  it('the value-free preflight does not refuse ADS_ENABLED=1, and still names a card switch beside it', () => {
+    const result = runPreflight({ ...good, ADS_ENABLED: '1', CARD_RAIL_ENROLL: '1' });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain('CARD_RAIL_ENROLL must be unset or 0');
+    expect(result.stdout).not.toContain('ADS_ENABLED must be');
   });
 });
 

@@ -117,7 +117,7 @@ const STUBS: Record<string, string> = {
   FEATURE_BIOMETRIC_FACE_MATCH: '0',
   PAYMENT_PROVIDER: 'disabled',
   CARD_RAIL_KILL: '1',
-  // [LAUNCH-LOCK] production refuses card rail v2 and ads until an attorney signs off.
+  // [LAUNCH-LOCK] production refuses card rail v2 until an attorney signs off, and a near miss of ADS_ENABLED.
   CARD_RAIL_V2: '0', CARD_RAIL_V2_DRAIN: '0', CARD_RAIL_ENROLL: '0', ADS_ENABLED: '0',
   PAYMENT_GATEWAY_KEY: 'STUB-NOT-A-REAL-KEY',
   PAYMENT_GATEWAY_SECRET: 'STUB-NOT-A-REAL-KEY',

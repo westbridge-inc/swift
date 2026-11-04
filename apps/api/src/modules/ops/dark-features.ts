@@ -382,7 +382,7 @@ export const DARK_FEATURES: DarkFeature[] = [
     enabledWhen: '1',
     title: 'Advertising (advertiser accounts, campaigns, sponsored placements)',
     whileOff:
-      'Advertising is closed: no sponsored placement is shown to anyone, and the advertiser routes refuse every request. This is the launch lock (owner ruling, 13 Oct 2026): production refuses to start with it on until an attorney signs off.',
+      'Advertising is closed: no sponsored placement is shown to anyone, and the advertiser routes refuse every request. It stays off through soft launch. Only the owner switches it on, with or after ordering day, once he has confirmed ads are lawful and the App Store and Play answers say the app shows ads (owner ruling, 3 Nov 2026).',
     impact: 'growth',
   },
   {

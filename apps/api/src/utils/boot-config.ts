@@ -92,29 +92,36 @@ export function assertNoLiveCardsOffProduction(env: Record<string, string | unde
 
 /**
  * [LAUNCH-LOCK · owner ruling 13 Oct, #34] Until an attorney signs off,
- * production takes no card payment and runs no ads (GUARDRAILS §8). Both are
- * already off by default; this makes "off" a refusal to boot rather than a
- * setting someone can flip: turning either on in production is a reviewed
- * change to this function (and to pilot-up.sh's matching refusal), never a
- * deploy/.env edit.
+ * production takes no card payment (GUARDRAILS §8). Cards are already off by
+ * default; this makes "off" a refusal to boot rather than a setting someone
+ * can flip: turning them on in production is a reviewed change to this
+ * function (and to pilot-up.sh's matching refusal), never a deploy/.env edit.
  *   Cards: no card instruction (PAYMENT_PROVIDER exactly disabled; the
  *   card-rail contract, checked earlier, then also requires CARD_RAIL_KILL=1),
  *   and none of card rail v2's switches (CARD_RAIL_V2, its drain, saving
  *   cards) set to anything but 0. With v2 off the weekly fee never offers a
  *   CARD pay action.
- *   Ads: ADS_ENABLED unset or 0 (only exactly 1 opens the ads routes).
+ *   Ads [ADS-ON · owner ruling 3 Nov]: this boot refusal is lifted; ads are
+ *   not on. They stay off through soft launch, and only the owner sets
+ *   ADS_ENABLED=1, with or after ordering day, once he has confirmed them
+ *   lawful (GUARDRAILS §8 stands until then) and the store answers say the app
+ *   shows ads. Only exactly 1 opens the ads routes, so anything but unset, 0
+ *   or 1 is a typo that would read as off, and still refuses.
  * Called only in production. Each refusal names its setting, never a value.
  */
 function assertProductionLaunchLocks(env: Record<string, string | undefined>): void {
   if (env['PAYMENT_PROVIDER'] !== 'disabled') {
     throw new Error('FATAL: PAYMENT_PROVIDER must be exactly disabled in production — no card payment until an attorney signs off (owner ruling, 13 Oct); turning cards on is a reviewed code change, not a setting. Refusing to start.');
   }
-  for (const name of ['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'] as const) {
+  for (const name of ['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL'] as const) {
     const value = env[name];
     if (value !== undefined && value !== '' && value !== '0') {
-      const what = name === 'ADS_ENABLED' ? 'ads stay off' : 'no card payment';
-      throw new Error(`FATAL: ${name} must be unset or 0 in production — ${what} until an attorney signs off (owner ruling, 13 Oct); turning it on is a reviewed code change, not a setting. Refusing to start.`);
+      throw new Error(`FATAL: ${name} must be unset or 0 in production — no card payment until an attorney signs off (owner ruling, 13 Oct); turning it on is a reviewed code change, not a setting. Refusing to start.`);
     }
+  }
+  const ads = env['ADS_ENABLED'];
+  if (ads !== undefined && ads !== '' && ads !== '0' && ads !== '1') {
+    throw new Error('FATAL: ADS_ENABLED must be unset, 0 or exactly 1 in production — only exactly 1 opens the ads routes, so a near miss is refused rather than read as off. Refusing to start.');
   }
 }
 

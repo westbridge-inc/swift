@@ -380,9 +380,10 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
   });
 
   // [LAUNCH-LOCK] Owner ruling, 13 Oct: until an attorney signs off,
-  // production takes no card payment and runs no ads. The API's boot guard
-  // refuses the same settings (boot-config.test.ts); turning either on is a
-  // reviewed code change in both places, never an .env edit.
+  // production takes no card payment. The API's boot guard refuses the same
+  // settings (boot-config.test.ts); turning cards on is a reviewed code change
+  // in both places, never an .env edit. [ADS-ON · owner ruling, 3 Nov] The ads
+  // half is lifted: ADS_ENABLED is the owner's switch, and a near miss refuses.
   const everyMode = [[SHA], ['--data-only', SHA], ['--no-public', SHA]];
   const modeEnv = (args: string[]): Record<string, string> => (args.length > 1 ? { DNS_MAP: '' } : {});
   it('production refuses any card provider but disabled, and no kill switch, in every mode, before anything changes', () => {
@@ -407,7 +408,7 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     }
   });
 
-  it.each(['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'])('production refuses %s unless it is unset or 0, in every mode, before anything changes', (name) => {
+  it.each(['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL'])('production refuses %s unless it is unset or 0, in every mode, before anything changes', (name) => {
     for (const args of everyMode) {
       for (const value of ['1', 'true', 'on']) {
         writeFileSync(log, '');
@@ -421,6 +422,43 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
       writeFileSync(log, '');
       const r = runPilot({ ...PRODUCTION, [name]: off });
       expect(r.status, `${name}=${JSON.stringify(off)}: ${r.stderr}`).toBe(0);
+    }
+  });
+
+  it('production deploys with ADS_ENABLED unset, 0 or exactly 1 in every mode: the owner\'s switch, not a lock', () => {
+    const running: Array<{ args: string[]; env: Record<string, string> }> = [
+      { args: [SHA], env: {} },
+      { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1' } },
+      { args: ['--no-public', SHA], env: { DNS_MAP: '', CADDY_STOPPED: '1' } },
+    ];
+    for (const { args, env } of running) {
+      for (const value of ['', '0', '1']) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, ADS_ENABLED: value }, { args, env });
+        expect(r.status, `${args.join(' ')} ADS_ENABLED=${JSON.stringify(value)}: ${r.stderr}`).toBe(0);
+      }
+    }
+  });
+
+  it('production refuses a near miss of ADS_ENABLED, in every mode, before anything changes', () => {
+    for (const args of everyMode) {
+      for (const value of ['true', 'on', 'yes', '01', '2']) {
+        writeFileSync(log, '');
+        const r = runPilot({ ...PRODUCTION, ADS_ENABLED: value }, { args, env: modeEnv(args) });
+        expect(r.status, `${args.join(' ')} ADS_ENABLED=${value}`).not.toBe(0);
+        expect(r.stderr).toContain('PILOT_ENV=production needs ADS_ENABLED unset, 0 or exactly 1');
+        expect(changedNothing(r.calls)).toEqual([]);
+      }
+    }
+  });
+
+  it('the card lock stands with ads on: a card switch beside ADS_ENABLED=1 still refuses', () => {
+    for (const name of ['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL']) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, ADS_ENABLED: '1', [name]: '1' });
+      expect(r.status, name).not.toBe(0);
+      expect(r.stderr).toContain(`PILOT_ENV=production refuses ${name} unless it is unset or 0: no card payment until an attorney signs off`);
+      expect(changedNothing(r.calls)).toEqual([]);
     }
   });
 

@@ -1,4 +1,6 @@
 import Fastify, { type FastifyInstance, type HTTPMethods, type InjectOptions } from 'fastify';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { publicRoutes } from '../modules/public/public.routes';
@@ -66,5 +68,21 @@ describe('launch advertising switch', () => {
       expect(response.json()).toEqual({ success: true, data: { adsEnabled: enabled } });
       expect((await app.inject('/api/v1/ads/placements')).statusCode).toBe(enabled ? 200 : 403);
     }
+  });
+});
+
+// [ADS-ON · owner ruling, 3 Nov] Production no longer refuses to boot with ads on. That lifts a refusal; it
+// switches nothing on: the setting stays absent from every file a deploy reads, so ads stay off through soft
+// launch, until the owner sets ADS_ENABLED=1 by hand, with or after ordering day.
+describe('lifting the production lock turns nothing on', () => {
+  const repo = resolve(__dirname, '../../../..');
+  it.each([
+    'deploy/.env.deploy.example',
+    'apps/api/.env.example',
+    'deploy/docker-compose.yml',
+    'deploy/docker-compose.wall.yml',
+  ])('%s sets no live ADS_ENABLED', (file) => {
+    const live = readFileSync(resolve(repo, file), 'utf8').split('\n').filter((line) => /^\s*(-\s*)?ADS_ENABLED\s*[=:]/.test(line));
+    expect(live).toEqual([]);
   });
 });
