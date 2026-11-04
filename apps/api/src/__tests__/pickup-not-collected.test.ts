@@ -14,7 +14,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { liveWorkWhere } from '../modules/user/account.service';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { OrderService } from '../modules/order/order.service';
 import {
   NOT_COLLECTED_CASE_SUBJECT, NOT_COLLECTED_REASON, openNotCollectedCase,
@@ -48,7 +48,7 @@ async function actor(roles: UserRole[], active: UserRole): Promise<Actor> {
 async function store(owner: Actor): Promise<string> {
   const row = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
   const vendor = await app.prisma.vendor.create({ data: {
-    ownerId: row.id, name: `Corner Shop ${nanoid(4)}`, slug: `pickup-${nanoid(10).toLowerCase()}`, vendorType: 'RESTAURANT', phone: testPhone(),
+    ownerId: row.id, name: `Corner Shop ${wordFreeTag(4)}`, slug: `pickup-${nanoid(10).toLowerCase()}`, vendorType: 'RESTAURANT', phone: testPhone(),
     addressLine1: '1 Pickup Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.801, longitude: -58.156,
     status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
   } });

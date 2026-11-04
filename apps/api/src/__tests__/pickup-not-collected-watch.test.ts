@@ -9,7 +9,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { PICKUP_UNCOLLECTED_KEY, PICKUP_UNCOLLECTED_TITLE } from '../modules/order/pickup-not-collected';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 const state = vi.hoisted(() => ({ workers: new Map<string, (job: unknown) => Promise<unknown>>() }));
 vi.mock('bullmq', () => ({
@@ -75,7 +75,7 @@ beforeAll(async () => {
   vendorId = await sys(async () => {
     const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUserId } });
     const vendor = await app.prisma.vendor.create({ data: {
-      ownerId: owner.id, name: `Sweep Shop ${nanoid(4)}`, slug: `pickup-watch-${nanoid(10).toLowerCase()}`, vendorType: 'RESTAURANT', phone: testPhone(),
+      ownerId: owner.id, name: `Sweep Shop ${wordFreeTag(4)}`, slug: `pickup-watch-${nanoid(10).toLowerCase()}`, vendorType: 'RESTAURANT', phone: testPhone(),
       addressLine1: '2 Pickup Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.801, longitude: -58.156,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     } });
