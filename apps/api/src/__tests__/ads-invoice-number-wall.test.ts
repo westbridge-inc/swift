@@ -31,6 +31,9 @@ let logins: Awaited<ReturnType<typeof createTenantProbeLogins>> | undefined;
 let app: FastifyInstance;
 let prismaModule: typeof import('../plugins/prisma') | null = null;
 const payers: Array<{ userId: string; advertiserId: string; campaignId: string; token: string }> = [];
+// Far past anything the sequence reaches: a number worked out from what the second operator can see lands on the first's.
+const SEEN = 900_000_000 + Math.floor(Math.random() * 90_000_000);
+const numberOf = (seq: number) => `ADS-${new Date().getUTCFullYear()}-${seq}`;
 
 async function payerIn(tenantId: string) {
   const tag = nanoid(8);
@@ -48,6 +51,9 @@ beforeAll(async () => {
   logins = await createTenantProbeLogins(owner, TEST_URL);
   await owner.tenant.create({ data: { id: OTHER_OPERATOR, name: 'Ad number operator', slug: OTHER_OPERATOR, isActive: true } });
   const people = [await payerIn(DEFAULT_OPERATOR), await payerIn(OTHER_OPERATOR)];
+  const voidInvoice = (person: (typeof people)[number], tenantId: string, seq: number) => owner.adInvoice.create({ data: { tenantId, advertiserId: person.advertiserId, campaignId: person.campaignId, number: numberOf(seq), amount: 1000, status: 'VOID' } });
+  await voidInvoice(people[1]!, OTHER_OPERATOR, SEEN);
+  await voidInvoice(people[0]!, DEFAULT_OPERATOR, SEEN + 1);
 
   // The app's OWN client on the walled login, and the contract's settings, BEFORE the app's modules load their client.
   process.env['DATABASE_URL'] = logins.requestUrl;
@@ -88,6 +94,7 @@ afterAll(async () => {
     if (priorEnv[k] === undefined) delete process.env[k]; else process.env[k] = priorEnv[k];
   }
   await logins?.cleanup();
+  await owner.adInvoice.deleteMany({ where: { number: { in: [numberOf(SEEN), numberOf(SEEN + 1)] } } });
   await owner.$disconnect();
 });
 
@@ -103,7 +110,8 @@ describe('an ad invoice number under the tenant wall', () => {
     expect(second.statusCode, second.body).toBe(200);
     const numbers = [first.json().data.number as string, second.json().data.number as string];
     expect(new Set(numbers).size).toBe(2);
-    expect(await owner.adInvoice.findMany({ where: { campaignId: { in: payers.map((p) => p.campaignId) } }, select: { tenantId: true }, orderBy: { tenantId: 'asc' } }))
-      .toEqual([DEFAULT_OPERATOR, OTHER_OPERATOR].sort().map((tenantId) => ({ tenantId })));
+    expect(numbers).not.toContain(numberOf(SEEN + 1));
+    const issued = await owner.adInvoice.findMany({ where: { campaignId: { in: payers.map((p) => p.campaignId) }, status: 'UNPAID' }, select: { tenantId: true, number: true } });
+    expect(new Map(issued.map((i) => [i.tenantId, i.number]))).toEqual(new Map([[DEFAULT_OPERATOR, numbers[0]], [OTHER_OPERATOR, numbers[1]]]));
   });
 });

@@ -557,9 +557,7 @@ const WATCHED_FIELDS = { id: true, tenantId: true, adInvoiceId: true, merchantTr
 /** One pass, from the checkout poll (as the system). Returns how many
  *  automatically closed checkouts were read and how many were held. */
 export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps, now: Date): Promise<{ read: number; held: number }> {
-  const out = { read: 0, held: 0 };
-  if (!deps.zone) return out;
-  const zone = deps.zone;
+  if (!deps.zone) return { read: 0, held: 0 };
   const endedIds = await endedWatches(db);
   // No age limit: every automatic close stays watched until it ends (oldest first).
   // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] A pay-all checkout closed this way is watched too, once (its branches hold through parts).
@@ -579,7 +577,7 @@ export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps
     const closedAt = row.resolvedAt!.getTime();
     return [{ checkout, closedAt, readFrom: closedAt - NO_REPLY_SETTLE_MARGIN_MS }];
   });
-  return watchEach(db, deps, zone, closed, now);
+  return watchEach(db, deps, closed, now);
 }
 
 /** Checkouts whose watch reached a terminal record: never read again. */
@@ -596,10 +594,10 @@ async function endedWatches(db: PrismaClient): Promise<string[]> {
  * [ADS-ON · REVIEW-G9 #2325] An ad checkout closed as not paid gets the same week, on the checkout itself: it has no
  * hold to be found through. Its own pass and its own read budget, so no number of ad closes can delay a fee's watch.
  * It reads from the page's opening, not from the close: the close's read may have run before MMG's records showed
- * the payment. The close's moment is the read that decided it.
+ * the payment. The close's moment is the read that decided it. With no time zone to read MMG by, every read counts as
+ * failed: the checkout blocks new pages, so its week must still end in front of a person.
  */
 export async function watchAutoClosedAdCheckouts(db: PrismaClient, deps: WatchDeps, now: Date): Promise<{ read: number; held: number }> {
-  if (!deps.zone) return { read: 0, held: 0 };
   const endedIds = await endedWatches(db);
   const rows = await db.mmgCheckoutIntent.findMany({
     where: { adInvoiceId: { not: null }, status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON, ...(endedIds.length ? { id: { notIn: endedIds } } : {}) },
@@ -615,7 +613,7 @@ export async function watchAutoClosedAdCheckouts(db: PrismaClient, deps: WatchDe
     _max: { createdAt: true },
   });
   const closedAt = new Map(closes.map((o) => [o.intentId, o._max.createdAt]));
-  return watchEach(db, deps, deps.zone, rows.map((c) => ({ checkout: c, closedAt: (closedAt.get(c.id) ?? c.updatedAt).getTime(), readFrom: c.createdAt.getTime() })), now);
+  return watchEach(db, deps, rows.map((c) => ({ checkout: c, closedAt: (closedAt.get(c.id) ?? c.updatedAt).getTime(), readFrom: c.createdAt.getTime() })), now);
 }
 
 /**
@@ -638,7 +636,7 @@ export async function adWatchesUnfinished(db: Pick<Prisma.TransactionClient, 'mm
 
 /** The next read of each automatic close that is due, oldest close first, at most CHECK_BATCH a pass. */
 async function watchEach(
-  db: PrismaClient, deps: WatchDeps, zone: MmgCreationZone,
+  db: PrismaClient, deps: WatchDeps,
   closed: ReadonlyArray<{ checkout: Watched; closedAt: number; readFrom: number }>, now: Date,
 ): Promise<{ read: number; held: number }> {
   const out = { read: 0, held: 0 };
@@ -660,7 +658,7 @@ async function watchEach(
     if (due > now.getTime()) continue;
     reads += 1;
     try {
-      if (await watchOne(db, deps, zone, c, { covered, end: closedAt + AUTO_CLOSE_WATCH_MS, lastDecision }, now)) out.held += 1;
+      if (await watchOne(db, deps, c, { covered, end: closedAt + AUTO_CLOSE_WATCH_MS, lastDecision }, now)) out.held += 1;
       out.read += 1;
     } catch (err) {
       log().error({ err, checkoutId: c.id }, '[MMG checkout] the watch after an automatic close failed; it is read again later');
@@ -680,7 +678,7 @@ function namedRecord(row: Record<string, unknown>, c: Watched, paidStatuses: rea
 }
 
 async function watchOne(
-  db: PrismaClient, deps: WatchDeps, zone: MmgCreationZone, c: Watched,
+  db: PrismaClient, deps: WatchDeps, c: Watched,
   state: { covered: number; end: number; lastDecision: WatchDecision | null }, now: Date,
 ): Promise<boolean> {
   const ours = c.merchantTransactionId;
@@ -691,8 +689,9 @@ async function watchOne(
   let records: ReturnType<typeof namedRecord>[] = [];
   let i = 0;
   for (; i < WATCH_SLICES_PER_CHECK && covered < limit; i += 1) {
+    if (!deps.zone) { decision = 'WATCH_READ_FAILED'; break; }
     const to = Math.min(covered + WATCH_SLICE_MS, limit);
-    const query: MmgHistoryQuery = { fromdate: mmgStampOf(covered - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(to, zone, 'ceil'), rows: MMG_HISTORY_ROWS };
+    const query: MmgHistoryQuery = { fromdate: mmgStampOf(covered - WATCH_OVERLAP_MS, deps.zone), todate: mmgStampOf(to, deps.zone, 'ceil'), rows: MMG_HISTORY_ROWS };
     const answer = await deps.lookup.transactionHistoryRows(query);
     mmgCheckoutLookupsCounter.labels(`history_${answer.outcome}`).inc();
     if (answer.outcome !== 'rows') {

@@ -383,6 +383,15 @@ describe('opening the page', () => {
     }
   });
 
+  it('an open page is never handed out for an invoice that was voided, even with its campaign still waiting to pay', async () => {
+    const f = await invoiced();
+    const tap = key();
+    expect((await start(f.invoice.id, f.owner.token, tap)).statusCode).toBe(201);
+    await raw.adInvoice.update({ where: { id: f.invoice.id }, data: { status: 'VOID' } });
+    expect((await campaignOf(f.campaign.id)).status).toBe('PENDING_PAYMENT');
+    expect((await start(f.invoice.id, f.owner.token, tap)).json().error.code).toBe('INVOICE_NOT_PAYABLE');
+  });
+
   it('an open page is never handed out while another payment on the campaign is with a person', async () => {
     const f = await invoiced();
     const first = await open(f);
@@ -939,6 +948,23 @@ describe('A8: the week after an automatic close', () => {
     const reads = history.queries.length;
     await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + 3 * DAY));
     expect(history.queries.length).toBe(reads);
+  });
+
+  it('with no time zone to read MMG by, the week is one failed read after another: it stays blocked, and ends in front of a person', async () => {
+    const f = await closed();
+    const reads = history.queries.length;
+    const keys = { request: generatedPair, result: generatedPair };
+    checkoutProvider = () => new SandboxMmgCheckoutProvider(keys, null);
+    try {
+      await service.pollIntents(later(f.closedAt, DAY));
+      expect(await decisionsOf(f.page.ref)).toEqual(['WATCH_READ_FAILED']);
+      await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + DAY + HOUR));
+    } finally {
+      checkoutProvider = () => sandbox;
+    }
+    expect((await decisionsOf(f.page.ref)).at(-1)).toBe('WATCH_ENDED_INCOMPLETE');
+    expect(history.queries.length).toBe(reads);
+    await refused(f);
   });
 
   it('a close with no record of the read behind it is watched all the same', async () => {
