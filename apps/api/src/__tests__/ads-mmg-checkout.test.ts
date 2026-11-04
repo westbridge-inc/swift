@@ -130,7 +130,7 @@ const paidBy = (row: { id: string }) => app.prisma.providerPayment.count({ where
 const campaignsOf = async (f: { advertiser: { id: string }; campaign: { id: string }; owner: { token: string } }) => {
   const res = await app.inject({ method: 'GET', url: `/api/v1/ads/advertiser/${f.advertiser.id}/campaigns`, headers: { authorization: `Bearer ${f.owner.token}` } });
   expect(res.statusCode, res.body).toBe(200);
-  return (res.json().data as Array<{ id: string; invoices: Array<{ id: string; payable: boolean }> }>).find((c) => c.id === f.campaign.id)!;
+  return (res.json().data as Array<{ id: string; invoices: Array<{ id: string; payable: boolean; paymentConfirming: boolean }> }>).find((c) => c.id === f.campaign.id)!;
 };
 
 async function buildApp(): Promise<FastifyInstance> {
@@ -396,7 +396,7 @@ describe('opening the page', () => {
       expect(res.json().error.code).toBe('PAYMENT_CONFIRMING');
       expect(res.body).not.toContain('checkoutUrl');
     }
-    expect((await campaignsOf(f)).invoices.find((i) => i.id === f.invoice.id)?.payable).toBe(false);
+    expect((await campaignsOf(f)).invoices.find((i) => i.id === f.invoice.id)).toMatchObject({ payable: false, paymentConfirming: true });
   });
 
   it('an open page is never handed out for a campaign an admin stopped', async () => {
@@ -890,6 +890,7 @@ describe('A8: the week after an automatic close', () => {
   it('a second page waits out the week, opens once the week has read clean, and the page is not read again', async () => {
     const f = await closed();
     await refused(f);
+    expect((await campaignsOf(f)).invoices[0]).toMatchObject({ payable: false, paymentConfirming: true });
     for (let t = AUTO_CLOSE_WATCH_FIRST_MS; t < AUTO_CLOSE_WATCH_MS; t += AUTO_CLOSE_WATCH_EVERY_MS) {
       await service.pollIntents(later(f.closedAt, t));
       expect((await decisionsOf(f.page.ref)).at(-1)).toBe('WATCH_CLEAR');
@@ -901,6 +902,7 @@ describe('A8: the week after an automatic close', () => {
     await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + 2 * DAY));
     expect(history.queries.length).toBe(reads);
     expect((await intentOf(f.page.ref)).status).toBe('NOT_PAID');
+    expect((await campaignsOf(f)).invoices[0]).toMatchObject({ payable: true, paymentConfirming: false });
     expect((await open(f)).ref).not.toBe(f.page.ref);
   });
 

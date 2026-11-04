@@ -8,7 +8,7 @@ export interface Campaign {
   id: string; name: string; status: string; statusReason: string | null;
   placement: { name: string; key: string; tier: string; mediaKind: string };
   cities: string[]; startWeek: string; endWeek: string; totalAmount: number | null; currency: string;
-  invoices: { id: string; number: string; status: string; amount: number; payable?: boolean }[];
+  invoices: { id: string; number: string; status: string; amount: number; payable?: boolean; paymentConfirming?: boolean }[];
   creatives: { id: string; status: string; transcodeStatus: string | null }[];
   bookings: { weekStart: string; city: string; status: string }[];
 }

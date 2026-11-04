@@ -42,6 +42,13 @@ describe('paying an ad invoice', () => {
     expect(screen.queryByRole('button', { name: 'Pay with MMG' })).toBeNull();
   });
 
+  it('an invoice waiting on an earlier payment offers nothing, and says why', async () => {
+    api({ payable: false, paymentConfirming: true });
+    renderWithQuery(<CampaignRead advertiserId="a1" campaignId="c1" />);
+    expect(await screen.findByText('An earlier payment is being confirmed. Do not pay again.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Pay with MMG' })).toBeNull();
+  });
+
   it('a retry of the same tap carries the same key, so it can never open a second page', async () => {
     let n = 0;
     const fetchMock = api({}, () => { n += 1; return n === 1 ? { status: 503, body: { success: false, error: { code: 'MMG_CHECKOUT_UNAVAILABLE', message: 'x' } } } : { status: 200, body: { success: true, data: page } }; });

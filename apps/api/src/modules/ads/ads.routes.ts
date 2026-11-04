@@ -353,11 +353,13 @@ export async function adsRoutes(app: FastifyInstance) {
     // [ADS-ON] The same answer a tap gets: an open page of the invoice's own can be handed back, any other unresolved
     // payment on the campaign stops it.
     const payable = new Set<string>();
+    const confirming = new Set<string>();
     if (canPay) {
       for (const c of campaigns) {
         if (c.status !== 'PENDING_PAYMENT') continue;
         for (const i of c.invoices) {
-          if (i.status === 'UNPAID' && await unresolvedAdPayments(app.prisma, c.id, i.mmgCheckouts[0]?.id) === 0) payable.add(i.id);
+          if (i.status !== 'UNPAID') continue;
+          (await unresolvedAdPayments(app.prisma, c.id, i.mmgCheckouts[0]?.id) === 0 ? payable : confirming).add(i.id);
         }
       }
     }
@@ -368,7 +370,7 @@ export async function adsRoutes(app: FastifyInstance) {
         placement: { key: c.placement.key, name: c.placement.name, tier: c.placement.tier, mediaKind: c.placement.mediaKind },
         cities: c.cities, startWeek: c.startWeek, endWeek: c.endWeek,
         totalAmount: c.totalAmount ? Number(c.totalAmount) : null, currency: c.currency,
-        invoices: c.invoices.map((i) => ({ id: i.id, number: i.number, status: i.status, amount: Number(i.amount), paymentUrl: i.paymentUrl, payable: payable.has(i.id) })),
+        invoices: c.invoices.map((i) => ({ id: i.id, number: i.number, status: i.status, amount: Number(i.amount), paymentUrl: i.paymentUrl, payable: payable.has(i.id), paymentConfirming: confirming.has(i.id) })),
         creatives: c.creatives,
         bookings: c.bookings,
         createdAt: c.createdAt,
