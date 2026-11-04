@@ -15,6 +15,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
 import { isCalendarDayExpiry, setExpiryStillCountsOr } from './document-validity';
+import { NOT_RETIRED_DOC } from './doc-state';
 
 export const RENEWAL_NOTICE_DAYS: readonly number[] = [30, 14, 7, 1];
 const DAY_MS = 86_400_000;
@@ -70,7 +71,8 @@ export interface DueNotice { scheduleId: string; documentId: string; subjectId: 
 export async function dueRenewalNotices(prisma: PrismaClient, now = new Date()): Promise<DueNotice[]> {
   const rows = await prisma.renewalSchedule.findMany({
     // [FOLLOWUPS ruling] a document counts through the end of its expiry day in Guyana (document-validity.ts)
-    where: { suspendedAt: null, OR: setExpiryStillCountsOr('expiresOn', now), document: { status: 'APPROVED' } },
+    // [FIXES-4] and never about a copy already renewed: its status still reads APPROVED (doc-state.ts)
+    where: { suspendedAt: null, OR: setExpiryStillCountsOr('expiresOn', now), document: { status: 'APPROVED', ...NOT_RETIRED_DOC } },
     select: { id: true, documentId: true, subjectId: true, expiresOn: true, notifyAt: true, lastNotified: true },
   });
   const due: DueNotice[] = [];

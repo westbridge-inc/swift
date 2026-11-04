@@ -97,6 +97,17 @@ export const LEGACY_STATUS_OF: Record<DocState, VerificationDocumentStatus | nul
   PURGED: null, SUPERSEDED: null, LEGAL_HOLD: null,
 };
 
+/**
+ * [FIXES-4] The states the machine leaves the legacy status alone for: a copy a renewal replaced,
+ * or one a purge emptied, still reads APPROVED or PENDING. A status alone never says such a row
+ * is current, so a sweep or a reminder that selects by status names this too. (LEGAL_HOLD is in
+ * the table with them, but it is an overlay, never a stored state.)
+ */
+export const RETIRED_DOC_STATES: readonly DocState[] = DOC_STATES.filter((s) => LEGACY_STATUS_OF[s] === null && s !== 'LEGAL_HOLD');
+
+/** Prisma: not a retired copy. A pre-trigger null state is not retired, and `notIn` alone would drop it. */
+export const NOT_RETIRED_DOC = { OR: [{ state: null }, { state: { notIn: [...RETIRED_DOC_STATES] } }] } satisfies Prisma.VerificationDocumentWhereInput;
+
 /** The state a legacy row (status only) is in — the migration backfill and the INSERT trigger use this. */
 export function legacyToState(status: VerificationDocumentStatus, purgedAt: Date | null): DocState {
   if (purgedAt) return 'PURGED';

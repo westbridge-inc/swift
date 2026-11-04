@@ -147,7 +147,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // [R19] a child-safety (CSAE) report: an ops page, as loud as an SOS page
     'csae_report',
     'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_riders_short', 'ops_food_too_old', 'ops_rider_no_show', 'ops_rider_waiting', 'ops_rider_waiting_long',
-    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
+    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_error_sustained', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_malware_scan_bypass', 'ops_evidence_unscanned', 'ops_evidence_held', 'ops_upload_quarantined', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     // [PLACES-LOUD] address search (Google) failing: customers cannot search a place
@@ -164,7 +164,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'liveness_outage', 'liveness_review', 'compliance_violation', 'verification_pending',
     'verification_sla_breach', 'verification_legal_hold_overdue', 'audit_chain_broken',
     'audit_chain_anchor', 'integrity_appeal', 'dup_doc', 'vendor_pending', 'advertiser_application',
-    'ad_review_sla_risk', 'ad_campaign_killed_ops', 'ad_refund_payout_task', 'ad_campaign_paid',
+    'ad_review_sla_risk', 'ad_campaign_killed_ops', 'ad_house_link_off', 'ad_refund_payout_task', 'ad_campaign_paid',
   ],
 };
 

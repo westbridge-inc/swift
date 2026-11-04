@@ -15,7 +15,9 @@ import { socketPlugin } from '../plugins/socket';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
-import { EXPIRABLE_DOC_STATES } from '../modules/verification/expiry-sweep-report';
+import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from '../modules/verification/expiry-sweep-report';
+import { DOC_STATES, LEGACY_STATUS_OF, RETIRED_DOC_STATES } from '../modules/verification/doc-state';
+import { dueRenewalNotices } from '../modules/verification/renewal-schedule';
 
 // The provider heal is a module function: a switchable failure, the real heal otherwise.
 const heal = vi.hoisted(() => ({ fail: false }));
@@ -208,6 +210,103 @@ describe('[Row 209] the daily expiry sweep isolates every row', () => {
     const mine = (await sweepNotices(since));
     // Other suites' leftover rows may be held in a shared DB; a clean run of OUR rows adds no failure kinds.
     for (const n of mine) expect(n.body).not.toMatch(/expiry_failed|effects_failed|vendor_reconcile|provider_reconcile/);
+  });
+
+  // [FIXES-4] The sweep selected by the legacy status, and the machine leaves that status alone on a
+  // copy a renewal replaced or a purge emptied: such a row can never expire, nobody can act on it,
+  // and it told the admins so every day, one more with every renewal.
+  describe('[FIXES-4] a retired copy is not a lapsed document', () => {
+    const FAR = () => new Date(Date.now() + 200 * 86_400_000);
+    const insert = (userId: string, expiresAt: Date) => app.prisma.verificationDocument.create({
+      data: { userId, role: 'MOVER', docType: 'gei_electrical_licence', fileUrl: `test/${marker}/${nanoid(5)}`, status: 'APPROVED', expiresAt } as never,
+    });
+    /** A renewal through the database's own mechanism: a newer commit supersedes the older one. */
+    async function renewed(oldExpiry: Date, newExpiry: Date) {
+      const user = await makeUser('MOVER');
+      const old = await insert(user.id, oldExpiry);
+      const current = await insert(user.id, newExpiry);
+      const row = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: old.id } });
+      expect(row).toMatchObject({ state: 'SUPERSEDED', status: 'APPROVED' });
+      return { user, old, current };
+    }
+    const reported = (spy: { mock: { calls: unknown[][] } }, id: string) => spy.mock.calls.filter(([, documentId]) => documentId === id).map(([reason]) => reason);
+
+    it('a renewal\'s old copy, past its expiry, is not held, not reported and not touched', async () => {
+      const add = vi.spyOn(ExpirySweepReport.prototype, 'add');
+      const { old, current } = await renewed(LAPSED(), FAR());
+      await svc.expireLapsedDocuments();
+      expect(reported(add, old.id)).toEqual([]);
+      expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: old.id } })).toMatchObject({ state: 'SUPERSEDED', status: 'APPROVED' });
+      expect(await statusOf(current.id)).toBe('APPROVED');
+    });
+
+    it('a purged copy, past its expiry, is not held or reported either', async () => {
+      const add = vi.spyOn(ExpirySweepReport.prototype, 'add');
+      const user = await makeUser('MOVER');
+      const doc = await lapsedDoc(user.id, 'MOVER');
+      await app.prisma.verificationDocument.update({ where: { id: doc.id }, data: { state: 'PURGED', purgedAt: new Date() } as never });
+      expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).toMatchObject({ state: 'PURGED', status: 'APPROVED' });
+      await svc.expireLapsedDocuments();
+      expect(reported(add, doc.id)).toEqual([]);
+    });
+
+    it('expiry is not weakened: the current copy of a renewal expires when it lapses', async () => {
+      const { user, old } = await renewed(new Date(Date.now() - 120_000), FAR());
+      const current = await insert(user.id, LAPSED());
+      await expect(svc.expireLapsedDocuments()).resolves.toBeGreaterThanOrEqual(1);
+      expect(await statusOf(current.id)).toBe('EXPIRED');
+      expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: old.id } })).state).toBe('SUPERSEDED');
+    });
+
+    it.each(['COMMITTED', 'REVIEW_QUEUED', 'IN_REVIEW', 'INFO_REQUESTED'] as const)('expiry is not weakened: a lapsed %s row still expires', async (state) => {
+      const user = await makeUser('MOVER');
+      const doc = await lapsedDoc(user.id, 'MOVER', state === 'COMMITTED' ? {} : { state, status: 'PENDING' });
+      await expect(svc.expireLapsedDocuments()).resolves.toBeGreaterThanOrEqual(1);
+      expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).toMatchObject({ state: 'EXPIRED', status: 'EXPIRED' });
+    });
+
+    it('a row with no state at all stays in the sweep: it is never silently skipped', async () => {
+      const add = vi.spyOn(ExpirySweepReport.prototype, 'add');
+      const user = await makeUser('MOVER');
+      const doc = await lapsedDoc(user.id, 'MOVER');
+      await app.prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+        await tx.$executeRaw`UPDATE verification_documents SET state = NULL WHERE id = ${doc.id}`;
+      });
+      await svc.expireLapsedDocuments();
+      // the document machine has no edge from no state, so the row is reported for a person, as before
+      expect(reported(add, doc.id)).toEqual(['expiry_failed']);
+    });
+
+    it('a stuck row a person can act on is still reported', async () => {
+      const add = vi.spyOn(ExpirySweepReport.prototype, 'add');
+      const user = await makeUser('MOVER');
+      const stuck = await lapsedDoc(user.id, 'MOVER', { state: 'AUTO_APPROVED' });
+      await svc.expireLapsedDocuments();
+      expect(reported(add, stuck.id)).toEqual(['not_expirable']);
+    });
+
+    it('the retired states are exactly the ones whose legacy status the machine leaves alone, and none can expire', () => {
+      expect([...RETIRED_DOC_STATES].sort()).toEqual(['PURGED', 'SUPERSEDED']);
+      expect([...RETIRED_DOC_STATES].sort()).toEqual(DOC_STATES.filter((s) => LEGACY_STATUS_OF[s] === null && s !== 'LEGAL_HOLD').sort());
+      for (const s of RETIRED_DOC_STATES) expect(EXPIRABLE_DOC_STATES.has(s)).toBe(false);
+    });
+
+    it('a renewal\'s old copy sends no "expires soon" notice; the current copy still does', async () => {
+      const soon = new Date(Date.now() + 5 * 86_400_000);
+      const { old, current } = await renewed(soon, new Date(soon.getTime() + 86_400_000));
+      const due = (await dueRenewalNotices(app.prisma)).map((n) => n.documentId);
+      expect(due).not.toContain(old.id);
+      expect(due).toContain(current.id);
+    });
+
+    it('a revoked document sends no "expires soon" notice either: the status rule still stands beside the new one', async () => {
+      const user = await makeUser('MOVER');
+      const doc = await insert(user.id, new Date(Date.now() + 5 * 86_400_000));
+      await app.prisma.verificationDocument.update({ where: { id: doc.id }, data: { state: 'REVOKED' } as never });
+      expect(await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).toMatchObject({ state: 'REVOKED', status: 'REJECTED' });
+      expect((await dueRenewalNotices(app.prisma)).map((n) => n.documentId)).not.toContain(doc.id);
+    });
   });
 
   it('the expirable states are exactly the document machine\'s', () => {

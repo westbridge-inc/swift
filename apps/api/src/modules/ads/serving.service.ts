@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { mondayOf } from './ads-weeks';
 import { signImpressionToken, userHash } from './ads-token';
+import { adLinkServable } from './ad-link-policy';
 
 // Ad serving (ads-platform spec §11). One batched endpoint builds the home
 // screen's ad slots. The cardinal rule: ADS NEVER BREAK THE HOME SCREEN — empty
@@ -98,7 +99,7 @@ export class AdServingService {
       const cacheKey = `${input.tenantId}:${key}:${input.city}:${week.toISOString().slice(0, 10)}`;
       let pool = AdServingService.poolCache.get(cacheKey, now.getTime());
       if (!pool) {
-        pool = await this.loadPool(placement.id, input.city, week);
+        pool = await this.loadPool(input.tenantId, placement.id, input.city, week);
         AdServingService.poolCache.set(cacheKey, pool, POOL_TTL_MS, now.getTime());
       }
 
@@ -133,7 +134,7 @@ export class AdServingService {
 
   /** loadPool (§11.2): CONFIRMED bookings for (city OR "*") this week ∩ campaign
    *  LIVE ∩ latest APPROVED+READY creative → one entry per booked slot. */
-  private async loadPool(placementId: string, city: string, week: Date): Promise<ServeItem[]> {
+  private async loadPool(tenantId: string, placementId: string, city: string, week: Date): Promise<ServeItem[]> {
     const bookings = await this.prisma.adBooking.findMany({
       where: {
         placementId, weekStart: week, status: 'CONFIRMED',
@@ -144,17 +145,19 @@ export class AdServingService {
       include: {
         campaign: {
           select: {
-            id: true, destinationType: true, destinationValue: true,
+            id: true, destinationType: true, destinationValue: true, destinationApprovedAt: true,
             advertiser: { select: { companyName: true } },
             creatives: { where: { status: 'APPROVED', transcodeStatus: 'READY' }, orderBy: { createdAt: 'desc' }, take: 1 },
           },
         },
       },
     });
+    const approvedHosts = await this.approvedLinkHosts(tenantId);
     const items: ServeItem[] = [];
     for (const b of bookings) {
       const creative = b.campaign.creatives[0];
       if (!creative) continue; // no approved creative → can't serve this booking
+      if (!adLinkServable(b.campaign, approvedHosts)) continue; // [ADS-ON] no approved link → can't serve this booking
       items.push({
         campaignId: b.campaign.id,
         creativeId: creative.id,
@@ -170,9 +173,16 @@ export class AdServingService {
     return items;
   }
 
+  /** [ADS-ON] The outside websites on the allow-list, as of this pool. */
+  private async approvedLinkHosts(tenantId: string): Promise<Set<string>> {
+    const rows = await this.prisma.adLinkDomain.findMany({ where: { tenantId, status: 'APPROVED' }, select: { host: true } });
+    return new Set(rows.map((r) => r.host));
+  }
+
   private async loadHouseAds(tenantId: string, placementId: string): Promise<ServeItem[]> {
     const rows = await this.prisma.houseAd.findMany({ where: { tenantId, placementId, active: true }, orderBy: { sort: 'asc' } });
-    return rows.map((h) => ({
+    const approvedHosts = await this.approvedLinkHosts(tenantId);
+    return rows.filter((h) => adLinkServable(h, approvedHosts)).map((h) => ({
       campaignId: `house:${h.id}`, creativeId: `house:${h.id}`, kind: h.kind,
       mediaUrl: h.fileUrl, posterUrl: h.posterUrl, headline: h.headline,
       advertiserName: 'Swift', ctaLabel: h.ctaLabel,

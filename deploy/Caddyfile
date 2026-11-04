@@ -108,6 +108,33 @@
             header_up -Authorization
         }
     }
+
+    # [FIXES-4] An access log that answers one question: which status went out,
+    # for which host, and when. It lives on the Caddy data volume, so a recreate
+    # keeps it, and Caddy rolls it itself: 10 MiB a file, 5 old files, 30 days.
+    # Nothing that can name a person goes in: no URI (a path can hold a tracking
+    # or sign-in token), no headers, no address, no TLS details, no user. Read it
+    # with: docker compose -f deploy/docker-compose.yml exec caddy tail /data/access-logs/access.log
+    log {
+        output file /data/access-logs/access.log {
+            roll_size 10MiB
+            roll_keep 5
+            roll_keep_for 720h
+        }
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers delete
+                request>remote_ip delete
+                request>remote_port delete
+                request>client_ip delete
+                request>tls delete
+                resp_headers delete
+                user_id delete
+            }
+        }
+    }
     @api host {$API_HOST} {$API_ALIAS_HOST}
     handle @api {
         @metrics path /metrics

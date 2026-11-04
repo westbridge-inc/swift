@@ -1,2 +1,3 @@
 import { AdvertiserCampaigns } from '@/components/advertiser-campaigns';
-export default function Page() { return <AdvertiserCampaigns />; }
+import { AdvertiserInvites } from '@/components/advertiser-invites';
+export default function Page() { return <AdvertiserCampaigns><AdvertiserInvites /></AdvertiserCampaigns>; }

@@ -23,6 +23,15 @@
 # ===========================================================================
 name: swift
 
+# [FIXES-4] A ceiling on the live logs: 250 MB a service. Without it the default
+# log driver grows without limit until the container dies. keep-logs.py copies
+# what is here, scrubbed, before a recreate throws it away.
+x-bounded-logs: &bounded-logs
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgis/postgis:16-3.4
@@ -165,6 +174,7 @@ services:
     networks: [private]
 
   api:
+    logging: *bounded-logs
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
@@ -248,6 +258,7 @@ services:
         condition: service_healthy
 
   worker:
+    logging: *bounded-logs
     image: swift-api:${SWIFT_TAG:-local}
     restart: unless-stopped
     env_file: .env
@@ -327,6 +338,7 @@ services:
     networks: [private, scanner]
 
   caddy:
+    logging: *bounded-logs
     image: caddy:2.10
     restart: unless-stopped
     environment:
@@ -372,6 +384,7 @@ services:
   # needs no migration and waits on no service. Caddy reaches it on the
   # private network; it publishes no port.
   web:
+    logging: *bounded-logs
     profiles: ["web"]
     build:
       context: ..
@@ -444,6 +457,7 @@ services:
   # waits on no service. Caddy reaches it on the private network, behind the
   # optional second gate; it publishes no port.
   admin:
+    logging: *bounded-logs
     profiles: ["admin"]
     build:
       context: ..

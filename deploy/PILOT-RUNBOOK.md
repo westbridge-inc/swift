@@ -1014,6 +1014,23 @@ logs without printing environment values:
     docker compose -f deploy/docker-compose.yml logs --tail=100 migrate api worker caddy
     docker compose -f deploy/docker-compose.routing.yml logs --tail=100 osrm
 
+Logs outlive a recreate in two places, both bounded and both free of anything
+that names a person:
+
+- pilot-up.sh runs `deploy/keep-logs.py` before it recreates anything. It copies
+  the api, worker, caddy, web and admin logs to `~/kept-logs` (the deploy user's
+  own directory, one gzip file per service), scrubbed of phones, emails, tokens,
+  URL queries, addresses and coordinates. Kept 30 days and 500 MB at most. If a
+  scrub or a read fails, nothing is kept for that service and it warns; it never
+  stops a deploy. Anything else that recreates a service should run
+  `python3 deploy/keep-logs.py` first.
+- Caddy's access log says which status went out, for which host, and when, with
+  no URI, address or header. Read it with
+  `docker compose -f deploy/docker-compose.yml exec caddy tail /data/access-logs/access.log`.
+  It stays on Caddy's data volume: 10 MiB a file, 5 old files, 30 days.
+
+    gunzip -c ~/kept-logs/<time>-api.log.gz | grep 'Unhandled error'
+
 After confirming the new schema remains backward-compatible with the
 previous binary, redeploy the previous approved main SHA:
 

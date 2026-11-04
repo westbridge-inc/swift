@@ -726,3 +726,56 @@ describe('[PICKUP] the live status rail: a step is green the moment it is reache
     expect(css).toMatch(/\.stageReached \.stageDot \{\s*border-color: var\(--swift-success\);\s*background: var\(--swift-success\);/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [FIXES-4] A cash order the business took the money for itself said "Cash status
+// awaiting confirmation" for ever: complete-pickup, complete-appointment and the
+// store's own delivered tap write the status only, the store takes the cash, and
+// Swift records nothing, so nothing could ever confirm it. Those orders now say so.
+// Where something does record the cash (a Swift rider's handover, a ride's outcome),
+// and on every captured order, the words stay as they were.
+// ---------------------------------------------------------------------------
+describe('[FIXES-4] cash the business takes itself is never left "awaiting confirmation"', () => {
+  const CASH = { ...ORDER, paymentMethod: 'CASH', paymentStatus: 'PENDING', paymentAction: null };
+  const showing = async (order: Record<string, unknown>) => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, ...order } as never);
+    render(<OrderDetailPage />);
+    await screen.findByText('SW-2001', { exact: false });
+    return document.body.textContent ?? '';
+  };
+
+  it.each([
+    ['a collected pickup', { fulfillment: 'PICKUP', status: 'COMPLETED', pickupAddress: '7 Counter Lane' }, 'The collection is complete.'],
+    ['a pickup marked picked up', { fulfillment: 'PICKUP', status: 'PICKED_UP', pickupAddress: '7 Counter Lane' }, 'The collection is complete.'],
+    ['a finished appointment', { fulfillment: 'APPOINTMENT', status: 'COMPLETED', appointmentSlot: '2026-09-24T13:00:00.000Z' }, 'The appointment is complete.'],
+    ['a store’s own delivery', { fulfillment: 'DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Main St', ownRiderNotice: 'This order is delivered by the store’s own rider, not a Swift rider.' }, 'The handover is complete.'],
+  ])('%s says the business handles it, and promises no confirmation', async (_name, order, first) => {
+    const text = await showing(order);
+    expect(screen.getByText('Cash is handled by the business')).toBeTruthy();
+    expect(text).toContain(`${first} Cash goes to the business directly, so Swift has no record of it. Swift did not hold any order money.`);
+    expect(text).not.toContain('awaiting confirmation');
+    expect(text).not.toContain('does not yet show');
+    expect(text).not.toMatch(/Cash paid|Paid in cash|cash received/i);
+  });
+
+  it.each([
+    ['a Swift rider’s delivery', { fulfillment: 'DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Main St', ownRiderNotice: null }, 'The handover is complete, but this order does not yet show confirmed cash receipt.'],
+    ['a ride', { orderType: 'TAXI', status: 'COMPLETED' }, 'The ride is complete, but this order does not yet show confirmed cash receipt.'],
+  ])('%s keeps its words: there the cash is recorded', async (_name, order, words) => {
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    const text = await showing(order);
+    expect(screen.getByText('Cash status awaiting confirmation')).toBeTruthy();
+    expect(text).toContain(words);
+    expect(screen.queryByText('Cash is handled by the business')).toBeNull();
+  });
+
+  it('a captured pickup still says the business confirmed it; one not yet collected still says what is due', async () => {
+    await showing({ fulfillment: 'PICKUP', status: 'COMPLETED', paymentStatus: 'CAPTURED', pickupAddress: '7 Counter Lane' });
+    expect(screen.getByText('Business confirmed cash received')).toBeTruthy();
+    expect(screen.queryByText('Cash is handled by the business')).toBeNull();
+    document.body.innerHTML = '';
+    await showing({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane' });
+    expect(screen.getByText('Cash due to the business')).toBeTruthy();
+    expect(screen.queryByText('Cash is handled by the business')).toBeNull();
+  });
+});

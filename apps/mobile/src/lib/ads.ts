@@ -265,6 +265,9 @@ try {
 
 export async function openAdDestination(destination: { type: 'NONE' | 'URL' | 'DEEPLINK'; value: string | null }): Promise<void> {
   if (!destination.value || destination.type === 'NONE') return;
+  // [ADS-ON] The server only serves approved links; this is the last word on the phone: a secure web page
+  // or a Swift link, never another app's scheme.
+  if (!(destination.type === 'URL' ? destination.value.startsWith('https://') : destination.value.startsWith('swift://'))) return;
   try {
     if (destination.type === 'URL' && WebBrowser) {
       await WebBrowser.openBrowserAsync(destination.value);

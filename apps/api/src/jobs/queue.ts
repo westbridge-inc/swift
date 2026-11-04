@@ -1473,6 +1473,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (result.refunded || result.overdue) ctx.log.info({ ...result }, 'weekly-fee refund cases swept');
         return;
       }
+      if (job.name === 'error-rate-watch') {
+        // [FIXES-4] Server errors too few a minute for the spike page, read from the hourly tally:
+        // one platform page a day at most (durable OpsAlert path); an errorless stretch closes it.
+        const { watchErrorRate } = await import('../modules/ops/error-rate-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const result = await watchErrorRate({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (result.outcome === 'delivered' || result.outcome === 'pending') ctx.log.warn({ ...result }, 'server errors keep happening');
+        return;
+      }
       if (job.name === 'upload-rescan') {
         // [Row 312 · COORD 21 Oct] Uploads stored unscanned (safety evidence while the scanner was down,
         // or MALWARE_SCAN_BYPASS=1): scanned once clamd answers; a positive or an unscannable one is
@@ -2177,6 +2186,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { AdsCronService } = await import('../modules/ads/cron.service');
         const res = await new AdsCronService(ctx.prisma, ctx.io).tick();
         if (res.autoCancelled + res.activated + res.completed > 0) ctx.log.info(res, 'ads: lifecycle tick');
+        // [ADS-ON] Ad links are re-checked weekly; the tick walks the ones whose week is up.
+        const links = await new AdsCronService(ctx.prisma, ctx.io).recheckLinks().catch((err: unknown) => { ctx.log.error({ err }, 'ads: link re-check failed'); return { checked: 0, stopped: 0 }; });
+        if (links.checked > 0) ctx.log.info(links, 'ads: link re-check');
         // [ads security] advertiser team invitations past their days are deleted (they hold a person's id).
         const { AdvertiserService } = await import('../modules/ads/advertiser.service');
         const expiredInvites = await new AdvertiserService(ctx.prisma, ctx.io).purgeExpiredTeamInvites();
@@ -2999,6 +3011,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // [Row 156] Weekly-fee refund cases: every fifteen minutes, close the proven ones and page the overdue.
   await queues.verificationQueue.add('fee-refund-case-sweep', {}, {
     repeat: { every: 15 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [FIXES-4] Every five minutes: server errors in the last day, too few a minute for the spike page.
+  await queues.verificationQueue.add('error-rate-watch', {}, {
+    repeat: { every: 5 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });

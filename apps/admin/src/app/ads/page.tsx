@@ -5,11 +5,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   approveAdvertiser,
   approveCreative,
+  approveLinkDomain,
   fetchAdvertiserQueue,
   fetchCreativeQueue,
+  fetchLinkDomains,
   reinstateAdvertiser,
   rejectAdvertiser,
   rejectCreative,
+  rejectLinkDomain,
   suspendAdvertiser,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
@@ -36,7 +39,7 @@ import { gyDate } from '@/lib/dates';
 // unusable image.
 // ---------------------------------------------------------------------------
 
-type Tab = 'advertisers' | 'creatives';
+type Tab = 'advertisers' | 'creatives' | 'links';
 
 const ADVERTISER_STATUSES = ['PENDING_REVIEW', 'APPROVED', 'REJECTED', 'SUSPENDED'] as const;
 type AdvertiserStatus = (typeof ADVERTISER_STATUSES)[number];
@@ -75,6 +78,68 @@ const CREATIVE_KIND_WORDS: Record<string, string> = { IMAGE: 'Image', VIDEO: 'Vi
 
 const shortDate = (iso: string) => gyDate(iso);
 
+// [ADS-ON] What the ad opens, on the card the reviewer decides from. The link is shown as text. It is only a
+// link to click once the server's policy has judged it, so an old row can never hand a reviewer a script.
+const DOMAIN_STATUS_WORDS: Record<string, string> = { PENDING: 'Waiting for a decision', APPROVED: 'Approved', REJECTED: 'Refused' };
+
+function AdLink({ link, busy, onDecide }: { link: any; busy: boolean; onDecide: (_domain: { id: string; host: string }, _action: 'approve' | 'reject') => void }) {
+  if (!link || link.kind === 'NONE') return <p className="mc-muted text-xs mt-2">No link: this ad opens nothing.</p>;
+  if (link.kind === 'REFUSED') {
+    return (
+      <div className="mc-note mc-note-warn mt-2">
+        <p className="font-semibold">This link cannot run. Reject this ad.</p>
+        <p className="text-xs break-all">Link as stored: {link.value}</p>
+        <p className="text-xs">{link.refusal}</p>
+      </div>
+    );
+  }
+  if (link.kind === 'INSIDE_SWIFT') {
+    return (
+      <div className="mt-2">
+        <p className="mc-muted text-xs">Opens inside Swift</p>
+        <p className="text-sm break-all">{link.value}</p>
+      </div>
+    );
+  }
+  const external = (
+    <a href={link.value} target="_blank" rel="noopener noreferrer nofollow" className="text-sm underline break-all">
+      {link.value}
+    </a>
+  );
+  if (link.kind === 'APP_STORE') {
+    return (
+      <div className="mc-note mt-2">
+        <p className="mc-muted text-xs">App store link</p>
+        {external}
+        <p className="text-xs mt-1">Check this is the advertiser&apos;s own app. Approving the ad approves this link.</p>
+      </div>
+    );
+  }
+  const onList = link.domainStatus === 'APPROVED';
+  return (
+    <div className={onList ? 'mt-2' : 'mc-note mc-note-warn mt-2'}>
+      <p className="mc-muted text-xs">Outside link</p>
+      {external}
+      <p className="text-xs mt-1">
+        Website: <span className="font-semibold">{link.host}</span>
+        {' · '}
+        {DOMAIN_STATUS_WORDS[link.domainStatus] ?? 'New: no decision yet'}
+      </p>
+      {!onList && link.domainStatus !== 'REJECTED' ? <p className="text-xs">The ad cannot be approved until this website is.</p> : null}
+      {link.domainStatus === 'PENDING' && link.domainId ? (
+        <div className="mc-actions">
+          <button type="button" disabled={busy} className="mc-btn" onClick={() => onDecide({ id: link.domainId, host: link.host }, 'approve')}>
+            Approve website
+          </button>
+          <button type="button" disabled={busy} className="mc-btn mc-btn-danger" onClick={() => onDecide({ id: link.domainId, host: link.host }, 'reject')}>
+            Refuse website
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function AdsReviewPage() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>('advertisers');
@@ -93,6 +158,7 @@ export default function AdsReviewPage() {
     queryFn: () => fetchAdvertiserQueue(status),
   });
   const creatives = useQuery({ queryKey: ['ads', 'creatives'], queryFn: () => fetchCreativeQueue() });
+  const linkDomains = useQuery({ queryKey: ['ads', 'link-domains'], queryFn: () => fetchLinkDomains() });
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ['ads'] });
@@ -123,9 +189,26 @@ export default function AdsReviewPage() {
     onSuccess: refresh,
   });
 
+  const domainAction = useMutation({
+    mutationFn: ({ id, action, reason: stated }: { id: string; action: 'approve' | 'reject'; reason: string }) =>
+      action === 'approve' ? approveLinkDomain(id, stated) : rejectLinkDomain(id, stated),
+    onMutate: () => setMutationError(null),
+    onError,
+    onSuccess: refresh,
+  });
+
   const advertiserRows: any[] = advertisers.data?.data ?? [];
   const creativeRows: any[] = creatives.data?.data ?? [];
-  const busy = advertiserAction.isPending || creativeAction.isPending;
+  const domainRows: any[] = linkDomains.data?.data ?? [];
+  const pendingDomains = domainRows.filter((d) => d.status === 'PENDING').length;
+  const busy = advertiserAction.isPending || creativeAction.isPending || domainAction.isPending;
+  const decideDomain = async (domain: { id: string; host: string }, action: 'approve' | 'reject') => {
+    const stated = await dialog.ask({
+      action: action === 'approve' ? 'allow ads to link to this website' : 'refuse this website',
+      subject: domain.host,
+    });
+    if (stated) domainAction.mutate({ id: domain.id, action, reason: stated });
+  };
   // [DS110-14] The server floor is 12 characters, not 3 — a 3-character
   // answer passed this screen and 400'd at the gate.
   const reasonReady = !reasonTooShort(reason);
@@ -148,6 +231,14 @@ export default function AdsReviewPage() {
           className="mc-tab"
         >
           Creatives ({creatives.isSuccess ? creativeRows.length : '—'})
+        </button>
+        <button
+          type="button"
+          aria-pressed={tab === 'links'}
+          onClick={() => { setTab('links'); setActiveId(null); setMutationError(null); }}
+          className="mc-tab"
+        >
+          Links ({linkDomains.isSuccess ? pendingDomains : '—'})
         </button>
       </div>
 
@@ -273,10 +364,48 @@ export default function AdsReviewPage() {
             </ul>
           )}
         </div>
+      ) : tab === 'links' ? (
+        <div>
+          <p className="mc-muted text-sm mb-3">
+            The outside websites ads may open. Only a person allows one. Refusing an allowed website stops every ad linking to it, and the advertisers are told.
+          </p>
+          {linkDomains.isLoading ? (
+            <div className="mc-loading" aria-busy="true">Loading websites…</div>
+          ) : linkDomains.isError ? (
+            <QueryFailed error={linkDomains.error} what="the websites" onRetry={() => void linkDomains.refetch()} retrying={linkDomains.isFetching} />
+          ) : domainRows.length === 0 ? (
+            <div className="mc-empty">No website has been named by an ad yet.</div>
+          ) : (
+            <ul className="mc-grid-2" aria-label="Websites">
+              {domainRows.map((d) => (
+                <li key={d.id} className="mc-card">
+                  <p className="mc-card-title break-all">{d.host}</p>
+                  <p className="mc-muted text-xs mt-1">
+                    {DOMAIN_STATUS_WORDS[d.status] ?? 'Status not known'}
+                    {d.reviewedAt ? ` · ${d.reviewedByName ?? 'An operator'}, ${shortDate(d.reviewedAt)}` : ` · first seen ${shortDate(d.createdAt)}`}
+                  </p>
+                  {d.reviewNotes ? <p className="mc-note mt-2">Why refused: {d.reviewNotes}</p> : null}
+                  <div className="mc-actions">
+                    {d.status !== 'APPROVED' ? (
+                      <button type="button" disabled={busy} className="mc-btn mc-btn-primary" onClick={() => void decideDomain(d, 'approve')}>
+                        Approve website
+                      </button>
+                    ) : null}
+                    {d.status !== 'REJECTED' ? (
+                      <button type="button" disabled={busy} className="mc-btn mc-btn-danger" onClick={() => void decideDomain(d, 'reject')}>
+                        Refuse website
+                      </button>
+                    ) : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       ) : (
         <div>
           <p className="mc-muted text-sm mb-3">
-            Approving a creative lets it run; rejecting it tells the advertiser why.
+            Approving a creative lets it run and approves the link it opens; rejecting it tells the advertiser why.
           </p>
           {creatives.isLoading ? (
             <div className="mc-loading" aria-busy="true">Loading creatives…</div>
@@ -303,6 +432,8 @@ export default function AdsReviewPage() {
                       </p>
                     </div>
                   </div>
+
+                  <AdLink link={c.link} busy={busy} onDecide={(domain, action) => void decideDomain(domain, action)} />
 
                   {c.preScreen ? (
                     <p className="mc-note mc-note-warn mt-2">
@@ -357,7 +488,7 @@ export default function AdsReviewPage() {
                         onClick={async () => {
                           const go = await dialog.askWith({
                             title: 'Approve this ad creative?',
-                            body: <p>It can run as soon as ads are switched on and its campaign is live.</p>,
+                            body: <p>It can run as soon as ads are switched on and its campaign is live. Its link is checked now, and approved with it.</p>,
                             reason: false,
                             confirmLabel: 'Approve creative',
                           });
