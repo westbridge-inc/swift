@@ -2592,6 +2592,8 @@ model TaxiRideWaiting {
   currencyCode   String
   /// The TAXI_RATES version the terms were read from; null = the declared defaults.
   termsVersion   Int?
+  /// [Owner 4 Nov 2026] Did GPS put the car at the pickup? Only TRUE starts the pickup wait; null or false is never billed.
+  pickupArrivalVerified Boolean?
   /// Frozen at completion, all four together or none.
   waitingSeconds Int?
   waitingMinutes Int?
