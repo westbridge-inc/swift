@@ -258,8 +258,15 @@ export async function adsRoutes(app: FastifyInstance) {
     }).parse(request.query ?? {});
     const keys = q.placements.split(',').map((k) => k.trim()).filter(Boolean).slice(0, 5);
     try {
-      const { getTenantId } = await import('../../plugins/tenant-context');
-      const data = await serving.serve({ tenantId: getTenantId() ?? 'swift-default', city: q.city, sessionId: q.sessionId, userId: deriveUserId(request), keys });
+      const { enterTenant, getTenantId } = await import('../../plugins/tenant-context');
+      // [TENANT-WALL] A guest's slots are the default marketplace's. Naming that
+      // tenant is not binding it: under the tenant wall every unbound read of the
+      // placements was refused, and the catch below served every guest an empty
+      // home screen. Bind it, as the public storefronts do; a signed-in caller
+      // keeps the tenant authentication bound.
+      const tenantId = getTenantId() ?? 'swift-default';
+      if (!getTenantId()) enterTenant(tenantId);
+      const data = await serving.serve({ tenantId, city: q.city, sessionId: q.sessionId, userId: deriveUserId(request), keys });
       return { success: true, data };
     } catch {
       // Ads must NEVER break the home screen — degrade to empty on any failure.
