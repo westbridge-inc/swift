@@ -258,10 +258,14 @@ export class AdsRefundService {
     let processed = 0; let failed = 0; let deadLettered = 0;
     for (let i = 0; i < limit; i += 1) {
       const filter = options.intentIds?.length ? Prisma.sql`AND "refundIntentId" IN (${Prisma.join(options.intentIds)})` : Prisma.empty;
+      // `availableAt` is stamped on the app's clock and read on the database's, so a row just staged can read as a
+      // moment in the future, and the drain that named it finds nothing. It only ever means a failed attempt's
+      // back-off: a named row never tried has nothing to wait for. A failure's back-off still stands.
+      const due = options.intentIds?.length ? Prisma.sql`("availableAt" <= CURRENT_TIMESTAMP OR "attempts" = 0)` : Prisma.sql`"availableAt" <= CURRENT_TIMESTAMP`;
       const rows = await this.prisma.$queryRaw<Array<{ id: string; refundIntentId: string; attempts: number; maxAttempts: number; tenantId: string }>>(Prisma.sql`
         WITH candidate AS (
           SELECT "id" FROM "ad_refund_outbox"
-          WHERE "processedAt" IS NULL AND "deadLetteredAt" IS NULL AND "availableAt" <= CURRENT_TIMESTAMP
+          WHERE "processedAt" IS NULL AND "deadLetteredAt" IS NULL AND ${due}
             AND ("leaseExpiresAt" IS NULL OR "leaseExpiresAt" < CURRENT_TIMESTAMP) ${filter}
           ORDER BY "createdAt" ASC FOR UPDATE SKIP LOCKED LIMIT 1)
         UPDATE "ad_refund_outbox" AS o
