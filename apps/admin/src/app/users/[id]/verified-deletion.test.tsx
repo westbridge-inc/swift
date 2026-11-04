@@ -18,6 +18,7 @@ const NOTE = 'Code texted to the account number came back by email';
 function page(superAdmin: boolean | undefined, over: Record<string, unknown> = {}, onDelete?: (_request: ApiRequest) => { status?: number; body: unknown }) {
   const fetchMock = mockApi((request) => {
     if (request.url.pathname === '/api/v1/admin/users/user-1/verified-deletion') return onDelete?.(request) ?? { body: { success: true, data: { outcome: { deleted: true } } } };
+    if (request.url.pathname !== '/api/v1/admin/users/user-1') return { body: { success: true, data: [] } };
     return { body: { success: true, data: person({ ...(superAdmin === undefined ? {} : { viewer: { superAdmin } }), ...over }) } };
   });
   const view = renderWithQuery(<UserDetailPage params={fulfilledParams({ id: 'user-1' })} />);
