@@ -67,4 +67,10 @@ describe('[G16 · COORD 4 Nov 2026] a ride sold as cash or MMG at drop-off', () 
     expect(ride).toContain('Paid to your driver');
     expect(ride).not.toContain('Paid in cash to your driver');
   });
+
+  it('with nothing recorded it never says how either', () => {
+    const ride = renderReceiptHtml({ ...base, orderType: 'TAXI', paymentStatus: 'PENDING', pickupAddress: 'Stabroek', deliveryAddress: 'Kitty', totalAmount: 1100 } as never);
+    expect(ride).toContain('To your driver, not recorded by Swift');
+    expect(ride).not.toContain('Cash to your driver');
+  });
 });
