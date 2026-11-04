@@ -165,8 +165,13 @@ import { OPERATOR, OPERATOR_ADDRESS } from './operator';
 // section 6 (IDs added before 1 November 2026 are withdrawn and deleted, a legal or safety hold excepted). The Child
 // Safety page names no customer ID and is unchanged. Non-material: Swift asks for less and keeps less
 // (reaccept.ts NON_MATERIAL_CHANGES). Same day as 2026-11-01 (EXPRESS-FEE): a same-day suffix, LAST_UPDATED stays.
-export const LEGAL_VERSION = '2026-11-01.1';
-const LAST_UPDATED = '1 November 2026'; // human form of LEGAL_VERSION
+// [2026-11-04 · owner ruling 4 Nov 2026 · passenger-favourable, NON-material like 2026-10-28, no fresh tick · DRAFT until
+// counsel verifies] Terms section 4 says what rides/taxi-waiting.ts now does: the waiting charge is capped at GY$1,800 for
+// a ride (TAXI_WAITING_CAP_MINUTES), it starts only when GPS puts the car at the pickup (a passenger's confirmation moves
+// the ride on but no longer starts the charge), and it stops at the ride code, not at the trip start. The line shown
+// before booking names the cap too. A new day: LAST_UPDATED moves, so every document changes by its date.
+export const LEGAL_VERSION = '2026-11-04';
+const LAST_UPDATED = '4 November 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -207,7 +212,7 @@ export const TERMS = page(
 
 <h2>4. Payments are direct — Swift holds no money</h2>
 <p>Swift is software, not a payment service. You pay for an Order in cash at Handover or, where the Business offers it, directly into the Business's own MMG account under MMG's terms. Swift never holds, collects or transmits Order money, offers no wallet or stored value, and never asks for card numbers. Prices are the Business's own prices. Delivery fees and taxi fares are calculated by Swift and shown in the app before you confirm. Swift charges customers nothing.</p>
-<p><b>Taxi waiting charge.</b> When the app shows a waiting charge beside the taxi fare before you book, that charge applies to the ride: GY$300 for each full 10 minutes the car waits for you. Waiting is counted at the pickup, from when your driver arrives until your trip starts (the app checks the driver's location before the count starts, or you confirm the arrival yourself), and at any stop on the way, from when the car arrives until it leaves. Waiting at your final destination is never counted, and part of a 10-minute block is never charged. The Swift app shows the waiting time and the charge as they run, and the ride's receipt lists the waiting charge separately from the route fare. You pay it with your fare, directly to the driver. A ride that is cancelled, or that ends without the trip being completed, carries no waiting charge.</p>
+<p><b>Taxi waiting charge.</b> When the app shows a waiting charge beside the taxi fare before you book, that charge applies to the ride: GY$300 for each full 10 minutes the car waits for you. The waiting charge is never more than GY$1,800 for a ride. Waiting is counted at the pickup, from when the app has placed the car at your pickup until your ride code is verified, and at any stop on the way, from when the car arrives until it leaves. Waiting at your final destination is never counted, and part of a 10-minute block is never charged. The Swift app shows the waiting time and the charge as they run, and the ride's receipt lists the waiting charge separately from the route fare. You pay it with your fare, directly to the driver. A ride that is cancelled, or that ends without the trip being completed, carries no waiting charge.</p>
 
 <h2>5. Placing an Order</h2>
 <p>Submitting an Order is an offer to the Business; the contract forms when the Business accepts it in the app. A Business can set a bookable service to confirm bookings automatically: if the app shows your booking as confirmed the moment you book it, that is the Business's acceptance, given in advance through that setting, and the contract forms at that moment. An individual service provider gives the same advance acceptance by publishing a list of services with bookable times: if the app shows your booking from that list as confirmed the moment you book it, that is the provider's acceptance, given in advance through that list, and the contract forms at that moment. A Business may decline an Order and must tell you why through the app. If an item turns out to be unavailable, the app asks <b>you</b> to approve a substitution or that line is removed and, where you already paid by MMG, refunded by the Business — never swapped silently. Service bookings reserve the time slot shown; express delivery, where offered, buys priority handling.</p>

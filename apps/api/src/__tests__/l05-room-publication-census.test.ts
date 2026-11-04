@@ -76,8 +76,9 @@ describe('sensitive room publication census', () => {
     // + [O-4] the out-of-stock question asked before acceptance, and the free cancel when the only
     //   item left gets no answer (picking.service, both through the gate).
     // + [BOOK-FU2 · owner B3] "Customer didn't come": the appointment closed by its business (vendor no-show, through the gate).
+    // + [BUG-HUNT-2 G01] Support ends a ride whose driver is gone (through the gate).
     // + [BUG-HUNT-2 G03] The passenger who never came: the ride closed by its driver (through the gate).
     // + [BUG-HUNT-2 G20] "Not collected": a pickup closed by its store (vendor not-collected, through the gate).
-    expect(orderPublishers).toBe(54);
+    expect(orderPublishers).toBe(55);
   });
 });

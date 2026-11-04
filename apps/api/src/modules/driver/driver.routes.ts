@@ -1370,7 +1370,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const updatedOrder = await advanceDriverPickup(app.prisma, {
       orderId: id, driverId: driver.id, assignmentVersion: order.driverAssignmentVersion,
       changedBy: request.user.userId, from: 'DRIVER_EN_ROUTE', target: 'DRIVER_ARRIVED',
-      note: gate.note, arrivedAt,
+      note: gate.note, arrivedAt, gpsVerified: gate.allowed,
     });
     try {
       await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'DRIVER_ARRIVED' });

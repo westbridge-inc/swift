@@ -361,6 +361,15 @@ const PUBLISHED: Record<
     driver_agreement: '65168219ab4b9e6781eaf545510294db837f80bcb2a98cd0067cd43c428aa1f0',
     vendor_agreement: '62c6c9d31e881482d6e8303c10a012abb75a75b25a5305959cb6aacb2625e115',
   },
+  // [owner ruling 4 Nov 2026, non-material, no fresh tick] Terms section 4: the taxi waiting charge is capped at
+  // GY$1,800 for a ride, starts only when the app has placed the car at the pickup, and stops at the ride code. A new
+  // day, so LAST_UPDATED moves and every document re-pins; the Privacy Policy and both agreements change only by their date.
+  '2026-11-04': {
+    terms: '8211f8fdae8b7086aa6b3c09f6494850591c48b316a0081d2deeebc580d699be',
+    privacy: 'e2506ea826f08f22fd1edfd856607c28ba70ffb4e00892ba7eeb29c409bc21ba',
+    driver_agreement: 'a4bc5e874eb2b2ae9d3992ba910bb22b38071d31f741cf3d627d915d515a4c4f',
+    vendor_agreement: '942975fc7e4fc9a4dc54890daf2c80479b62d3009bfc9c416361afe38121f38d',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
