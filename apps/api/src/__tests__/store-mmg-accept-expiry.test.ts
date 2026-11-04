@@ -337,6 +337,7 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
     const toldCustomer = (await notices(customer.userId, orderId)).filter((n) => n.title === 'Swift support is checking your MMG payment');
     expect(toldCustomer).toHaveLength(1);
     expect(toldCustomer[0]!.body).toContain('Keep your MMG message');
+    expect(toldCustomer[0]!.data).toMatchObject({ kind: 'mmg_store_silent', audience: 'customer' });
     expect((await customerView(orderId)).mmgClaim).toMatchObject({ customerClaim: 'PAID', storeSilent: true });
     // Still locked until the store confirms; the store's tap (same reference) lets it go ahead.
     expect((await preparing(orderId)).statusCode).toBe(409);
