@@ -28,6 +28,14 @@ export function isAdminAccount(user: { activeRole: string; roles: readonly strin
   return ADMIN_ROLES.has(user.activeRole) || user.roles.some((role) => ADMIN_ROLES.has(role));
 }
 
+/**
+ * [BUG-HUNT F22 · COORD 4 Nov 2026] Support's doors on a person are for customers and partners. A staff account is
+ * refused for everyone, a founder included: the caller passes roles it read from the database, never from a token.
+ */
+export function refuseStaffAccount(user: { activeRole: string; roles: readonly string[] }): void {
+  if (isAdminAccount(user)) throw new AppError(403, 'STAFF_ACCOUNT', 'This door is for customers and partners. A staff account changes only by that person’s own fresh sign-in.');
+}
+
 /** When solo approval is allowed again after an email change, or null when it already is. */
 export function soloQuietUntil(emailChangedAt: Date | null | undefined, now: Date): Date | null {
   if (!emailChangedAt) return null;

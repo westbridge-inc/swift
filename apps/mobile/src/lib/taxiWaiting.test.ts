@@ -27,7 +27,7 @@ describe('[quote proof] the terms echoed with the booking', () => {
 
 describe('the disclosure before booking (§8.2)', () => {
   it('shows the server’s own sentence', () => {
-    expect(waitingDisclosure({ ...ESTIMATE_WITH_ONE_STOP.data, waiting: WAITING_TERMS })).toBe('Waiting: 300 per 10 minutes after your driver arrives');
+    expect(waitingDisclosure({ ...ESTIMATE_WITH_ONE_STOP.data, waiting: WAITING_TERMS })).toBe('Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride');
   });
 
   it('nothing when the server sends no terms — today’s screen', () => {

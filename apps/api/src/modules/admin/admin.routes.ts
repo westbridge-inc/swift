@@ -41,6 +41,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { refuseStaffAccount } from './admin-email-change';
 import { EVIDENCE_REFERENCE_MAX, EVIDENCE_REFERENCE_MIN, EVIDENCE_REFERENCE_SHAPE } from '../billing/evidence-reference';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
 import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
@@ -76,13 +77,21 @@ import {
   approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
   startSoloApproval,
 } from './solo-approval';
-import { sanitizeUser } from '../auth/auth.service';
+import { AuthService, sanitizeUser } from '../auth/auth.service';
+import { blankApprovedNumber, confirmPhoneChange, lastFour, startPhoneChange } from './phone-change';
+import { assertTypeKeepsFee } from '../partner/store-fee';
+import { getChannels } from '../../providers/notifications/channels';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
+import { closeSettlementBySwift, SETTLEMENT_CLOSED_DISPOSITION } from '../cash/delivery-cash-settlement.service';
 import { executeTenantBoundServiceJobTransaction } from '../services/service-job-transaction';
 import { transitionServiceJob } from '../services/service-job-transition';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
+import { LIVE_SOS_STATUSES } from '../safety/sos.service';
+import { taxiNotificationData } from '../rides/taxi-notification';
+import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
+import { assertMayEndRide } from '../rides/end-ride-authority';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -103,13 +112,14 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { assertAccountActionAuthority, lockUserRoleAuthority, transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 import { platformStats } from './platform-stats';
 import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
 // [SEC-PII] the subscriptions list's masking (its own line: the line above is shared with other open changes)
 import { maskSubscription, maskUserPhone } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
-import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
+import { assertNameNotReserved, FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { assertNotBannedGoods, catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
@@ -177,6 +187,13 @@ const vendorsQuerySchema = z.object({
 });
 
 // Riders/drivers list filters use UI keywords, not DB enums
+const storeTypeChangeSchema = z.object({ vendorType: z.nativeEnum(VendorType) });
+const storeNameChangeSchema = z.object({ name: z.string().trim().min(2).max(100) });
+const phoneChangeSchema = z.object({ phone: z.string().trim().min(7).max(20) });
+const phoneChangeCodeSchema = z.object({ code: z.string().trim().regex(/^\d{6}$/) });
+/** [BUG-HUNT F05] How long a person has to make the one move support allowed. */
+const MOVER_PLAN_MOVE_DAYS = 7;
+
 const moverFilterQuerySchema = z.object({
   status: z.enum(['online', 'offline', 'verified', 'unverified']).optional(),
   type: z.nativeEnum(RiderType).optional(),
@@ -484,6 +501,7 @@ function catalogueCheckSummary(check: Exclude<CatalogueCheck, { state: 'CLEAR' }
 
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
+  const phoneChangeDeps = () => ({ prisma: app.prisma, redis: app.redis, channels: getChannels(), log: app.log });
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const discoveryGovernance = new DiscoveryGovernanceService(app.prisma);
 
@@ -1436,6 +1454,58 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await riskScoreFor(app.prisma, id) };
   });
 
+  /** [BUG-HUNT F22] Move an account to a new number: the code goes to the new number (admin/phone-change.ts). */
+  app.post('/users/:id/phone-change', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId;
+    if (approvalId) await blankApprovedNumber(app.prisma, approvalId);
+    const { phone } = phoneChangeSchema.parse(request.body ?? {});
+    const answer = await startPhoneChange(phoneChangeDeps(), {
+      userId: id, phone, ip: request.ip,
+      within: (tx) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { toLastFour: lastFour(phone) } }),
+    });
+    return { success: true, data: answer };
+  });
+
+  /** [BUG-HUNT F22] The person read the code back. Every session ends: the number is the sign-in. */
+  app.post('/users/:id/phone-change/confirm', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { code } = phoneChangeCodeSchema.parse(request.body ?? {});
+    await confirmPhoneChange({ ...phoneChangeDeps(), moveWithSessions: (write) => new AuthService(app).logoutAll(id, write) }, {
+      userId: id, code,
+      within: (tx, moved) => auditIn(tx, request.user.userId, 'CHANGE_USER_PHONE', 'User', id, { fromLastFour: lastFour(moved.from), toLastFour: lastFour(moved.to) }, request),
+    });
+    await notifications.send({
+      userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your number was changed',
+      body: 'Swift support moved your account to a new number. Sign in with it from now on. If this was not you, contact Swift support right away.',
+    });
+    return { success: true, data: { moved: true } };
+  });
+
+  /**
+   * [BUG-HUNT F05] "Contact support to move it to taxi work": this is that door. It allows one move for a week; the
+   * person makes it in the app, because the vehicle is theirs to name (partner.service changeVehicleWithAuthority).
+   */
+  app.post('/users/:id/mover-plan/allow-move', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const person = await app.prisma.user.findUnique({ where: { id }, select: { roles: true, activeRole: true } });
+    if (!person) throw new NotFoundError('User', id);
+    refuseStaffAccount(person);
+    const plan = await app.prisma.subscription.findFirst({
+      where: { OR: [{ rider: { userId: id } }, { driver: { userId: id } }], status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE', 'PAUSED', 'SUSPENDED'] } },
+      select: { id: true },
+    });
+    if (!plan) throw new AppError(409, 'NO_PLAN_TO_MOVE', 'This person has no weekly plan on a rider or driver profile, so nothing is stopping a vehicle change.');
+    const until = new Date(Date.now() + MOVER_PLAN_MOVE_DAYS * 86_400_000);
+    await app.prisma.user.update({ where: { id }, data: { moverPlanMoveUntil: until, moverPlanMoveBy: request.user.userId } });
+    await audit(request.user.userId, 'ALLOW_MOVER_PLAN_MOVE', 'User', id, { until: until.toISOString() }, request);
+    await notifications.send({
+      userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'You can change your vehicle now',
+      body: `Swift support has opened this for you. Change your vehicle in the app within ${MOVER_PLAN_MOVE_DAYS} days. Your weekly fee follows the new work: a higher fee starts only after 14 days’ notice, and a week you have paid keeps its price.`,
+    });
+    return { success: true, data: { until } };
+  });
+
   app.put('/users/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
@@ -2071,6 +2141,69 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
+  });
+
+  /**
+   * [BUG-HUNT F22] A wrong type at sign-up had no door: the documents then ask for a licence the store will never hold.
+   * Only before the store has ever been live. After that its fee and its papers rest on the type, so it is not a
+   * correction any more; say so instead of quietly repricing a working store. A change that moves the weekly fee waits
+   * for the owner's tick of the new amount (partner/store-fee.ts assertTypeKeepsFee).
+   */
+  app.put('/vendors/:id/type', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { vendorType } = storeTypeChangeSchema.parse(request.body ?? {});
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id }, include: { owner: { select: { userId: true, user: { select: { roles: true, activeRole: true } } } }, subscription: { select: { id: true } } },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    refuseStaffAccount(vendor.owner.user);
+    if (vendor.vendorType === vendorType) throw new AppError(409, 'NOTHING_TO_CHANGE', `${vendor.name} is already that type.`);
+    if (vendor.firstLiveAt || vendor.subscription) {
+      throw new AppError(409, 'STORE_HAS_BEEN_LIVE', `${vendor.name} has been live, so its weekly fee and documents rest on its type. It cannot be changed here.`);
+    }
+    const updated = await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* store-type-door */`;
+      await assertTypeKeepsFee(tx, id, vendorType, vendor.name);
+      const row = await tx.vendor.update({ where: { id }, data: { vendorType } });
+      await auditIn(tx, request.user.userId, 'CHANGE_VENDOR_TYPE', 'Vendor', id, { from: vendor.vendorType, to: vendorType }, request);
+      return row;
+    });
+    await verification.reprojectVendorActivation(vendor.owner.userId);
+    scheduleVendorSearchSync(app, id);
+    await notifications.send({
+      userId: vendor.owner.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your store type was changed',
+      body: `Swift changed the type of ${vendor.name}. Your documents list follows it: check Documents to see what is needed now.`,
+      data: { vendorId: id },
+    });
+    return { success: true, data: updated };
+  });
+
+  /** [BUG-HUNT F22] "To use a new name, contact Swift support: we check the new name first" (CHECKED_NAME_RENAME). This is that door. */
+  app.put('/vendors/:id/name', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { name } = storeNameChangeSchema.parse(request.body ?? {});
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id }, select: { ...STORE_WORDS_SELECT, tradesUnderOwnName: true, owner: { select: { userId: true, user: { select: { phone: true, roles: true, activeRole: true } } } } },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    refuseStaffAccount(vendor.owner.user);
+    if (vendor.name.trim() === name) throw new AppError(409, 'NOTHING_TO_CHANGE', 'The store already has that name.');
+    assertNameNotReserved(name, vendor.owner.user.phone, vendor.name);
+    if (storeCheckOf({ ...vendor, name }).state === 'WAITING') {
+      throw new AppError(409, 'STORE_NAME_HELD', 'That name has words a person has to check first. Choose another name, or clear it in the store review.');
+    }
+    if (vendor.tradesUnderOwnName) {
+      throw new AppError(409, 'OWN_NAME_RENAME', 'This store trades under its owner’s own name, which a person checked. A different name has to be registered as a business name first.');
+    }
+    const updated = await app.prisma.vendor.update({ where: { id }, data: { name } });
+    await audit(request.user.userId, 'CHANGE_VENDOR_NAME', 'Vendor', id, { from: vendor.name, to: name }, request);
+    scheduleVendorSearchSync(app, id);
+    await notifications.send({
+      userId: vendor.owner.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your store name was changed',
+      body: `Swift changed your store’s name to ${name}.`, data: { vendorId: id },
+    });
+    return { success: true, data: updated };
   });
 
   app.put('/vendors/:id/feature', { preHandler: [adminGuard] }, async (request) => {
@@ -3393,6 +3526,68 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { caseId: kase.id, state: kase.state } };
   });
 
+  // [BUG-HUNT-2 G01] A ride in progress has two exits, and both are the driver's own handover. With the driver gone it
+  // stayed open for days: the passenger could not book or delete, and suspend and ban on the driver refused. Support ends
+  // it here. FAILED is the machine's own exit, and it frees the driver. No fare is invented: nothing about money moves,
+  // because nothing about money is known, so no earning, no strike and no claim, and the amount and payment stay as they
+  // were. A live SOS comes first: closing the ride must never be what ends a response.
+  app.post('/orders/:id/end-ride', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const order = await app.prisma.order.findUnique({
+      where: { id },
+      select: { status: true, orderType: true, ridePinVerified: true, ridePinVerifiedAt: true },
+    });
+    if (!order) throw new NotFoundError('Order', id);
+    if (order.orderType !== 'TAXI') throw new AppError(409, 'NOT_A_RIDE', 'Only a taxi ride ends here.');
+    const closed = 'Swift support closed this ride. Swift has no record of what was paid, and moved no money.';
+    const noticeIds: string[] = [];
+    const closeNote = 'Closed by Swift support: no payment on record';
+    // The code was verified and the driver never tapped Start: the passenger is in the car, so a cancel is refused and the
+    // machine has no FAILED from here. The ride walks through its own start to the same exit, in one commit.
+    const neverStarted = order.status === 'DRIVER_ARRIVED' && hasTaxiPassengerCustody(order);
+    await orderService.transitionOrderAtomically({
+      orderId: id,
+      ...(neverStarted
+        ? { target: 'RIDE_IN_PROGRESS' as const, allowedFrom: ['DRIVER_ARRIVED'] as const, note: 'Passenger code verified: the driver never started the trip', continueTo: { target: 'FAILED' as const, note: closeNote, when: () => true } }
+        : { target: 'FAILED' as const, allowedFrom: ['RIDE_IN_PROGRESS'] as const, note: closeNote }),
+      changedBy: request.user.userId,
+      operatorAudit: {
+        userId: request.user.userId,
+        action: 'END_STUCK_RIDE',
+        entity: 'Order',
+        entityId: id,
+        changes: (previousStatus) => ({ reason, previousStatus }),
+        ipAddress: request.ip,
+        userAgent: request.headers['user-agent'],
+      },
+      invalidStatus: (current) => new AppError(409, 'RIDE_NOT_IN_PROGRESS', `This ride is not in progress (it is ${current}).`),
+      // The close, the audit row and both notices commit together, as the job close does.
+      withinTransaction: async (tx, locked) => {
+        const driver = locked.driverId ? await tx.driver.findUnique({ where: { id: locked.driverId }, select: { userId: true } }) : null;
+        const parties = [
+          { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
+          ...(driver ? [{ userId: driver.userId, body: `${closed} If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
+        ];
+        await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
+        if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
+          throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
+        }
+        for (const party of parties) {
+          const row = await insertNoticeFor(tx, {
+            userId: party.userId, type: 'ORDER_UPDATE', title: 'Ride closed by Swift', body: party.body,
+            data: taxiNotificationData(id, { status: 'FAILED' }, party.audience) as Prisma.InputJsonObject,
+            dedupeKey: `ride-closed:${id}:${party.userId}`,
+          });
+          noticeIds.push(row.id);
+        }
+      },
+    });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'FAILED' });
+    await Promise.all(noticeIds.map((noticeId) => notifications.publishPersisted(noticeId)));
+    return { success: true, data: { id, status: 'FAILED' } };
+  });
+
   app.put('/orders/:id/cancel', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { reason, refund } = cancelOrderSchema.parse(request.body ?? {});
@@ -3938,10 +4133,10 @@ export async function adminRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
       }),
       app.prisma.deliveryCashSettlement.count({ where }),
-      // Unfiltered health totals — how much store→rider cash is in each state.
+      // Unfiltered health totals — how much store→rider cash is in each state. A closed record is nobody's to chase.
       app.prisma.deliveryCashSettlement.groupBy({
         by: ['status'],
-        where: { order: { tenantId }, rider: { user: { tenantId } }, vendor: { tenantId } },
+        where: { order: { tenantId }, rider: { user: { tenantId } }, vendor: { tenantId }, closedAt: null },
         _sum: { amount: true },
         _count: true,
       }),
@@ -3958,6 +4153,7 @@ export async function adminRoutes(app: FastifyInstance) {
       status: s.status,
       riderConfirmedAt: s.riderConfirmedAt,
       storeConfirmedAt: s.storeConfirmedAt,
+      closedAt: s.closedAt,
       createdAt: s.createdAt,
       vendor: s.vendor ? { id: s.vendor.id, name: s.vendor.name } : null,
       rider: s.rider
@@ -3967,6 +4163,25 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const paged = paginatedResponse(data, total, { page, limit, skip });
     return { success: true, ...paged, summary };
+  });
+
+  /**
+   * POST /finance/cash-settlements/:id/close — a record neither side can close: a store that never confirms, or has
+   * left Swift. RECORD ONLY: Swift moves nothing and the row keeps every fact it held; the amount stays the store's
+   * debt to the rider, between them. C4: a stated reason and a second admin (the approval gate above).
+   */
+  app.post('/finance/cash-settlements/:id/close', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const closed = await closeSettlementBySwift(tenantPrisma as unknown as PrismaClient, {
+      settlementId: id,
+      adminUserId: request.user.userId,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+    await Promise.all(closed.noticeIds.map((noticeId) => notifications.publishPersisted(noticeId)));
+    return { success: true, data: { id: closed.id, closedAt: closed.closedAt, disposition: SETTLEMENT_CLOSED_DISPOSITION } };
   });
 
   /** MMG-vs-cash mix, last 30 days of completed orders, plus MMG confirmation

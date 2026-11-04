@@ -407,12 +407,25 @@ export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<Ven
   apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
 export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
   apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
+/** [BUG-HUNT F05] "Contact support to move it": allows one move between delivery and taxi work, for a week. */
+export const allowMoverPlanMove = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/mover-plan/allow-move`, { method: 'POST', body: JSON.stringify({}), reason });
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 /** [BUG-HUNT F20] A verified deletion request from someone who cannot sign in. Founder only, answers 202
  *  APPROVAL_REQUIRED, and runs the person's own deletion with every blocker once approved. */
 export const deleteVerifiedRequest = (id: string, check: { identityCheck: string; identityNote: string }, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/verified-deletion`, { method: 'POST', body: JSON.stringify({ ...check, reason }), reason });
+/** [BUG-HUNT F22] What the screens tell a store to ask support for: a type picked by mistake, a checked name. */
+export const changeStoreType = (id: string, vendorType: string, reason: string) =>
+  apiFetch(`/api/v1/admin/vendors/${id}/type`, { method: 'PUT', body: JSON.stringify({ vendorType }), reason });
+export const changeStoreName = (id: string, name: string, reason: string) =>
+  apiFetch(`/api/v1/admin/vendors/${id}/name`, { method: 'PUT', body: JSON.stringify({ name }), reason });
+/** [BUG-HUNT F22] Move an account to a new number: a code goes to the new number, the person reads it back. */
+export const startPhoneChange = (id: string, phone: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/phone-change`, { method: 'POST', body: JSON.stringify({ phone }), reason });
+export const confirmPhoneChange = (id: string, code: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/phone-change/confirm`, { method: 'POST', body: JSON.stringify({ code }), reason });
 export const suspendVendor = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/vendors/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const featureVendor = (id: string, featured: boolean) =>
@@ -656,6 +669,8 @@ export interface CashSettlementRow {
   status: 'OWED' | 'RIDER_CONFIRMED' | 'STORE_CONFIRMED' | 'SETTLED';
   riderConfirmedAt: string | null;
   storeConfirmedAt: string | null;
+  /** When Swift support closed it. A closed record is not a settled one: `status` stays what it was. */
+  closedAt?: string | null;
   createdAt: string;
   vendor: { id: string; name: string } | null;
   rider: { id: string; name: string } | null;
@@ -669,6 +684,13 @@ export interface CashSettlementsResponse {
 }
 export const fetchCashSettlements = (params?: string): Promise<CashSettlementsResponse> =>
   apiFetch(`/api/v1/admin/finance/cash-settlements?${params || 'limit=50'}`);
+/**
+ * C4 (money class): close a delivery-pay record neither side can. A record only: Swift moves nothing and the row keeps
+ * what it says. The first call answers 202 APPROVAL_REQUIRED; a second admin (or the owner's solo approval) decides it in
+ * Approvals, and the asking admin applies it from there.
+ */
+export const closeCashSettlement = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/finance/cash-settlements/${encodeURIComponent(id)}/close`, { method: 'POST', body: '{}', reason });
 
 export interface PaymentMix {
   byMethod: { method: string; count: number; total: number }[];
@@ -773,6 +795,10 @@ export const setDriverRideClass = (id: string, rideClass: string, reason: string
 // anything refunded — settleOrderRefund below is the only thing that can.
 export const cancelOrder = (id: string, body: { refund?: boolean }, reason: string) =>
   apiFetch(`/api/v1/admin/orders/${id}/cancel`, { method: 'PUT', body: JSON.stringify({ ...body, reason }), reason });
+
+/** [BUG-HUNT-2 G01] A ride in progress that cannot finish: closed with no fare, and both sides told. */
+export const endStuckRide = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/orders/${id}/end-ride`, { method: 'POST', body: '{}', reason });
 
 /** The cash actually went back: a unique reference and the amount handed over. */
 export const settleOrderRefund = (id: string, reference: string, amount: string | number, reason: string) =>

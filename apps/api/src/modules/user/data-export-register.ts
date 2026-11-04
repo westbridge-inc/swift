@@ -116,6 +116,7 @@ export const STORE_RATING_TYPES: readonly string[] = [...TYPES_FOR_ROLE.VENDOR];
 
 /** The person's own account row. */
 export const ACCOUNT_FIELDS = [
+  'moverPlanMoveUntil',
   'id', 'phone', 'email', 'emailChangedAt', 'firstName', 'lastName', 'selfieCapturedAt', 'roles', 'activeRole', 'lastMoverRole',
   'status', 'isPhoneVerified', 'isEmailVerified', 'acceptedTermsAt', 'tosVersion', 'trustLevel', 'lossProtectionSuspendedAt',
   'countryCode', 'notificationPrefs', 'lastKnownLat', 'lastKnownLng',
@@ -419,7 +420,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'cashSettlements', model: 'DeliveryCashSettlement', by: ['riderId'], via: 'rider', key: 'id',
-    fields: ['id', 'orderId', 'riderId', 'amount', 'status', 'riderConfirmedAt', 'storeConfirmedAt', 'riderAttestedAmount', 'storeAttestedAmount', 'createdAt'],
+    fields: ['id', 'orderId', 'riderId', 'amount', 'status', 'riderConfirmedAt', 'storeConfirmedAt', 'riderAttestedAmount', 'storeAttestedAmount', 'closedAt', 'createdAt'],
   },
   {
     category: 'deliveryRuns', model: 'DeliveryRun', by: ['riderId'], via: 'rider', key: 'id',

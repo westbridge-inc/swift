@@ -68,12 +68,16 @@ export interface ArrivalEvidence {
 /** The refusal copy for each non-passing verdict. `at-pickup` is unreachable
  *  here — `arrivalGate.allowed` is exactly that verdict — but the map stays
  *  total so a verdict rename cannot silently 500 the driver. */
+// [Owner 4 Nov 2026] The passenger can move the ride on, but only GPS starts the waiting charge: a driver sent to the
+// passenger is told before they rely on it.
+const WAITING_NEEDS_GPS = ' Waiting is only charged once GPS shows the car at the pickup.';
+
 export const ARRIVAL_GATE_COPY: Record<ArrivalVerdict, string> = {
   'at-pickup': 'The driver is at the pickup point.',
-  far: "You're too far from the pickup point to confirm arrival. Drive closer and try again, or ask the passenger to confirm your arrival.",
-  stale: "Your location is out of date. Open the app and try again once your GPS updates, or ask the passenger to confirm your arrival.",
-  'no-fix': "Swift can't verify your location right now. Ask the passenger to confirm your arrival, or contact support.",
-  'no-pickup': "Swift can't verify your location right now. Ask the passenger to confirm your arrival, or contact support.",
+  far: `You're too far from the pickup point to confirm arrival. Drive closer and try again, or ask the passenger to confirm your arrival.${WAITING_NEEDS_GPS}`,
+  stale: `Your location is out of date. Open the app and try again once your GPS updates, or ask the passenger to confirm your arrival.${WAITING_NEEDS_GPS}`,
+  'no-fix': `Swift can't verify your location right now. Ask the passenger to confirm your arrival, or contact support.${WAITING_NEEDS_GPS}`,
+  'no-pickup': `Swift can't verify your location right now. Ask the passenger to confirm your arrival, or contact support.${WAITING_NEEDS_GPS}`,
 };
 
 export function arrivalEvidence(
