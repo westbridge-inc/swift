@@ -24,7 +24,7 @@ describe('[G04] a ride at the pickup', () => {
     expect(cancellationVerdict(ride({ status: 'DRIVER_EN_ROUTE', driverArrivedAt: null, acceptedAt: ago(30), assignedAt: ago(30) }), NOW)).toMatchObject({ allowed: true, reason: 'TOO_LATE' });
   });
   it('the words say what is true, and never that the driver is on the way', () => {
-    expect(customerCancelView(ride(), NOW).cancellationMessage).toBe('This ride is very late starting: your driver arrived 15 minutes ago and you are not aboard. You can cancel it for free.');
+    expect(customerCancelView(ride(), NOW).cancellationMessage).toBe('This ride is very late starting: your driver arrived over 15 minutes ago and you are not aboard. You can cancel it for free.');
     expect(customerCancelView(ride({ status: 'DRIVER_EN_ROUTE', driverArrivedAt: null, acceptedAt: ago(40), assignedAt: ago(40) }), NOW).cancellationMessage).toBe('Your driver is running very late. You can cancel the ride for free.');
   });
 });

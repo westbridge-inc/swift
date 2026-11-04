@@ -108,7 +108,7 @@ describe('[G04] the driver marks arrived and then nothing happens', () => {
     const late = await ride('DRIVER_ARRIVED', 15 * MIN);
     const view = await passengerView(late.customer);
     expect(view.canCancel).toBe(true);
-    expect(view.cancellationMessage).toBe('This ride is very late starting: your driver arrived 15 minutes ago and you are not aboard. You can cancel it for free.');
+    expect(view.cancellationMessage).toBe('This ride is very late starting: your driver arrived over 15 minutes ago and you are not aboard. You can cancel it for free.');
   });
 
   it('the cancel is free, the driver is told and freed, and no next driver is sent', async () => {
@@ -165,7 +165,7 @@ describe('[G03] the passenger never comes', () => {
     expect(await app.redis.sismember(`dispatch:declined:${order.id}`, driver.driverId)).toBe(0);
     const told = await noticesOf(customer.userId);
     expect(told.map((notice) => notice.title)).toEqual(['Ride closed']);
-    expect(told[0]!.body).toContain('waited');
+    expect(told[0]!.body).toContain(`Your driver recorded that you did not come, so ride ${order.orderNumber} was closed.`);
     expect(told[0]!.body).toContain('no fee');
     expect(told[0]!.data).toMatchObject({ orderId: order.id, status: 'CANCELLED' });
   });
@@ -177,6 +177,59 @@ describe('[G03] the passenger never comes', () => {
     expect(again.statusCode, again.body).toBe(200);
     expect(again.json().data).toEqual({ orderId: order.id, status: 'CANCELLED', reDispatched: false });
     expect(await noticesOf(customer.userId)).toHaveLength(1);
+  });
+
+  describe('[COORD 4 Nov 2026] the record needs GPS at the pickup', () => {
+    const moveCar = (driverId: string, at: { lat: number; lng: number }, seen = new Date()) => app.prisma.driver.update({
+      where: { id: driverId }, data: { currentLat: at.lat, currentLng: at.lng, lastLocationUpdate: seen },
+    });
+    const northOfPickup = (metres: number) => ({ lat: pickup.lat + metres / 111_195, lng: pickup.lng });
+
+    it('a driver far from the pickup is refused and told to go there; nothing changes, nobody is told', async () => {
+      const { order, customer, driver } = await ride('DRIVER_ARRIVED', 6 * MIN);
+      await moveCar(driver.driverId, northOfPickup(19_000));
+      const res = await handBack(order.id, driver, 'Passenger did not arrive');
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('NO_SHOW_NOT_AT_PICKUP');
+      expect(res.json().error.message).toContain('Go to the pickup');
+      expect(await row(order.id)).toMatchObject({ status: 'DRIVER_ARRIVED', driverId: driver.driverId, cancellationReason: null });
+      expect(await noticesOf(customer.userId)).toEqual([]);
+    });
+
+    it('far inside the grace is told to go there too, not to wait', async () => {
+      const { order, driver } = await ride('DRIVER_ARRIVED', 2 * MIN);
+      await moveCar(driver.driverId, northOfPickup(19_000));
+      const res = await handBack(order.id, driver, 'Passenger did not arrive');
+      expect(res.json().error.code).toBe('NO_SHOW_NOT_AT_PICKUP');
+    });
+
+    it.each([
+      ['a stale fix', (driverId: string) => moveCar(driverId, pickup, new Date(Date.now() - 30 * MIN))],
+      ['no fix at all', (driverId: string) => app.prisma.driver.update({ where: { id: driverId }, data: { currentLat: null, currentLng: null, lastLocationUpdate: null } })],
+    ])('%s: refused, the ordinary hand-back offered, and it still works', async (_label, blind) => {
+      const { order, driver } = await ride('DRIVER_ARRIVED', 6 * MIN);
+      await blind(driver.driverId);
+      const res = await handBack(order.id, driver, 'Passenger did not arrive');
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('NO_SHOW_NO_LOCATION');
+      expect(res.json().error.message).toContain('You can still hand the ride back');
+      expect(res.json().error.details).toMatchObject({ allowHandback: true });
+      expect((await row(order.id)).status).toBe('DRIVER_ARRIVED');
+      const back = await handBack(order.id, driver, 'GPS not working');
+      expect(back.statusCode, back.body).toBe(200);
+      expect(await row(order.id)).toMatchObject({ status: 'PENDING', driverId: null });
+    });
+
+    it('the word holds only inside the arrival radius: 250 m records it, 350 m does not', async () => {
+      const inside = await ride('DRIVER_ARRIVED', 6 * MIN);
+      await moveCar(inside.driver.driverId, northOfPickup(250));
+      expect((await handBack(inside.order.id, inside.driver, 'Passenger did not arrive')).statusCode).toBe(200);
+      const outside = await ride('DRIVER_ARRIVED', 6 * MIN);
+      await moveCar(outside.driver.driverId, northOfPickup(350));
+      const res = await handBack(outside.order.id, outside.driver, 'Passenger did not arrive');
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('NO_SHOW_NOT_AT_PICKUP');
+    });
   });
 
   it('a driver who never arrived cannot record it: the passenger was not kept waiting', async () => {

@@ -1359,9 +1359,9 @@ export function ActiveJobScreen({ navigation }: any) {
       >
         <PopupTitle variant="title" center>Hand this ride back?</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          Pick what happened. If the passenger did not come, the ride closes once you have waited 5 minutes, and this does not count against you. Otherwise the passenger keeps this ride and Swift looks for another driver, and this may affect your driver standing.
+          Pick what happened. If the passenger did not come, the ride closes once you have waited 5 minutes at the pickup, and this does not count against you. Otherwise the passenger keeps this ride and Swift looks for another driver, and this may affect your driver standing.
         </T>
-        {(['Vehicle problem', 'Road or access blocked', 'Passenger did not arrive'] as const).map((why) => (
+        {(['Vehicle problem', 'Road or access blocked', 'GPS not working', 'Passenger did not arrive'] as const).map((why) => (
           <PillButton
             key={why}
             label={why}

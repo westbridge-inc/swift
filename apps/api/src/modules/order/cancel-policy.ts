@@ -437,7 +437,7 @@ export const APPOINTMENT_TOO_LATE_MESSAGE = 'The provider is running very late. 
 function tooLateMessage(order: CancellationSnapshot): string {
   if (order.fulfillment === 'APPOINTMENT') return APPOINTMENT_TOO_LATE_MESSAGE;
   if (order.orderType === 'TAXI' && order.status === 'DRIVER_ARRIVED') {
-    return `This ride is very late starting: your driver arrived ${TAXI_ARRIVED_VERY_LATE_MIN} minutes ago and you are not aboard. You can cancel it for free.`;
+    return `This ride is very late starting: your driver arrived over ${TAXI_ARRIVED_VERY_LATE_MIN} minutes ago and you are not aboard. You can cancel it for free.`;
   }
   if (order.orderType === 'TAXI') return 'Your driver is running very late. You can cancel the ride for free.';
   if (order.orderType === 'COURIER') return 'Your rider is running very late. You can cancel for free.';

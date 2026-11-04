@@ -58,7 +58,7 @@ describe('driver ride handback client/server contract', () => {
     expect(SCREEN).toContain('if (!liveJob?.id || !canDriverHandback) return;');
     expect(SCREEN).toContain("setDriverHandbackFlow({ rideId: liveJob.id, job: liveJob, phase: 'confirm' });");
     expect(SCREEN).toContain("phase: 'confirm' | 'submitting' | 'dismissing';");
-    expect(SCREEN).toContain("['Vehicle problem', 'Road or access blocked', 'Passenger did not arrive']");
+    expect(SCREEN).toContain("['Vehicle problem', 'Road or access blocked', 'GPS not working', 'Passenger did not arrive']");
     expect(SCREEN).toContain('onError: (e: any) =>');
   });
 
