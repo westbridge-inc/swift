@@ -541,16 +541,18 @@ async function watchOne(
     if (naming.length > 0) { records = naming.map((row) => namedRecord(row, c, deps.paidStatuses)); return 'LATE_RECORD'; }
     return mmgHistoryTruncated(answer.rows.length, query) ? 'WATCH_INCOMPLETE' : null;
   };
-  // The page's own time, every pass: MMG may show a payment made there only after the close read it.
+  // The page's own time, every pass: MMG may show a payment made there only after the close read it. A read of it that
+  // failed or was cut stops nothing ahead of it: it is carried, and no week ends clean on it.
   const pageWindow: typeof slices = [];
-  let decision: WatchDecision = await read({ fromdate: mmgStampOf(c.createdAt.getTime() - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(state.closedAt, zone, 'ceil'), rows: MMG_HISTORY_ROWS }, pageWindow) ?? 'WATCH_CLEAR';
+  const pageRead = await read({ fromdate: mmgStampOf(c.createdAt.getTime() - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(state.closedAt, zone, 'ceil'), rows: MMG_HISTORY_ROWS }, pageWindow);
+  let decision: WatchDecision = pageRead === 'LATE_RECORD' ? pageRead : 'WATCH_CLEAR';
   for (let i = 0; decision === 'WATCH_CLEAR' && i < WATCH_SLICES_PER_CHECK && covered < limit; i += 1) {
     const to = Math.min(covered + WATCH_SLICE_MS, limit);
     const stop = await read({ fromdate: mmgStampOf(covered - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(to, zone, 'ceil'), rows: MMG_HISTORY_ROWS }, slices);
     if (stop) decision = stop;
     else covered = to;
   }
-  if (decision === 'WATCH_CLEAR') decision = covered >= state.end ? 'WATCH_DONE' : covered < limit ? 'WATCH_BEHIND' : 'WATCH_CLEAR';
+  if (decision === 'WATCH_CLEAR') decision = covered < limit ? 'WATCH_BEHIND' : pageRead ?? (covered >= state.end ? 'WATCH_DONE' : 'WATCH_CLEAR');
   // The week (and its grace day) is over and a read keeps failing: a person looks, once.
   if ((decision === 'WATCH_READ_FAILED' || decision === 'WATCH_INCOMPLETE') && now.getTime() >= state.end + WATCH_GRACE_MS) decision = 'WATCH_ENDED_INCOMPLETE';
   const write = (d: WatchDecision) => db.mmgCheckoutObservation.create({ data: {
@@ -588,7 +590,7 @@ async function watchOne(
   await db.auditLog.create({ data: { action: AUTO_CLOSE_LATE_RECORD_AUDIT, entity: 'MmgCheckoutIntent', entityId: c.id, changes: {
     tenantId: c.tenantId, checkoutId: c.id, subscriptionId: held.subscriptionId, reason: held.reason, actor: NO_REPLY_CHECK_ACTOR,
     assessment: likely ? 'LATE_PAYMENT_LIKELY' : 'POSSIBLE_MATCH', confirmationId: hold?.id ?? null, confirmationStatus: hold?.status ?? null,
-    confirmationReason: hold?.reason ?? null, epoch: hold?.sourceEpoch ?? null, slices, coveredUntilMs: covered,
+    confirmationReason: hold?.reason ?? null, epoch: hold?.sourceEpoch ?? null, pageWindow: pageWindow[0] ?? null, slices, coveredUntilMs: covered,
   } } });
   mmgCheckoutEventsCounter.labels('auto_closed_late_record').inc();
   return true;
