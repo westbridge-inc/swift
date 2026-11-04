@@ -2958,7 +2958,7 @@ export async function customerRoutes(app: FastifyInstance) {
       ...order,
       noMoverFound: cancellableState && await readNoMoverFound(app.prisma, order),
       tooLateToDeliver: cancellableState && await readTooLateToDeliver(app.prisma, order, previewNow),
-      storeCannotHandOver: cancellableState && await readStoreCannotHandOver(app.prisma, order.vendorId),
+      storeCannotHandOver: cancellableState && order.fulfillment === 'PICKUP' && order.status === 'READY_FOR_PICKUP' && await readStoreCannotHandOver(app.prisma, order.vendorId),
       // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
       assignedAt: cancellableState ? await readAssignedAt(app.prisma, order) : null,
     };
