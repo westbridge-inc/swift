@@ -412,6 +412,10 @@ export const allowMoverPlanMove = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/mover-plan/allow-move`, { method: 'POST', body: JSON.stringify({}), reason });
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+/** [BUG-HUNT F20] A verified deletion request from someone who cannot sign in. Founder only, answers 202
+ *  APPROVAL_REQUIRED, and runs the person's own deletion with every blocker once approved. */
+export const deleteVerifiedRequest = (id: string, check: { identityCheck: string; identityNote: string }, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/verified-deletion`, { method: 'POST', body: JSON.stringify({ ...check, reason }), reason });
 /** [BUG-HUNT F22] What the screens tell a store to ask support for: a type picked by mistake, a checked name. */
 export const changeStoreType = (id: string, vendorType: string, reason: string) =>
   apiFetch(`/api/v1/admin/vendors/${id}/type`, { method: 'PUT', body: JSON.stringify({ vendorType }), reason });

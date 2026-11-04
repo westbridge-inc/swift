@@ -440,6 +440,8 @@ describe('[Row 249 · COORD security review] the open-case census: every case, r
       .then((r) => cleanups.push(() => raw((t) => t.sosAlert.delete({ where: { id: r.id } }))))),
     safety_deletion_hold: (u) => raw((tx) => tx.safetyDeletionHold.create({ data: { userId: u, holdRefs: [], purpose: 'synthetic', ownerRole: 'OPS', reviewBy: later(5), purgeBy: later(50) } })
       .then((r) => cleanups.push(() => raw((t) => t.safetyDeletionHold.delete({ where: { id: r.id } }))))),
+    evidence_legal_hold: (u) => raw((tx) => tx.evidenceBundle.create({ data: { bundleNumber: `EB-${nanoid(8)}`, subjectUserId: u, legalHold: true } as never })
+      .then((r) => cleanups.push(() => raw((t) => t.evidenceBundle.delete({ where: { id: r.id } }))))),
     doc_legal_hold: (u) => raw((tx) => tx.docLegalHold.create({ data: { subjectUserId: u, reason: 'synthetic', ownerId: other(), placedBy: other(), reviewBy: later(5) } })
       .then((r) => cleanups.push(() => raw((t) => t.docLegalHold.delete({ where: { id: r.id } }))))),
     compliance_review_case: (u) => raw((tx) => tx.complianceReviewCase.create({ data: { userId: u, dueAt: later(5) } })

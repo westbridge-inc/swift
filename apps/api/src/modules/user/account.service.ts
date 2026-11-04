@@ -24,6 +24,7 @@ import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../.
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import { accountClosedKeptWords, holdForOpenIdentityReviews, investigationHoldSummary } from '../verification/investigation-hold';
 import { identityReviewOpenFor } from '../verification/investigation-hold-core';
+import { refuseVerifiedDeletion } from './verified-deletion-gate';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -248,7 +249,13 @@ export class AccountService {
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
   async deleteAccount(
     userId: string, selfServe = false, surface: ClosureSurface = 'app',
-    opts: { claimClosure?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
+    opts: {
+      claimClosure?: (tx: Prisma.TransactionClient) => Promise<boolean>;
+      /** Runs once the tombstone is written, past every blocker, in the same transaction: an audit row here shows the effect, and a refusal leaves none. */
+      onCutoff?: (tx: Prisma.TransactionClient) => Promise<void>;
+      /** [BUG-HUNT F20] The founder's door for a verified request from someone who cannot sign in, and no other caller. */
+      verifiedRequest?: boolean;
+    } = {},
   ) {
     const prisma = this.app.prisma;
     const preflight = await prisma.$transaction(async (tx) => {
@@ -324,7 +331,8 @@ export class AccountService {
         await revokeAccessBeforeCleanup();
         return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
-      if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
+      if (opts.verifiedRequest) await refuseVerifiedDeletion(tx, user);
+      else if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
       }
 
@@ -408,6 +416,7 @@ export class AccountService {
       // [erasure exceptions] The erasure's own record of its cut-off, committed with the marker. audit_logs is
       // immutable to app logins; the database's erasure exceptions (swift_erased_person) require this row too.
       await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: 'User', entityId: userId } });
+      await opts.onCutoff?.(tx);
       return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);
