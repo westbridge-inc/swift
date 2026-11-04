@@ -1,4 +1,3 @@
-import type { OnAudit } from '../../lib/audit-writer';
 import type { PrismaClient, AdInvoice } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -13,12 +12,17 @@ import { isProduction } from '../../utils/runtime-mode';
 // Ad checkout & payment (ads-platform spec §8.1/§8.2). Ad money is PLATFORM
 // revenue paid UPFRONT — it reuses the subscription rails' discipline
 // (idempotent by provider ref, integer-minor money as Decimal) but is a
-// one-time invoice, not a recurring MIT charge. The LIVE hosted-checkout URL
-// (MMG Merchant Checkout / PowerTranz hosted page) is a FOUNDER/acquirer-gated
-// integration exactly like the PowerTranz-MIT billing item; until those
-// credentials exist, checkout issues the invoice + a mock/pending payment URL
-// and the audited mark-paid path (§8.2 "Caribbean reality path") settles it —
-// which is also the real webhook's settlement action.
+// one-time invoice, not a recurring MIT charge.
+//
+// [ADS-ON · owner ruling 3 Nov] An advertiser pays through the MMG checkout
+// page, and an invoice is paid only after MMG's own lookup confirms it. There
+// is no typed-reference settlement: the admin mark-paid route is gone. The
+// weekly fee's checkout (billing/mmg-checkout.service.ts) decides whether a
+// payment happened and calls settleInTx in its own transaction, so a
+// confirmation and its settlement commit together or not at all.
+//
+// The switch stays OFF until the owner has MMG's answers (second product on one
+// merchant, limits, reversal rules): with it off, production takes no ad money.
 
 export type AdPaymentProvider = 'MOCK' | 'MMG' | 'POWERTRANZ' | 'MANUAL';
 
@@ -32,8 +36,23 @@ export interface AdCheckoutObserver {
 export function adCheckoutKilled(env: Record<string, string | undefined> = process.env): boolean {
   return env['AD_CHECKOUT_KILL'] === '1';
 }
+/** 1 pauses automatic settlement: a payment MMG confirmed keeps waiting and nothing is settled until it is unset. */
 export function adPaymentConfirmManualOnly(env: Record<string, string | undefined> = process.env): boolean {
   return env['AD_PAYMENT_CONFIRM_MANUAL_ONLY'] === '1';
+}
+/** [ADS-ON] Advertisers may pay with MMG. Stays off until the owner has MMG's answers; only exactly 1 opens it. */
+export function adMmgCheckoutEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env['ADS_MMG_CHECKOUT'] === '1';
+}
+
+/** What a settlement did. `already` is the same payment, seen again. */
+export type AdSettlement = 'settled' | 'late_capture' | 'already';
+
+/** A second payment on an invoice another payment settled. Never swallowed: real money is at MMG. */
+export class AdInvoiceSettledByAnotherPayment extends AppError {
+  constructor() {
+    super(409, 'AD_INVOICE_ALREADY_PAID', 'This invoice was settled by another payment.');
+  }
 }
 
 export class AdCheckoutService {
@@ -60,16 +79,14 @@ export class AdCheckoutService {
       authorize?: (tx: Prisma.TransactionClient) => Promise<void>;
     } = {},
   ): Promise<{ invoice: AdInvoice; reservedUntil: Date | null }> {
-    // The hosted MMG/PowerTranz checkout adapters are not implemented here yet;
-    // MANUAL is the honest production invoice path. Fail before reading or
-    // reserving inventory so a synthetic provider cannot mutate production.
-    if (isProduction() && provider !== 'MANUAL') {
-      throw new AppError(
-        503,
-        'ADS_PAYMENT_PROVIDER_UNAVAILABLE',
-        'Only audited manual invoice payment is available for ads right now.',
-      );
+    // [ADS-ON] The server decides how an invoice is paid: in production that is
+    // the MMG checkout, and the provider a client names is not read (the app in
+    // the stores asks for MANUAL). Fail before reading or reserving inventory:
+    // with the switch off, production issues no invoice nobody could pay.
+    if (isProduction() && !adMmgCheckoutEnabled()) {
+      throw new AppError(503, 'ADS_PAYMENT_PROVIDER_UNAVAILABLE', 'Paying for ads is not open yet.');
     }
+    const invoiceProvider: AdPaymentProvider = isProduction() ? 'MMG' : provider;
     const campaign = await this.prisma.adCampaign.findUnique({
       where: { id: campaignId },
       include: { advertiser: { select: { status: true } } },
@@ -102,7 +119,7 @@ export class AdCheckoutService {
           adCheckoutCounter.labels('duplicate_invoice_refused').inc();
           throw new AppError(409, 'CAMPAIGN_ALREADY_INVOICED', 'This campaign already has a settled invoice.');
         }
-        invoice = await this.createInvoice(tx, fresh.tenantId, fresh.advertiserId, campaignId, fresh.totalAmount ?? new Prisma.Decimal(0), fresh.currency, provider);
+        invoice = await this.createInvoice(tx, fresh.tenantId, fresh.advertiserId, campaignId, fresh.totalAmount ?? new Prisma.Decimal(0), fresh.currency, invoiceProvider);
       },
     });
     if (!invoice) throw new AppError(500, 'INVOICE_MISSING', 'Checkout did not produce an invoice.');
@@ -115,128 +132,105 @@ export class AdCheckoutService {
     return { invoice, reservedUntil: nextExpiry?.reservedUntil ?? null };
   }
 
-  /** ADS-{YYYY}-{seq}, per-year monotonic. @unique(number) + a small retry
-   *  covers the count race. */
-  private async createInvoice(db: Prisma.TransactionClient, tenantId: string, advertiserId: string, campaignId: string, amount: Prisma.Decimal, currency: string, provider: AdPaymentProvider): Promise<AdInvoice> {
+  /** ADS-{YYYY}-{seq}, per-year monotonic. One allocator at a time, for the length of this transaction: a clash
+   *  could not be retried here, because Postgres has aborted the transaction by then. The next number follows the
+   *  highest one, never a count of rows, so a gap can never name a number already taken. */
+  private async createInvoice(tx: Prisma.TransactionClient, tenantId: string, advertiserId: string, campaignId: string, amount: Prisma.Decimal, currency: string, provider: AdPaymentProvider): Promise<AdInvoice> {
     const year = new Date().getUTCFullYear();
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const count = await db.adInvoice.count({ where: { number: { startsWith: `ADS-${year}-` } } });
-      const number = `ADS-${year}-${String(count + 1 + attempt).padStart(6, '0')}`;
-      try {
-        return await db.adInvoice.create({
-          data: {
-            tenantId, advertiserId, campaignId, number,
-            amount, currency, provider,
-            paymentUrl: provider === 'MOCK' ? `mock://ads-checkout/${campaignId}` : null,
-          },
-        });
-      } catch (err) {
-        if ((err as Prisma.PrismaClientKnownRequestError).code === 'P2002') continue; // number raced — retry
-        throw err;
-      }
-    }
-    throw new AppError(500, 'INVOICE_NUMBER_RACE', 'Could not allocate an invoice number — retry.');
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`ad-invoice-number:${year}`}, 0))::text`;
+    const prefix = `ADS-${year}-`;
+    const [highest] = await tx.$queryRaw<Array<{ seq: number | null }>>`
+      SELECT max(substring("number" FROM '[0-9]+$')::int) AS seq FROM "ad_invoices"
+      WHERE "number" LIKE ${`${prefix}%`} AND "number" ~ '^ADS-[0-9]{4}-[0-9]{6,9}$'`;
+    const number = `${prefix}${String((highest?.seq ?? 0) + 1).padStart(6, '0')}`;
+    return tx.adInvoice.create({
+      data: {
+        tenantId, advertiserId, campaignId, number,
+        amount, currency, provider,
+        paymentUrl: provider === 'MOCK' ? `mock://ads-checkout/${campaignId}` : null,
+      },
+    });
   }
 
-  /** §8.2 payment confirmation — the ONE settlement action, reached by both the
-   *  provider webhook and the admin "mark paid" button. Idempotent by
-   *  providerRef: a replayed callback returns the already-paid invoice. Moves
-   *  the campaign PENDING_PAYMENT → PENDING_REVIEW and confirms every booking.
-   *  manualReference is required on the admin path (audit). */
-  async markPaid(invoiceId: string, opts: { providerRef?: string; adminUserId?: string; manualReference?: string; onAudit?: OnAudit }): Promise<AdInvoice> {
-    const head = await this.prisma.adInvoice.findUnique({ where: { id: invoiceId } });
+  /** §8.2 payment confirmation: the ONE settlement action, inside the caller's transaction, under the campaign
+   *  lock the expiry sweep takes. A payment seen again is `already`; ANOTHER payment on a paid invoice is refused
+   *  and must reach a person (AdInvoiceSettledByAnotherPayment). Moves the campaign PENDING_PAYMENT → PENDING_REVIEW
+   *  and confirms every booking. */
+  async settleInTx(tx: Prisma.TransactionClient, invoiceId: string, opts: { providerRef: string; actor?: string }): Promise<AdSettlement> {
+    const head = await tx.adInvoice.findUnique({ where: { id: invoiceId }, select: { campaignId: true } });
     if (!head) throw new NotFoundError('AdInvoice', invoiceId);
-    if (head.status === 'PAID') {
-      return head; // idempotent replay
-    }
-    if (opts.adminUserId && !opts.manualReference) {
-      throw new AppError(400, 'REFERENCE_REQUIRED', 'A payment reference note is required to mark an invoice paid.');
-    }
-    // [R045-ADS-05] Rollback routes confirmation to manual review.
-    if (!opts.adminUserId && adPaymentConfirmManualOnly()) {
-      throw new AppError(503, 'ADS_CONFIRMATION_MANUAL_ONLY', 'Automatic payment confirmation is paused — an operator confirms this invoice by hand.');
-    }
-
+    const actor = opts.actor ?? 'system:ad-settlement';
     const paidAt = new Date();
-    let lateCapture = false;
-    await this.prisma.$transaction(async (tx) => {
-      // [R045-ADS-04 · 05] ONE serializable transition under the campaign lock —
-      // the same lock the expiry sweep takes. Every step is count-checked;
-      // any miss rolls the whole thing back.
-      await lockCampaign(tx, head.campaignId);
-      await this.observer.afterLock?.(head.campaignId);
-      const invoice = await tx.adInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
-      if (invoice.status === 'PAID') return; // settled under the lock by a peer
-      if (opts.providerRef) {
-        const reused = await tx.adInvoice.findFirst({ where: { providerRef: opts.providerRef, id: { not: invoiceId } }, select: { id: true } });
-        if (reused) {
-          adCheckoutCounter.labels('provider_ref_reused').inc();
-          throw new AppError(409, 'PROVIDER_REF_REUSED', 'This payment reference already settled another invoice.');
-        }
-      }
-      const reserved = await tx.adBooking.count({ where: { campaignId: invoice.campaignId, status: 'RESERVED' } });
-      const campaign = await tx.adCampaign.findUniqueOrThrow({ where: { id: invoice.campaignId }, select: { status: true } });
-      if (invoice.status === 'UNPAID' && reserved > 0 && campaign.status === 'PENDING_PAYMENT') {
-        const claimed = await tx.adInvoice.updateMany({
-          where: { id: invoiceId, status: 'UNPAID' },
-          data: { status: 'PAID', paidAt, providerRef: opts.providerRef ?? invoice.providerRef ?? null, provider: opts.adminUserId ? 'MANUAL' : invoice.provider },
-        });
-        if (claimed.count !== 1) throw new AppError(409, 'INVOICE_SETTLE_RACE', 'The invoice changed underneath this settlement.');
-        const confirmed = await tx.adBooking.updateMany({ where: { campaignId: invoice.campaignId, status: 'RESERVED' }, data: { status: 'CONFIRMED' } });
-        if (confirmed.count !== reserved) throw new AppError(409, 'INVENTORY_SETTLE_RACE', 'The held inventory changed underneath this settlement.');
-        const moved = await tx.adCampaign.updateMany({ where: { id: invoice.campaignId, status: 'PENDING_PAYMENT' }, data: { status: 'PENDING_REVIEW' } });
-        if (moved.count !== 1) throw new AppError(409, 'CAMPAIGN_SETTLE_RACE', 'The campaign changed underneath this settlement.');
-        await tx.adsAuditLog.create({
-          data: {
-            tenantId: invoice.tenantId, actorUserId: opts.adminUserId ?? 'system:webhook',
-            action: 'INVOICE_MARK_PAID', entityType: 'AdInvoice', entityId: invoiceId,
-            reason: opts.manualReference ?? opts.providerRef ?? null,
-          },
-        });
-        // [ADM-002] The caller's audit row is the last statement of the settlement.
-        await opts.onAudit?.(tx, { outcome: 'settled', confirmedBookings: confirmed.count });
-        return;
-      }
-      // [R045-ADS-05] The hold expired (inventory released, invoice VOID or the
-      // campaign back in DRAFT) and the money arrived anyway — a late external
-      // capture. Never a paid campaign with no inventory: the invoice records
-      // the money, the campaign stays where the expiry left it, and the full
-      // amount becomes a durable refund obligation (suspense) in the same
-      // transaction.
-      if (invoice.status === 'VOID' || invoice.status === 'UNPAID') {
-        const claimed = await tx.adInvoice.updateMany({
-          where: { id: invoiceId, status: invoice.status },
-          data: { status: 'PAID', paidAt, providerRef: opts.providerRef ?? invoice.providerRef ?? null, provider: opts.adminUserId ? 'MANUAL' : invoice.provider },
-        });
-        if (claimed.count !== 1) throw new AppError(409, 'INVOICE_SETTLE_RACE', 'The invoice changed underneath this settlement.');
-        await tx.adCampaign.updateMany({ where: { id: invoice.campaignId }, data: { statusReason: 'Paid after the reservation hold expired — full refund staged' } });
-        await this.refunds.stageLateCapture(tx, invoice.campaignId, invoiceId, opts.adminUserId ?? null);
-        await tx.adsAuditLog.create({
-          data: {
-            tenantId: invoice.tenantId, actorUserId: opts.adminUserId ?? 'system:webhook',
-            action: 'INVOICE_LATE_CAPTURE', entityType: 'AdInvoice', entityId: invoiceId,
-            reason: opts.manualReference ?? opts.providerRef ?? null,
-          },
-        });
-        lateCapture = true;
-        adCheckoutCounter.labels('late_capture').inc();
-        await opts.onAudit?.(tx, { outcome: 'late_capture' });
-        return;
-      }
-      throw new AppError(409, 'INVOICE_NOT_PAYABLE', `A ${invoice.status} invoice cannot be marked paid.`);
-    });
-    if (lateCapture) {
-      await notifyAdmins(this.prisma, this.notifications, {
-        tenantId: head.tenantId ?? null,
-        title: 'Ad payment arrived after the hold expired',
-        body: `Invoice ${head.number} was paid after its reservation expired. The money is recorded, the inventory was not confirmed, and a full refund obligation is staged — settle it with the payout reference.`,
-        data: { kind: 'ad_late_capture', campaignId: head.campaignId, invoiceNumber: head.number },
-      }).catch(() => {});
-      return this.prisma.adInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
+    // [R045-ADS-04 · 05] ONE serializable transition under the campaign lock —
+    // the same lock the expiry sweep takes. Every step is count-checked;
+    // any miss rolls the whole thing back.
+    await lockCampaign(tx, head.campaignId);
+    await this.observer.afterLock?.(head.campaignId);
+    const invoice = await tx.adInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
+    if (invoice.status === 'PAID') {
+      if (invoice.providerRef === opts.providerRef) return 'already'; // settled under the lock by a peer
+      adCheckoutCounter.labels('second_payment_refused').inc();
+      throw new AdInvoiceSettledByAnotherPayment();
     }
-    const invoice = head;
+    const reused = await tx.adInvoice.findFirst({ where: { providerRef: opts.providerRef, id: { not: invoiceId } }, select: { id: true } });
+    if (reused) {
+      adCheckoutCounter.labels('provider_ref_reused').inc();
+      throw new AppError(409, 'PROVIDER_REF_REUSED', 'This payment reference already settled another invoice.');
+    }
+    const reserved = await tx.adBooking.count({ where: { campaignId: invoice.campaignId, status: 'RESERVED' } });
+    const campaign = await tx.adCampaign.findUniqueOrThrow({ where: { id: invoice.campaignId }, select: { status: true } });
+    if (invoice.status === 'UNPAID' && reserved > 0 && campaign.status === 'PENDING_PAYMENT') {
+      const claimed = await tx.adInvoice.updateMany({
+        where: { id: invoiceId, status: 'UNPAID' },
+        data: { status: 'PAID', paidAt, providerRef: opts.providerRef },
+      });
+      if (claimed.count !== 1) throw new AppError(409, 'INVOICE_SETTLE_RACE', 'The invoice changed underneath this settlement.');
+      const confirmed = await tx.adBooking.updateMany({ where: { campaignId: invoice.campaignId, status: 'RESERVED' }, data: { status: 'CONFIRMED' } });
+      if (confirmed.count !== reserved) throw new AppError(409, 'INVENTORY_SETTLE_RACE', 'The held inventory changed underneath this settlement.');
+      const moved = await tx.adCampaign.updateMany({ where: { id: invoice.campaignId, status: 'PENDING_PAYMENT' }, data: { status: 'PENDING_REVIEW' } });
+      if (moved.count !== 1) throw new AppError(409, 'CAMPAIGN_SETTLE_RACE', 'The campaign changed underneath this settlement.');
+      await tx.adsAuditLog.create({
+        data: { tenantId: invoice.tenantId, actorUserId: actor, action: 'INVOICE_MARK_PAID', entityType: 'AdInvoice', entityId: invoiceId, reason: opts.providerRef },
+      });
+      return 'settled';
+    }
+    // [R045-ADS-05] The hold expired (inventory released, invoice VOID or the
+    // campaign back in DRAFT) and the money arrived anyway — a late external
+    // capture. Never a paid campaign with no inventory: the invoice records
+    // the money, the campaign stays where the expiry left it, and the full
+    // amount becomes a durable refund obligation (suspense) in the same
+    // transaction.
+    if (invoice.status === 'VOID' || invoice.status === 'UNPAID') {
+      const claimed = await tx.adInvoice.updateMany({
+        where: { id: invoiceId, status: invoice.status },
+        data: { status: 'PAID', paidAt, providerRef: opts.providerRef },
+      });
+      if (claimed.count !== 1) throw new AppError(409, 'INVOICE_SETTLE_RACE', 'The invoice changed underneath this settlement.');
+      await tx.adCampaign.updateMany({ where: { id: invoice.campaignId }, data: { statusReason: 'Paid after the reservation hold expired — full refund staged' } });
+      await this.refunds.stageLateCapture(tx, invoice.campaignId, invoiceId, null);
+      await tx.adsAuditLog.create({
+        data: { tenantId: invoice.tenantId, actorUserId: actor, action: 'INVOICE_LATE_CAPTURE', entityType: 'AdInvoice', entityId: invoiceId, reason: opts.providerRef },
+      });
+      adCheckoutCounter.labels('late_capture').inc();
+      return 'late_capture';
+    }
+    throw new AppError(409, 'INVOICE_NOT_PAYABLE', `A ${invoice.status} invoice cannot be marked paid.`);
+  }
 
-    log().info({ invoiceId, campaignId: invoice.campaignId, via: opts.adminUserId ? 'admin' : 'provider' }, 'ad invoice paid — campaign → PENDING_REVIEW');
+  /** The notices of a settlement that has committed. A failed notice never unsettles anything. */
+  async afterSettled(invoiceId: string, outcome: AdSettlement): Promise<void> {
+    if (outcome === 'already') return;
+    const invoice = await this.prisma.adInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
+    if (outcome === 'late_capture') {
+      await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: invoice.tenantId ?? null,
+        title: 'Ad payment arrived after the hold expired',
+        body: `Invoice ${invoice.number} was paid after its reservation expired. The money is recorded, the inventory was not confirmed, and a full refund obligation is staged — settle it with the payout reference.`,
+        data: { kind: 'ad_late_capture', campaignId: invoice.campaignId, invoiceNumber: invoice.number },
+      }).catch(() => {});
+      return;
+    }
+    log().info({ invoiceId, campaignId: invoice.campaignId }, 'ad invoice paid — campaign → PENDING_REVIEW');
     await notifyAdmins(this.prisma, this.notifications, {
       // Scoped to the subject's tenant [NOC-A F45].
       tenantId: invoice.tenantId ?? null,
@@ -252,6 +246,17 @@ export class AdCheckoutService {
       kind: 'ad_invoice_receipt',
       data: { campaignId: invoice.campaignId, invoiceNumber: invoice.number },
     }).catch(() => {});
+  }
+
+  /** One settlement in its own transaction, then its notices. The MMG checkout does not use this: it calls the
+   *  two halves itself, so its confirmation commits with the settlement. Idempotent by providerRef. */
+  async markPaid(invoiceId: string, opts: { providerRef: string }): Promise<AdInvoice> {
+    // [R045-ADS-05] Rollback holds settlement back.
+    if (adPaymentConfirmManualOnly()) {
+      throw new AppError(503, 'ADS_CONFIRMATION_PAUSED', 'Automatic payment confirmation is paused.');
+    }
+    const outcome = await this.prisma.$transaction((tx) => this.settleInTx(tx, invoiceId, opts));
+    await this.afterSettled(invoiceId, outcome);
     return this.prisma.adInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
   }
 }

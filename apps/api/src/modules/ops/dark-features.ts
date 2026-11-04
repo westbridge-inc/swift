@@ -386,6 +386,16 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'growth',
   },
   {
+    key: 'ads_mmg_checkout',
+    setting: 'ADS_MMG_CHECKOUT',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Advertisers pay on the MMG checkout page',
+    whileOff:
+      'Production takes no ad money: no ad invoice is issued and no MMG page opens for one. It stays off until MMG has answered three things: whether one merchant account may sell a second product, what limits apply, and when an ad payment can be reversed.',
+    impact: 'money',
+  },
+  {
     key: 'owner_rls_bind',
     setting: 'OWNER_RLS_BIND',
     source: 'env',

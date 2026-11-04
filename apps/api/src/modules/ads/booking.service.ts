@@ -225,6 +225,10 @@ export class BookingService {
     for (const campaignId of new Set(expired.map((b) => b.campaignId))) {
       const outcome = await this.prisma.$transaction(async (tx) => {
         await lockCampaign(tx, campaignId);
+        // [ADS-ON] An MMG page is open, or MMG's answer is being checked: the slots wait for it, so a payment
+        // that is going through never lands on released inventory.
+        const paying = await tx.mmgCheckoutIntent.count({ where: { adInvoice: { campaignId }, status: { in: ['OPEN', 'CONFIRMING'] } } });
+        if (paying > 0) return { releasedHere: 0, voidedHere: 0 };
         const holds = await tx.adBooking.findMany({ where: { campaignId, status: 'RESERVED', reservedUntil: { lt: now } }, select: { id: true, placementId: true, city: true, weekStart: true } });
         let releasedHere = 0;
         for (const b of holds) {

@@ -137,7 +137,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'low_stock', 'staff_added', 'staff_invite', 'staff_joined', 'ad_team_invite', 'review_response', 'rating_removed', 'category_request_resolved',
     'category_backfill_review', 'vendor_needs_public_phone', 'vendor_needs_food_handler_tick', 'vendor_needs_weekly_fee_tick', 'support_update', 'store_pin_moved',
     'ad_campaign_paused', 'ad_campaign_cancelled', 'ad_campaign_killed', 'ad_campaign_auto_cancelled',
-    'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture',
+    'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture', 'ad_mmg_checkout',
     // Operations pages (admins)
     'support_ticket', 'sos_active', 'sos_marked_safe', 'guardian_deescalation',
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',

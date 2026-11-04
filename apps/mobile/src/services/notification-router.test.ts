@@ -491,6 +491,7 @@ const CENSUS: Case[] = [
   { k: 'ad_campaign_paused', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_team_invite', d: { advertiserId: 'a1' }, to: null, why: 'ADS OFF: the invited person — the accept and decline screens are built when ads go on (ads-on checklist); until then the notice is the whole message' },
   { k: 'ad_campaign_resumed', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
+  { k: 'ad_mmg_checkout', d: { ref: 'r1', status: 'HELD', campaignId: 'c1' }, to: null, why: 'ADS OFF: advertiser — ad invoices are paid on the website, so an MMG result opens nothing in the app' },
   { k: 'ad_campaign_cancelled', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_killed', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_auto_cancelled', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },

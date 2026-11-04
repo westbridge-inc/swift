@@ -470,3 +470,25 @@ The server never takes an amount from this body: it prices the list again, then 
 **Notice.** The owner hears once per outcome (push kind `billing_mmg_checkout`, data `{ ref, status, chainCheckout: true }`, no `subscriptionId`): route it to the pay-all screen, or to the fee screen of the selected store on an older app.
 
 Changes to this contract are made here first, in the same PR as the code that changes.
+
+## Advertisers (`ADS_MMG_CHECKOUT`, off)
+
+An advertiser's invoice is a third payer of this same checkout: one more kind of `MmgCheckoutIntent`, with the same reply, lookup and six conditions. **Nothing settles until MMG's own lookup confirms it**, and there is no typed-reference settlement. The switch stays off until MMG has answered U11, U12 and U13 (`providers/mmg/CHECKOUT-CONTRACT.md`). With it off, production issues no ad invoice and opens no page.
+
+| Route | Who | |
+|---|---|---|
+| `POST /api/v1/ads/invoices/{id}/mmg-checkout` | the advertiser's OWNER | `Idempotency-Key` as section 2. 201 new, 200 the one already open |
+| `GET /api/v1/ads/invoices/{id}/mmg-checkout/{ref}` | any member | the server's own state |
+
+MMG sends every payment back to the one set of registered pages. `POST /api/v1/billing/mmg-checkout/return` adds `audience: 'ADVERTISER'` when the checkout is an advertiser's, and the page words itself from that. A weekly-fee answer is unchanged.
+
+What differs from a weekly fee:
+
+- **The amount is the invoice's.** The database refuses an ad checkout that differs from its invoice, or that is born from a paid one. An invoice with cents is refused, never rounded.
+- **No fee clock.** The campaign lock serializes a checkout against settlement and the expiry sweep. The slots stay held past the page, and the sweep leaves them while a page is open or a payment is being confirmed.
+- **Settlement is one commit** with the confirmation and the provider identity.
+- **A second payment is never swallowed.** MMG's confirmation of a payment on an invoice another payment settled is held for a person, not answered "already paid".
+- **One unresolved payment blocks the next.** No new page opens for a campaign while a payment on it is open, confirming, held or expired. An expired one nobody answered is read against MMG's history, as a fee's is: no payment and it closes as not paid; anything else goes to a person.
+- **A late payment** on a released hold is recorded, and its full amount becomes a refund obligation.
+- **No reversal.** `reversalRefusal` refuses an ad checkout (U13).
+- **A held ad payment has no close path yet.** It stays held and blocks new pages for that campaign until there is one. On the ads-on checklist.

@@ -55,8 +55,11 @@ export const MMG_CHECKOUT_SANDBOX_URL = 'https://mmg-checkout.sandbox.invalid/mm
 /** The obviously fake merchant the sandbox pays. */
 export const SANDBOX_MERCHANT_ID = '0000000';
 
-/** The productDescription of every checkout: the fee is the only thing sold. */
+/** The productDescription of a weekly-fee checkout. */
 export const MMG_CHECKOUT_PRODUCT_DESCRIPTION = 'Swift weekly fee';
+/** [ADS-ON] The productDescription of an advertiser's checkout. MMG shows it on its page; free text up to 64 ASCII.
+ *  No longer than the fee's: the boot proof that a request fits the configured key is built with the fee's. */
+export const MMG_AD_PRODUCT_DESCRIPTION = 'Swift ad payment';
 
 const SHA256_BYTES = 32;
 /** Below this an RSA key is refused at boot, whoever issued it. */
@@ -626,6 +629,8 @@ export interface MmgCheckoutCreate {
   /** From newMerchantTransactionId, persisted by the caller BEFORE the URL exists. */
   merchantTransactionId: string;
   now?: Date;
+  /** Defaults to the weekly fee's. */
+  productDescription?: string;
 }
 
 export interface MmgCheckoutProvider {
@@ -655,7 +660,7 @@ function createCheckoutWith(parties: CheckoutParties, input: MmgCheckoutCreate):
     amount: formatCheckoutAmount(input.amount),
     merchantId: parties.merchantId,
     merchantTransactionId: input.merchantTransactionId,
-    productDescription: MMG_CHECKOUT_PRODUCT_DESCRIPTION,
+    productDescription: input.productDescription ?? MMG_CHECKOUT_PRODUCT_DESCRIPTION,
     requestInitiationTime: requestInitiationTime(input.now ?? new Date()),
     merchantName: parties.merchantName,
   });

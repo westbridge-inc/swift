@@ -8,11 +8,15 @@ export interface Campaign {
   id: string; name: string; status: string; statusReason: string | null;
   placement: { name: string; key: string; tier: string; mediaKind: string };
   cities: string[]; startWeek: string; endWeek: string; totalAmount: number | null; currency: string;
-  invoices: { id: string; number: string; status: string; amount: number }[];
+  invoices: { id: string; number: string; status: string; amount: number; payable?: boolean }[];
   creatives: { id: string; status: string; transcodeStatus: string | null }[];
   bookings: { weekStart: string; city: string; status: string }[];
 }
 export const getAdvertisers = (): Promise<Advertiser[]> => apiFetch('/api/v1/ads/advertiser/me').then(r => r.data);
+/** [ADS-ON] Open MMG's page for one invoice. The server prices it; the key makes a retry the same tap. */
+export interface AdCheckoutStart { ref: string; status: string; checkoutUrl: string | null }
+export const startAdCheckout = (invoiceId: string, key: string): Promise<AdCheckoutStart> =>
+  apiFetch(`/api/v1/ads/invoices/${encodeURIComponent(invoiceId)}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key, 'x-client-platform': 'web' } }).then(r => r.data);
 export const getCampaigns = (advertiserId: string): Promise<Campaign[]> =>
   apiFetch(`/api/v1/ads/advertiser/${encodeURIComponent(advertiserId)}/campaigns`).then(r => r.data);
 export interface Notice { id: string; title: string; body: string; isRead: boolean; createdAt: string }

@@ -141,3 +141,31 @@ describe('[SEC-DOS F8] the relay refuses what the API would never open, and limi
     expect(fetcher).toHaveBeenCalledTimes(21);
   });
 });
+
+// [ADS-ON] MMG sends every payment back here. The checkout's own record says who it is talking to.
+describe('an advertiser returning from MMG', () => {
+  const stubAudience = (state: string, audience: unknown) => vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: true, data: { state, audience } }), { status: 200 })));
+  const page = async () => (await GET(new Request('https://web.test/pay/mmg/success?token=abc'), context())).text();
+
+  it.each([
+    ['CONFIRMED', 'Payment received. Your ad is now in review.'],
+    ['CONFIRMING', "We're confirming your payment with MMG. Don't pay again. You can close this page."],
+    ['NOT_PAID', "MMG didn't complete this payment. You can try again from your campaign."],
+  ])('%s reads as an ad payment, never a weekly fee, and goes back to the campaigns', async (state, words) => {
+    stubAudience(state, 'ADVERTISER');
+    const html = await page();
+    expect(html).toContain(words);
+    expect(html).toContain('href="/advertiser"');
+    expect(html).not.toContain('Weekly fee');
+    expect(html).not.toContain('weekly fee');
+    expect(html).not.toContain('/weekly-fee');
+  });
+
+  it.each([[undefined], ['SOMETHING_ELSE'], [1]])('an audience of %j is a weekly fee, exactly as before', async (audience) => {
+    stubAudience('CONFIRMED', audience);
+    const html = await page();
+    expect(html).toContain('Your Swift weekly fee is paid.');
+    expect(html).toContain('/weekly-fee');
+  });
+});
+
