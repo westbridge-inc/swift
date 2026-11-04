@@ -12,6 +12,7 @@
  */
 import type { Prisma, PrismaClient, DiscoveryCategoryKind, GateEnforcement } from '@prisma/client';
 import { validExpiryOr } from './document-validity';
+import { NOT_RETIRED_DOC } from './doc-state';
 import { AppError } from '../../utils/errors';
 import { FOOD_HANDLER_CERT_DOC_TYPE } from './doc-registry';
 import { foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
@@ -41,13 +42,30 @@ export function gateApplies(gate: { categorySlug: string | null; categoryKind: D
   return gate.categoryKind !== null && gate.categoryKind === category.kind;
 }
 
-/** VALID = approved and unexpired, held by the vendor's owner. The image may be purged; the record is what counts. */
-export async function holdsValidDocument(prisma: Db, ownerUserId: string, legacyCode: string, now = new Date()): Promise<boolean> {
-  const doc = await prisma.verificationDocument.findFirst({
-    where: { userId: ownerUserId, docType: legacyCode, status: 'APPROVED', OR: validExpiryOr('expiresAt', now) },
+/**
+ * VALID = approved, unexpired and still the current copy, held by the vendor's owner. The image may be purged; the
+ * record is what counts. A renewal's old copy keeps its status, so the status alone never says it is current
+ * (doc-state.ts). `besides` leaves one copy out: does the person hold a valid copy other than this one?
+ *
+ * The trigger supersedes within one subject (document-record.ts), so a legacy copy bound to no subject stays COMMITTED
+ * beside a renewal that names one. If that renewal was revoked, the legacy copy is not what stands: the newest decided
+ * copy was. A rejected renewal was never approved, so it replaced nothing.
+ */
+export async function holdsValidDocument(prisma: Db, ownerUserId: string, legacyCode: string, now = new Date(), besides?: string): Promise<boolean> {
+  const held = { userId: ownerUserId, docType: legacyCode };
+  // A copy on a subject first: only when there is none does the legacy question arise.
+  const copy = await prisma.verificationDocument.findFirst({
+    where: { ...held, status: 'APPROVED', ...(besides && { id: { not: besides } }), AND: [{ OR: validExpiryOr('expiresAt', now) }, NOT_RETIRED_DOC] },
+    select: { subjectId: true, createdAt: true },
+    orderBy: [{ subjectId: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+  });
+  if (!copy) return false;
+  if (copy.subjectId !== null) return true;
+  const revokedSince = await prisma.verificationDocument.findFirst({
+    where: { ...held, state: 'REVOKED', createdAt: { gt: copy.createdAt } },
     select: { id: true },
   });
-  return doc !== null;
+  return revokedSince === null;
 }
 
 /** The store a gate is judged for: its owner, its market, and [FOOD-PERMIT] whether it is a registered restaurant. */
