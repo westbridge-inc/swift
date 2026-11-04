@@ -128,7 +128,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
   // [BUG-HUNT F20] A verified deletion request from someone who cannot sign in (docs/ops/verified-deletion-request.md).
   // The server holds every rule; this offers the door only where it can work.
   const staffAccount = (u.roles ?? []).some((role: string) => role === 'ADMIN' || role === 'SUPER_ADMIN');
-  const canDelete = u.viewer?.superAdmin === true && !staffAccount && u.status !== 'DEACTIVATED';
+  const canDelete = u.viewer?.superAdmin === true && !staffAccount && u.status !== 'DEACTIVATED' && u.status !== 'BANNED';
   const deleteAccount = async () => show(await dialog.run({
     title: `Delete ${name}'s account?`,
     body: <p>Only for a request you have verified, from someone who cannot sign in. This runs the person&apos;s own deletion: live orders or open cash refuse it, and financial and legal records are kept. It cannot be undone, and it needs approval first.</p>,

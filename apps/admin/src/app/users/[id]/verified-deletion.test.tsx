@@ -63,6 +63,7 @@ describe('the verified deletion door on a person', () => {
   it.each([
     ['a staff account', { roles: ['ADMIN', 'CUSTOMER'] }],
     ['an account already closed', { status: 'DEACTIVATED' }],
+    ['a banned account', { status: 'BANNED' }],
   ])('not on %s', async (_what, over) => {
     page(true, over);
     await screen.findByRole('heading', { name: 'Profiles' });

@@ -24,7 +24,9 @@ import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../.
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import { accountClosedKeptWords, holdForOpenIdentityReviews, investigationHoldSummary } from '../verification/investigation-hold';
 import { identityReviewOpenFor } from '../verification/investigation-hold-core';
+import { openCasesOf } from '../verification/abandoned-application';
 import type { FastifyInstance } from 'fastify';
+import type { PrismaClient } from '@prisma/client';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { bindTenantTransaction } from '../../plugins/prisma';
@@ -253,7 +255,7 @@ export class AccountService {
       /** Runs once the tombstone is written, past every blocker, in the same transaction: an audit row here shows the effect, and a refusal leaves none. */
       onCutoff?: (tx: Prisma.TransactionClient) => Promise<void>;
       /** [BUG-HUNT F20] The founder's door for a verified request from someone who cannot sign in, and no other caller:
-       *  a suspended or banned account may close, and an open case or a legal hold refuses instead of being escrowed. */
+       *  a suspended account with no open case may close. A banned one may not. An active one is as self-service is. */
       verifiedRequest?: boolean;
     } = {},
   ) {
@@ -331,9 +333,18 @@ export class AccountService {
         await revokeAccessBeforeCleanup();
         return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
-      const closedForThem = opts.verifiedRequest === true && (user.status === 'SUSPENDED' || user.status === 'BANNED');
+      // Measured: a closed account's number signs up again, identity tombstones on or off, so a ban would not survive this.
+      if (opts.verifiedRequest && user.status === 'BANNED') {
+        throw new AppError(409, 'BANNED_ACCOUNT', 'This account is banned, and closing it would let its number sign up again. Nothing was deleted. This one goes to the owner.');
+      }
+      const closedForThem = opts.verifiedRequest === true && user.status === 'SUSPENDED';
       if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED' && !closedForThem) {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
+      }
+      // Self-service never reaches a suspended account, so this door must not become a way out of an investigation.
+      // The abandoned-application census, so the two lists of what counts as a case cannot drift.
+      if (closedForThem && ((await openCasesOf(tx as unknown as PrismaClient, userId)).length > 0 || await identityReviewOpenFor(tx, userId))) {
+        throw new AppError(409, 'OPEN_CASE', 'This account has an open case. Nothing was deleted. This one goes to the owner.');
       }
 
       // The server, not a navigation flag or active role, chooses the business
@@ -385,11 +396,6 @@ export class AccountService {
       // the wrong extremes. The deletion proceeds in full and only the minimum
       // response authority is escrowed, encrypted, with a purge deadline.
       const holds = await enumerateSafetyHolds(tx, userId);
-      // [BUG-HUNT F20] The escrow above is for a person deleting their own account. Staff acting for someone are not
-      // that person: an open case or a legal hold, a fraud case's included, stops here and goes to the owner.
-      if (opts.verifiedRequest && (holds.reasons.length > 0 || await tx.docLegalHold.count({ where: { subjectUserId: userId, releasedAt: null } }) > 0)) {
-        throw new AppError(409, 'OPEN_CASE', 'This account has an open safety or fraud case, or a legal hold. Nothing was deleted. This one goes to the owner.');
-      }
       const hold = holds.reasons.length > 0 ? await openSafetyDeletionHold(tx, userId, holds) : null;
 
       // Cut public/action authority before any fallible retention work. The
