@@ -1,8 +1,11 @@
-import type { Prisma } from '@prisma/client';
+import type { OrderStatus, Prisma } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { ATTESTABLE_PAYMENT_STATUSES, normaliseMmgReference } from '../vendor/mmg-attestation';
 import { CHECKOUT_OUTBOX_VERSION, checkoutOutboxId } from './checkout-outbox';
-import { MOVER_HOLDING_STATUSES, TERMINAL_ORDER_STATUSES } from './order-status';
+import { MOVER_HOLDING_STATUSES, RIDER_IN_CUSTODY_STATUSES, TERMINAL_ORDER_STATUSES } from './order-status';
+import { isStoreSilentOnClaimedMmgPayment } from './mmg-accept-expiry';
+import { openCaseInTransaction } from '../custody/custody-case';
+import { storeMmgPayLinkEnabled } from '../../utils/store-mmg';
 import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import type { AuditFacts } from '../../lib/audit-writer';
 
@@ -59,10 +62,12 @@ export interface MmgClaimFacts {
   orderNumber: string;
   customerId: string;
   vendorId: string | null;
+  riderId: string | null;
   orderType: string;
   status: string;
   paymentMethod: string;
   paymentStatus: string;
+  acceptedAt: Date | null;
   customerMmgClaim: CustomerMmgClaimValue;
   customerMmgClaimAt: Date | null;
   customerClaimedPaidAt: Date | null;
@@ -76,9 +81,9 @@ export interface MmgClaimFacts {
 }
 
 export const MMG_CLAIM_FACTS_SELECT = {
-  id: true, tenantId: true, orderNumber: true, customerId: true, vendorId: true, orderType: true,
+  id: true, tenantId: true, orderNumber: true, customerId: true, vendorId: true, riderId: true, orderType: true,
   status: true, paymentMethod: true, paymentStatus: true,
-  customerMmgClaim: true, customerMmgClaimAt: true, customerClaimedPaidAt: true, customerPaymentRef: true,
+  acceptedAt: true, customerMmgClaim: true, customerMmgClaimAt: true, customerClaimedPaidAt: true, customerPaymentRef: true,
   mmgAttestedRef: true, mmgClaimMismatchAt: true, mmgClaimRevision: true,
   mmgClaimResolution: true, mmgClaimResolvedAt: true, mmgClaimResolvedRevision: true,
 } as const satisfies Prisma.OrderSelect;
@@ -92,6 +97,9 @@ const POST_CUSTODY_STATUSES: ReadonlySet<string> = new Set<string>(MOVER_HOLDING
 /** Payment states a customer statement may be recorded against. Reversed,
  *  failed and unresolved payments are not re-opened through a statement. */
 const CUSTOMER_CLAIMABLE_PAYMENTS: ReadonlySet<string> = new Set(['PENDING', 'AUTHORIZED', 'CLAIMED', 'CAPTURED']);
+/** [BUG-HUNT-2 G22] Goods that came back: the dispute that sent them back still has to close, and nothing else can move. */
+const RETURNED_STATUS = 'RETURNED';
+const isRiderInCustody = (status: string): boolean => (RIDER_IN_CUSTODY_STATUSES as readonly string[]).includes(status);
 /** The store's claim, or a provider capture: someone says the money arrived. */
 const STORE_SAYS_PAID: ReadonlySet<string> = new Set(['CLAIMED', 'CAPTURED']);
 const ATTEMPT_OPEN: ReadonlySet<string> = new Set<string>(ATTESTABLE_PAYMENT_STATUSES);
@@ -269,7 +277,8 @@ export function decideMmgClaimResolution(
       currentRevision: f.mmgClaimRevision,
     });
   }
-  if (CLOSED_STATUSES.has(f.status)) throw orderClosed();
+  // [BUG-HUNT-2 G22] A return closed the order with the dispute still open: a person can still close the dispute.
+  if (CLOSED_STATUSES.has(f.status) && !(f.status === RETURNED_STATUS && f.mmgClaimMismatchAt != null)) throw orderClosed();
   if (f.mmgClaimMismatchAt == null) {
     throw new AppError(409, 'MMG_CLAIM_NOT_DISPUTED', 'There is no open payment disagreement on this order.', { currentRevision: f.mmgClaimRevision });
   }
@@ -447,6 +456,15 @@ export async function recordCustomerMmgClaim(
       effect: 'DISAGREEMENT_OPENED', openedBy: 'CUSTOMER', reason: decision.reason, resolution: null,
     };
     outboxId = (await persistMmgClaimNoticeInTransaction(tx, notice, now)).id;
+    // [BUG-HUNT-2 G22] The goods are in a rider's bag: a not-paid decision needs the recovery case, and nothing opened one
+    // unless the rider thought to press Report a problem. It opens here, with the dispute, under this lock.
+    if (facts.riderId && isRiderInCustody(facts.status)) {
+      await openCaseInTransaction(tx as unknown as Prisma.TransactionClient, {
+        order: { id: facts.id, riderId: facts.riderId, status: facts.status as OrderStatus, orderType: facts.orderType },
+        reason: 'OTHER', note: 'The customer says they did not pay and the store says they did. The order is held at the door.',
+        actor: { userId: null, role: 'SYSTEM' }, now,
+      });
+    }
   }
   await mmgClaimLockObserver.beforeCommit?.({ orderId: input.orderId, actor: 'CUSTOMER' });
   return { replayed: false, opened: decision.opened, facts: decision.next, notice, outboxId };
@@ -553,6 +571,8 @@ export interface MmgClaimView {
   attemptRejected: boolean;
   revision: number;
   canClaim: boolean;
+  /** [BUG-HUNT-2 G14c] The customer says they paid, and the store has been silent past its 30 minutes. */
+  storeSilent: boolean;
 }
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
@@ -573,7 +593,11 @@ export function mmgClaimView(f: MmgClaimFacts): MmgClaimView | null {
     resolvedAt: iso(f.mmgClaimResolvedAt),
     attemptRejected: isRejectedMmgAttempt(f),
     revision: f.mmgClaimRevision,
-    canClaim: !CLOSED_STATUSES.has(f.status) && CUSTOMER_CLAIMABLE_PAYMENTS.has(f.paymentStatus),
+    // [BUG-HUNT-2 G14d] Before the store accepts there is nothing to pay: the number is not shown until then, and with the
+    // pay link off nothing can have been sent. Nothing is offered that cannot be true.
+    canClaim: !CLOSED_STATUSES.has(f.status) && CUSTOMER_CLAIMABLE_PAYMENTS.has(f.paymentStatus) && (f.status !== 'PENDING' || storeMmgPayLinkEnabled()),
+    // [BUG-HUNT-2 G14c] They said they paid, and 30 minutes on the store is silent: support is on it, and the card says so.
+    storeSilent: isStoreSilentOnClaimedMmgPayment(f),
   };
 }
 
@@ -624,7 +648,7 @@ export interface MmgClaimDelivery {
   adminReached: number | null;
 }
 
-type OrderForNotice = MmgClaimFacts & { vendor: { owner: { userId: string } | null } | null };
+type OrderForNotice = MmgClaimFacts & { vendor: { owner: { userId: string } | null } | null; rider: { userId: string } | null };
 
 const REASON_TEXT: Record<MmgDisagreementReason, { customer: string; store: string; ops: string }> = {
   CUSTOMER_DENIED: {
@@ -650,7 +674,7 @@ export async function deliverMmgClaimNotice(deps: MmgClaimNoticeDeps, notice: Mm
   return runWithTenant(notice.tenantId, async () => {
     const order = (await deps.prisma.order.findFirst({
       where: { id: notice.orderId, tenantId: notice.tenantId },
-      select: { ...MMG_CLAIM_FACTS_SELECT, vendor: { select: { owner: { select: { userId: true } } } } },
+      select: { ...MMG_CLAIM_FACTS_SELECT, vendor: { select: { owner: { select: { userId: true } } } }, rider: { select: { userId: true } } },
     })) as OrderForNotice | null;
     const sent: MmgClaimDelivery['sent'] = [];
     const skipped: MmgClaimDelivery['skipped'] = [];
@@ -658,7 +682,7 @@ export async function deliverMmgClaimNotice(deps: MmgClaimNoticeDeps, notice: Mm
 
     const businessUserId = order.vendor?.owner?.userId ?? null;
     const key = (role: 'customer' | 'business' | 'admin') => `mmg-claim:${order.id}:r${notice.revision}:${role}`;
-    const plan: Array<{ role: 'customer' | 'business'; userId: string; type: 'ORDER_UPDATE' | 'PAYMENT_RECEIVED'; title: string; body: string; data: Record<string, unknown> }> = [];
+    const plan: Array<{ role: 'customer' | 'business' | 'earner'; userId: string; type: 'ORDER_UPDATE' | 'PAYMENT_RECEIVED'; title: string; body: string; data: Record<string, unknown> }> = [];
     let page: { title: string; body: string } | null = null;
 
     if (notice.effect === 'STORE_CLAIMED') {
@@ -688,6 +712,16 @@ export async function deliverMmgClaimNotice(deps: MmgClaimNoticeDeps, notice: Mm
             title: 'Payment disputed — order on hold',
             body: `Order #${order.orderNumber}: ${why.store}. Don't prepare or hand it over until Swift support resolves it.`,
             data: { orderId: order.id, kind: 'mmg_claim_disputed', claimRevision: notice.revision },
+          });
+        }
+        // [BUG-HUNT-2 G22] The rider at the door found out from a blocked screen, on the next poll.
+        const riderUserId = order.rider?.userId ?? null;
+        if (riderUserId && isRiderInCustody(order.status)) {
+          plan.push({
+            role: 'earner', userId: riderUserId, type: 'ORDER_UPDATE',
+            title: 'Payment dispute: keep the order',
+            body: `Order #${order.orderNumber}: the customer and the store disagree about the payment. Do not hand it over. Keep it with you and contact support from the job screen.`,
+            data: { orderId: order.id, kind: 'mmg_dispute_hold', claimRevision: notice.revision },
           });
         }
         page = {

@@ -81,6 +81,10 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_unattested_cancellation', 'supply_returned',
     // [owner 18 Oct 2026] the customer says they paid; the store is asked to check its MMG (standard, like its MMG peers)
     'mmg_customer_says_paid',
+    // [BUG-HUNT-2 G14c] the same moment, the customer: Swift support is checking (standard, like its MMG peers)
+    'mmg_store_silent',
+    // [BUG-HUNT-2 G22] the rider at the door: the payment is disputed, keep the order (standard, like pickup_overdue)
+    'mmg_dispute_hold',
     // [O-4] the customer answered an out-of-stock question asked before acceptance; the store may accept now
     'vendor_customer_answered',
     // Rides

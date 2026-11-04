@@ -402,7 +402,7 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
   });
 
   it('an order cancelled because it was not marked paid in time says why', async () => {
-    const notice = "Shanta Kitchen didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Shanta Kitchen refunds you directly.";
+    const notice = 'No MMG payment was confirmed within 30 minutes of Shanta Kitchen accepting, so this order was cancelled automatically. If you did send the MMG payment, Shanta Kitchen refunds you directly. If it does not, contact Swift support.';
     vi.spyOn(orders, 'getOrder').mockResolvedValue({
       ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null,
       cancellationReason: 'Cancelled automatically: not marked "Paid by MMG" within 30 minutes of being accepted', cancellationNotice: notice,

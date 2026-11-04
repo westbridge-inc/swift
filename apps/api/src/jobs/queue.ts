@@ -611,7 +611,7 @@ export async function expireUnpaidMmgAcceptance(ctx: JobContext, orderId: string
  *  support ticket, not the claim-dispute latch: that latch would keep holding
  *  the order after the store's tap, which the owner's flow does not want. */
 export async function escalateStoreSilentMmgClaim(ctx: JobContext, orderId: string): Promise<boolean> {
-  const { isStoreSilentOnClaimedMmgPayment, MMG_STORE_SILENT_SUBJECT, mmgStoreSilentStorePush, mmgStoreSilentTicketMessage, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
+  const { isStoreSilentOnClaimedMmgPayment, MMG_STORE_SILENT_SUBJECT, mmgStoreSilentCustomerPush, mmgStoreSilentStorePush, mmgStoreSilentTicketMessage, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
   const { bindTenantTransaction } = await import('../plugins/prisma');
   const opened = await ctx.prisma.$transaction(async (tx) => {
     await bindTenantTransaction(tx);
@@ -642,6 +642,11 @@ export async function escalateStoreSilentMmgClaim(ctx: JobContext, orderId: stri
       data: { orderId, kind: 'mmg_customer_says_paid' }, dedupeKey: `mmg-store-silent:${orderId}`,
     }).catch((err: unknown) => ctx.log.warn({ err, orderId }, 'store MMG check push failed after the case opened'));
   }
+  // [BUG-HUNT-2 G14c] The customer's own case: they were told nothing, and two days later nothing had changed on their card.
+  await notifications.send({
+    userId: order.customerId, type: 'ORDER_UPDATE', audience: 'customer', ...mmgStoreSilentCustomerPush(order.orderNumber, mmgOrderNoun(order.fulfillment)),
+    data: { orderId, kind: 'mmg_store_silent' }, dedupeKey: `mmg-store-silent:customer:${orderId}`,
+  }).catch((err: unknown) => ctx.log.warn({ err, orderId }, 'customer MMG check push failed after the case opened'));
   await notifyAdmins(ctx.prisma, notifications, {
     tenantId: order.tenantId ?? null,
     title: 'MMG payment not confirmed by the store',
