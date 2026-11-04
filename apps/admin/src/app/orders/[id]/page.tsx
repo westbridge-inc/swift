@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, closeStoreRefund, settleOrderRefund, revealOrderPartyPhone, type OrderContactParty } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, closeStoreRefund, endStuckRide, settleOrderRefund, revealOrderPartyPhone, type OrderContactParty } from '@/lib/api';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -115,6 +115,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   }
 
   const isRide = o.orderType === 'TAXI';
+  // [BUG-HUNT-2 G01] From the verified code on the passenger is in the car: the server refuses a cancel, and the driver
+  // holds the only exits.
+  const rideUnderway = isRide && !TERMINAL.includes(o.status) && (o.status === 'RIDE_IN_PROGRESS' || o.ridePinVerified === true || Boolean(o.ridePinVerifiedAt));
   const mover = o.rider?.user ?? o.driver?.user;
   const moverLabel = o.rider ? 'Rider' : o.driver ? 'Driver' : null;
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
@@ -158,7 +161,23 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           <span className="mc-badge">cash</span>
         )}
         <div className="ml-auto flex gap-2">
-          {!TERMINAL.includes(o.status) && (
+          {rideUnderway && (
+            <button
+              type="button"
+              onClick={() => void actions.run({
+                title: `End ride ${o.orderNumber}?`,
+                body: <p>For a ride that cannot finish, such as a driver who is gone. Call both sides first. The passenger and the driver are told. No fare is recorded and no money moves.</p>,
+                confirmLabel: 'End this ride',
+                dismissLabel: 'Keep the ride',
+                submit: ({ reason }) => endStuckRide(id, reason),
+                success: () => `Ride ${o.orderNumber} closed. Both sides are told.`,
+              })}
+              className="mc-btn mc-btn-primary"
+            >
+              End this ride
+            </button>
+          )}
+          {!TERMINAL.includes(o.status) && !rideUnderway && (
             <>
               <button
                 type="button"

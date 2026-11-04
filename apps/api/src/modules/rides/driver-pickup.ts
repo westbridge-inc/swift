@@ -5,6 +5,7 @@ import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import type { NotificationService } from '../notification/notification.service';
 import { checkoutOutboxId } from '../order/checkout-outbox';
 import { lockTaxiOrderForCustodyDecision } from './passenger-custody';
+import { recordPickupArrival } from './taxi-waiting';
 import { taxiNotificationData } from './taxi-notification';
 import { ownerWallSystem } from '../../lib/owner-rls';
 import { upsertNoticeFor } from '../../lib/owner-wall-notices';
@@ -17,6 +18,8 @@ export async function advanceDriverPickup(prisma: PrismaClient, input: {
   orderId: string; driverId: string; assignmentVersion: number; changedBy: string;
   from: 'DRIVER_ASSIGNED' | 'DRIVER_EN_ROUTE'; target: PickupStatus;
   note: string; arrivedAt?: Date; etaMinutes?: number | null;
+  /** The arrival gate's verdict: only a car GPS placed at the pickup starts the waiting charge. */
+  gpsVerified?: boolean;
 }) {
   return prisma.$transaction(async (tx) => {
     await lockTaxiOrderForCustodyDecision(tx, input.orderId);
@@ -33,6 +36,7 @@ export async function advanceDriverPickup(prisma: PrismaClient, input: {
       omit: HANDOVER_SECRETS_OMIT,
     });
     await tx.orderStatusLog.create({ data: { orderId: input.orderId, status: input.target, changedBy: input.changedBy, note: input.note } });
+    if (input.target === 'DRIVER_ARRIVED') await recordPickupArrival(tx, input.orderId, input.gpsVerified === true);
     const dedupeKey = `order:${current.id}:${DRIVER_PICKUP_NOTICE_KIND}:${current.driverAssignmentVersion}:${input.target}`;
     const id = checkoutOutboxId(dedupeKey);
     const notificationId = `${id}_inbox`;

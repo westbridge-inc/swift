@@ -3,8 +3,8 @@ import { money } from './money';
 // ---------------------------------------------------------------------------
 // [TAXI waiting charge · owner ruling 1 Oct 2026] The phone's half of the
 // waiting charge (CONTRACT.md Rev 2 §8): a charge per FULL block of waiting,
-// counted by the SERVER from the driver's arrival — at the pickup and at each
-// stop — and paid in cash on top of the route fare.
+// counted by the SERVER from the car's arrival — at the pickup and at each stop
+// — up to the server's cap, and paid in cash on top of the route fare.
 //
 // The rule for this module is the contract's: show what the server sends and
 // never make up a value. With no `waiting` object there is nothing to show (the
@@ -54,7 +54,8 @@ function termsOf(raw: unknown): WaitingTerms | null {
  * The line shown beside the fare before booking (§8.2): the server's own
  * sentence, from the estimate (or the capability read) it rode on. A server
  * that sends terms without the sentence gets the same sentence built from its
- * numbers; no terms — or broken ones — show nothing.
+ * numbers, less the cap, which is the server's to name; no terms — or broken
+ * ones — show nothing.
  */
 export function waitingDisclosure(source: unknown): string | null {
   const terms = termsOf((source as { waiting?: unknown } | null | undefined)?.waiting);

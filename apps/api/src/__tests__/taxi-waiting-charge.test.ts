@@ -57,7 +57,7 @@ const DROPOFF_ADDRESS = 'Bartica Airstrip';
  *  (the same bytes taxi-multistop-request pins, recorded on main). */
 const PINNED_SINGLE_LEG_ANSWER = '{"success":true,"data":{"ride":{"id":"<ID>","orderNumber":"<NUMBER>","status":"PENDING","fare":1700,"rideClass":"ECONOMY","currencyCode":"GYD","fareSource":"formula","distanceKm":2,"durationMin":5,"ridePin":"<PIN>","pickupAddress":"Bartica Police Station","dropoffAddress":"Bartica Airstrip"},"message":"Looking for a driver near you…"}}';
 /** The contract's §8.2 block for the default terms, byte for byte. */
-const DISCLOSED = '{"chargePerBlock":300,"blockMinutes":10,"currencyCode":"GYD","text":"Waiting: 300 per 10 minutes after your driver arrives"}';
+const DISCLOSED = '{"chargePerBlock":300,"blockMinutes":10,"currencyCode":"GYD","text":"Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride"}';
 const WAIT_KEYS = /"(waiting|fareBreakdown|waitMinutes)"/;
 
 let app: FastifyInstance;
@@ -108,6 +108,8 @@ type StopSpec = { status: TaxiStopStatus; arrivedAt?: Date; departedAt?: Date; s
 interface RideSpec {
   status: OrderStatus;
   driverArrivedAt?: Date | null;
+  /** [Owner 4 Nov 2026] An arrival here is one GPS placed, unless a case says otherwise. */
+  pickupVerified?: boolean | null;
   pickedUpAt?: Date | null;
   /** The terms frozen at booking; false = a ride booked while the switch was off. */
   terms?: { chargePerBlock: number; blockMinutes: number } | false;
@@ -134,7 +136,7 @@ async function makeRide(spec: RideSpec) {
       driverArrivedAt: spec.driverArrivedAt ?? null, pickedUpAt: spec.pickedUpAt ?? null,
       ridePinVerified: spec.pickedUpAt != null, ridePinVerifiedAt: spec.pickedUpAt ?? null,
       ...(spec.terms === false ? {} : {
-        taxiRideWaiting: { create: { chargePerBlock: (spec.terms ?? { chargePerBlock: 300 }).chargePerBlock, blockMinutes: (spec.terms ?? { blockMinutes: 10 }).blockMinutes, currencyCode: 'GYD' } },
+        taxiRideWaiting: { create: { chargePerBlock: (spec.terms ?? { chargePerBlock: 300 }).chargePerBlock, blockMinutes: (spec.terms ?? { blockMinutes: 10 }).blockMinutes, currencyCode: 'GYD', pickupArrivalVerified: spec.pickupVerified === undefined ? (spec.driverArrivedAt ? true : null) : spec.pickupVerified } },
       }),
       ...(stops.length > 0 ? {
         taxiStopCount: stops.length,
@@ -375,7 +377,7 @@ describe('disclosure before booking (CONTRACT §8.2)', () => {
       on();
       const customer = await makeCustomer();
       const estimate = await call('POST', '/api/v1/rides/estimate', customer.token, { pickup: PICKUP, dropoff: DEST });
-      expect(estimate.json().data.waiting).toEqual({ chargePerBlock: 750, blockMinutes: 15, currencyCode: 'GYD', text: 'Waiting: 750 per 15 minutes after your driver arrives' });
+      expect(estimate.json().data.waiting).toEqual({ chargePerBlock: 750, blockMinutes: 15, currencyCode: 'GYD', text: 'Waiting: 750 per 15 minutes after your driver arrives, up to 3,000 a ride' });
       const res = await call('POST', '/api/v1/rides/request', customer.token, echoed({ chargePerBlock: 750, blockMinutes: 15 }));
       expect(res.statusCode, res.body).toBe(201);
       const id = res.json().data.ride.id as string;
@@ -492,6 +494,7 @@ describe('"Fare collected" freezes the charge once, into every money surface (CO
         driverId: driver.driverId, driverArrivedAt: new Date(t - 30 * MIN), pickedUpAt: new Date(t - 17 * MIN),
         ridePinVerified: true, ridePinVerifiedAt: new Date(t - 17 * MIN),
       }));
+      await sys(() => app.prisma.taxiRideWaiting.updateMany({ where: { orderId: id }, data: { pickupArrivalVerified: true } }));
       await sys(() => app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: id } }));
       const done = await call('POST', `/api/v1/driver/rides/${id}/handover`, driver.token, { outcome: 'paid', gps: DEST });
       expect(done.statusCode, done.body).toBe(200);
@@ -634,6 +637,7 @@ describe('quote proof: only a booking from the screen that showed the terms is e
       driverId: driver.driverId, driverArrivedAt: new Date(t - (waitMin + 5) * MIN), pickedUpAt: new Date(t - 5 * MIN),
       ridePinVerified: true, ridePinVerifiedAt: new Date(t - 5 * MIN),
     }));
+    await sys(() => app.prisma.taxiRideWaiting.updateMany({ where: { orderId: id }, data: { pickupArrivalVerified: true } }));
     await sys(() => app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: id } }));
     const done = await call('POST', `/api/v1/driver/rides/${id}/handover`, driver.token, { outcome: 'paid', gps: DEST });
     expect(done.statusCode, done.body).toBe(200);
@@ -731,5 +735,133 @@ describe('the database holds the rule (taxi_ride_waiting)', () => {
     await sys(() => app.prisma.driver.update({ where: { id: r.driver.driverId }, data: { currentRideId: null } }));
     await sys(() => app.prisma.order.delete({ where: { id: r.order.id } }));
     expect(await sys(() => app.prisma.taxiRideWaiting.count({ where: { orderId: r.order.id } }))).toBe(0);
+  });
+});
+
+// ===========================================================================
+describe('[owner 4 Nov 2026] the cap, the GPS start and the ride code, through the real doors', () => {
+  const verdict = async (orderId: string) => (await sys(() => app.prisma.taxiRideWaiting.findUniqueOrThrow({ where: { orderId } }))).pickupArrivalVerified;
+  const placeCar = (r: Awaited<ReturnType<typeof makeRide>>, at: { lat: number; lng: number }) => sys(() => app.prisma.driver.update({
+    where: { id: r.driver.driverId }, data: { currentLat: at.lat, currentLng: at.lng, lastLocationUpdate: new Date() },
+  }));
+  /** The arrival, moved back: the clock is the subject. */
+  const arrivedAgo = (orderId: string, minutes: number) => sys(() => app.prisma.order.update({ where: { id: orderId }, data: { driverArrivedAt: new Date(Date.now() - minutes * MIN) } }));
+  const confirm = (r: Awaited<ReturnType<typeof makeRide>>) => call('POST', `/api/v1/rides/${r.order.id}/confirm-driver-arrival`, r.customer.token);
+  const riderWait = async (r: Awaited<ReturnType<typeof makeRide>>) => (await call('GET', '/api/v1/rides/active', r.customer.token)).json().data.waiting as Record<string, unknown>;
+  const driverWait = async (r: Awaited<ReturnType<typeof makeRide>>) => (await call('GET', '/api/v1/driver/rides/active', r.driver.token)).json().data.waiting as Record<string, unknown>;
+
+  it('a two-hour wait freezes at GY$1,800: the database takes it, and the total and the earning say the same', async () => {
+    const t = Date.now();
+    const r = await makeRide({ status: 'RIDE_IN_PROGRESS', driverArrivedAt: new Date(t - 150 * MIN), pickedUpAt: new Date(t - 30 * MIN) });
+    on();
+    expect((await paid(r)).statusCode).toBe(200);
+    expect(await money(r.order.id)).toEqual({
+      status: 'DELIVERED', total: 3800, route: 2000, earnings: [3800],
+      waiting: { seconds: 3600, minutes: 60, charge: 1800, frozen: true },
+    });
+    const breakdown = (await call('GET', `/api/v1/rides/${r.order.id}`, r.customer.token)).json().data.fareBreakdown;
+    expect(breakdown).toEqual({ routeFare: 2000, waitingMinutes: 60, waitingCharge: 1800, total: 3800, currencyCode: 'GYD' });
+  });
+
+  it('live past the hour: both screens stop at GY$1,800 and promise nothing more', async () => {
+    const r = await makeRide({ status: 'DRIVER_ARRIVED', driverArrivedAt: new Date(Date.now() - 80 * MIN) });
+    on();
+    const expected = { pickupWaitMinutes: 60, waitingMinutes: 60, waitingCharge: 1800, running: true, nextChargeAt: null };
+    expect(await riderWait(r)).toMatchObject(expected);
+    expect(await driverWait(r)).toMatchObject(expected);
+  });
+
+  it('the driver\'s door, GPS at the pickup: the arrival is recorded as placed, and the wait runs', async () => {
+    const r = await makeRide({ status: 'DRIVER_EN_ROUTE' });
+    await placeCar(r, PICKUP);
+    on();
+    const res = await call('PUT', `/api/v1/driver/rides/${r.order.id}/arrived`, r.driver.token);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await verdict(r.order.id)).toBe(true);
+    await arrivedAgo(r.order.id, 13);
+    expect(await riderWait(r)).toMatchObject({ pickupWaitMinutes: 13, waitingCharge: 300, running: true });
+  });
+
+  it('the driver\'s door, no GPS: refused, nothing recorded', async () => {
+    const r = await makeRide({ status: 'DRIVER_EN_ROUTE' });
+    on();
+    const res = await call('PUT', `/api/v1/driver/rides/${r.order.id}/arrived`, r.driver.token);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.message, 'told before relying on the passenger').toContain('Waiting is only charged once GPS shows the car at the pickup.');
+    expect(await verdict(r.order.id)).toBeNull();
+  });
+
+  it('the passenger confirms with the car somewhere else: the ride moves on and the wait is never billed', async () => {
+    const r = await makeRide({ status: 'DRIVER_EN_ROUTE' });
+    on();
+    const res = await confirm(r);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.status).toBe('DRIVER_ARRIVED');
+    expect(await verdict(r.order.id)).toBe(false);
+    await arrivedAgo(r.order.id, 45);
+    const nothing = { pickupWaitMinutes: null, waitingMinutes: 0, waitingCharge: 0, running: false, nextChargeAt: null };
+    expect(await riderWait(r)).toMatchObject(nothing);
+    expect(await driverWait(r)).toMatchObject(nothing);
+    await sys(() => app.prisma.order.update({ where: { id: r.order.id }, data: { status: 'RIDE_IN_PROGRESS', pickedUpAt: new Date(), ridePinVerified: true, ridePinVerifiedAt: new Date() } }));
+    expect((await paid(r)).statusCode).toBe(200);
+    expect(await money(r.order.id)).toMatchObject({ total: 2000, earnings: [2000], waiting: { seconds: 0, minutes: 0, charge: 0, frozen: true } });
+  });
+
+  it('the passenger confirms and GPS agrees: the wait counts', async () => {
+    const r = await makeRide({ status: 'DRIVER_EN_ROUTE' });
+    await placeCar(r, PICKUP);
+    on();
+    expect((await confirm(r)).statusCode).toBe(200);
+    expect(await verdict(r.order.id)).toBe(true);
+    await arrivedAgo(r.order.id, 11);
+    expect(await riderWait(r)).toMatchObject({ pickupWaitMinutes: 11, waitingCharge: 300, running: true });
+  });
+
+  it('a stale fix at the pickup is no fix: the passenger\'s confirmation starts nothing', async () => {
+    const r = await makeRide({ status: 'DRIVER_EN_ROUTE' });
+    await sys(() => app.prisma.driver.update({ where: { id: r.driver.driverId }, data: { currentLat: PICKUP.lat, currentLng: PICKUP.lng, lastLocationUpdate: new Date(Date.now() - 30 * MIN) } }));
+    on();
+    expect((await confirm(r)).statusCode).toBe(200);
+    expect(await verdict(r.order.id)).toBe(false);
+  });
+
+  it('a second arrival writes again: an earlier driver\'s placed arrival never carries over', async () => {
+    const r = await makeRide({ status: 'DRIVER_EN_ROUTE', driverArrivedAt: new Date(Date.now() - 40 * MIN), pickupVerified: true });
+    on();
+    expect((await confirm(r)).statusCode).toBe(200);
+    expect(await verdict(r.order.id)).toBe(false);
+  });
+
+  it('a confirmation that loses the race writes nothing: the status has moved on', async () => {
+    const r = await makeRide({ status: 'DRIVER_ARRIVED', driverArrivedAt: new Date(), pickupVerified: true });
+    on();
+    expect((await confirm(r)).statusCode).toBe(409);
+    expect(await verdict(r.order.id)).toBe(true);
+  });
+
+  it('the ride code stops the wait on both screens before the car moves; what is frozen is what they showed', async () => {
+    const r = await makeRide({ status: 'DRIVER_ARRIVED', driverArrivedAt: new Date(Date.now() - 25 * MIN) });
+    await sys(() => app.prisma.order.update({ where: { id: r.order.id }, data: { ridePin: '482915' } }));
+    on();
+    const verified = await call('PUT', `/api/v1/driver/rides/${r.order.id}/verify-pin`, r.driver.token, { pin: '482915' });
+    expect(verified.statusCode, verified.body).toBe(200);
+    const stood = { pickupWaitMinutes: 25, waitingMinutes: 25, waitingCharge: 600, running: false, nextChargeAt: null };
+    expect(await riderWait(r)).toMatchObject(stood);
+    expect(await driverWait(r)).toMatchObject(stood);
+    expect((await call('GET', `/api/v1/rides/${r.order.id}`, r.customer.token)).json().data.waiting).toMatchObject(stood);
+    // Twenty more minutes before the car moves: nothing more is counted.
+    await sys(() => app.prisma.$executeRaw`UPDATE "orders" SET "driverArrivedAt" = "driverArrivedAt" - interval '20 minutes', "ridePinVerifiedAt" = "ridePinVerifiedAt" - interval '20 minutes' WHERE "id" = ${r.order.id}`);
+    const started = await call('PUT', `/api/v1/driver/rides/${r.order.id}/start`, r.driver.token);
+    expect(started.statusCode, started.body).toBe(200);
+    expect((await paid(r)).statusCode).toBe(200);
+    expect(await money(r.order.id)).toMatchObject({ total: 2600, earnings: [2600], waiting: { minutes: 25, charge: 600, frozen: true } });
+  });
+
+  it('the database refuses a charge past its own seconds: the cap is on the time, so the rule still holds', async () => {
+    const t = Date.now();
+    const r = await makeRide({ status: 'RIDE_IN_PROGRESS', driverArrivedAt: new Date(t - 30 * MIN), pickedUpAt: new Date(t - 20 * MIN) });
+    await expect(sys(() => app.prisma.taxiRideWaiting.update({
+      where: { orderId: r.order.id }, data: { waitingSeconds: 7200, waitingMinutes: 120, waitingCharge: 1800, frozenAt: new Date() },
+    }))).rejects.toThrow();
   });
 });

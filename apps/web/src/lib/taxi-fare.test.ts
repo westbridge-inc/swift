@@ -51,7 +51,7 @@ describe('readTaxiEstimate: only what the server priced', () => {
   });
 
   it('[quote proof] the terms behind the sentence are kept to echo with the booking; none without a sentence or with broken numbers', () => {
-    const text = 'Waiting: 300 per 10 minutes after your driver arrives';
+    const text = 'Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride';
     expect(readTaxiEstimate({ tiers: [tier()], waiting: { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', text } })?.waitingTerms)
       .toEqual({ chargePerBlock: 300, blockMinutes: 10 });
     for (const waiting of [

@@ -512,6 +512,7 @@ const CENSUS: Case[] = [
   { k: 'ops_error_spike', to: null, why: 'admins' },
   { k: 'ops_fee_refund_overdue', to: null, why: 'admins' },
   { k: 'ops_error_sustained', to: null, why: 'admins' },
+  { k: 'ops_ride_overdue', to: null, why: 'admins' },
   { k: 'ops_collusion_affinity', to: null, why: 'admins' },
   { k: 'ops_billing_failures', to: null, why: 'admins' },
   { k: 'ops_pool_saturation', to: null, why: 'admins' },
