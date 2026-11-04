@@ -673,8 +673,9 @@ export async function ridesRoutes(app: FastifyInstance) {
     const raisedBy = ride.customerId === request.user.userId ? 'passenger' : 'driver';
     const counterpartyUserId = raisedBy === 'passenger' ? ride.driver?.userId ?? null : ride.customerId;
 
-    // Loud, correlated trace for ops.
-    log().error({ orderId: ride.id, orderNumber: ride.orderNumber, raisedBy, lat: body.lat, lng: body.lng }, 'SOS raised on active ride');
+    // Loud, correlated trace for ops. Never the position: logs are kept for 30 days
+    // (deploy/keep-logs.py). The alert below carries it to the responders.
+    log().error({ orderId: ride.id, orderNumber: ride.orderNumber, raisedBy }, 'SOS raised on active ride');
 
     // ONE SOS engine (safety §4, standing order #17): a ride panic is a
     // first-class SosAlert, never a parallel notify. It goes straight to ACTIVE
