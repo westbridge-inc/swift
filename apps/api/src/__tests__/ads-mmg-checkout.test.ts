@@ -836,7 +836,7 @@ describe('A8: the week after an automatic close', () => {
   });
 
   /** A page that ran out unanswered, closed as not paid on MMG's records, read and proven healthy. */
-  async function closed(closedAt = new Date()) {
+  async function closed(at?: Date) {
     const control = await invoiced();
     const paid = await open(control);
     const txn = tx('CONTROL');
@@ -845,6 +845,8 @@ describe('A8: the week after an automatic close', () => {
     const f = await invoiced();
     const page = await open(f);
     await raw.mmgCheckoutIntent.update({ where: { id: page.ref }, data: { expiresAt: new Date(Date.now() - NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS - 5 * MIN) } });
+    // After the control's payment: the read that proves it reaches back from this moment.
+    const closedAt = at ?? new Date();
     await service.pollIntents(closedAt);
     const row = await intentOf(page.ref);
     expect([row.status, row.reason]).toEqual(['NOT_PAID', NO_REPLY_CLOSED_REASON]);
