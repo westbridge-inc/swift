@@ -855,6 +855,13 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     })();
   });
 
+  // Fastify stops the HTTP server before its onClose hooks run, and that waits for every open connection. A websocket
+  // holds one, so with one client connected a shutdown sat at its cap and failed. This node's sockets go first; a phone
+  // reconnects to the next API. Local: the adapter would carry a plain disconnectSockets to every node.
+  app.addHook('preClose', async () => {
+    io.local.disconnectSockets(true);
+  });
+
   app.addHook('onClose', async () => {
     authorityRecheckClosing = true;
     clearInterval(authorityRecheckTimer);
