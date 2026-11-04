@@ -319,6 +319,24 @@ describe('BullMQ lifecycle', () => {
     }
   });
 
+  it('a worker keeps BullMQ\'s own retry: a producer\'s would fail a job that finished during an outage', async () => {
+    const ctx = context();
+    const queues = createQueues(ctx.redis, ctx.log);
+    const workers = await createWorkers(ctx, queues);
+    try {
+      const built = bullState.workers as Array<{ options: { connection?: Record<string, unknown> } }>;
+      expect(built.length).toBeGreaterThan(0);
+      for (const worker of built) {
+        expect(worker.options.connection).toBeDefined();
+        expect(worker.options.connection).not.toHaveProperty('retryStrategy');
+        expect(worker.options.connection).not.toHaveProperty('maxRetriesPerRequest');
+      }
+    } finally {
+      await workers.cleanup();
+      await Promise.all(Object.values(queues).map((queue) => queue.close()));
+    }
+  });
+
   it('awaits every producer and worker, then shuts down exactly once', async () => {
     consumerLease = null;
     const runtime = await initializeJobRuntime(context(), { runWorkers: true });

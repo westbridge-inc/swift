@@ -391,7 +391,8 @@ describe('legal version binding [F-035-08]', () => {
   it('the Terms never promise an in-app cancel the app refuses [Opus review 14 Oct S3-1/S3-3]', () => {
     // An MMG Order whose payment the Business confirmed (CAPTURED/CLAIMED) is refused at every stage, even before acceptance.
     expect(TERMS).toContain('If you paid by MMG and the Business has already confirmed your payment, the app cannot cancel the Order at any stage, even before the Business accepts it: contact the Business to cancel it.');
-    // The app offers a customer Cancel on a service job only while it is a request (REQUESTED/QUOTED), not once booked.
+    // The app offers a customer Cancel on a service job while it is a request, and until the provider has confirmed the
+    // time (nobody has accepted it yet), not once booked, unless the provider is running very late.
     // [TERMS 2026-10-29] A time booked from a provider's list of services is an appointment (its own switched-on rule,
     // legal-appointment-rules.test.ts); every other service job keeps this one.
     expect(TERMS).toContain('Any other service job request can be cancelled free in the app until the job is booked; once it is booked, contact the provider to change or cancel it.');

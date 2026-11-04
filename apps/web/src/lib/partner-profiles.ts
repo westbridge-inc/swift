@@ -34,6 +34,19 @@ export async function providerFromMe(): Promise<boolean | null> {
   }
 }
 
+/** Whether /auth/me names MOVER among this account's roles. False when it could not say, so a page keeps its ordinary
+ *  words rather than guess. A plain read, as providerFromMe is. */
+export async function holdsMoverRole(): Promise<boolean> {
+  try {
+    const me = await fetch(`${BROWSER_API_ORIGIN}/api/v1/auth/me`, { credentials: 'include', headers: { 'X-Swift-Client': BROWSER_CLIENT } });
+    if (!me.ok) return false;
+    const roles: unknown = (await me.json().catch(() => null))?.data?.user?.roles;
+    return Array.isArray(roles) && roles.includes('MOVER');
+  } catch {
+    return false;
+  }
+}
+
 /** Is this person a pro? /auth/me's answer (a 200, never a 404 the browser logs for someone who is not a pro); only
  *  when it could not say is the provider route asked (lib/auth hasProviderProfile, as before). Used by the pages that
  *  load it on demand (the header's account link, the signed-in card, the store's weekly-fee link, the page MMG returns

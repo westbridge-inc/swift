@@ -774,8 +774,10 @@ describe('Services — job lifecycle + two-way rating', () => {
 
     // [TRANSFORMED, coordinator ruling 14 Oct: the server matches the Terms] Booked, not
     // started: this case used to cancel free. Once a slot is booked the app refuses and the
-    // customer contacts the provider; nothing is written.
+    // customer contacts the provider; nothing is written. Booked means the provider confirmed the
+    // time: before that it is still free (service-job-no-dead-end.test.ts).
     const booked = await job();
+    expect((await inject('POST', `/api/v1/services/jobs/${booked}/confirm`, await commandState(booked), provider.token)).statusCode).toBe(200);
     const refusedBooked = await inject('POST', `/api/v1/services/jobs/${booked}/cancel`, await commandState(booked), customer.token);
     expect(refusedBooked.statusCode, refusedBooked.body).toBe(409);
     expect(refusedBooked.json().error).toMatchObject({

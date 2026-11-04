@@ -173,6 +173,7 @@ const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIE
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
+  serviceJob: { model: 'serviceJob', fields: ['status', 'cancelledAt'] },
   vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired', 'brandListedAlone', 'vendorType', 'name'] },
   // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
   // lives in `documentsVerified*`, and a safety suspension is a timestamp.
@@ -268,6 +269,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /users/:id': c('C1', 'user.read'),
   'GET /users/:id/phone': c('C1', 'user.contact.read'),
   'GET /users/:id/risk': c('C1', 'user.risk.read'),
+  // A person's service jobs, on either side: what a complaint about a pro has to open.
+  'GET /users/:id/service-jobs': c('C1', 'user.read'),
+  // Closes a job nobody else can: no money moves, both sides are told, the reason stays in the record.
+  'POST /service-jobs/:id/close': c('C3', 'service.job.close', E.serviceJob),
   // [BOOK-FU2 · owner B3] Repeat "Customer didn't come" records for a person to review: counts and dates, numbers masked.
   'GET /missed-appointments': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
@@ -655,7 +660,7 @@ export const ROLE_DEFAULT_CAPABILITIES: Readonly<Record<string, readonly string[
 /** A worked example, and the shape the red test uses: a support operator. Counts only on the review queue (DOC-1 §8.4). */
 export const SUPPORT_OPERATOR_CAPABILITIES: readonly string[] = [
   'dashboard.read', 'support.read', 'support.resolve', 'order.read', 'user.read', 'moderation.read',
-  'verification.counts',
+  'verification.counts', 'service.job.close',
 ];
 
 /**

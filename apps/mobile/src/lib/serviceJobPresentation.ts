@@ -21,6 +21,12 @@ export function serviceJobCancelView(status: string, isCustomer: boolean): { can
   return { canCancel: false, contactWords: status === 'IN_PROGRESS' ? SERVICE_JOB_STARTED_CANCEL_WORDS : SERVICE_JOB_BOOKED_CANCEL_WORDS };
 }
 
+/** The time on a job card. A time the provider has not confirmed is not booked yet, whoever reads the card: the
+ *  customer can still cancel it free, so the card never says otherwise. */
+export function serviceJobSlotWords(job: { status: string; providerConfirmedAt?: unknown }, slot: string): string {
+  return job.status === 'SCHEDULED' && !job.providerConfirmedAt ? `requested ${slot}, not confirmed yet` : `booked ${slot}`;
+}
+
 /** Parse the provider's quote without silently rounding sub-cent input. */
 export function parseServiceQuoteInput(input: string): number | null {
   const normalized = input.trim();
