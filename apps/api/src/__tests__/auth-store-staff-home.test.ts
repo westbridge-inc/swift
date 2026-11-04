@@ -5,7 +5,7 @@ import { buildApp } from '../app';
 import { runWithoutTenant } from '../plugins/prisma';
 import { devChannelLog } from '../providers/notifications/channels';
 import { guyanaDayKey } from '../utils/guyana-day';
-import { fixtureTag, testPhone } from './helpers/fixture-ids';
+import { fixtureTag, testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [BUG-HUNT F03] Branch staff hold no partner role (roles ['CUSTOMER'], no vendorOwner): the website read them as a
@@ -46,7 +46,7 @@ async function makeStore(ownerUserId: string): Promise<string> {
     ownerIds.push(owner.id);
     const vendor = await app.prisma.vendor.create({
       data: {
-        ownerId: owner.id, name: `Staff Home ${fixtureTag(6)}`, slug: `staff-home-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
+        ownerId: owner.id, name: `Staff Home ${wordFreeTag(6)}`, slug: `staff-home-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
         phone: testPhone(), addressLine1: '1 Test Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE',
       },
       select: { id: true },
