@@ -77,6 +77,11 @@ export const STORE_VERY_LATE_AFTER_MIN = 60;
  *  late: the customer would wait on the store forever with no way out. */
 export const STORE_FALLBACK_PROMISE_MIN = 45;
 
+/** [BUG-HUNT-2 G20 · COORD 4 Nov 2026] A pickup the store marked ready and nobody came for is "not collected" this many
+ *  hours after it was ready (or after its slot, when that is later). From then the store can record it and the customer
+ *  can cancel a cash one. Before this the order had no exit but a false "picked up". */
+export const PICKUP_NOT_COLLECTED_AFTER_HOURS = 24;
+
 /** [owner 17 Oct 2026] How long past its promised moment THIS order must be to
  *  count as very late: a store order `STORE_VERY_LATE_AFTER_MIN`, every other
  *  kind `VERY_LATE_AFTER_MIN`. The one place the number is chosen. */
@@ -117,6 +122,8 @@ export type CancellationSnapshot = {
   estimatedDeliveryTime?: number | null;
   /** [owner #50] When the driver took the ride (the claim writes it). */
   acceptedAt?: Date | null;
+  /** [BUG-HUNT-2 G20] When the store marked it ready. Absent: not known to be ready, so never "not collected". */
+  readyAt?: Date | null;
   /** [owner ruling 14 Oct] When the driver, rider or provider took THIS job —
    *  the current assignment: a ride's and a booking's `acceptedAt` (the claim
    *  and the provider's accept write it; a release clears it), a parcel's
@@ -156,6 +163,8 @@ export const AWAITING_STORE_FREE_CANCEL_MESSAGE = 'You can cancel for free until
 /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD Q2] An accepted MMG order the store has not marked "Paid by MMG". */
 export const MMG_UNCONFIRMED_CANCEL_MESSAGE = 'You can cancel until the store confirms your MMG payment.';
 export const TOO_LATE_FREE_CANCEL_MESSAGE = 'Your order is running very late. You can cancel it for free.';
+/** [BUG-HUNT-2 G20] A cash pickup nobody collected. "Very late" on purpose: it is the exit Terms s7 names, as the app shows. */
+export const PICKUP_NOT_COLLECTED_CANCEL_MESSAGE = 'Your pickup has been waiting over a day, so it is very late. You can cancel it for free.';
 /** [Opus S3-2 · REPORT-008 F-01] An MMG order may already be paid to the store outside Swift: no cancel surface
  *  promises "free" for it, and the customer is told where any money comes back from. */
 export const MMG_STORE_REFUNDS_SENTENCE = 'If you already sent the MMG payment, the store refunds you directly.';
@@ -177,7 +186,8 @@ export type FreeCancelReason =
   | 'NOT_ACCEPTED' // [owner #50] a ride, parcel or booking nobody has accepted yet
   | 'IN_WINDOW' // [owner #50 · 22 Oct] inside the one-minute window (or the hold)
   | 'TOO_LATE' // [owner #46/#50/#52] very late
-  | 'MMG_UNCONFIRMED'; // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
+  | 'MMG_UNCONFIRMED' // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
+  | 'NOT_COLLECTED'; // [BUG-HUNT-2 G20] a cash pickup, ready, and nobody came for it
 
 /** What a customer cancel may do right now: free, or refused. Never a fee. */
 export type CancellationVerdict =
@@ -398,6 +408,22 @@ export function isVeryLate(order: CancellationSnapshot, now: Date = new Date()):
   return promised != null && now.getTime() >= plusMinutes(promised, veryLateAfterMin(order)).getTime();
 }
 
+/** [BUG-HUNT-2 G20] A store pickup, ready, and past `PICKUP_NOT_COLLECTED_AFTER_HOURS` from the later of its ready moment
+ *  and its slot. The cancel verdict, the store's door and the sweep all ask here. */
+export function isPickupNotCollected(
+  order: Pick<CancellationSnapshot, 'status' | 'orderType' | 'fulfillment' | 'readyAt' | 'scheduledFor'>,
+  now: Date = new Date(),
+): boolean {
+  if (!isStoreOrder(order) || order.fulfillment !== 'PICKUP' || order.status !== 'READY_FOR_PICKUP') return false;
+  return pickupWaitingOver(order, PICKUP_NOT_COLLECTED_AFTER_HOURS, now);
+}
+
+/** [BUG-HUNT-2 G20] Has it waited this long, from the later of its ready moment and its slot? */
+export function pickupWaitingOver(order: Pick<CancellationSnapshot, 'readyAt' | 'scheduledFor'>, hours: number, now: Date): boolean {
+  if (order.readyAt == null) return false;
+  return now.getTime() >= (latest([order.readyAt, order.scheduledFor]) as Date).getTime() + hours * 60 * MINUTE_MS;
+}
+
 /** [owner #52] A booking whose provider is very late: a store appointment's and [BOOK-P2] a pro appointment's words. */
 export const APPOINTMENT_TOO_LATE_MESSAGE = 'The provider is running very late. You can cancel the booking for free.';
 
@@ -437,6 +463,7 @@ function windowClosedMessage(order: CancellationSnapshot): string {
  *  - free when it is very late — past the food-age cutoff with nobody to
  *    carry it (`tooLateToDeliver`), or [owner #52 · 17 Oct] an hour
  *    (`STORE_VERY_LATE_AFTER_MIN`) past its promised time;
+ *  - [BUG-HUNT-2 G20] free for a CASH pickup nobody collected (`isPickupNotCollected`);
  *  - otherwise REFUSED: the customer contacts the store.
  *
  * [owner #50] A RIDE, a PARCEL or a BOOKING once someone has accepted it:
@@ -463,6 +490,7 @@ export function cancellationVerdict(order: CancellationSnapshot, now: Date = new
     if ((unassigned(order) && order.tooLateToDeliver === true) || isVeryLate(order, now)) {
       return { allowed: true, free: true, reason: 'TOO_LATE' };
     }
+    if (order.paymentMethod === 'CASH' && isPickupNotCollected(order, now)) return { allowed: true, free: true, reason: 'NOT_COLLECTED' };
     return { allowed: false, free: false, code: STORE_ACCEPTED_CANCEL_CODE, message: STORE_ACCEPTED_CANCEL_MESSAGE };
   }
   const windowEnd = freeWindowEnd(order);
@@ -618,7 +646,9 @@ export function customerCancelView(order: CancellationSnapshot, now: Date = new 
       ? AWAITING_STORE_FREE_CANCEL_MESSAGE
       : verdict.reason === 'MMG_UNCONFIRMED'
         ? MMG_UNCONFIRMED_CANCEL_MESSAGE
-        : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
+        : verdict.reason === 'NOT_COLLECTED'
+          ? PICKUP_NOT_COLLECTED_CANCEL_MESSAGE
+          : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
   return {
     canCancel: true,
     freeCancellationExpiresAt: freeCancellationExpiresAt(order, now)?.toISOString() ?? null,

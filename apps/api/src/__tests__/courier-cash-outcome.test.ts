@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import courierRoutes from '../modules/courier/courier.routes';
 import { OrderService, reconcileMissingEarnings } from '../modules/order/order.service';
 import { COURIER_CASH_OUTCOME_ENFORCED_AT } from '../modules/cash/cash-rules.service';
+import { admittedHandoverEvidence } from '../modules/cash/handover-evidence';
 import { issueSyntheticHandoverPhoto, persistSessionFix } from './helpers/handover-proof';
 import { retainedPhonePrefix } from './helpers/retained-evidence';
 
@@ -178,24 +179,56 @@ describe('[M-28] the recipient pays — with the proof', () => {
     expect((await facts(job.orderId, job.sender.userId)).fees).toBe(1);
   });
 
-  it('refused at the drop-off: one coherent claim path — FAILED, payment FAILED, a strike, the rider’s claim with the proof photo as evidence, nothing earned', async () => {
+  it('refused at the drop-off: one coherent claim path — the parcel starts back, payment FAILED, a strike, the rider’s claim with the proof photo as evidence, nothing earned', async () => {
     const job = await jobInCustody('RECIPIENT');
     const refused = await inject('POST', `/api/v1/courier/order/${job.orderId}/proof`, { proofPhotoUrl: job.issued, outcome: 'refused', gps: job.drop }, job.rider.token);
     expect(refused.statusCode).toBe(200);
-    expect(refused.json().data.status).toBe('FAILED');
+    expect(refused.json().data.status).toBe('RETURNING');
     expect(refused.json().data.claim).toMatchObject({ status: 'AUTO_APPROVED' });
-    expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, fees: 0 });
+    expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'RETURNING', payment: 'FAILED', strikes: 1, claims: 1, fees: 0 });
     const claim = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { orderId: job.orderId } });
     expect({ riderId: claim.riderId, reason: claim.reason, photo: claim.photoUrl }).toEqual({ riderId: job.rider.riderId, reason: 'refused', photo: job.issued });
-    expect(await app.prisma.notification.count({ where: { userId: job.sender.userId, title: 'Unpaid courier fee recorded' } })).toBe(1);
+    const told = await app.prisma.notification.findFirstOrThrow({ where: { userId: job.sender.userId, title: 'Your parcel is coming back' } });
+    expect(told.body).toContain('refused to pay');
+    expect(told.body).toContain('The rider still has your parcel and is bringing it back');
+  });
+
+  it('[BUG-HUNT-2 G02] the goods stay with the rider, owned: the job stays live, a return case opens, and a second tap changes nothing', async () => {
+    const job = await jobInCustody('RECIPIENT');
+    const body = { proofPhotoUrl: job.issued, outcome: 'refused', gps: job.drop };
+    await inject('POST', `/api/v1/courier/order/${job.orderId}/proof`, body, job.rider.token);
+    expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: job.rider.riderId } })).currentOrderId).toBe(job.orderId);
+    const order = await app.prisma.order.findUniqueOrThrow({ where: { id: job.orderId } });
+    expect(order.courierReturnRequestedAt).toBeInstanceOf(Date);
+    expect(order.courierReturnReason).toContain('refused to pay');
+    expect(await app.prisma.custodyRecoveryCase.count({ where: { orderId: job.orderId, state: 'RETURN_REQUIRED' } })).toBe(1);
+    const again = await inject('POST', `/api/v1/courier/order/${job.orderId}/proof`, body, job.rider.token);
+    expect(again.statusCode, again.body).toBe(200);
+    expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'RETURNING', strikes: 1, claims: 1 });
+    expect(await app.prisma.notification.count({ where: { userId: job.sender.userId, title: 'Your parcel is coming back' } })).toBe(1);
+  });
+
+  it('[BUG-HUNT-2 G02] the claim stands on its evidence all the way back, and the door cannot be retaken', async () => {
+    const job = await jobInCustody('RECIPIENT');
+    await inject('POST', `/api/v1/courier/order/${job.orderId}/proof`, { proofPhotoUrl: job.issued, outcome: 'no_show', gps: job.drop }, job.rider.token);
+    const paid = await inject('POST', `/api/v1/courier/order/${job.orderId}/proof`, { proofPhotoUrl: job.issued, outcome: 'paid', gps: job.drop }, job.rider.token);
+    expect(paid.statusCode).toBeGreaterThanOrEqual(400);
+    const claim = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { orderId: job.orderId } });
+    const returning = await app.prisma.order.findUniqueOrThrow({ where: { id: job.orderId } });
+    expect((await admittedHandoverEvidence(app.prisma, returning, claim)).bound).toBe(true);
+    const returned = { ...returning, status: 'RETURNED' as const };
+    expect((await admittedHandoverEvidence(app.prisma, returned, claim)).bound).toBe(true);
+    expect((await admittedHandoverEvidence(app.prisma, { ...returning, status: 'PICKED_UP' as const }, claim)).bound).toBe(false);
   });
 
   it('nobody there (no_show) has the same shape with its own reason', async () => {
     const job = await jobInCustody('RECIPIENT');
     const gone = await inject('POST', `/api/v1/courier/order/${job.orderId}/proof`, { proofPhotoUrl: job.issued, outcome: 'no_show', gps: job.drop }, job.rider.token);
     expect(gone.statusCode).toBe(200);
-    expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'FAILED', strikes: 1, claims: 1, fees: 0 });
+    expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'RETURNING', strikes: 1, claims: 1, fees: 0 });
     expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { orderId: job.orderId } })).reason).toBe('no_show');
+    const told = await app.prisma.notification.findFirstOrThrow({ where: { userId: job.sender.userId, title: 'Your parcel is coming back' } });
+    expect(told.body).toContain('nobody was there');
   });
 });
 

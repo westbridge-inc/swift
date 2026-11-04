@@ -87,6 +87,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_dispute_hold',
     // [O-4] the customer answered an out-of-stock question asked before acceptance; the store may accept now
     'vendor_customer_answered',
+    // [BUG-HUNT-2 G20] the store, once: a pickup has been ready for a day and nobody came
+    'pickup_not_collected',
     // Rides
     'ride_queue_matched', 'ride_queue_expired', 'ride_released_no_drivers',
     // [VERIFY-DOCS · owner ruling 9] A queued ride whose class is no longer offered
@@ -151,7 +153,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // [R19] a child-safety (CSAE) report: an ops page, as loud as an SOS page
     'csae_report',
     'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_riders_short', 'ops_food_too_old', 'ops_rider_no_show', 'ops_rider_waiting', 'ops_rider_waiting_long',
-    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_error_sustained', 'ops_collusion_affinity', 'ops_billing_failures',
+    'ops_taxi_driver_dropped', 'ops_pickup_uncollected', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_error_sustained', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_malware_scan_bypass', 'ops_evidence_unscanned', 'ops_evidence_held', 'ops_upload_quarantined', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     // [PLACES-LOUD] address search (Google) failing: customers cannot search a place
@@ -162,7 +164,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
     // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)
     'vat_threshold',
-    'billing_unknown_intents_sla', 'reconcile_mismatch', 'settlement_trailer_mismatch',
+    'ops_fee_refund_overdue', 'billing_unknown_intents_sla', 'reconcile_mismatch', 'settlement_trailer_mismatch',
     'settlement_deposit_mismatch', 'earnings_missing', 'agent_cash_sla',
     'incident_new', 'incident_sla_breach', 'incident_weekly_digest', 'incident_pattern_cross_reporter',
     'liveness_outage', 'liveness_review', 'compliance_violation', 'verification_pending',

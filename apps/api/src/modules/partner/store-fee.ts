@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient, VendorType } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { formatMoney } from '../../utils/currency-amount';
 import { PricingConfigError, partnerRateFor, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
@@ -37,6 +37,7 @@ export const STORE_FEE_ACK_PATH = 'vendor/store-weekly-fee-ack';
 export const STORE_FEE_NOTICE_KIND = 'vendor_needs_weekly_fee_tick';
 export const STORE_FEE_TICK_REQUIRED = 'STORE_FEE_TICK_REQUIRED';
 export const STORE_FEE_ALREADY_SET = 'STORE_FEE_ALREADY_SET';
+export const STORE_TYPE_MOVES_FEE = 'STORE_TYPE_MOVES_FEE';
 
 /** The 7-day window: a listing taken off sale, changed or removed this recently still counts (anti-hide). */
 export const CATALOGUE_WINDOW_DAYS = 7;
@@ -102,7 +103,7 @@ export function storeFeeTickNeeded(amount: number, signupAmount: number): boolea
  * The weekly fee this store would be born on NOW, and whether its owner must tick it first. Reads only; `db` may be
  * the activation transaction (the birth re-reads the chain deal under its own lock and re-checks: assertStoreFeeTicked).
  */
-export async function storeFeeQuote(db: Db, vendorId: string, now = new Date()): Promise<StoreFeeQuote> {
+export async function storeFeeQuote(db: Db, vendorId: string, now = new Date(), asType?: VendorType): Promise<StoreFeeQuote> {
   const vendor = await db.vendor.findUnique({
     where: { id: vendorId },
     select: { vendorType: true, firstLiveAt: true, owner: { select: { userId: true, dealWeeklyRate: true, dealCurrencyCode: true, user: { select: { countryCode: true } } } } },
@@ -111,7 +112,7 @@ export async function storeFeeQuote(db: Db, vendorId: string, now = new Date()):
   const config = await db.countryConfig.findUnique({ where: { code: vendor.owner.user.countryCode }, select: { currencyCode: true, subscriptionTiers: true } });
   if (!config) throw new PricingConfigError('countryConfig');
   const tiers = config.subscriptionTiers as unknown as SubscriptionTiers;
-  const isService = vendor.vendorType === 'SERVICE';
+  const isService = (asType ?? vendor.vendorType) === 'SERVICE';
   const signup = partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: 0 });
   const items = isService ? null : await storeCatalogueCount(db, vendorId, now);
   const catalogue = isService ? signup : partnerRateFor(tiers, { kind: 'VENDOR', isService, activeListings: items ?? 0 });
@@ -189,6 +190,25 @@ export async function assertStoreFeeTicked(
     STORE_FEE_TICK_REQUIRED,
     `This store's weekly fee is ${formatMoney(p.amount, p.currencyCode, { whole: true })} a week. Its owner reads it and ticks “I understand the weekly fee” for this store before it goes live.`,
     { vendorId: p.vendorId, amount: p.amount, currencyCode: p.currencyCode },
+  );
+}
+
+/**
+ * [BUG-HUNT F22 · COORD 4 Nov 2026] A type change that changes the weekly fee is never silent: the owner ticked one
+ * amount, and support's door must not bill another, up or down. Unless the owner has ticked the new amount for this
+ * store, nothing changes, and the refusal says why. Call it under the store's row lock.
+ */
+export async function assertTypeKeepsFee(db: Db, vendorId: string, vendorType: VendorType, storeName: string): Promise<void> {
+  const now = new Date();
+  const [current, next] = [await storeFeeQuote(db, vendorId, now), await storeFeeQuote(db, vendorId, now, vendorType)];
+  if (next.amount === current.amount) return;
+  if (storeTickIsFor(await latestStoreFeeTick(db, next.ownerUserId, vendorId), next)) return;
+  const money = (amount: number) => formatMoney(amount, next.currencyCode, { whole: true });
+  throw new AppError(
+    409,
+    STORE_TYPE_MOVES_FEE,
+    `This change moves ${storeName}'s weekly fee from ${money(current.amount)} to ${money(next.amount)} a week. Its owner has to read the new amount and tick “I understand the weekly fee” for this store first, so nothing was changed.`,
+    { vendorId, from: current.amount, to: next.amount, currencyCode: next.currencyCode },
   );
 }
 
