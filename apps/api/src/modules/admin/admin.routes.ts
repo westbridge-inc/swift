@@ -1442,8 +1442,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/users/:id/phone-change', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { phone } = phoneChangeSchema.parse(request.body ?? {});
-    const answer = await startPhoneChange(phoneChangeDeps(), { userId: id, phone, ip: request.ip });
-    await audit(request.user.userId, 'START_USER_PHONE_CHANGE', 'User', id, { toLastFour: lastFour(phone) }, request);
+    const answer = await startPhoneChange(phoneChangeDeps(), {
+      userId: id, phone, ip: request.ip,
+      within: (tx) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { toLastFour: lastFour(phone) } }),
+    });
     return { success: true, data: answer };
   });
 

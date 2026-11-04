@@ -308,6 +308,8 @@ export function craftedBodies(w: World): Record<string, Record<string, unknown>>
     [`PUT ${A}/returns/:id/resolve`]: { status: 'APPROVED', note: 'matrix probe' },
     [`PUT ${A}/returns/:id/refund-settled`]: { reference: 'MATRIX-REF', amount: 100, note: 'matrix probe' },
     [`PUT ${A}/cash-rules/claims/:id/paid`]: { reference: 'MATRIX-REF', amount: 500 },
+    // [BUG-HUNT F22] a number: valid, so the re-send reaches the person's lookup (and its tenant wall)
+    [`POST ${A}/users/:id/phone-change`]: { phone: '+5926000000' },
     // fail-closed for tenant B today (TENANT_BILLING_UNAVAILABLE): valid, so they reach the lookup if that ever opens
     [`POST ${A}/subscriptions/:id/topup`]: { amount: 2000, reference: 'MATRIX-REF' },
     [`POST ${A}/subscriptions/:id/refund-credit/set-aside`]: { amount: 100 },

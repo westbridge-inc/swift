@@ -222,6 +222,9 @@ describe('[F22] a person\'s number', () => {
     const trail = await app.prisma.auditLog.findFirstOrThrow({ where: { entityId: person.id, action: 'CHANGE_USER_PHONE' } });
     expect(JSON.stringify(trail)).not.toContain(next);
     expect(JSON.stringify(trail)).not.toContain(person.phone);
+    const started = await app.prisma.auditLog.findMany({ where: { entityId: person.id } });
+    expect(started.length).toBeGreaterThanOrEqual(2); // the ask carried out, and the move
+    expect(JSON.stringify(started)).not.toContain(next);
   });
 
   it('a wrong code moves nothing, and a code cannot be used twice', async () => {
@@ -278,6 +281,16 @@ describe('[F22] a person\'s number', () => {
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('PHONE_IN_USE');
     expect(devChannelLog.slice(before).filter((entry) => entry.to === two.phone)).toHaveLength(0);
+  });
+
+  it('the number the account already has is not a move: no text goes', async () => {
+    const one = await makeUser('Same');
+    await clearCounters(one.phone);
+    const since = devChannelLog.length;
+    const res = await twoPeople(adminToken, one.id, one.phone);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('SAME_PHONE');
+    expect(smsTo(one.phone, since)).toHaveLength(0);
   });
 
   it('a number outside Guyana is refused', async () => {

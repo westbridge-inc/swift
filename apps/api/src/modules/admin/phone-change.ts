@@ -54,18 +54,22 @@ async function lockedPerson(tx: Prisma.TransactionClient, userId: string): Promi
   return numberMayMove(await tx.user.findUnique({ where: { id: userId }, select: PERSON }), userId);
 }
 
-/** Send the code to the new number. Nothing about the account changes yet. */
-export async function startPhoneChange(deps: PhoneChangeDeps, input: { userId: string; phone: string; ip: string }): Promise<{ expiresIn: number }> {
+/** Send the code to the new number. Nothing about the account changes yet. `within` is the trail, in the checks' commit. */
+export async function startPhoneChange(
+  deps: PhoneChangeDeps,
+  input: { userId: string; phone: string; ip: string; within: (tx: Prisma.TransactionClient) => Promise<void> },
+): Promise<{ expiresIn: number }> {
   const phone = normalizePhone(input.phone);
   if (!publicLaunchCountryFromPhone(phone)) throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is currently available in Guyana only');
-  const person = await deps.prisma.$transaction(async (tx) => {
+  await deps.prisma.$transaction(async (tx) => {
     await bindTenantTransaction(tx);
-    return lockedPerson(tx, input.userId);
+    const person = await lockedPerson(tx, input.userId);
+    if (person.phone === phone) throw new AppError(409, 'SAME_PHONE', 'This account already uses that number.');
+    if (await deps.prisma.user.findUnique({ where: { phone }, select: { id: true } })) {
+      throw new AppError(409, 'PHONE_IN_USE', 'Another account uses that number. Sort that account out first.');
+    }
+    await input.within(tx);
   });
-  if (person.phone === phone) throw new AppError(409, 'SAME_PHONE', 'This account already uses that number.');
-  if (await deps.prisma.user.findUnique({ where: { phone }, select: { id: true } })) {
-    throw new AppError(409, 'PHONE_IN_USE', 'Another account uses that number. Sort that account out first.');
-  }
   const budget = await checkOtpDailyBudget(deps.redis, phone, { ip: input.ip, knownPhone: false });
   if (!budget.allowed) throw new AppError(429, 'RATE_LIMITED', 'Too many codes to this number right now. Please try again later.');
   const code = generateOtp();
