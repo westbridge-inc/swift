@@ -371,19 +371,28 @@ if [ "$PILOT_ENV" = production ]; then
       die "PILOT_ENV=production refuses the agent-cash webhook ($agent_cash_name is set): partners pay the weekly fee only on the MMG checkout page"
   done
   # [LAUNCH-LOCK] Owner ruling, 13 Oct: until an attorney signs off,
-  # production takes no card payment and runs no ads. The API's boot guard
-  # refuses the same settings (boot-config.ts assertProductionLaunchLocks);
-  # turning either on is a reviewed code change in both, never an .env edit.
+  # production takes no card payment. The API's boot guard refuses the same
+  # settings (boot-config.ts assertProductionLaunchLocks); turning cards on is
+  # a reviewed code change in both, never an .env edit.
   [ "$(env_setting PAYMENT_PROVIDER)" = disabled ] ||
     die "PILOT_ENV=production needs PAYMENT_PROVIDER=disabled: no card payment until an attorney signs off (owner ruling, 13 Oct)"
   [ "$(env_setting CARD_RAIL_KILL)" = 1 ] ||
     die "PILOT_ENV=production needs CARD_RAIL_KILL=1: no card payment until an attorney signs off (owner ruling, 13 Oct)"
-  for locked_name in CARD_RAIL_V2 CARD_RAIL_V2_DRAIN CARD_RAIL_ENROLL ADS_ENABLED; do
+  for locked_name in CARD_RAIL_V2 CARD_RAIL_V2_DRAIN CARD_RAIL_ENROLL; do
     case "$(env_setting "$locked_name")" in
       "" | 0) ;;
-      *) die "PILOT_ENV=production refuses $locked_name unless it is unset or 0: no card payment and no ads until an attorney signs off (owner ruling, 13 Oct)" ;;
+      *) die "PILOT_ENV=production refuses $locked_name unless it is unset or 0: no card payment until an attorney signs off (owner ruling, 13 Oct)" ;;
     esac
   done
+  # [ADS-ON] Owner ruling, 3 Nov: ads stay off through soft launch; only the
+  # owner sets the switch, with or after ordering day, once he has confirmed
+  # ads are lawful and the store answers say the app shows ads. Only exactly 1
+  # opens the ads routes, so a near miss (which would read as off) is refused,
+  # here and in the API's boot guard.
+  case "$(env_setting ADS_ENABLED)" in
+    "" | 0 | 1) ;;
+    *) die "PILOT_ENV=production needs ADS_ENABLED unset, 0 or exactly 1: only exactly 1 opens the ads routes (owner ruling, 3 Nov)" ;;
+  esac
   # [Row 312] MALWARE_SCAN: every upload is scanned by the private clamd
   # service on production (owner, 21 Oct: on for launch). Compose defaults it
   # to clamd; deploy/.env may only leave it unset or say clamd.
