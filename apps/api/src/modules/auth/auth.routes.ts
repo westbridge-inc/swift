@@ -159,10 +159,13 @@ export async function authRoutes(app: FastifyInstance) {
       select: {
         id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true, tenant: { select: { kind: true } },
         rider: { select: { id: true } }, driver: { select: { id: true } }, serviceProvider: { select: { id: true } },
+        vendorStaffMemberships: { select: { id: true }, take: 1 },
       },
     });
     if (!found) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
-    const { rider, driver, serviceProvider, ...user } = found;
+    const { rider, driver, serviceProvider, vendorStaffMemberships, ...person } = found;
+    // [BUG-HUNT F03] Branch staff hold no partner role: this is what tells the website they work at a store (AuthService signInVerified says the same).
+    const user = { ...person, storeStaff: vendorStaffMemberships.length > 0 };
     // [PORTAL-404 · FLOW-QA F29] Which of this person's own partner profiles exist, as yes/no only: the same row each
     // profile route reads (GET /rider/profile, /driver/profile, /provider/subscription answer 404 or 403 exactly when
     // it is false). The website asks only for the profiles it holds, so a browser never logs a 404 for one it does

@@ -42,7 +42,10 @@ const Stack = createNativeStackNavigator();
 function MoverRoot({ navigation }: any) {
   const preview = useMoverPreview((s) => s.preview);
   const { data: status, isLoading, refetch } = useVerificationStatus<any>('MOVER', undefined, { poll: true });
-  const live = useWentLive(preview ? undefined : status ? !!status.roleVerified : undefined);
+  // Documents can be approved before a vehicle is saved. The server's vehicleType is null until a rider or driver
+  // profile exists: Home has nothing to run on then, and the vehicle form is on the onboarding screen.
+  const verified = !!status?.roleVerified && status?.vehicleType !== null;
+  const live = useWentLive(preview ? undefined : status ? verified : undefined);
 
   // Preview (R3): a prospective mover lands straight on the REAL dashboard home
   // fed sample data — no verification gate, no onboarding, no went-live popup.
@@ -61,7 +64,7 @@ function MoverRoot({ navigation }: any) {
 
   return (
     <>
-      {status?.roleVerified ? <MoverHomeScreen navigation={navigation} /> : <MoverOnboardingScreen status={status} />}
+      {verified ? <MoverHomeScreen navigation={navigation} /> : <MoverOnboardingScreen status={status} />}
       <WentLivePopup visible={live.celebrate} onClose={live.dismiss} kind="mover" />
     </>
   );

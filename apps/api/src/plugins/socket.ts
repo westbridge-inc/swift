@@ -337,6 +337,11 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
 
     const redisResults = await Promise.allSettled(adapterClients.map(async (client, index) => {
       if (client.status === 'end') return;
+      // Not connected: QUIT would sit in the offline queue behind any publish.
+      if (client.status !== 'ready') {
+        client.disconnect(false);
+        return;
+      }
       try {
         await withTimeout(
           client.quit(),
@@ -383,11 +388,34 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       client.on('error', (error) => withdrawReadiness('error', error));
       client.on('close', () => withdrawReadiness('close'));
       client.on('end', () => withdrawReadiness('end'));
+      client.on('ready', () => { void restoreReadiness(); });
     }
+    // A Redis restart closes both connections and ioredis brings them back,
+    // re-sending the subscriptions on the way. A connection that returns gives
+    // readiness back once the server has answered behind those subscriptions
+    // (PING is answered in order); checkSocketAdapterReady still asks for both.
+    // A re-subscribe the live server refused keeps the instance out until the
+    // next connection, as a refusal at startup would.
+    let adapterStarted = false;
+    let subscriptionRefused = false;
+    subClient.on('close', () => { subscriptionRefused = false; });
+    const restoreReadiness = async () => {
+      if (!adapterStarted) return;
+      try {
+        await subClient.ping();
+      } catch {
+        return;
+      }
+      if (!subscriptionRefused) {
+        socketAdapterHealthy = true;
+        app.log.info('Socket adapter Redis connection restored');
+      }
+    };
     const reportCommandFailure = (kind: 'pub' | 'sub') => (
       { command, error }: { command: string; error: unknown },
     ) => {
       socketAdapterHealthy = false;
+      if (kind === 'sub' && subClient.status === 'ready') subscriptionRefused = true;
       app.log.error(
         { err: error, kind, command },
         'Socket adapter Redis command rejected',
@@ -423,6 +451,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           // the default namespace subscriptions before plugin readiness.
           await subscriptionGuard.verifyAndStopTracking(['psubscribe', 'subscribe']);
           socketAdapterHealthy = true;
+          adapterStarted = true;
         })(),
         startupTimeoutMs,
         'Socket adapter startup',

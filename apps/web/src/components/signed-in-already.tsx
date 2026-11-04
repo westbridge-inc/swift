@@ -20,7 +20,7 @@ export type SignedIn = { phone: string; home: string; label: string; /** where t
 /** Where sign-in sends this account (lib/auth verifyPartnerLogin, signup doVerify): roles first, then a pro profile. */
 export async function homeFor(user: Record<string, unknown>): Promise<{ home: string; label: string }> {
   const { kind } = roleHome(user);
-  if (kind === 'business') return { home: '/dashboard', label: 'Go to your dashboard' };
+  if (kind === 'business' || kind === 'staff') return { home: '/dashboard', label: 'Go to your dashboard' };
   if (kind === 'earner') {
     const movers = await import('@/lib/mover-api');
     // [REVIEW-G G1 · owner rule 3] An account that stopped after its name, before the vehicle step, has no rider or

@@ -427,7 +427,7 @@ export async function hasProviderProfile(): Promise<boolean> {
   }
 }
 
-/** OTP login for partners: businesses land on /dashboard, earners on /portal, pros on /portal/weekly-fee. */
+/** OTP login for partners: businesses and their staff land on /dashboard, earners on /portal, pros on /portal/weekly-fee. */
 export async function verifyPartnerLogin(phone: string, code: string): Promise<{ user: unknown; home: string }> {
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
@@ -450,6 +450,11 @@ export async function verifyPartnerLogin(phone: string, code: string): Promise<{
   // vendorOwner relation on the login payload.
   const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!data.user?.vendorOwner;
   const isMover = roles.some((r) => ['MOVER', 'RIDER', 'DRIVER'].includes(r));
+  // [BUG-HUNT F03] Branch staff hold no partner role: the server's `storeStaff` says they work at a store (lib/role-home).
+  if (!isVendor && !isMover && data.user?.storeStaff === true) {
+    adoptSession(data.user.id);
+    return { user: data.user, home: '/dashboard' };
+  }
   // [BILL-PRO PR6 · owner A4] An independent service provider (a pro) holds no partner role but pays their own weekly
   // fee here (Partner portal, Weekly fee): the server's own answer decides, never a role guess.
   const isPro = !isVendor && !isMover && await hasProviderProfile();

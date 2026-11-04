@@ -37,3 +37,16 @@ describe('[F29] the header asks /auth/me whether a signed-in customer is a pro',
     expect(asked).toContain('/api/v1/services/providers/me');
   });
 });
+
+describe('[BUG-HUNT F03] branch staff hold no partner role: the header still links them to their store', () => {
+  it('"Dashboard", and no provider request', async () => {
+    const asked: string[] = [];
+    mockApi(({ url }) => {
+      asked.push(url.pathname);
+      if (url.pathname === '/api/v1/auth/me') return { body: { success: true, data: { user: { id: 's1', roles: ['CUSTOMER'], storeStaff: true }, profiles: { rider: false, driver: false, provider: false } } } };
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    });
+    expect(await headerAccount()).toEqual({ href: '/dashboard', label: 'Dashboard' });
+    expect(asked).toEqual(['/api/v1/auth/me']);
+  });
+});
