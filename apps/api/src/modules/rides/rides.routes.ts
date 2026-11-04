@@ -21,9 +21,10 @@ import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from
 import { assertHirePassengers } from './hire-passengers';
 import { assertWebBookingCarriesQuoteAndKey, taxiMobileAppRequired, webTaxiBookingEnabled } from './web-taxi-booking';
 import { readRideItinerary } from './taxi-stops-read';
-import { hasTaxiPassengerCustody } from './passenger-custody';
+import { hasTaxiPassengerCustody, lockTaxiOrderForCustodyDecision } from './passenger-custody';
 import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';
-import { decorateRideWaiting, taxiWaitingEnabled, waitingDisclosure } from './taxi-waiting';
+import { decorateRideWaiting, recordPickupArrival, taxiWaitingEnabled, waitingDisclosure } from './taxi-waiting';
+import { arrivalGate } from '../dispatch/arrival-evidence';
 import {
   CHECKOUT_CLAIM_TTL_S,
   checkoutRequestHash,
@@ -609,22 +610,37 @@ export async function ridesRoutes(app: FastifyInstance) {
   });
 
   /** POST /:id/confirm-driver-arrival — the passenger's own eyes override the
-   *  arrival GPS gate [E19]. Ownership and the status CAS are one `updateMany`,
-   *  so the confirm itself IS the override transaction: no new column, no
-   *  migration, and nobody but this ride's customer can start the clock. */
+   *  arrival GPS gate [E19]. Ownership and the status are read on the locked
+   *  row, as at the driver's own door, and nobody but this ride's customer can
+   *  use it. [Owner 4 Nov 2026] It moves the ride on; it does not start the
+   *  waiting charge. Only GPS does: the gate is read here on the driver's own
+   *  fix, and a car it cannot place waits for free. */
   app.post<{ Params: { id: string } }>('/:id/confirm-driver-arrival', auth, async (request) => {
     const now = new Date();
-    const claimed = await app.prisma.order.updateMany({
-      where: {
-        id: request.params.id,
-        customerId: request.user.userId,
-        orderType: 'TAXI',
-        status: 'DRIVER_EN_ROUTE',
-        driverId: { not: null },
-      },
-      data: { status: 'DRIVER_ARRIVED', driverArrivedAt: now },
+    const claimed = await app.prisma.$transaction(async (tx) => {
+      await lockTaxiOrderForCustodyDecision(tx, request.params.id);
+      const ride = await tx.order.findFirst({
+        where: {
+          id: request.params.id,
+          customerId: request.user.userId,
+          orderType: 'TAXI',
+          status: 'DRIVER_EN_ROUTE',
+          driverId: { not: null },
+        },
+        select: { id: true, driverId: true, pickupLat: true, pickupLng: true },
+      });
+      if (!ride?.driverId) return false;
+      const driver = await tx.driver.findUnique({ where: { id: ride.driverId }, select: { currentLat: true, currentLng: true, lastLocationUpdate: true } });
+      const gate = arrivalGate(
+        { lat: driver?.currentLat ?? null, lng: driver?.currentLng ?? null, at: driver?.lastLocationUpdate ?? null },
+        { lat: ride.pickupLat, lng: ride.pickupLng },
+        now,
+      );
+      await tx.order.updateMany({ where: { id: ride.id, status: 'DRIVER_EN_ROUTE' }, data: { status: 'DRIVER_ARRIVED', driverArrivedAt: now } });
+      await recordPickupArrival(tx, ride.id, gate.allowed);
+      return true;
     });
-    if (claimed.count === 0) {
+    if (!claimed) {
       throw new AppError(409, 'INVALID_STATUS',
         'The driver has not started this ride, or it is no longer waiting for pickup.');
     }

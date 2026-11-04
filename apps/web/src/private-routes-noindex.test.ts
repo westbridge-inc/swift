@@ -77,6 +77,7 @@ const PRIVATE_PAGES = [
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',
   'dashboard/insights/page.tsx',
+  'dashboard/help/page.tsx', // [BUG-HUNT F04] a partner's way to a person
   'dashboard/qr/page.tsx', // [STORE-LINK] the store's own QR code and share link (owners and managers)
   'dashboard/schedule/page.tsx', // a Services store's bookings (customer first names)
   'dashboard/settings/page.tsx',
@@ -90,6 +91,7 @@ const PRIVATE_PAGES = [
   'portal/account/delete/page.tsx', // [WEB-DELETE] a rider or driver deletes their own account
   'portal/documents/page.tsx',
   'portal/history/page.tsx',
+  'portal/help/page.tsx', // [BUG-HUNT F04] a partner's way to a person
   'portal/weekly-fee/page.tsx',
   'weekly-fee/page.tsx',
   'selfie/page.tsx',

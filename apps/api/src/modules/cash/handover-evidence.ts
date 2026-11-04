@@ -122,6 +122,9 @@ export async function captureHandoverEvidence(
   } });
 }
 
+/** [BUG-HUNT-2 G02] An unpaid parcel does not stop at FAILED: it goes back to the sender, and its claim stands. */
+const UNPAID_PARCEL_BACK: readonly string[] = ['RETURNING', 'RETURNED'];
+
 /** Both review and payout use these source records, never the claim JSON. */
 export async function admittedHandoverEvidence(db: Db, order: Order, claim: {
   handoverEvidenceId?: string | null; riderId: string | null; driverId: string | null;
@@ -139,7 +142,8 @@ export async function admittedHandoverEvidence(db: Db, order: Order, claim: {
     && evidence.orderType === order.orderType && evidence.bindingDigest === handoverBinding(order)
     && evidence.policyVersion === HANDOVER_POLICY_VERSION && evidence.filedAt <= new Date()
     && (CUSTODY[order.orderType] ?? []).includes(evidence.sourceStatus)
-    && order.status === 'FAILED' && order.paymentStatus === 'FAILED' && order.deliveredAt == null
+    && (order.status === 'FAILED' || (order.orderType === 'COURIER' && UNPAID_PARCEL_BACK.includes(order.status)))
+    && order.paymentStatus === 'FAILED' && order.deliveredAt == null
     && order.paymentMethod === 'CASH' && (order.orderType !== 'COURIER' || order.courierPayer === 'RECIPIENT');
   const fixAge = evidence?.locationAt ? evidence.filedAt.getTime() - evidence.locationAt.getTime() : null;
   const coords = evidence && [evidence.locationLat, evidence.locationLng, order.deliveryLat, order.deliveryLng];

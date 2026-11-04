@@ -8,9 +8,10 @@ import type { TaxiStopProgress } from './taxi-stops-read';
 //
 // The rule: a charge per FULL block of waiting (300 GYD per 10 minutes by
 // default; TAXI_RATES.waitingChargePerBlock / waitingBlockMinutes). The waits
-// are the pickup (the driver's arrival → the trip start) and each intermediate
-// stop (its arrival → its departure, or its skip: the car waited either way).
-// They are summed on the server's own timestamps, then
+// are the pickup (the moment GPS put the car there → the ride code) and each
+// intermediate stop (its arrival → its departure, or its skip: the car waited
+// either way). They are summed on the server's own timestamps, then
+//   totalSeconds   = min(summed seconds, one hour) [owner 4 Nov 2026]
 //   waitingMinutes = floor(totalSeconds / 60)
 //   waitingCharge  = floor(totalSeconds / (blockMinutes × 60)) × chargePerBlock.
 // Waiting at the final destination is never counted. A wait whose end reads
@@ -29,6 +30,21 @@ import type { TaxiStopProgress } from './taxi-stops-read';
 
 /** The declared defaults: a market whose TAXI_RATES names no waiting terms waits on these. */
 export const TAXI_WAITING_DEFAULTS = { chargePerBlock: 300, blockMinutes: 10 } as const;
+
+/**
+ * [Owner 4 Nov 2026] The most waiting one ride can count: an hour, which is
+ * GY$1,800 on the default terms. The cap is on the time counted, not on the
+ * money, so the database's rule (the charge IS seconds / block × charge per
+ * block) holds for a capped ride as for any other, and a ride booked before the
+ * cap is capped too: it only ever lowers what a passenger pays.
+ */
+export const TAXI_WAITING_CAP_MINUTES = 60;
+const CAP_SECONDS = TAXI_WAITING_CAP_MINUTES * 60;
+
+/** The most one ride can be charged on these terms: the whole blocks inside the hour. */
+export function waitingChargeCap(terms: Pick<TaxiWaitingTerms, 'chargePerBlock' | 'blockMinutes'>): number {
+  return Math.floor(TAXI_WAITING_CAP_MINUTES / terms.blockMinutes) * terms.chargePerBlock;
+}
 
 /** TAXI_WAITING_CHARGE: on only when exactly "1" (surrounding blanks ignored). */
 export function taxiWaitingEnabled(env: Record<string, string | undefined> = process.env): boolean {
@@ -56,10 +72,10 @@ export function waitingTermsFromRates(
 
 const wholeUnits = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 
-/** The sentence shown beside the fare: "Waiting: 300 per 10 minutes after your driver arrives". */
+/** The sentence shown beside the fare: "Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride". */
 export function waitingTermsText(terms: TaxiWaitingTerms): string {
   const block = terms.blockMinutes === 1 ? 'minute' : `${terms.blockMinutes} minutes`;
-  return `Waiting: ${wholeUnits.format(terms.chargePerBlock)} per ${block} after your driver arrives`;
+  return `Waiting: ${wholeUnits.format(terms.chargePerBlock)} per ${block} after your driver arrives, up to ${wholeUnits.format(waitingChargeCap(terms))} a ride`;
 }
 
 /** §8.2: the disclosure block on the estimate, the capability read and the request answer. */
@@ -94,7 +110,12 @@ export interface TaxiWaitClock {
   status: OrderStatus;
   /** The driver's arrival at the pickup (Order.driverArrivedAt). */
   driverArrivedAt: Date | null;
-  /** The trip start (Order.pickedUpAt). */
+  /** [Owner 4 Nov 2026] Only TRUE (GPS put the car at the pickup) starts the
+   *  pickup wait; a passenger's confirmation the GPS did not back is never billed. */
+  pickupArrivalVerified: boolean | null;
+  /** The ride code's verification (Order.ridePinVerifiedAt): the pickup wait stops here. */
+  ridePinVerifiedAt: Date | null;
+  /** The trip start (Order.pickedUpAt): the wait's end on a ride with no code on its row. */
   pickedUpAt: Date | null;
   stops: readonly TaxiWaitStopClock[];
 }
@@ -106,7 +127,7 @@ export interface TaxiWaitSpan {
 }
 
 export interface TaxiWaitTally {
-  /** The pickup wait; null before the driver arrived (or after a release). */
+  /** The pickup wait; null before the driver arrived, after a release, or with no GPS at the pickup. */
   pickup: TaxiWaitSpan | null;
   /** Each stop's wait by sequence; null before its arrival. */
   stops: Map<number, TaxiWaitSpan | null>;
@@ -116,7 +137,7 @@ export interface TaxiWaitTally {
   waitingCharge: number;
   /** How many waits are running now (0 or 1 on any real ride). */
   running: number;
-  /** When the next block lands if the running wait continues; null when none runs. */
+  /** When the next block lands if the running wait continues; null when none runs or the cap is reached. */
   nextChargeAt: Date | null;
 }
 
@@ -135,8 +156,9 @@ const span = (from: Date, to: Date): number => Math.max(0, to.getTime() - from.g
 export function tallyTaxiWaiting(clock: TaxiWaitClock, terms: TaxiWaitingTerms, now: Date, mode: 'live' | 'final'): TaxiWaitTally {
   const live = mode === 'live';
   let pickup: TaxiWaitSpan | null = null;
-  if (clock.driverArrivedAt) {
-    if (clock.pickedUpAt) pickup = { ms: span(clock.driverArrivedAt, clock.pickedUpAt), running: false };
+  const pickupEnd = clock.ridePinVerifiedAt ?? clock.pickedUpAt;
+  if (clock.driverArrivedAt && clock.pickupArrivalVerified === true) {
+    if (pickupEnd) pickup = { ms: span(clock.driverArrivedAt, pickupEnd), running: false };
     else if (clock.status === 'DRIVER_ARRIVED') pickup = live ? { ms: span(clock.driverArrivedAt, now), running: true } : { ms: 0, running: false };
   }
   const stops = new Map<number, TaxiWaitSpan | null>();
@@ -150,14 +172,16 @@ export function tallyTaxiWaiting(clock: TaxiWaitClock, terms: TaxiWaitingTerms, 
   }
   const waits = [pickup, ...stops.values()].filter((w): w is TaxiWaitSpan => w !== null);
   const totalMs = waits.reduce((sum, w) => sum + w.ms, 0);
-  const totalSeconds = Math.floor(totalMs / 1000);
+  const totalSeconds = Math.min(Math.floor(totalMs / 1000), CAP_SECONDS);
   const blockSeconds = terms.blockMinutes * 60;
   const blocks = Math.floor(totalSeconds / blockSeconds);
   const running = waits.filter((w) => w.running).length;
   // The summed wait reaches the next full block at (blocks + 1) × block; with
   // `running` clocks advancing together it gets there `running` times faster.
-  const nextChargeAt = running > 0
-    ? new Date(now.getTime() + Math.ceil(((blocks + 1) * blockSeconds * 1000 - totalMs) / running))
+  // A block that would pass the hour never lands: past the cap nothing is promised.
+  const nextBlockSeconds = (blocks + 1) * blockSeconds;
+  const nextChargeAt = running > 0 && nextBlockSeconds <= CAP_SECONDS
+    ? new Date(now.getTime() + Math.ceil((nextBlockSeconds * 1000 - totalMs) / running))
     : null;
   return {
     pickup,
@@ -171,7 +195,7 @@ export function tallyTaxiWaiting(clock: TaxiWaitClock, terms: TaxiWaitingTerms, 
   };
 }
 
-const minutesOf = (w: TaxiWaitSpan | null | undefined): number | null => (w ? Math.floor(w.ms / 60_000) : null);
+const minutesOf = (w: TaxiWaitSpan | null | undefined): number | null => (w ? Math.min(Math.floor(w.ms / 60_000), TAXI_WAITING_CAP_MINUTES) : null);
 
 /** §8.3: the live object on the rider's and the driver's active ride. */
 export interface TaxiWaitingLive extends TaxiWaitingTerms {
@@ -213,6 +237,7 @@ const WAITING_ROW_SELECT = {
   chargePerBlock: true,
   blockMinutes: true,
   currencyCode: true,
+  pickupArrivalVerified: true,
   waitingSeconds: true,
   waitingMinutes: true,
   waitingCharge: true,
@@ -246,6 +271,17 @@ export interface FrozenTaxiWaiting {
 }
 
 /**
+ * [Owner 4 Nov 2026] Whether GPS put the car at the pickup, written with each
+ * arrival inside its own transaction: the driver's door only passes when it
+ * did, and the passenger's confirmation counts only when the fix agrees. A second
+ * arrival after a release writes again, so an old driver's word never carries
+ * over. No terms row (a ride booked while the switch was off): nothing to write.
+ */
+export async function recordPickupArrival(tx: Prisma.TransactionClient, orderId: string, verified: boolean): Promise<void> {
+  await tx.taxiRideWaiting.updateMany({ where: { orderId }, data: { pickupArrivalVerified: verified } });
+}
+
+/**
  * THE closing seam's half of the waiting charge. Called by the canonical
  * transition on its locked order row, on the way to DELIVERED, inside its
  * transaction: computes the closed waits once and freezes them on the ride's
@@ -258,7 +294,7 @@ export interface FrozenTaxiWaiting {
  */
 export async function freezeTaxiWaiting(
   tx: Prisma.TransactionClient,
-  source: { id: string; status: OrderStatus; driverArrivedAt: Date | null; pickedUpAt: Date | null },
+  source: { id: string; status: OrderStatus; driverArrivedAt: Date | null; ridePinVerifiedAt: Date | null; pickedUpAt: Date | null },
   now: Date,
   env: Record<string, string | undefined> = process.env,
 ): Promise<FrozenTaxiWaiting | null> {
@@ -267,7 +303,10 @@ export async function freezeTaxiWaiting(
   if (!row || row.frozenAt) return null;
   const stops = await tx.taxiTripStop.findMany({ where: { orderId: source.id }, select: STOP_CLOCK_SELECT });
   const tally = tallyTaxiWaiting(
-    { status: source.status, driverArrivedAt: source.driverArrivedAt, pickedUpAt: source.pickedUpAt, stops },
+    {
+      status: source.status, driverArrivedAt: source.driverArrivedAt, pickupArrivalVerified: row.pickupArrivalVerified,
+      ridePinVerifiedAt: source.ridePinVerifiedAt, pickedUpAt: source.pickedUpAt, stops,
+    },
     termsOfRow(row),
     now,
     'final',
@@ -331,7 +370,7 @@ export interface TaxiWaitingDecoration {
 export async function decorateRideWaiting(
   db: Db,
   ride: {
-    id: string; status: OrderStatus; driverArrivedAt: Date | null; pickedUpAt: Date | null;
+    id: string; status: OrderStatus; driverArrivedAt: Date | null; ridePinVerifiedAt: Date | null; pickedUpAt: Date | null;
     taxiFareTotal: Prisma.Decimal | number | null; totalAmount: Prisma.Decimal | number; currencyCode: string;
   },
   itineraryStops: readonly TaxiStopProgress[] | null,
@@ -355,7 +394,10 @@ export async function decorateRideWaiting(
     : null;
   const clockStops = (itineraryStops ?? []).map((s) => ({ ...s, arrivalVerified: verified?.get(s.sequence) ?? null }));
   const tally = tallyTaxiWaiting(
-    { status: ride.status, driverArrivedAt: ride.driverArrivedAt, pickedUpAt: ride.pickedUpAt, stops: clockStops },
+    {
+      status: ride.status, driverArrivedAt: ride.driverArrivedAt, pickupArrivalVerified: row.pickupArrivalVerified,
+      ridePinVerifiedAt: ride.ridePinVerifiedAt, pickedUpAt: ride.pickedUpAt, stops: clockStops,
+    },
     terms,
     now,
     'live',

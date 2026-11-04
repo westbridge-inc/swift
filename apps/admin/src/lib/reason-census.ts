@@ -37,6 +37,9 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── People ─────────────────────────────────────────────────────────────
   { route: 'PUT /users/:id/suspend', helper: 'suspendUser', args: ['usr_1'] },
   { route: 'PUT /users/:id/name', helper: 'changeLegalName', args: ['usr_1', 'First', 'Last'], requiredBodyKeys: ['firstName', 'lastName'] },
+  { route: 'POST /users/:id/phone-change', helper: 'startPhoneChange', args: ['usr_1', '+5926001234'], requiredBodyKeys: ['phone'] },
+  { route: 'POST /users/:id/phone-change/confirm', helper: 'confirmPhoneChange', args: ['usr_1', '123456'], requiredBodyKeys: ['code'] },
+  { route: 'POST /users/:id/mover-plan/allow-move', helper: 'allowMoverPlanMove', args: ['usr_1'] },
   { route: 'POST /service-jobs/:id/close', helper: 'closeServiceJob', args: ['job_1'] },
   { route: 'PUT /users/:id/unsuspend', helper: 'unsuspendUser', args: ['usr_1'] },
   // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] a person lifts a strike restriction
@@ -47,12 +50,16 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── Vendors and movers ─────────────────────────────────────────────────
   { route: 'PUT /vendors/:id/approve', helper: 'approveVendor', args: ['vnd_1'] },
   { route: 'PUT /vendors/:id/suspend', helper: 'suspendVendor', args: ['vnd_1'] },
+  { route: 'PUT /vendors/:id/type', helper: 'changeStoreType', args: ['vnd_1', 'STORE'], requiredBodyKeys: ['vendorType'] },
+  { route: 'PUT /vendors/:id/name', helper: 'changeStoreName', args: ['vnd_1', 'New Name'], requiredBodyKeys: ['name'] },
   { route: 'PUT /riders/:id/verify-documents', helper: 'verifyRiderDocuments', args: ['rdr_1'] },
   { route: 'PUT /drivers/:id/verify-documents', helper: 'verifyDriverDocuments', args: ['drv_1'] },
   { route: 'PUT /drivers/:id/ride-class', helper: 'setDriverRideClass', args: ['drv_1', 'COMFORT'], requiredBodyKeys: ['rideClass'] },
 
   // ── Orders ─────────────────────────────────────────────────────────────
   { route: 'PUT /orders/:id/cancel', helper: 'cancelOrder', args: ['ord_1', { refund: false }] },
+  { route: 'POST /orders/:id/end-ride', helper: 'endStuckRide', args: ['ord_1'] },
+  { route: 'POST /finance/cash-settlements/:id/close', helper: 'closeCashSettlement', args: ['cs_1'] },
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
   { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
     requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },
@@ -105,6 +112,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /vendor-owners/:id/deal-rate', helper: 'setChainDeal', args: ['own_1', 14000], requiredBodyKeys: ['weeklyRate', 'reason'] },
   { route: 'PUT /vendor-owners/:id/brand', helper: 'setChainBrand', args: ['own_1', 'Royal Castle'], requiredBodyKeys: ['brandName', 'reason'] },
   { route: 'PUT /vendors/:id/brand-listing', helper: 'setBranchListedAlone', args: ['ven_1', true], requiredBodyKeys: ['alone', 'reason'] },
+  { route: 'POST /users/:id/verified-deletion', helper: 'deleteVerifiedRequest', args: ['usr_1', { identityCheck: 'OWNER_CHECKED', identityNote: 'Owner spoke to the person' }], requiredBodyKeys: ['identityCheck', 'identityNote', 'reason'] },
   { route: 'POST /vendor-owners/:id/deal-change', helper: 'changeChainDeal', args: ['own_1', { kind: 'RAISE', weeklyRate: 17000 }], requiredBodyKeys: ['kind', 'reason'] },
   { route: 'DELETE /vendor-owners/:id/deal-change', helper: 'withdrawChainDealChange', args: ['own_1'] },
   { route: 'POST /subscriptions/:id/topup', helper: 'topUpSubscription', args: ['sub_1', 1000, 'REF-1', 'idem-1'], requiredBodyKeys: ['amount', 'reference'] },
@@ -120,6 +128,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'POST /billing/agent-payments/:id/attach', helper: 'attachAgentPayment', args: ['pay_1', 'sub_1'], requiredBodyKeys: ['subscriptionId'] },
   { route: 'POST /billing/agent-payments/:id/refund-flag', helper: 'flagAgentPaymentRefund', args: ['pay_1'], requiredBodyKeys: ['note'] },
   // [MMG REVERSAL · owner #11] Return a whole MMG weekly-fee payment: the whole amount, typed.
+  { route: 'POST /billing/mmg-checkouts/:id/refund-case', helper: 'openFeeRefundCase', args: ['mco_1', 'DUPLICATE'], requiredBodyKeys: ['kind', 'reason'] },
   { route: 'POST /billing/mmg-checkouts/:id/reverse', helper: 'reverseMmgFeePayment', args: ['mco_1', 2100], requiredBodyKeys: ['amountGyd'] },
   { route: 'POST /billing/mmg-fee-reversals/:id/resolve', helper: 'resolveMmgFeeReversal', args: ['rev_1', 'NOT_RETURNED', 'MMG-STMT-123'], requiredBodyKeys: ['outcome', 'mmgReference'] },
   // [continues #1592] Weekly-fee payment confirmations: the reason travels in the body (and the header).

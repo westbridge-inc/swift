@@ -1,7 +1,8 @@
 import { z } from '../../lib/zod';
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { CashSettlementStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 import type { NotificationService } from '../notification/notification.service';
 
 /**
@@ -18,7 +19,15 @@ import type { NotificationService } from '../notification/notification.service';
  *
  * Every transition is compare-and-set; re-confirming your own side is a no-op
  * (double-tap safe), so the endpoints are idempotent.
+ *
+ * A store that never confirms, or has left Swift, must not hold a record open for
+ * ever, so Swift support can close one (closeSettlementBySwift). The status and
+ * every other fact stay as they were: closed is not settled.
  */
+
+/** A record still waiting on someone. The one predicate of the ledgers, the admin totals and account deletion. */
+export const OPEN_SETTLEMENT = { status: { not: CashSettlementStatus.SETTLED }, closedAt: null } satisfies Prisma.DeliveryCashSettlementWhereInput;
+export const SETTLEMENT_CLOSED_DISPOSITION = 'CLOSED_BY_SWIFT' as const;
 
 /**
  * [W-26] Money is parsed exactly or refused. A settlement amount arriving as a
@@ -102,7 +111,7 @@ export class DeliveryCashSettlementService {
   private async list(scope: Record<string, unknown>, owedStatuses: CashSettlementStatus[]) {
     const [unsettled, settled, owedAgg] = await Promise.all([
       this.prisma.deliveryCashSettlement.findMany({
-        where: { ...scope, status: { not: 'SETTLED' } },
+        where: { ...scope, ...OPEN_SETTLEMENT },
         include: SETTLEMENT_INCLUDE,
         orderBy: { createdAt: 'desc' },
         take: 100,
@@ -117,7 +126,7 @@ export class DeliveryCashSettlementService {
       // sum the displayed (capped-100) list — otherwise the "stores owe you" /
       // "you owe" figure silently undercounts once a party has >100 open rows.
       this.prisma.deliveryCashSettlement.aggregate({
-        where: { ...scope, status: { in: owedStatuses } },
+        where: { ...scope, status: { in: owedStatuses }, closedAt: null },
         _sum: { amount: true },
         _count: true,
       }),
@@ -170,9 +179,10 @@ export class DeliveryCashSettlementService {
     // amount BEFORE anything is written.
     const existing = await this.prisma.deliveryCashSettlement.findFirst({
       where: { id: settlementId, ...scope },
-      select: { amount: true },
+      select: { amount: true, closedAt: true },
     });
     if (!existing) throw new NotFoundError('Settlement', settlementId);
+    if (existing.closedAt) throw settlementClosedError();
     assertAttestedAmountMatches(existing.amount, attestation.amount);
 
     const now = new Date();
@@ -186,13 +196,13 @@ export class DeliveryCashSettlementService {
 
     // CAS 1: first confirmer — OWED → my half.
     let hit = await this.prisma.deliveryCashSettlement.updateMany({
-      where: { id: settlementId, ...scope, status: CashSettlementStatus.OWED },
+      where: { id: settlementId, ...scope, status: CashSettlementStatus.OWED, closedAt: null },
       data: { status: half, ...mine },
     });
     // CAS 2: second confirmer — other half → SETTLED.
     if (hit.count === 0) {
       hit = await this.prisma.deliveryCashSettlement.updateMany({
-        where: { id: settlementId, ...scope, status: otherHalf },
+        where: { id: settlementId, ...scope, status: otherHalf, closedAt: null },
         data: { status: CashSettlementStatus.SETTLED, ...mine },
       });
     }
@@ -255,6 +265,50 @@ export class DeliveryCashSettlementService {
       });
     }
   }
+}
+
+const settlementClosedError = () => new AppError(409, 'SETTLEMENT_CLOSED', 'Swift support has closed this delivery pay record, so it can no longer be confirmed.');
+
+/**
+ * Swift support closes a record neither side can: a store that never confirms, or has left Swift. RECORD ONLY: Swift
+ * moves nothing, and the amount, the status and each side's confirmation stay as they were. The reason is the
+ * caller's audit row, in this transaction. Both people are told, without it, unless the account is gone.
+ */
+export async function closeSettlementBySwift(
+  prisma: Pick<PrismaClient, '$transaction'>,
+  input: {
+    settlementId: string;
+    adminUserId: string;
+    reason: string;
+    audit: (tx: Prisma.TransactionClient, facts: { disposition: string; amount: number; previousStatus: CashSettlementStatus }) => Promise<void>;
+  },
+): Promise<{ id: string; closedAt: Date; noticeIds: string[] }> {
+  if (!input.reason.trim()) throw new AppError(400, 'REASON_REQUIRED', 'Say why this record is being closed before closing it.');
+  return prisma.$transaction(async (tx) => {
+    const closedAt = new Date();
+    const moved = await tx.deliveryCashSettlement.updateMany({
+      where: { id: input.settlementId, ...OPEN_SETTLEMENT },
+      data: { closedAt, closedById: input.adminUserId },
+    });
+    const row = await tx.deliveryCashSettlement.findUnique({ where: { id: input.settlementId }, include: SETTLEMENT_INCLUDE });
+    if (!row) throw new NotFoundError('Settlement', input.settlementId);
+    if (moved.count !== 1) throw new AppError(409, 'SETTLEMENT_NOT_OPEN', 'This record is already settled or closed.');
+    await input.audit(tx, { disposition: SETTLEMENT_CLOSED_DISPOSITION, amount: Number(row.amount), previousStatus: row.status });
+    const reachable = await tx.user.findMany({
+      where: { id: { in: [row.rider.userId, row.vendor.owner.userId] }, status: { not: 'DEACTIVATED' } }, select: { id: true },
+    });
+    const noticeIds: string[] = [];
+    for (const { id } of reachable) {
+      const notice = await insertNoticeFor(tx, {
+        userId: id, type: 'ORDER_UPDATE', title: 'Delivery pay record closed by Swift',
+        body: `Swift support closed the GYD ${Number(row.amount).toLocaleString()} delivery pay record for order #${row.order.orderNumber}. Swift moved no money. If you have a question, open Get Help.`,
+        data: { kind: 'delivery_cash_settlement', settlementId: row.id, orderId: row.orderId },
+        dedupeKey: `settlement-closed:${row.id}:${id}`,
+      });
+      noticeIds.push(notice.id);
+    }
+    return { id: row.id, closedAt, noticeIds };
+  });
 }
 
 /** Guard shared by both confirm routes. */

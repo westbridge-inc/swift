@@ -470,3 +470,45 @@ describe('[O-1] party phones are masked; the full number is an audited reveal', 
     expect(screen.queryByText(FULL)).toBeNull();
   });
 });
+
+describe('[BUG-HUNT-2 G01] a ride in progress that cannot finish', () => {
+  const ride = { ...order, orderType: 'TAXI', status: 'RIDE_IN_PROGRESS', vendor: null } as unknown as typeof order;
+  const showPage = () => renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+
+  it('support ends it with a stated reason, and the page offers no cancel the server would refuse', async () => {
+    const fetchMock = mockApi(orderHandler(() => ({ body: { success: true, data: { id: 'order-1', status: 'FAILED' } } }), ride));
+    const { user } = showPage();
+    const panel = await openPanel(user, 'End this ride');
+    expect(screen.queryByRole('button', { name: 'Cancel order' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Record refund owed' })).toBeNull();
+    expect(panel.textContent).toContain('No fare is recorded and no money moves.');
+    await giveReason(user, panel);
+    await user.click(within(panel).getByRole('button', { name: 'End this ride' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(String(url)).toBe(`${API_ORIGIN}/api/v1/admin/orders/order-1/end-ride`);
+    expect(new Headers(init?.headers).get('x-swift-reason')).toBe(REASON);
+  });
+
+  it.each([
+    ['a verified code, the driver never tapped Start', { ...ride, status: 'DRIVER_ARRIVED', ridePinVerified: true }],
+    ['the older record of a verified code', { ...ride, status: 'DRIVER_ARRIVED', ridePinVerifiedAt: '2026-11-04T10:00:00.000Z' }],
+  ])('is offered with %s, with no cancel the server would refuse', async (_name, visible) => {
+    mockApi(orderHandler(() => ({ body: {} }), visible as unknown as typeof order));
+    showPage();
+    expect(await screen.findByRole('button', { name: 'End this ride' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Cancel order' })).toBeNull();
+  });
+
+  it.each([
+    ['a ride not yet picked up', { ...ride, status: 'DRIVER_ARRIVED' }],
+    ['an order that is not a ride', { ...order, status: 'PICKED_UP' }],
+    ['a ride already closed', { ...ride, status: 'FAILED' }],
+    ['a closed ride with a verified code', { ...ride, status: 'FAILED', ridePinVerified: true }],
+  ])('is not offered on %s', async (_name, visible) => {
+    mockApi(orderHandler(() => ({ body: {} }), visible as typeof order));
+    showPage();
+    await screen.findByText(/ORDER-TEST-1/);
+    expect(screen.queryByRole('button', { name: 'End this ride' })).toBeNull();
+  });
+});

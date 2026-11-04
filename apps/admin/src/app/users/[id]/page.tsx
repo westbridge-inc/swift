@@ -4,17 +4,19 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { changeLegalName, fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction } from '@/lib/api';
+import { allowMoverPlanMove, changeLegalName, fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction, deleteVerifiedRequest } from '@/lib/api';
 import { label } from '@/lib/labels';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { PhoneChangeAction } from './phone-change-action';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { gyDate, gyDateTime } from '@/lib/dates';
+import { liveDocumentsLabel, liveDocumentsOk } from '@/lib/live-documents';
 import { ServiceJobsCard } from './service-jobs';
 
 /** [BUG-GUARDS C5] Why a strike was given, in words (cash-rules.service writes
@@ -37,6 +39,9 @@ const STRIKE_REASON: Record<string, string> = {
 const when = (iso?: string | null, withTime = false) =>
   iso ? (withTime ? gyDateTime(iso) : gyDate(iso)) : '—';
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
+
+/** The server's rule on a verified deletion's note: six digits, however spaced, or an address, is refused. */
+const NO_ID_OR_ADDRESS = /^(?![\s\S]*@)(?![\s\S]*(?:\d[\s-]*){6})/;
 
 function Row({ label: name, children }: { label: string; children: React.ReactNode }) {
   if (children == null || children === '') return null;
@@ -119,6 +124,15 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
     submit: ({ reason, values }) => changeLegalName(id, String(values['firstName']).trim(), String(values['lastName']).trim(), reason),
     success: () => 'The name is changed and the person is told.',
   }));
+  // [BUG-HUNT F05] "Contact support to move it to taxi work": this is that door. The person makes the move in the app.
+  const allowPlanMove = async () => show(await dialog.run({
+    title: `Let ${name} move between delivery and taxi work?`,
+    body: <p>They get one move, for 7 days, and make it themselves in the app. Their weekly fee follows the new work: a higher fee starts only after 14 days’ notice, and a week they have paid keeps its price. No money moves.</p>,
+    confirmLabel: 'Allow the move',
+    reason: { hint: 'Kept on the permanent record.' },
+    submit: ({ reason }) => allowMoverPlanMove(id, reason),
+    success: () => `${name} is told, and can change their vehicle in the app for the next 7 days.`,
+  }));
   const liftRestriction = async () => show(await dialog.run({
     title: `Open ordering again for ${name}?`,
     body: <p>Their strikes stay on the record and still count toward a ban, but the ones given until now stop pausing their orders and rides. Use this after you have reviewed the account with them through Help.</p>,
@@ -134,6 +148,26 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
     reason: { hint: 'Kept on the account and the permanent record.' },
     submit: ({ reason }) => banUser(id, reason),
     success: () => `${name} is banned.`,
+  }));
+
+  // [BUG-HUNT F20] A verified deletion request from someone who cannot sign in (docs/ops/verified-deletion-request.md).
+  // The server holds every rule; this offers the door only where it can work.
+  const staffAccount = (u.roles ?? []).some((role: string) => role === 'ADMIN' || role === 'SUPER_ADMIN');
+  const canDelete = u.viewer?.superAdmin === true && !staffAccount && u.status !== 'DEACTIVATED' && u.status !== 'BANNED';
+  const deleteAccount = async () => show(await dialog.run({
+    title: `Delete ${name}'s account?`,
+    body: <p>Only for a request you have verified, from someone who cannot sign in. This runs the person&apos;s own deletion: live orders or open cash refuse it, and financial and legal records are kept. It cannot be undone, and it needs approval first.</p>,
+    confirmLabel: 'Ask to delete account',
+    reason: { hint: 'Kept on the permanent record.' },
+    fields: [
+      { kind: 'choice', name: 'identityCheck', label: 'How identity was checked', options: [
+        { value: 'CODE_TO_ACCOUNT_NUMBER', label: 'A code sent to the number on the account' },
+        { value: 'OWNER_CHECKED', label: 'Another way, checked by the owner' },
+      ] },
+      { kind: 'text', name: 'identityNote', label: 'What was done', required: true, minLength: 12, maxLength: 300, hint: 'In words. Never copy from an identity document.', pattern: NO_ID_OR_ADDRESS, patternMessage: 'Say how it was checked, in words: no ID or phone numbers, no addresses.' },
+    ],
+    submit: ({ reason, values }) => deleteVerifiedRequest(id, { identityCheck: String(values['identityCheck']), identityNote: String(values['identityNote']) }, reason),
+    success: () => 'Account closed.',
   }));
 
   return (
@@ -165,7 +199,10 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             <button type="button" className="mc-btn" onClick={suspend}>Suspend…</button>
           ) : null}
           <button type="button" className="mc-btn" onClick={changeName}>Change name…</button>
+          {(u.roles ?? []).some((r: string) => r === 'ADMIN' || r === 'SUPER_ADMIN') ? null : <PhoneChangeAction userId={id} name={name} onResult={show} />}
+          {u.rider || u.driver ? <button type="button" className="mc-btn" onClick={allowPlanMove}>Allow plan move…</button> : null}
           {u.status !== 'BANNED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={ban}>Ban…</button> : null}
+          {canDelete ? <button type="button" className="mc-btn mc-btn-danger" onClick={deleteAccount}>Delete account…</button> : null}
         </div>
       </header>
 
@@ -218,10 +255,10 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             <h2 id="profiles" className="mc-label">Profiles</h2>
             <ul className="grid gap-1">
               {u.rider ? (
-                <li><Link href={`/riders/${u.rider.id}`} className="mc-row min-h-11"><span>Rider profile</span><span className={`mc-badge${u.rider.documentsVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.rider.documentsVerified ? 'Verified' : 'Not verified'}</span></Link></li>
+                <li><Link href={`/riders/${u.rider.id}`} className="mc-row min-h-11"><span>Rider profile</span><span className={`mc-badge${liveDocumentsOk(u.rider) ? ' mc-tone-good' : ' mc-tone-warn'}`}>{liveDocumentsLabel(u.rider)}</span></Link></li>
               ) : null}
               {u.driver ? (
-                <li><Link href={`/drivers/${u.driver.id}`} className="mc-row min-h-11"><span>Driver profile</span><span className={`mc-badge${u.driver.documentsVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.driver.documentsVerified ? 'Verified' : 'Not verified'}</span></Link></li>
+                <li><Link href={`/drivers/${u.driver.id}`} className="mc-row min-h-11"><span>Driver profile</span><span className={`mc-badge${liveDocumentsOk(u.driver) ? ' mc-tone-good' : ' mc-tone-warn'}`}>{liveDocumentsLabel(u.driver)}</span></Link></li>
               ) : null}
               {(u.vendorOwner?.vendors ?? []).map((v: { id: string; name: string; status: string }) => (
                 <li key={v.id}><Link href={`/vendors/${v.id}`} className="mc-row min-h-11"><Truncate text={v.name} /><StatusBadge group="VendorStatus" value={v.status} /></Link></li>

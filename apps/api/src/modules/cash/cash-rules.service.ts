@@ -225,6 +225,16 @@ type StagedClaim = {
   riderNotice: { userId: string; type: 'SYSTEM_ANNOUNCEMENT'; title: string; body: string; data: Record<string, unknown> } | null;
 };
 
+/** [BUG-HUNT-2 G02] What the sender reads: where their goods are, and what happens next. */
+function unpaidParcelReturn(outcome: 'no_show' | 'refused', orderNumber: string) {
+  const reason = outcome === 'refused' ? 'the recipient refused to pay' : 'nobody was there to pay';
+  return {
+    reason: `Not delivered: ${reason}`,
+    title: 'Your parcel is coming back',
+    body: `${orderNumber} was not delivered: ${reason}. The rider still has your parcel and is bringing it back to the pickup address. We will tell you when it is back. If this looks wrong, contact Swift support.`,
+  };
+}
+
 export class CashRulesService {
   private countryConfig: CountryConfigService;
 
@@ -332,7 +342,8 @@ export class CashRulesService {
     if (order.status === 'DELIVERED' && input.outcome === 'paid' && order.paymentStatus === 'CAPTURED') {
       return { order, claim: null };
     }
-    if (order.status === 'FAILED' && (input.outcome === 'no_show' || input.outcome === 'refused')) {
+    const unpaidParcelBack = isCourier && order.status === 'RETURNING' && order.paymentStatus === 'FAILED';
+    if ((order.status === 'FAILED' || unpaidParcelBack) && (input.outcome === 'no_show' || input.outcome === 'refused')) {
       const claim = await this.prisma.reimbursementClaim.findFirst({ where: { orderId } });
       return { order, claim };
     }
@@ -520,9 +531,12 @@ export class CashRulesService {
 
     const failureOutcome = input.outcome;
     let staged: StagedClaim = { claim: null, riderNotice: null };
+    // [BUG-HUNT-2 G02] An unpaid parcel is still in the rider's hands, and it is the sender's: it never ends there. The
+    // money facts are the same as any unpaid door; the job goes on, into the one return path (a case opens with it).
+    const parcelBack = isCourier ? unpaidParcelReturn(input.outcome as 'no_show' | 'refused', order.orderNumber) : null;
     const failed = await this.orders.updateStatus(
       orderId,
-      'FAILED',
+      parcelBack ? 'RETURNING' : 'FAILED',
       moverUserId,
       `${input.outcome} — ${gpsNote}${input.photoUrl ? ' photo:yes' : ''}${noShowNote}`,
       {
@@ -543,7 +557,10 @@ export class CashRulesService {
             actorId: moverUserId, sessionId: input.sessionId, outcome: input.outcome as 'no_show' | 'refused',
             gps: input.gps, photoUrl: input.photoUrl ?? input.courierProofPhotoUrl,
           }, rules.maxHandoverDistanceKm);
-          await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'FAILED' } });
+          await tx.order.update({
+            where: { id: orderId },
+            data: { paymentStatus: 'FAILED', ...(parcelBack ? { courierReturnReason: parcelBack.reason, courierReturnRequestedAt: new Date() } : {}) },
+          });
           staged = await this.stageClaim(tx, { ...source, customer: order.customer }, mover,
             { ...input, outcome: failureOutcome }, addressKey, filing.id);
           // No strike from a declaration alone. Taxi remains incomplete while
@@ -582,8 +599,8 @@ export class CashRulesService {
     await this.notifications.send({
       userId: order.customer.id,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: isRide ? 'Unpaid fare recorded' : isCourier ? 'Unpaid courier fee recorded' : 'Failed delivery recorded',
-      body: 'An unpaid outcome was recorded. Support can review the evidence and any disagreement.',
+      title: parcelBack?.title ?? (isRide ? 'Unpaid fare recorded' : 'Failed delivery recorded'),
+      body: parcelBack?.body ?? 'An unpaid outcome was recorded. Support can review the evidence and any disagreement.',
       data: { kind: 'handover_review', orderId },
     }).catch(() => {});
     if (staged.riderNotice) await this.notifications.send(staged.riderNotice).catch(() => {});
