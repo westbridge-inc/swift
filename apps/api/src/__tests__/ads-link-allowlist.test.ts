@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -19,11 +18,12 @@ import { mondayOf } from '../modules/ads/ads-weeks';
 import { LINK_PAUSE_PREFIX } from '../modules/ads/ad-link-policy';
 import type { AdLinkHop } from '../modules/ads/ad-link-probe';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { testPrismaClient } from './helpers/test-prisma-client';
 
 // [ADS-ON · 4 Oct ruling, GUARDRAILS s.4] "Ad destinations need an allow-list plus human approval."
 // Every test here goes through the real services and the real database; only the network hop is a fake.
 
-const prisma = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test' } } });
+const prisma = testPrismaClient();
 const tenantId = 'swift-default';
 const io = { to: () => ({ emit: () => {} }) } as unknown as Server;
 const DAY = 86_400_000;

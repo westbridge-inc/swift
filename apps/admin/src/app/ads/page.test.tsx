@@ -225,7 +225,7 @@ describe('the reviewer sees the link', () => {
   });
 
   it('a link the server refused is words, never a link to click', async () => {
-    mockApi(withLink({ kind: 'REFUSED', value: 'javascript:alert(1)', host: null, domainId: null, domainStatus: null, refusal: 'An ad link must start with https://.' }));
+    mockApi(withLink({ kind: 'REFUSED', value: 'javascript:alert(1)', host: null, domainId: null, domainStatus: null, refusal: 'An ad link must be a secure (https) web address.' }));
     const { user } = renderWithQuery(<AdsReviewPage />);
     await openCreatives(user);
     expect(await screen.findByText('This link cannot run. Reject this ad.')).toBeTruthy();

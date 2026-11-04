@@ -31,8 +31,8 @@ export type AdLinkVerdict =
 /** What the advertiser reads when a link is refused. */
 export const AD_LINK_REFUSAL_WORDS: Record<AdLinkRefusal, string> = {
   LINK_MISSING: 'Add the link, or leave the ad without one.',
-  LINK_MALFORMED: 'That link is not a full web address. Use one like https://your-site.gy/offer.',
-  HTTPS_REQUIRED: 'An ad link must start with https://.',
+  LINK_MALFORMED: 'That link is not a full web address. Paste the whole address of your page.',
+  HTTPS_REQUIRED: 'An ad link must be a secure (https) web address.',
   CREDENTIALS_FORBIDDEN: 'An ad link cannot carry a user name or password.',
   PORT_FORBIDDEN: 'An ad link cannot name a port.',
   IP_OR_LOCAL_HOST: 'An ad link must use a public website name, not a number or a local name.',

@@ -6492,9 +6492,11 @@ export async function adminRoutes(app: FastifyInstance) {
     const type = body.destinationType ?? existing.destinationType;
     const value = body.destinationValue === undefined ? existing.destinationValue : body.destinationValue;
     const relink = type !== existing.destinationType || value !== existing.destinationValue || (body.active === true && !existing.active);
-    const { destinationType: _type, destinationValue: _value, ...rest } = body;
     const link = relink ? await creativeSvc.links.houseLink(existing.tenantId, type, value, request.user.userId) : {};
-    const row = await app.prisma.houseAd.update({ where: { id }, data: { ...rest, ...link } });
+    const row = await app.prisma.houseAd.update({
+      where: { id },
+      data: { headline: body.headline, ctaLabel: body.ctaLabel, sort: body.sort, active: body.active, ...link },
+    });
     return { success: true, data: row };
   });
 
