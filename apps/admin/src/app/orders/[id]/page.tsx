@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, endStuckRide, settleOrderRefund, revealOrderPartyPhone, openOrderProofPhoto, type OrderContactParty, type OrderProofPhoto } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, closeStoreRefund, endStuckRide, settleOrderRefund, revealOrderPartyPhone, openOrderProofPhoto, type OrderContactParty, type OrderProofPhoto } from '@/lib/api';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -209,6 +209,23 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
               >
                 Cancel order
               </button>
+              {/* [BUG-HUNT-2 G08] A paid MMG order that cannot be fulfilled has one close, and it had no button. Two people. */}
+              {o.canCloseStoreRefund === true && (
+                <button
+                  type="button"
+                  onClick={() => void actions.run({
+                    title: `Close ${o.orderNumber} as refund handled by the store?`,
+                    body: <p>{refundingStore} owes the customer what it received by MMG. Swift records that and moves no money. The customer and the store are told, and the refund shows under MMG refunds until it is confirmed.</p>,
+                    confirmLabel: 'Close it',
+                    dismissLabel: 'Keep the order',
+                    submit: ({ reason }) => closeStoreRefund(id, Number(o.mmgClaimRevision ?? 0), reason),
+                    success: () => `Order ${o.orderNumber} closed. The refund is recorded as owed by ${refundingStore}.`,
+                  })}
+                  className="mc-btn mc-btn-primary"
+                >
+                  Close: store refunds
+                </button>
+              )}
               {o.paymentMethod === 'CASH' && (
                 <button
                   type="button"

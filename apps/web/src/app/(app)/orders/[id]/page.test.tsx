@@ -402,7 +402,7 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
   });
 
   it('an order cancelled because it was not marked paid in time says why', async () => {
-    const notice = "Shanta Kitchen didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Shanta Kitchen refunds you directly.";
+    const notice = 'No MMG payment was confirmed within 30 minutes of Shanta Kitchen accepting, so this order was cancelled automatically. If you did send the MMG payment, Shanta Kitchen refunds you directly. If it does not, contact Swift support.';
     vi.spyOn(orders, 'getOrder').mockResolvedValue({
       ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null,
       cancellationReason: 'Cancelled automatically: not marked "Paid by MMG" within 30 minutes of being accepted', cancellationNotice: notice,
@@ -777,6 +777,45 @@ describe('[FIXES-4] cash the business takes itself is never left "awaiting confi
     await showing({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane' });
     expect(screen.getByText('Cash due to the business')).toBeTruthy();
     expect(screen.queryByText('Cash is handled by the business')).toBeNull();
+  });
+});
+
+// [BUG-HUNT-2 G08] A closed order can still owe a refund: the server's words on the customer's order page, and "Did it arrive?".
+describe('[G08] the MMG refund on the order page', () => {
+  const closed = { ...ORDER, status: 'CANCELLED', paymentStatus: 'CLAIMED', paymentAction: null };
+  const asked = { state: 'SENT', amount: '3500.00', line: 'Shanta Kitchen says it sent GY$3,500 by MMG, reference R1. Did it arrive?', sendId: 'snd-1', canAnswer: true };
+
+  it('says who owes what, with no question while nothing was sent', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: { state: 'OWED', amount: '3500.00', line: 'Shanta Kitchen owes you GY$3,500 by MMG.', sendId: null, canAnswer: false } } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Shanta Kitchen owes you GY$3,500 by MMG.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'It arrived' })).toBeNull();
+  });
+
+  it('asks once a refund was sent, sends the answer, and reads the order again', async () => {
+    const read = vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: asked } as never);
+    const answer = vi.spyOn(orders, 'answerMmgRefund').mockResolvedValue();
+    const user = userEvent.setup();
+    render(<OrderDetailPage />);
+    await user.click(await screen.findByRole('button', { name: 'It did not arrive' }));
+    await waitFor(() => expect(answer).toHaveBeenCalledWith('order-1', 'snd-1', false));
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it('a refused answer is shown in the server\'s words', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: asked } as never);
+    vi.spyOn(orders, 'answerMmgRefund').mockRejectedValue(new Error('You already answered this.'));
+    const user = userEvent.setup();
+    render(<OrderDetailPage />);
+    await user.click(await screen.findByRole('button', { name: 'It arrived' }));
+    expect(await screen.findByText('You already answered this.')).toBeTruthy();
+  });
+
+  it('an order with no refund shows nothing', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: null } as never);
+    render(<OrderDetailPage />);
+    await screen.findByText(/SW-2001/);
+    expect(screen.queryByLabelText('MMG refund')).toBeNull();
   });
 });
 

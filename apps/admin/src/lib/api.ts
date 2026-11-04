@@ -583,6 +583,19 @@ export const assignCustodyRelay = (id: string, riderId: string, reason: string) 
 export const confirmCustodyReturn = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/custody-cases/${id}/confirm-return`, { method: 'POST', body: '{}', reason });
 
+/** [BUG-HUNT-2 G08] What stores owe customers back by MMG. Swift holds none of it: these are records. */
+export const fetchMmgRefunds = (filter: 'open' | 'overdue' | 'disputed') =>
+  apiFetch(`/api/v1/admin/mmg-refunds?limit=50&filter=${filter}`);
+/** Support's finding on a disputed refund. */
+export const resolveMmgRefund = (sendId: string, received: boolean, note: string, reason: string) =>
+  apiFetch(`/api/v1/admin/mmg-refunds/sends/${sendId}/resolve`, { method: 'POST', body: JSON.stringify({ received, note }), reason });
+/** Nothing is owed on this record any more. Two people; the record stays. */
+export const voidMmgRefund = (id: string, note: string, reason: string) =>
+  apiFetch(`/api/v1/admin/mmg-refunds/${id}/void`, { method: 'POST', body: JSON.stringify({ note }), reason });
+/** Close a store-claimed MMG order as "refund handled by the store". Two people, bound to the claim revision on screen. */
+export const closeStoreRefund = (id: string, expectedClaimRevision: number, reason: string) =>
+  apiFetch(`/api/v1/admin/orders/${id}/close-store-refund`, { method: 'POST', body: JSON.stringify({ expectedClaimRevision }), reason });
+
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 // [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.

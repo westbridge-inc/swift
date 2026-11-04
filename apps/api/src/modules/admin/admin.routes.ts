@@ -56,6 +56,7 @@ import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { cancelChainDealChange, chainOf, changeChainDeal, setChainDeal } from '../vendor/chain-deal';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
+import { assertMayDecideRefund, openRefundWhere, refundResolvedNotice, refundVoidedNotice, resolveMmgRefundDispute, tellBothOfRefund, voidMmgRefundObligation } from '../order/mmg-refund-rail';
 import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -3580,7 +3581,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // The code was verified and the driver never tapped Start: the passenger is in the car, so a cancel is refused and the
     // machine has no FAILED from here. The ride walks through its own start to the same exit, in one commit.
     const neverStarted = order.status === 'DRIVER_ARRIVED' && hasTaxiPassengerCustody(order);
-    // The close, both notices and the driver going offline commit with the transition, as the job close does. It runs on
+    // The close, the audit row, both notices and the driver going offline commit with the transition, as the job close does. It runs on
     // the step that reaches FAILED, after that step frees the driver, so nothing writes the driver available again.
     const closeRide: NonNullable<CanonicalOrderTransitionInput['withinTransaction']> = async (tx, locked) => {
       noticeIds.length = 0;
@@ -3589,10 +3590,15 @@ export async function adminRoutes(app: FastifyInstance) {
         { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
         ...(driver ? [{ userId: driver.userId, body: `${closed} You are offline until you go online again. If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
       ];
-      await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
+      const { identityReviewReasons } = await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
       if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
         throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
       }
+      await tx.auditLog.create({ data: {
+        userId: request.user.userId, action: 'END_STUCK_RIDE', entity: 'Order', entityId: id,
+        changes: { reason, previousStatus: neverStarted ? 'DRIVER_ARRIVED' : 'RIDE_IN_PROGRESS', ...(identityReviewReasons.length > 0 ? { identityUnderReview: true, identityReviewReasons } : {}) },
+        ipAddress: request.ip, userAgent: request.headers['user-agent'],
+      } });
       for (const party of parties) {
         const row = await insertNoticeFor(tx, {
           userId: party.userId, type: 'ORDER_UPDATE', title: 'Ride closed by Swift', body: party.body,
@@ -3610,15 +3616,6 @@ export async function adminRoutes(app: FastifyInstance) {
         ? { target: 'RIDE_IN_PROGRESS' as const, allowedFrom: ['DRIVER_ARRIVED'] as const, note: 'Passenger code verified: the driver never started the trip', continueTo: { target: 'FAILED' as const, note: closeNote, when: () => true, withinTransaction: closeRide } }
         : { target: 'FAILED' as const, allowedFrom: ['RIDE_IN_PROGRESS'] as const, note: closeNote, withinTransaction: closeRide }),
       changedBy: request.user.userId,
-      operatorAudit: {
-        userId: request.user.userId,
-        action: 'END_STUCK_RIDE',
-        entity: 'Order',
-        entityId: id,
-        changes: (previousStatus) => ({ reason, previousStatus }),
-        ipAddress: request.ip,
-        userAgent: request.headers['user-agent'],
-      },
       invalidStatus: (current) => new AppError(409, 'RIDE_NOT_IN_PROGRESS', `This ride is not in progress (it is ${current}).`),
     });
     await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'FAILED' });
@@ -3691,6 +3688,8 @@ export async function adminRoutes(app: FastifyInstance) {
         userAgent: request.headers['user-agent'],
       },
       invalidStatus: (current) => new AppError(400, 'INVALID_STATUS', `Cannot cancel an order with status ${current}`),
+      // [BUG-HUNT-2 G08] Support is told its own door, not the customer's sentence.
+      paidMmgRefusal: () => new AppError(409, 'MMG_CANCEL_UNAVAILABLE', 'This order is paid by MMG. Use Close: store refunds on the order, which records the refund the store owes.'),
       // [A-14] The obligation is part of the cancellation fact, not a follow-up
       // write: an operator who decided the customer is owed money must never be
       // able to leave a cancelled order with no record of it.
@@ -3785,6 +3784,7 @@ export async function adminRoutes(app: FastifyInstance) {
       adminUserId: request.user.userId,
       expectedClaimRevision: body.expectedClaimRevision,
       reason,
+      authorize: (tx, parties) => assertMayDecideRefund(tx, request.user.userId, parties, approvalId),
       audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
     });
 
@@ -3808,6 +3808,63 @@ export async function adminRoutes(app: FastifyInstance) {
       });
     }
     return { success: true, data: { orderId: id, status: 'CANCELLED', disposition: MMG_STORE_CLOSE_DISPOSITION } };
+  });
+
+  /**
+   * [BUG-HUNT-2 G08] GET /mmg-refunds — what stores owe customers back by MMG: open, overdue or disputed, oldest due first.
+   * A list of records: names and amounts, never a phone number. Swift holds none of this money.
+   */
+  app.get('/mmg-refunds', { preHandler: [adminGuard] }, async (request) => {
+    const { filter } = z.object({ filter: z.enum(['open', 'overdue', 'disputed']).default('open') }).parse(request.query ?? {});
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const now = new Date();
+    const where: Prisma.MmgRefundObligationWhereInput = filter === 'overdue'
+      ? { status: 'OWED', dueAt: { lte: now } }
+      : filter === 'disputed' ? { status: 'DISPUTED' } : openRefundWhere;
+    const [rows, total] = await Promise.all([
+      tenantPrisma.mmgRefundObligation.findMany({
+        where, orderBy: { dueAt: 'asc' }, skip, take: limit,
+        select: {
+          id: true, orderId: true, status: true, amount: true, currencyCode: true, dueAt: true, missedAt: true, createdAt: true, reason: true,
+          order: { select: { orderNumber: true, vendor: { select: { name: true } } } },
+          send: { select: { id: true, mmgRefundRef: true, sentAt: true, answer: true, answeredAt: true, supportTicketId: true } },
+        },
+      }),
+      tenantPrisma.mmgRefundObligation.count({ where }),
+    ]);
+    const data = rows.map((row) => ({
+      id: row.id, orderId: row.orderId, orderNumber: row.order.orderNumber, storeName: row.order.vendor?.name ?? null, status: row.status,
+      amount: row.amount.toFixed(2), currencyCode: row.currencyCode, dueAt: row.dueAt, overdue: row.status === 'OWED' && row.dueAt.getTime() <= now.getTime(),
+      missedAt: row.missedAt, createdAt: row.createdAt, reason: row.reason, send: row.send,
+    }));
+    return { success: true, ...paginatedResponse(data, total, { page, limit, skip }) };
+  });
+
+  /** [BUG-HUNT-2 G08] POST /mmg-refunds/sends/:id/resolve — support's finding on a disputed refund. Record only. */
+  app.post('/mmg-refunds/sends/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { received, note } = z.object({ received: z.boolean(), note: z.string().trim().min(3).max(500) }).parse(request.body);
+    const done = await resolveMmgRefundDispute(tenantPrisma as unknown as PrismaClient, {
+      sendId: id, actorId: request.user.userId, received, note,
+      authorize: (tx, parties) => assertMayDecideRefund(tx, request.user.userId, parties),
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    });
+    await tellBothOfRefund(tenantPrisma as unknown as PrismaClient, notifications, done, refundResolvedNotice(done.orderNumber, done.amount, received), `mmg-refund-resolved:${id}:${received ? 'yes' : 'no'}`);
+    return { success: true, data: { sendId: id, orderId: done.orderId, received } };
+  });
+
+  /** [BUG-HUNT-2 G08] POST /mmg-refunds/:id/void — nothing is owed on this record any more. Two people. The record stays. */
+  app.post('/mmg-refunds/:id/void', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { note } = z.object({ note: z.string().trim().min(3).max(500) }).parse(request.body);
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const done = await voidMmgRefundObligation(tenantPrisma as unknown as PrismaClient, {
+      obligationId: id, actorId: request.user.userId, note,
+      authorize: (tx, parties) => assertMayDecideRefund(tx, request.user.userId, parties, approvalId),
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+    await tellBothOfRefund(tenantPrisma as unknown as PrismaClient, notifications, done, refundVoidedNotice(done.orderNumber, done.amount), `mmg-refund-voided:${id}`);
+    return { success: true, data: { id, orderId: done.orderId, status: 'VOIDED' } };
   });
 
   /**

@@ -78,6 +78,8 @@ export interface MmgStoreCloseInput {
   /** The claim revision the admin reviewed; a different one on the locked row is refused. */
   expectedClaimRevision: number;
   reason: string;
+  /** [BUG-HUNT-2 G08] Who may close it: nobody on the order, on the people the locked row names. */
+  authorize: (tx: Prisma.TransactionClient, parties: { customerId: string; vendorId: string }) => Promise<void>;
   /** The admin audit row, written inside the same transaction. */
   audit: (tx: Prisma.TransactionClient, facts: { disposition: typeof MMG_STORE_CLOSE_DISPOSITION; claimRevision: number; obligationId: string }) => Promise<void>;
 }
@@ -104,6 +106,7 @@ export async function closeMmgOrderAsStoreRefund(orderService: Pick<OrderService
     withinTransaction: async (tx, locked) => {
       const refusal = mmgStoreCloseRefusal(locked);
       if (refusal) throw new AppError(409, refusal.code, refusal.message);
+      await input.authorize(tx, { customerId: locked.customerId, vendorId: locked.vendorId as string }); // the refusal above checked it
       if (locked.mmgClaimRevision !== input.expectedClaimRevision) {
         throw new AppError(409, 'MMG_CLAIM_STALE', 'The payment claims on this order changed since you reviewed it. Refresh and review it again.', {
           expectedClaimRevision: input.expectedClaimRevision, currentClaimRevision: locked.mmgClaimRevision,
@@ -161,8 +164,8 @@ export function mmgStoreCloseNotices(orderNumber: string, amount: Prisma.Decimal
     store: {
       title: `${noun} closed — refund the customer`,
       body: booking
-        ? `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid you by MMG: as the provider, refund them ${gyd} directly from your MMG account within 72 hours. Swift never holds or moves order money.`
-        : `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid your store by MMG: refund them ${gyd} directly from your MMG account within 72 hours. Swift never holds or moves order money.`,
+        ? `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid you by MMG: as the provider, refund them ${gyd} directly from your MMG account within 72 hours, then tap Refund sent on the booking. Swift never holds or moves order money.`
+        : `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid your store by MMG: refund them ${gyd} directly from your MMG account within 72 hours, then tap Refund sent on the order. Swift never holds or moves order money.`,
     },
   };
 }

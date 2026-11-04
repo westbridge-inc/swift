@@ -243,6 +243,8 @@ const SCOPE: Record<string, Entry> = {
 
 /** Verb-matched routes that create none of the eight things (reviewed). */
 const OUT: Record<string, string> = {
+  // [BUG-HUNT-2 G08] A finding on one send: decided once under the order lock, compare-and-set on its revision. Moves no money.
+  'modules/admin/admin.routes.ts|POST|/mmg-refunds/sends/:id/resolve': 'A support finding on a refund already recorded: a repeat is refused, it creates none of the eight.',
   // [Row 156] A note that a clock started, not one of the eight: it moves no money, and checkoutId is unique, so a retry is 409.
   [`${ADMIN}|POST|/billing/mmg-checkouts/:id/refund-case`]: 'records a partner\'s ask on one payment: unique per payment (a retry is REFUND_CASE_EXISTS), and it moves no money',
   // [WEB-DELETE · owner ruling 1 Nov 2026]

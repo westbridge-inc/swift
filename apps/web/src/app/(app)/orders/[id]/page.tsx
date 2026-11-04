@@ -26,7 +26,7 @@ import { activeRide, getRide, rideCapabilities } from '@/lib/customer-rides';
 import { validPoint } from '@/lib/live-tracking';
 import type { TaxiSafetyFacts } from '@/components/taxi-trip-safety';
 import { fareBreakdownOf, liveWaiting, type FareBreakdown, type WaitingLive } from '@/lib/taxi-waiting';
-import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
+import { answerMmgRefund, cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, orderPrepFacts, orderStepState, orderTimelineIndex, parseMmgStorePayment } from '@/lib/app-rules';
@@ -129,6 +129,8 @@ type OrderDetail = {
   cancellationReason?: string | null;
   /** [owner 18 Oct 2026] Why an unpaid MMG order closed by itself, in the customer's words (null otherwise). */
   cancellationNotice?: string | null;
+  /** [BUG-HUNT-2 G08] Who owes this customer what by MMG, and "Did it arrive?", in the server's words. */
+  mmgRefund?: { state: string; line: string; sendId: string | null; canAnswer: boolean } | null;
   /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Where to send MMG on an ACCEPTED order: the store's number and the
    *  exact total (only this customer, only until the store marks it "Paid by MMG"). Parsed, never trusted raw. */
   mmgPayment?: unknown;
@@ -317,6 +319,7 @@ export default function OrderDetailPage() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cancelResult, setCancelResult] = useState<string | null>(null);
+  const [refundBusy, setRefundBusy] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [openingPayment, setOpeningPayment] = useState(false);
@@ -575,6 +578,20 @@ export default function OrderDetailPage() {
     }
   };
 
+  // [BUG-HUNT-2 G08] "It arrived", or it did not. The order is read again: the server's words follow.
+  const answerRefund = async (sendId: string, received: boolean) => {
+    setRefundBusy(true);
+    setError(null);
+    try {
+      await answerMmgRefund(id, sendId, received);
+      await load();
+    } catch (refundError) {
+      setError(refundError instanceof Error ? refundError.message : 'Could not record that. Try again.');
+    } finally {
+      setRefundBusy(false);
+    }
+  };
+
   const closeCancellationReview = () => {
     setConfirmingCancel(false);
     window.requestAnimationFrame(() => cancelReturnFocus.current?.focus());
@@ -598,6 +615,19 @@ export default function OrderDetailPage() {
           {orderStatusLabel(order.status, presentedVertical(order))}
         </span>
       </section>
+
+      {/* [BUG-HUNT-2 G08] A closed order can still owe a refund. Swift holds none of this money. */}
+      {order.mmgRefund ? (
+        <section className={styles.cancelConfirm} aria-label="MMG refund">
+          <p>{order.mmgRefund.line}</p>
+          {order.mmgRefund.canAnswer && order.mmgRefund.sendId ? (
+            <>
+              <button type="button" className={styles.secondaryButton} disabled={refundBusy} onClick={() => void answerRefund(order.mmgRefund?.sendId as string, true)}>It arrived</button>
+              <button type="button" className={styles.secondaryButton} disabled={refundBusy} onClick={() => void answerRefund(order.mmgRefund?.sendId as string, false)}>It did not arrive</button>
+            </>
+          ) : null}
+        </section>
+      ) : null}
 
       {isTaxi && webTaxi ? (
         <Suspense fallback={null}>
