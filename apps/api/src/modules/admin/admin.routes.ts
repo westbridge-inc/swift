@@ -78,6 +78,7 @@ import {
 } from './solo-approval';
 import { AuthService, sanitizeUser } from '../auth/auth.service';
 import { blankApprovedNumber, confirmPhoneChange, lastFour, startPhoneChange } from './phone-change';
+import { assertTypeKeepsFee } from '../partner/store-fee';
 import { getChannels } from '../../providers/notifications/channels';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { executeTenantBoundServiceJobTransaction } from '../services/service-job-transaction';
@@ -2106,7 +2107,8 @@ export async function adminRoutes(app: FastifyInstance) {
   /**
    * [BUG-HUNT F22] A wrong type at sign-up had no door: the documents then ask for a licence the store will never hold.
    * Only before the store has ever been live. After that its fee and its papers rest on the type, so it is not a
-   * correction any more; say so instead of quietly repricing a working store.
+   * correction any more; say so instead of quietly repricing a working store. A change that moves the weekly fee waits
+   * for the owner's tick of the new amount (partner/store-fee.ts assertTypeKeepsFee).
    */
   app.put('/vendors/:id/type', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
@@ -2120,8 +2122,14 @@ export async function adminRoutes(app: FastifyInstance) {
     if (vendor.firstLiveAt || vendor.subscription) {
       throw new AppError(409, 'STORE_HAS_BEEN_LIVE', `${vendor.name} has been live, so its weekly fee and documents rest on its type. It cannot be changed here.`);
     }
-    const updated = await app.prisma.vendor.update({ where: { id }, data: { vendorType } });
-    await audit(request.user.userId, 'CHANGE_VENDOR_TYPE', 'Vendor', id, { from: vendor.vendorType, to: vendorType }, request);
+    const updated = await app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${id} FOR UPDATE /* store-type-door */`;
+      await assertTypeKeepsFee(tx, id, vendorType, vendor.name);
+      const row = await tx.vendor.update({ where: { id }, data: { vendorType } });
+      await auditIn(tx, request.user.userId, 'CHANGE_VENDOR_TYPE', 'Vendor', id, { from: vendor.vendorType, to: vendorType }, request);
+      return row;
+    });
     await verification.reprojectVendorActivation(vendor.owner.userId);
     scheduleVendorSearchSync(app, id);
     await notifications.send({

@@ -17,6 +17,8 @@ import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { injectWithApproval } from './helpers/admin-approval';
+import { STORE_FEE_ACK_PATH } from '../modules/partner/store-fee';
+import { WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
 import { blankClosedNumberAsks, confirmPhoneChange } from '../modules/admin/phone-change';
 import { AuthService } from '../modules/auth/auth.service';
 import { getChannels } from '../providers/notifications/channels';
@@ -157,6 +159,43 @@ describe('[F22] a store type picked by mistake', () => {
     });
     const res = await call('PUT', `/api/v1/admin/vendors/${store.id}/type`, { vendorType: 'STORE' });
     expect(res.json().error?.code).toBe('STORE_HAS_BEEN_LIVE');
+  });
+
+  it('a change that moves the weekly fee is refused, in words that say so: up, from a services rate to a store\'s', async () => {
+    const owner = await makeUser('Up');
+    const store = await makeStore(owner.id, { vendorType: 'SERVICE' });
+    const res = await call('PUT', `/api/v1/admin/vendors/${store.id}/type`, { vendorType: 'STORE' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('STORE_TYPE_MOVES_FEE');
+    expect(res.json().error.message).toContain('8,000');
+    expect(res.json().error.message).toContain('15,000');
+    expect(res.json().error.message).toContain('tick');
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).vendorType).toBe('SERVICE');
+    expect(await app.prisma.notification.count({ where: { userId: owner.id, title: 'Your store type was changed' } })).toBe(0);
+  });
+
+  it('down as well: one grant never does what a chain deal needs a money class for', async () => {
+    const owner = await makeUser('Down');
+    const store = await makeStore(owner.id, { vendorType: 'STORE' });
+    const res = await call('PUT', `/api/v1/admin/vendors/${store.id}/type`, { vendorType: 'SERVICE' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('STORE_TYPE_MOVES_FEE');
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).vendorType).toBe('STORE');
+  });
+
+  it('a tick for another amount is no tick; the owner\'s tick for the new amount opens it', async () => {
+    const owner = await makeUser('Ticked');
+    const store = await makeStore(owner.id, { vendorType: 'SERVICE' });
+    const tick = (amount: number) => app.prisma.consentRecord.create({ data: {
+      subjectType: 'vendor_user', subjectId: owner.id, documentType: WEEKLY_FEE_ACK_TYPE, documentVersion: WEEKLY_FEE_ACK_VERSION, documentContentHash: 'door-test', action: 'granted', surface: 'mobile',
+      evidence: { path: STORE_FEE_ACK_PATH, kind: 'STORE', vendorId: store.id, weeklyFee: { amount, currencyCode: 'GYD' } },
+    } as never });
+    await tick(8000);
+    expect((await call('PUT', `/api/v1/admin/vendors/${store.id}/type`, { vendorType: 'STORE' })).statusCode).toBe(409);
+    await tick(15000);
+    const res = await call('PUT', `/api/v1/admin/vendors/${store.id}/type`, { vendorType: 'STORE' });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).vendorType).toBe('STORE');
   });
 
   it('the same type is not a change', async () => {
