@@ -15,6 +15,7 @@ import { runWithoutTenant } from '../plugins/tenant-context';
 import { grantStepUp } from './helpers/step-up';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { testPhone } from './helpers/fixture-ids';
 import { lockMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
 import { CountryConfigService, partnerRateFor, subscriptionTiersIn } from '../modules/country/country-config.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
@@ -32,7 +33,6 @@ import { SubscriptionService } from '../modules/subscription/subscription.servic
 const DAY = 86_400_000;
 const CAR = { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Allion', year: 2017, color: 'Grey' } };
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'mover-plan-move-test');
-const phoneBase = 592_018_000_000 + Math.floor(Math.random() * 900_000);
 let app: FastifyInstance;
 let adminToken: string;
 const users: string[] = [];
@@ -41,7 +41,7 @@ let seq = 0;
 async function makeUser() {
   seq += 1;
   const user = await system(() => app.prisma.user.create({ data: {
-    phone: `+${phoneBase + seq}`, firstName: 'Plan', lastName: `Mover${seq}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
+    phone: testPhone(), firstName: 'Plan', lastName: `Mover${seq}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
     countryCode: 'GY', isPhoneVerified: true, selfieCapturedAt: new Date(), avatar: `/uploads/avatars/pm-${seq}.jpg`,
   } }));
   users.push(user.id);
@@ -184,6 +184,26 @@ describe('[F05] the door', () => {
     await grantStepUp(app, r.token);
     const res = await change(r.token, { ...CAR, vehicle: { ...CAR.vehicle, licensePlate: plate() } });
     expect(res.json().error.code).toBe('PLAN_ON_CURRENT_ROLE');
+  });
+
+  it('a staff account is out of reach, even with a plan on its rider profile', async () => {
+    const r = await riderOnAFee();
+    await system(() => app.prisma.user.update({ where: { id: r.userId }, data: { roles: ['CUSTOMER', 'ADMIN'] } }));
+    const res = await allow(r.userId);
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error.code).toBe('STAFF_ACCOUNT');
+    expect((await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: r.userId } }))).moverPlanMoveUntil).toBeNull();
+  });
+
+  it('an admin cannot allow their own move', async () => {
+    const r = await riderOnAFee();
+    await system(() => app.prisma.user.update({ where: { id: r.userId }, data: { roles: ['CUSTOMER', 'ADMIN'], activeRole: 'ADMIN', admin: { create: { permissions: ['*'] } } } }));
+    const { phone } = await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: r.userId } }));
+    const own: string = (await loginWithOtp(app, phone)).json().data.tokens.accessToken;
+    const res = await send('POST', `/api/v1/admin/users/${r.userId}/mover-plan/allow-move`, own, {}, { 'x-swift-reason': TEST_ADMIN_REASON });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error.code).toBe('STAFF_ACCOUNT');
+    expect((await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: r.userId } }))).moverPlanMoveUntil).toBeNull();
   });
 
   it('a person with no plan has nothing to move', async () => {

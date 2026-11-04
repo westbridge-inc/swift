@@ -41,6 +41,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { refuseStaffAccount } from './admin-email-change';
 import { EVIDENCE_REFERENCE_MAX, EVIDENCE_REFERENCE_MIN, EVIDENCE_REFERENCE_SHAPE } from '../billing/evidence-reference';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
 import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
@@ -1438,6 +1439,9 @@ export async function adminRoutes(app: FastifyInstance) {
    */
   app.post('/users/:id/mover-plan/allow-move', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
+    const person = await app.prisma.user.findUnique({ where: { id }, select: { roles: true, activeRole: true } });
+    if (!person) throw new NotFoundError('User', id);
+    refuseStaffAccount(person);
     const plan = await app.prisma.subscription.findFirst({
       where: { OR: [{ rider: { userId: id } }, { driver: { userId: id } }], status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE', 'PAUSED', 'SUSPENDED'] } },
       select: { id: true },
