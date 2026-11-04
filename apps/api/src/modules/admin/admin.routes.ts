@@ -55,6 +55,8 @@ import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { cancelChainDealChange, chainOf, changeChainDeal, setChainDeal } from '../vendor/chain-deal';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
+import { tellCustomersOfStoreSuspension } from '../vendor/store-suspension-notices';
+import { taxiNotificationData } from '../rides/taxi-notification';
 import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -2058,12 +2060,16 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Vendor Suspended',
-      body: reason || `${vendor.name} has been suspended. Please contact support.`,
+      title: 'Your store is suspended',
+      body: `Swift suspended ${vendor.name}.${reason ? ` Reason: ${reason}` : ''} Ask Swift support through Get Help what will restore it.`,
       data: { vendorId: id },
     });
 
-    return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
+    // [BUG-HUNT-2 G07] The suspension touched no order, so nobody with a live one heard. Each is told once, in words true for
+    // their order, and support is told how many there are.
+    const liveOrders = await tellCustomersOfStoreSuspension(tenantPrisma as unknown as PrismaClient, notifications, id, vendor.name);
+
+    return { success: true, data: { ...updated, vatRegistrationNumber: undefined, liveOrders } };
   });
 
   app.put('/vendors/:id/feature', { preHandler: [adminGuard] }, async (request) => {
@@ -3472,15 +3478,33 @@ export async function adminRoutes(app: FastifyInstance) {
     const mmgGuidance = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING'
       ? ' If you already sent the MMG payment, the store refunds you directly.'
       : '';
+    // [BUG-HUNT-2 G10] A ride is a ride: its own words, never the support note, and the driver is told. A driver with the app
+    // in the background kept driving to a pickup nobody was at.
+    const isRide = order.orderType === 'TAXI';
     await notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',
-      title: 'Order Cancelled',
-      body: refund
-        ? `Your order ${order.orderNumber} has been cancelled. Any cash you paid will be refunded — our team will follow up.`
-        : `Your order ${order.orderNumber} has been cancelled. ${reason || ''}${mmgGuidance}`.trim(),
-      data: { orderId: id, status: newStatus },
+      title: isRide ? 'Ride cancelled' : 'Order Cancelled',
+      body: isRide
+        ? 'Swift support cancelled your ride. There is no fee. If you have a question, open Get Help.'
+        : refund
+          ? `Your order ${order.orderNumber} has been cancelled. Any cash you paid will be refunded — our team will follow up.`
+          : `Your order ${order.orderNumber} has been cancelled. ${reason || ''}${mmgGuidance}`.trim(),
+      data: isRide ? taxiNotificationData(id, { status: newStatus }) : { orderId: id, status: newStatus },
     });
+    if (isRide && order.driverId) {
+      const driverUserId = (await app.prisma.driver.findUnique({ where: { id: order.driverId }, select: { userId: true } }))?.userId;
+      if (driverUserId) {
+        await notifications.send({
+          userId: driverUserId,
+          type: 'ORDER_UPDATE',
+          title: 'Ride cancelled',
+          body: 'Swift support cancelled this ride. You can stop and go back online.',
+          data: taxiNotificationData(id, { status: newStatus }, 'earner'),
+          dedupeKey: `ride-cancelled-by-support:${id}:${driverUserId}`,
+        });
+      }
+    }
 
     // [REPORT-012 F-012-04] An admin terminal on an unattested-MMG order must
     // also tell the STORE — it may hold the customer's unconfirmed transfer

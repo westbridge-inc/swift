@@ -134,6 +134,9 @@ export type CancellationSnapshot = {
    *  Read by the caller with `readTooLateToDeliver` (dispatch/rescue) and
    *  passed in, like `noMoverFound`. Absent means "not known to be true". */
   tooLateToDeliver?: boolean;
+  /** [BUG-HUNT-2 G07] Swift suspended or closed the store, so it cannot hand over a ready pickup. Read by the caller with
+   *  `readStoreCannotHandOver` and passed in, like `noMoverFound`. Absent means "not known to be true". */
+  storeCannotHandOver?: boolean;
   /** [Opus S3-2] How the customer pays. An MMG order may already be paid to the
    *  store outside Swift, so its words never promise "free". Optional: a
    *  caller without it reads as not-MMG. */
@@ -156,6 +159,8 @@ export const AWAITING_STORE_FREE_CANCEL_MESSAGE = 'You can cancel for free until
 /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD Q2] An accepted MMG order the store has not marked "Paid by MMG". */
 export const MMG_UNCONFIRMED_CANCEL_MESSAGE = 'You can cancel until the store confirms your MMG payment.';
 export const TOO_LATE_FREE_CANCEL_MESSAGE = 'Your order is running very late. You can cancel it for free.';
+/** [BUG-HUNT-2 G07] A cash pickup ready at a store Swift paused. */
+export const STORE_PAUSED_CANCEL_MESSAGE = 'Swift paused this store, so it cannot hand over your order. You can cancel it for free.';
 /** [Opus S3-2 · REPORT-008 F-01] An MMG order may already be paid to the store outside Swift: no cancel surface
  *  promises "free" for it, and the customer is told where any money comes back from. */
 export const MMG_STORE_REFUNDS_SENTENCE = 'If you already sent the MMG payment, the store refunds you directly.';
@@ -171,7 +176,8 @@ export type FreeCancelReason =
   | 'NOT_ACCEPTED' // [owner #50] a ride, parcel or booking nobody has accepted yet
   | 'IN_WINDOW' // [owner #50 · 22 Oct] inside the one-minute window (or the hold)
   | 'TOO_LATE' // [owner #46/#50/#52] very late
-  | 'MMG_UNCONFIRMED'; // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
+  | 'MMG_UNCONFIRMED' // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
+  | 'STORE_PAUSED'; // [BUG-HUNT-2 G07] a cash pickup ready at a store Swift suspended
 
 /** What a customer cancel may do right now: free, or refused. Never a fee. */
 export type CancellationVerdict =
@@ -457,6 +463,9 @@ export function cancellationVerdict(order: CancellationSnapshot, now: Date = new
     if ((unassigned(order) && order.tooLateToDeliver === true) || isVeryLate(order, now)) {
       return { allowed: true, free: true, reason: 'TOO_LATE' };
     }
+    if (order.storeCannotHandOver === true && order.paymentMethod === 'CASH' && order.fulfillment === 'PICKUP' && order.status === 'READY_FOR_PICKUP') {
+      return { allowed: true, free: true, reason: 'STORE_PAUSED' };
+    }
     return { allowed: false, free: false, code: STORE_ACCEPTED_CANCEL_CODE, message: STORE_ACCEPTED_CANCEL_MESSAGE };
   }
   const windowEnd = freeWindowEnd(order);
@@ -612,7 +621,9 @@ export function customerCancelView(order: CancellationSnapshot, now: Date = new 
       ? AWAITING_STORE_FREE_CANCEL_MESSAGE
       : verdict.reason === 'MMG_UNCONFIRMED'
         ? MMG_UNCONFIRMED_CANCEL_MESSAGE
-        : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
+        : verdict.reason === 'STORE_PAUSED'
+          ? STORE_PAUSED_CANCEL_MESSAGE
+          : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
   return {
     canCancel: true,
     freeCancellationExpiresAt: freeCancellationExpiresAt(order, now)?.toISOString() ?? null,

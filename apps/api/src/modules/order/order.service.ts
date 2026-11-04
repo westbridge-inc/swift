@@ -30,6 +30,7 @@ import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
+import { readStoreCannotHandOver } from '../vendor/store-hold';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { readOrderSize, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
@@ -2490,6 +2491,7 @@ export class OrderService {
         ...source,
         noMoverFound: await readNoMoverFound(tx, source),
         tooLateToDeliver: await readTooLateToDeliver(this.prisma, source, lockedNow),
+        storeCannotHandOver: await readStoreCannotHandOver(tx, source.vendorId),
         assignedAt: await readAssignedAt(tx, source),
       }, lockedNow);
       if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
@@ -2959,6 +2961,7 @@ export class OrderService {
             ...order,
             noMoverFound: await readNoMoverFound(tx, order),
             tooLateToDeliver: await readTooLateToDeliver(this.prisma, order, now),
+            storeCannotHandOver: await readStoreCannotHandOver(tx, order.vendorId),
             // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
             assignedAt: await readAssignedAt(tx, order),
           };

@@ -36,6 +36,7 @@ import { cartVatByVendor } from '../store-vat/order-vat';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { MAX_DELIVERY_RADIUS_KM, brandBranchesFor, brandFactsFor, collapseBrands, oneDishPerBrand } from '../vendor/brand';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
+import { readStoreCannotHandOver } from '../vendor/store-hold';
 import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { ORDER_TRANSITIONS } from '../order/order-status';
@@ -2957,6 +2958,7 @@ export async function customerRoutes(app: FastifyInstance) {
       ...order,
       noMoverFound: cancellableState && await readNoMoverFound(app.prisma, order),
       tooLateToDeliver: cancellableState && await readTooLateToDeliver(app.prisma, order, previewNow),
+      storeCannotHandOver: cancellableState && await readStoreCannotHandOver(app.prisma, order.vendorId),
       // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
       assignedAt: cancellableState ? await readAssignedAt(app.prisma, order) : null,
     };
