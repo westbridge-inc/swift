@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import { Prisma, type UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -64,7 +64,7 @@ async function askApproveApply(subjectId: string, body: Record<string, unknown> 
 }
 
 const pendingFor = (userId: string) => app.prisma.privilegedApproval.count({ where: { requestedBy: userId } });
-const auditRows = (entityId: string) => app.prisma.auditLog.findMany({ where: { action: 'CLOSE_ACCOUNT_VERIFIED_REQUEST', entityId } });
+const auditRows = (entityId: string) => app.prisma.auditLog.findMany({ where: { entityId, changes: { path: ['identityCheck'], not: Prisma.AnyNull } } });
 
 let requester: { id: string; token: string };
 let approver: { id: string; token: string };
@@ -149,7 +149,7 @@ describe('once approved', () => {
     expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status: 'DEACTIVATED', phone: `deleted:${subject}`, firstName: 'Deleted', email: null });
     const [row, ...rest] = await auditRows(subject);
     expect(rest).toEqual([]);
-    expect(row).toMatchObject({ userId: requester.id, entity: 'User' });
+    expect(row).toMatchObject({ userId: requester.id, entityId: subject });
     expect(row!.changes).toMatchObject({ reason: TEST_ADMIN_REASON, identityCheck: GOOD.identityCheck, identityNote: GOOD.identityNote, approvalId });
   });
 

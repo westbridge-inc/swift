@@ -7597,14 +7597,11 @@ export async function adminRoutes(app: FastifyInstance) {
       throw new ForbiddenError('A staff account is not closed from this door.');
     }
     if (subject.status === 'DEACTIVATED') throw new AppError(409, 'ALREADY_CLOSED', 'This account is already closed.');
-    const facts = {
-      reason: reasonOf(request.body, request.headers) ?? '', identityCheck, identityNote,
-      approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null,
-    };
+    const facts = { identityCheck, identityNote, approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null };
     // In the erasure's own first transaction, so a blocker that refuses it leaves no record of a deletion.
     const outcome = await new AccountService(app).deleteAccount(id, false, 'app', {
       claimClosure: async (tx) => {
-        await auditIn(tx, request.user.userId, 'CLOSE_ACCOUNT_VERIFIED_REQUEST', 'User', id, facts, request);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts });
         return true;
       },
     });
