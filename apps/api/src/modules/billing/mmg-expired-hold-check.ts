@@ -68,6 +68,8 @@ export const NO_REPLY_CHECK_BACKOFF_MS: readonly number[] = [
 ];
 /** After this many checks, the hold is the admins' alone (as today). */
 export const NO_REPLY_CHECK_MAX_ATTEMPTS = NO_REPLY_CHECK_BACKOFF_MS.length + 1;
+/** [ADS-ON] How long all the checks take, first to last: an ad checkout MMG's records cannot be read for waits this long past its first check, then goes to a person. */
+export const NO_REPLY_CHECKS_SPAN_MS = NO_REPLY_CHECK_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0);
 /** Checks per poll, and how many recent confirmed checkouts may serve as the control. */
 const CHECK_BATCH = 20;
 const SCAN = 500;
@@ -78,7 +80,7 @@ type Db = PrismaClient | Prisma.TransactionClient;
 
 /** The checkout facts every step re-reads. */
 const CHECKOUT_FIELDS = {
-  id: true, tenantId: true, subscriptionId: true, amount: true, merchantTransactionId: true, status: true, reason: true, candidates: true,
+  id: true, tenantId: true, subscriptionId: true, adInvoiceId: true, amount: true, merchantTransactionId: true, status: true, reason: true, candidates: true,
   replyAt: true, mmgTransactionId: true, providerPaymentId: true, confirmedAt: true, createdAt: true, expiresAt: true,
 } satisfies Prisma.MmgCheckoutIntentSelect;
 type CheckoutFacts = Prisma.MmgCheckoutIntentGetPayload<{ select: typeof CHECKOUT_FIELDS }>;
@@ -141,7 +143,7 @@ async function blockerOf(db: Db, c: CheckoutFacts, now: Date): Promise<string | 
   if (replies > 0) return 'REPLY_ON_RECORD';
   // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] A pay-all checkout pays several branches: any MMG payment on ANY branch it
   // covers since it opened, and an admin request on ANY of its branches' holds, leaves it to the admins.
-  const covered = await coveredFees(db, { id: c.id, subscriptionId: c.subscriptionId, amount: c.amount });
+  const covered = await coveredFees(db, { id: c.id, subscriptionId: c.subscriptionId, adInvoiceId: c.adInvoiceId, amount: c.amount });
   const money = await db.providerPayment.count({ where: { OR: [
     { creditedPaymentId: `mco:${c.id}` },
     { provider: 'MMG', subscriptionId: { in: covered.map((f) => f.subscriptionId) }, createdAt: { gte: new Date(c.createdAt.getTime() - MMG_HISTORY_CLOCK_TOLERANCE_MS) } },
@@ -281,10 +283,13 @@ export async function checkExpiredNoReplyHolds(
   return out;
 }
 
-async function checkOne(
+type HistoryRead = { decision: NoReplyDecision; observationId: string; query: MmgHistoryQuery; body: Record<string, unknown> };
+
+/** Ask MMG's history about one never-answered checkout and write the answer down [I9]. Decides nothing. */
+async function readNeverAnswered(
   db: PrismaClient, deps: { lookup: MmgCheckoutLookupClient; redact: (value: Record<string, unknown>) => Prisma.InputJsonValue },
-  zone: MmgCreationZone, item: Due, control: Control, now: Date,
-): Promise<boolean> {
+  zone: MmgCreationZone, item: Pick<Due, 'checkout' | 'attempts'>, control: Control, now: Date,
+): Promise<HistoryRead> {
   const c = item.checkout;
   const query = noReplyQueryFor(c, zone, now);
   const controlFacts = control.ok
@@ -320,13 +325,22 @@ async function checkOne(
     tenantId: c.tenantId, intentId: c.id, source: 'HISTORY', detail: null, body: deps.redact(body), createdAt: now,
     failure: decision === 'NO_PAYMENT' ? 'HISTORY_NOT_FOUND' : decision === 'PAYMENT_MAY_MATCH' ? null : 'HISTORY_FAILED',
   }, select: { id: true } });
+  return { decision, observationId: observation.id, query, body };
+}
+
+async function checkOne(
+  db: PrismaClient, deps: { lookup: MmgCheckoutLookupClient; redact: (value: Record<string, unknown>) => Prisma.InputJsonValue },
+  zone: MmgCreationZone, item: Due, control: Control, now: Date,
+): Promise<boolean> {
+  const c = item.checkout;
+  const { decision, observationId, query, body } = await readNeverAnswered(db, deps, zone, item, control, now);
   if (decision !== 'NO_PAYMENT' || !control.ok) {
     mmgCheckoutEventsCounter.labels('expired_hold_left').inc();
     log().warn({ checkoutId: c.id, decision }, '[MMG checkout] expired checkout not closed: MMG did not confirm that nothing was paid; the admins keep it');
     return false;
   }
   const closed = await closeUnpaid(db, item.holdId, c.id, {
-    observationId: observation.id, controlCheckoutId: control.checkoutId, query,
+    observationId, controlCheckoutId: control.checkoutId, query,
     rowsReturned: body['rowsReturned'] as number, explained: body['explained'] as number,
   }, now);
   if (closed) {
@@ -334,6 +348,100 @@ async function checkOne(
     log().info({ checkoutId: c.id }, '[MMG checkout] expired checkout closed as not paid: MMG records show no payment');
   }
   return closed;
+}
+
+/** Why an ad checkout went to a person. */
+export const AD_NO_REPLY_UNRESOLVED = 'AD_NO_REPLY_UNRESOLVED';
+export const AD_LOOKUP_NEVER_CONFIRMED = 'AD_LOOKUP_NEVER_CONFIRMED';
+/** The hold reasons when MMG shows a record naming an ad checkout closed as not paid. */
+export const AD_LATE_PAYMENT_LIKELY = 'AD_LATE_PAYMENT_LIKELY_AFTER_AUTO_CLOSE';
+export const AD_POSSIBLE_MATCH = 'AD_POSSIBLE_MATCH_AFTER_AUTO_CLOSE';
+
+/**
+ * [ADS-ON] An ad checkout that ran out. It holds no fee clock, so nothing else keeps it from being forgotten, and
+ * until it is resolved no new page opens for its campaign: money may be at MMG, and a second page could take it
+ * twice. A checkout nobody answered gets the same reading of MMG's records as the weekly fee's: MMG shows no payment
+ * and the read is proven healthy, and it closes as not paid; MMG shows something that could be it, or the checks run
+ * out, and it goes to a person. So does one MMG's records cannot be read for at all (no time zone set, or no confirmed
+ * payment to prove the read with), once the checks would have run out: those write no attempt, so nothing else would
+ * ever end them. One that had any answer MMG never confirmed goes to a person once its late window has ended. Closed
+ * as not paid, it is watched for a week (watchAutoClosedAdCheckouts). Nothing here ever credits.
+ */
+export async function checkExpiredAdCheckouts(
+  db: PrismaClient,
+  deps: {
+    lookup: MmgCheckoutLookupClient;
+    zone: MmgCreationZone | null;
+    redact: (value: Record<string, unknown>) => Prisma.InputJsonValue;
+    holdForReview: (checkoutId: string, reason: string, now: Date) => Promise<void>;
+  },
+  now: Date,
+): Promise<{ checked: number; closed: number; held: number }> {
+  const out = { checked: 0, closed: 0, held: 0 };
+  const unconfirmed = await db.mmgCheckoutIntent.findMany({
+    where: { adInvoiceId: { not: null }, status: 'EXPIRED', nextCheckAt: null, OR: [{ NOT: { candidates: { isEmpty: true } } }, { replyAt: { not: null } }, { reason: { not: 'NO_REPLY' } }] },
+    select: { id: true }, take: CHECK_BATCH,
+  });
+  for (const row of unconfirmed) {
+    await deps.holdForReview(row.id, AD_LOOKUP_NEVER_CONFIRMED, now);
+    out.held += 1;
+  }
+  const rows = await db.mmgCheckoutIntent.findMany({
+    where: { adInvoiceId: { not: null }, ...NEVER_ANSWERED, expiresAt: { lte: new Date(now.getTime() - NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS) } },
+    orderBy: [{ expiresAt: 'desc' }, { id: 'asc' }], take: SCAN, select: CHECKOUT_FIELDS,
+  });
+  if (rows.length === 0) return out;
+  const tries = await db.mmgCheckoutObservation.groupBy({
+    by: ['intentId'], where: { intentId: { in: rows.map((c) => c.id) }, source: 'HISTORY', detail: null },
+    _count: { _all: true }, _max: { createdAt: true },
+  });
+  const triesOf = new Map(tries.map((t) => [t.intentId, { attempts: t._count._all, lastAt: t._max.createdAt }]));
+  const controls = new Map<string, Control>();
+  for (const c of rows) {
+    if (out.checked >= CHECK_BATCH) break;
+    const { attempts, lastAt } = triesOf.get(c.id) ?? { attempts: 0, lastAt: null };
+    const at = noReplyCheckDueAt(c, attempts, lastAt);
+    if (at !== null && at > now.getTime()) continue;
+    try {
+      const toPerson = async () => {
+        await deps.holdForReview(c.id, AD_NO_REPLY_UNRESOLVED, now);
+        out.held += 1;
+      };
+      const unreadTooLong = now.getTime() >= firstCheckAt(c) + NO_REPLY_CHECKS_SPAN_MS;
+      // The checks ran out, or a reply is on record: nothing automatic may close it.
+      if (at === null || await blockerOf(db, c, now)) {
+        await toPerson();
+        continue;
+      }
+      if (!deps.zone) {
+        if (unreadTooLong) await toPerson();
+        continue;
+      }
+      let control = controls.get(c.tenantId);
+      if (!control) {
+        control = await proveControl(db, deps.lookup, deps.zone, c.tenantId, now);
+        controls.set(c.tenantId, control);
+      }
+      if (!control.ok && control.reason === 'NO_CONTROL') {
+        if (unreadTooLong) await toPerson();
+        continue;
+      }
+      out.checked += 1;
+      const { decision } = await readNeverAnswered(db, deps, deps.zone, { checkout: c, attempts }, control, now);
+      if (decision === 'PAYMENT_MAY_MATCH') {
+        await toPerson();
+      } else if (decision === 'NO_PAYMENT' && control.ok) {
+        const moved = await db.mmgCheckoutIntent.updateMany({
+          where: { id: c.id, ...NEVER_ANSWERED },
+          data: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON, nextCheckAt: null },
+        });
+        if (moved.count === 1) out.closed += 1;
+      }
+    } catch (err) {
+      log().error({ err, checkoutId: c.id }, '[MMG checkout] the expired ad checkout check failed; it is checked again later');
+    }
+  }
+  return out;
 }
 
 /** The admin close's UNPAID records, written by the system: under the same
@@ -446,44 +554,96 @@ type WatchDeps = {
   holdForReview: (checkoutId: string, reason: string, at: Date) => Promise<void>;
   pageAdmins: (input: { tenantId: string | null; title: string; body: string; data: Record<string, unknown>; dedupeKey: string }) => Promise<unknown>;
 };
-type Watched = { id: string; tenantId: string; merchantTransactionId: string; amount: Prisma.Decimal; currencyCode: string; createdAt: Date };
+type Watched = { id: string; tenantId: string; adInvoiceId: string | null; merchantTransactionId: string; amount: Prisma.Decimal; currencyCode: string; createdAt: Date };
+const WATCHED_FIELDS = { id: true, tenantId: true, adInvoiceId: true, merchantTransactionId: true, amount: true, currencyCode: true, createdAt: true } as const;
 
 /** One pass, from the checkout poll (as the system). Returns how many
  *  automatically closed checkouts were read and how many were held. */
 export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps, now: Date): Promise<{ read: number; held: number }> {
-  const out = { read: 0, held: 0 };
-  if (!deps.zone) return out;
-  const zone = deps.zone;
-  // Checkouts whose watch reached a terminal record: never read again.
-  const ended = await db.mmgCheckoutObservation.findMany({
-    where: { source: 'HISTORY', detail: null, body: { path: ['purpose'], equals: AUTO_CLOSE_WATCH_PURPOSE },
-      OR: WATCH_TERMINAL.map((decision) => ({ body: { path: ['decision'], equals: decision } })) },
-    select: { intentId: true },
-  });
-  const endedIds = [...new Set(ended.map((o) => o.intentId).filter((id): id is string => !!id))];
+  if (!deps.zone) return { read: 0, held: 0 };
+  const endedIds = await endedWatches(db);
   // No age limit: every automatic close stays watched until it ends (oldest first).
   // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] A pay-all checkout closed this way is watched too, once (its branches hold through parts).
-  const watchedFields = { id: true, tenantId: true, merchantTransactionId: true, amount: true, currencyCode: true, createdAt: true } as const;
   const closedRows = await db.paymentConfirmationHold.findMany({
     where: { status: 'PROVEN_UNPAID', resolvedBy: NO_REPLY_CHECK_ACTOR, OR: [
       { ...(endedIds.length ? { checkoutId: { notIn: endedIds } } : {}), checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } },
       { checkoutPart: { is: { ...(endedIds.length ? { checkoutId: { notIn: endedIds } } : {}), checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } } } },
     ] },
     orderBy: [{ resolvedAt: 'asc' }, { id: 'asc' }], take: SCAN,
-    select: { id: true, resolvedAt: true, checkout: { select: watchedFields }, checkoutPart: { select: { checkout: { select: watchedFields } } } },
+    select: { id: true, resolvedAt: true, checkout: { select: WATCHED_FIELDS }, checkoutPart: { select: { checkout: { select: WATCHED_FIELDS } } } },
   });
   const watchedIds = new Set<string>();
   const closed = closedRows.flatMap((row) => {
     const checkout = row.checkout ?? row.checkoutPart?.checkout ?? null;
     if (!checkout || watchedIds.has(checkout.id)) return [];
     watchedIds.add(checkout.id);
-    return [{ id: row.id, resolvedAt: row.resolvedAt, checkout }];
+    return [{ checkout, closedAt: row.resolvedAt!.getTime() }];
   });
+  return watchEach(db, deps, closed, now);
+}
+
+/** Checkouts whose watch reached a terminal record: never read again. */
+async function endedWatches(db: PrismaClient): Promise<string[]> {
+  const ended = await db.mmgCheckoutObservation.findMany({
+    where: { source: 'HISTORY', detail: null, body: { path: ['purpose'], equals: AUTO_CLOSE_WATCH_PURPOSE },
+      OR: WATCH_TERMINAL.map((decision) => ({ body: { path: ['decision'], equals: decision } })) },
+    select: { intentId: true },
+  });
+  return [...new Set(ended.map((o) => o.intentId).filter((id): id is string => !!id))];
+}
+
+/**
+ * [ADS-ON · REVIEW-G9 #2325] An ad checkout closed as not paid gets the same week, on the checkout itself: it has no
+ * hold to be found through. Its own pass and its own read budget, so no number of ad closes can delay a fee's watch.
+ * The close's moment is the read that decided it. With no time zone to read MMG by, every read counts as failed: the
+ * checkout blocks new pages, so its week must still end in front of a person.
+ */
+export async function watchAutoClosedAdCheckouts(db: PrismaClient, deps: WatchDeps, now: Date): Promise<{ read: number; held: number }> {
+  const endedIds = await endedWatches(db);
+  const rows = await db.mmgCheckoutIntent.findMany({
+    where: { adInvoiceId: { not: null }, status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON, ...(endedIds.length ? { id: { notIn: endedIds } } : {}) },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], take: SCAN,
+    select: { ...WATCHED_FIELDS, updatedAt: true },
+  });
+  if (rows.length === 0) return { read: 0, held: 0 };
+  const closes = await db.mmgCheckoutObservation.groupBy({
+    by: ['intentId'],
+    where: { intentId: { in: rows.map((c) => c.id) }, source: 'HISTORY', detail: null, AND: [
+      { body: { path: ['purpose'], equals: NO_REPLY_CHECK_PURPOSE } }, { body: { path: ['decision'], equals: 'NO_PAYMENT' satisfies NoReplyDecision } },
+    ] },
+    _max: { createdAt: true },
+  });
+  const closedAt = new Map(closes.map((o) => [o.intentId, o._max.createdAt]));
+  return watchEach(db, deps, rows.map((c) => ({ checkout: c, closedAt: (closedAt.get(c.id) ?? c.updatedAt).getTime() })), now);
+}
+
+/**
+ * [ADS-ON] How many of this campaign's automatic closes have not read clean to the end of their week. A closed page
+ * may still take a payment: how long MMG keeps one is unconfirmed (U8), so until the week is over a second page would
+ * put two live pages in front of one payer, and an ad payment cannot be returned yet (U13). Only WATCH_DONE counts: a
+ * week that could not be read, or a record that could not be held, is money nobody has ruled out.
+ */
+export async function adWatchesUnfinished(db: Pick<Prisma.TransactionClient, 'mmgCheckoutIntent' | 'mmgCheckoutObservation'>, campaignId: string): Promise<number> {
+  const closed = await db.mmgCheckoutIntent.findMany({ where: { adInvoice: { campaignId }, status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON }, select: { id: true } });
+  if (closed.length === 0) return 0;
+  const done = await db.mmgCheckoutObservation.findMany({
+    where: { intentId: { in: closed.map((c) => c.id) }, source: 'HISTORY', detail: null, AND: [
+      { body: { path: ['purpose'], equals: AUTO_CLOSE_WATCH_PURPOSE } }, { body: { path: ['decision'], equals: 'WATCH_DONE' satisfies WatchDecision } },
+    ] },
+    distinct: ['intentId'], select: { intentId: true },
+  });
+  return closed.length - done.length;
+}
+
+/** The next read of each automatic close that is due, oldest close first, at most CHECK_BATCH a pass. */
+async function watchEach(
+  db: PrismaClient, deps: WatchDeps,
+  closed: ReadonlyArray<{ checkout: Watched; closedAt: number }>, now: Date,
+): Promise<{ read: number; held: number }> {
+  const out = { read: 0, held: 0 };
   let reads = 0;
-  for (const hold of closed) {
+  for (const { checkout: c, closedAt } of closed) {
     if (reads >= CHECK_BATCH) break;
-    const c = hold.checkout!;
-    const closedAt = hold.resolvedAt!.getTime();
     const last = await db.mmgCheckoutObservation.findFirst({
       where: { intentId: c.id, source: 'HISTORY', detail: null, body: { path: ['purpose'], equals: AUTO_CLOSE_WATCH_PURPOSE } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { createdAt: true, body: true },
@@ -499,7 +659,7 @@ export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps
     if (due > now.getTime()) continue;
     reads += 1;
     try {
-      if (await watchOne(db, deps, zone, c, { closedAt, covered, end: closedAt + AUTO_CLOSE_WATCH_MS, lastDecision }, now)) out.held += 1;
+      if (await watchOne(db, deps, c, { closedAt, covered, end: closedAt + AUTO_CLOSE_WATCH_MS, lastDecision }, now)) out.held += 1;
       out.read += 1;
     } catch (err) {
       log().error({ err, checkoutId: c.id }, '[MMG checkout] the watch after an automatic close failed; it is read again later');
@@ -519,7 +679,7 @@ function namedRecord(row: Record<string, unknown>, c: Watched, paidStatuses: rea
 }
 
 async function watchOne(
-  db: PrismaClient, deps: WatchDeps, zone: MmgCreationZone, c: Watched,
+  db: PrismaClient, deps: WatchDeps, c: Watched,
   state: { closedAt: number; covered: number; end: number; lastDecision: WatchDecision | null }, now: Date,
 ): Promise<boolean> {
   const ours = c.merchantTransactionId;
@@ -543,10 +703,12 @@ async function watchOne(
   };
   // The page's own time, every pass: MMG may show a payment made there only after the close read it. A read of it that
   // failed or was cut stops nothing ahead of it: it is carried, and no week ends clean on it.
+  // With no time zone to read MMG by, nothing can be read: the pass is a failed read, and the week still ends with a person.
+  const zone = deps.zone;
   const pageWindow: typeof slices = [];
-  const pageRead = await read({ fromdate: mmgStampOf(c.createdAt.getTime() - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(state.closedAt, zone, 'ceil'), rows: MMG_HISTORY_ROWS }, pageWindow);
-  let decision: WatchDecision = pageRead === 'LATE_RECORD' ? pageRead : 'WATCH_CLEAR';
-  for (let i = 0; decision === 'WATCH_CLEAR' && i < WATCH_SLICES_PER_CHECK && covered < limit; i += 1) {
+  const pageRead = zone ? await read({ fromdate: mmgStampOf(c.createdAt.getTime() - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(state.closedAt, zone, 'ceil'), rows: MMG_HISTORY_ROWS }, pageWindow) : 'WATCH_READ_FAILED';
+  let decision: WatchDecision = !zone ? 'WATCH_READ_FAILED' : pageRead === 'LATE_RECORD' ? pageRead : 'WATCH_CLEAR';
+  for (let i = 0; zone && decision === 'WATCH_CLEAR' && i < WATCH_SLICES_PER_CHECK && covered < limit; i += 1) {
     const to = Math.min(covered + WATCH_SLICE_MS, limit);
     const stop = await read({ fromdate: mmgStampOf(covered - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(to, zone, 'ceil'), rows: MMG_HISTORY_ROWS }, slices);
     if (stop) decision = stop;
@@ -572,7 +734,8 @@ async function watchOne(
   }
   if (decision !== 'LATE_RECORD') return false;
   const likely = records.some((r) => r.likely);
-  const reason = likely ? AUTO_CLOSE_LATE_PAYMENT_LIKELY : AUTO_CLOSE_POSSIBLE_MATCH;
+  // An ad payment has no credit path but MMG's lookup, so a person is not told to credit one.
+  const reason = c.adInvoiceId ? (likely ? AD_LATE_PAYMENT_LIKELY : AD_POSSIBLE_MATCH) : likely ? AUTO_CLOSE_LATE_PAYMENT_LIKELY : AUTO_CLOSE_POSSIBLE_MATCH;
   await deps.holdForReview(c.id, reason, now);
   const held = await db.mmgCheckoutIntent.findUnique({ where: { id: c.id }, select: { status: true, reason: true, subscriptionId: true } });
   if (held?.status !== 'HELD') {

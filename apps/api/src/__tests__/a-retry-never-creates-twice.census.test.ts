@@ -189,6 +189,7 @@ const SCOPE: Record<string, Entry> = {
   [`${ADMIN}|POST|/billing/settlement-batches/:id/confirm-deposit`]: approval('payout'),
   [`${ADMIN}|POST|/billing/settlement-batches/:id/adjust-deposit`]: approval('payout'),
   // Weekly-fee checkouts and fee money.
+  'modules/ads/ads.routes.ts|POST|/invoices/:id/mmg-checkout': { kind: 'ad-spend', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createAdCheckout', 'const replay = await this.answerForKey(who, now);']] },
   'modules/billing/mmg-checkout.routes.ts|POST|/subscription/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createCheckout', 'const replay = await this.answerForKey(who, now);']] },
   // [ENTERPRISE E1] "Pay all my branches": the same key rule (a key that answered keeps its answer), one open per owner.
   'modules/billing/mmg-checkout.routes.ts|POST|/subscription/chain-fees/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createChainCheckout', 'const replay = await this.answerForKey(who, now);']] },
@@ -201,7 +202,6 @@ const SCOPE: Record<string, Entry> = {
   [`${ADMIN}|POST|/billing/agent-payments`]: approval('fee-checkout'),
   [`${ADMIN}|POST|/billing/agent-payments/:id/attach`]: approval('fee-checkout'),
   [`${ADMIN}|POST|/billing/settlement-import`]: approval('fee-checkout'),
-  [`${ADMIN}|PUT|/ads/invoices/:id/mark-paid`]: approval('fee-checkout'),
   // Ad spend (ads are OFF at launch; the routes still guard).
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/reserve': { kind: 'ad-spend', guard: 'state', pins: [['modules/ads/booking.service.ts', 'reserveAndHold', 'FOR UPDATE']] },
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/checkout': { kind: 'ad-spend', guard: 'state', pins: [['modules/ads/checkout.service.ts', 'checkout', 'if (open) { invoice = open; return; }']] },

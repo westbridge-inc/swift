@@ -211,7 +211,6 @@ const E = {
   advertiser: { model: 'advertiser', fields: ['status'] },
   adCampaign: { model: 'adCampaign', fields: ['status'] },
   adLinkDomain: { model: 'adLinkDomain', fields: ['status'] },
-  adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
   adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'payoutRail', 'manualPayoutRef', 'providerRefundRef', 'completedAt'] },
   paymentConfirmation: { model: 'paymentConfirmationHold', fields: ['status', 'resolvedAt', 'resolvedBy', 'resolutionEvidence'] },
   // [PT-4] A held card payment's resolution: what finance decided and the provider actions it took.
@@ -454,7 +453,6 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /ads/campaigns/:id/kill': c('C3', 'ads.campaign.kill', E.adCampaign),
   'POST /ads/refund-intents/:id/settle': c('C4', 'ads.refund.settle', E.adRefundIntent),
   'POST /ads/refund-intents/backfill': c('C4', 'ads.refund.backfill'),
-  'PUT /ads/invoices/:id/mark-paid': c('C4', 'ads.invoice.pay', E.adInvoice),
   'POST /ads/placements/seed': c('C2', 'ads.placement.write'),
   'PUT /ads/placements/:id': c('C2', 'ads.placement.write'),
   'PUT /ads/settings': c('C5', 'ads.settings.write'),

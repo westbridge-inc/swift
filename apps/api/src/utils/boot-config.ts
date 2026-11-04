@@ -196,6 +196,11 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // driver needs its whole configuration — keys parsed, the request proven to
   // fit the key. Production also refuses the sandbox and a UAT page.
   assertMmgCheckoutConfig(env);
+  // [ADS-ON] Read as off, which takes no money, but a misspelling must not look like a switch that was turned on.
+  const adMmgCheckout = env['ADS_MMG_CHECKOUT'];
+  if (adMmgCheckout !== undefined && adMmgCheckout !== '' && adMmgCheckout !== '0' && adMmgCheckout !== '1') {
+    throw new Error('FATAL: ADS_MMG_CHECKOUT must be exactly 0 or 1 — a misspelled switch is not guessed at. Refusing to start.');
+  }
   // [O-1] The Swift call bridge, in EVERY mode: CALL_RELAY=1 needs Swift's caller ID, the
   // public webhook address and the Twilio account, key and webhook token, or nothing starts.
   assertCallRelayConfig(env);
