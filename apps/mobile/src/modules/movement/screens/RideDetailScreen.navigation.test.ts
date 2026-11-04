@@ -24,7 +24,7 @@ vi.mock('../../../kit', async () => {
   const h = R.createElement;
   const Box = (p: any) => h('div', null, p.children);
   return {
-    Screen: Box, IconChip: () => null, LoadingBlock: () => h('span', null, 'loading'), ErrorState: () => h('span', null, 'failed'),
+    Screen: Box, Header: (p: any) => h('h1', null, p.title), IconChip: () => null, LoadingBlock: () => h('span', null, 'loading'), ErrorState: () => h('span', null, 'failed'),
     T: (p: any) => h('span', null, p.children),
     Stars: (p: any) => h('button', { type: 'button', onClick: () => p.onRate?.(5) }, 'stars'),
     PillButton: (p: any) => h('button', { type: 'button', onClick: p.onPress, disabled: !!p.disabled }, p.label),

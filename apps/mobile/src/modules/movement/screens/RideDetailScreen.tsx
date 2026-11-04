@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import { color, radius, space } from '@swift/ui';
-import { IconChip, LoadingBlock, ErrorState, PillButton, Screen, Stars, T } from '../../../kit';
+import { Header, IconChip, LoadingBlock, ErrorState, PillButton, Screen, Stars, T } from '../../../kit';
 import { useRateOrder } from '../../../hooks/customer';
 import { money } from '../../../lib/money';
 import { rideStops } from '../../../lib/taxiItinerary';
@@ -23,8 +23,8 @@ export function RideDetailScreen({ navigation, route }: any) {
   const [score, setScore] = useState(0);
   const [rated, setRated] = useState(false);
 
-  if (ride.isLoading) return <Screen><LoadingBlock /></Screen>;
-  if (ride.isError || !ride.data) return <Screen><ErrorState onRetry={() => void ride.refetch()} /></Screen>;
+  if (ride.isLoading) return <Screen><Header title="Your ride" /><LoadingBlock /></Screen>;
+  if (ride.isError || !ride.data) return <Screen><Header title="Your ride" /><ErrorState onRetry={() => void ride.refetch()} /></Screen>;
 
   const r = ride.data;
   const breakdown = fareBreakdownOf(r);
@@ -41,6 +41,7 @@ export function RideDetailScreen({ navigation, route }: any) {
 
   return (
     <Screen>
+      <Header title="Your ride" />
       <ScrollView contentContainerStyle={{ padding: space.lg }}>
         <IconChip icon="check-circle" size={56} />
         <T variant="title" accessibilityRole="header" style={{ marginTop: space.md }}>{rideOverTitle(r.status)}</T>
