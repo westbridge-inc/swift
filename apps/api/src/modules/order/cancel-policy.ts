@@ -181,6 +181,12 @@ export const MMG_STORE_REFUNDS_SENTENCE = 'If you already sent the MMG payment, 
 export const MMG_PAID_STORE_CANCELS_CODE = 'MMG_PAID_STORE_CANCELS';
 export const MMG_PAID_STORE_CANCELS_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money. If the store does not answer, contact Swift support.';
 
+/** [BUG-HUNT-2 G14a] The same refusal to someone who told Swift they did not pay: never "already paid" beside "you disagree". */
+export const MMG_DISPUTED_CANCEL_MESSAGE = 'You and the store disagree about this payment, so the order is paused until a person at Swift decides. It cannot be cancelled until then.';
+export function mmgPaidCancelMessage(order: { mmgClaimMismatchAt?: Date | null }): string {
+  return order.mmgClaimMismatchAt != null ? MMG_DISPUTED_CANCEL_MESSAGE : MMG_PAID_STORE_CANCELS_MESSAGE;
+}
+
 /** Why a cancel is free right now. */
 export type FreeCancelReason =
   | 'NO_MOVER' // [Item 64] the mover search came back empty

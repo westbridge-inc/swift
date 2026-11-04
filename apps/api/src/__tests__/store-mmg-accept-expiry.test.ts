@@ -242,13 +242,16 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
     const toCustomer = await notices(customer.userId, orderId);
     expect(toCustomer.map((n) => n.title)).toContain('Order cancelled — MMG payment not confirmed');
     const customerPush = toCustomer.find((n) => n.title === 'Order cancelled — MMG payment not confirmed')!;
-    expect(customerPush.body).toContain('within 30 minutes of accepting');
+    expect(customerPush.body).toContain('within 30 minutes of Window Diner accepting');
     expect(customerPush.body).toContain('Window Diner refunds you directly');
+    // [BUG-HUNT-2 G14b] Most people here never paid: it blames nobody, and says where to go if the money did leave.
+    expect(customerPush.body).not.toContain("didn't mark");
+    expect(customerPush.body).toContain('contact Swift support');
     const toStore = await notices(owner.userId, orderId);
     expect(toStore.some((n) => n.body.includes('not marked "Paid by MMG" within 30 minutes'))).toBe(true);
     const closed = await customerView(orderId);
     expect(closed.mmgPayment).toBeNull(); // the number is never shown on a closed order
-    expect(closed.cancellationNotice).toBe("Window Diner didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Window Diner refunds you directly.");
+    expect(closed.cancellationNotice).toBe('No MMG payment was confirmed within 30 minutes of Window Diner accepting, so this order was cancelled automatically. If you did send the MMG payment, Window Diner refunds you directly. If it does not, contact Swift support.');
     const storeClosed = await storeView(orderId);
     expect(storeClosed['cancellationReason']).toBe(MMG_ACCEPT_EXPIRY_REASON);
     expect(storeClosed['mmgPayBy']).toBeNull();
@@ -330,6 +333,12 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
     await sweep(); await sweep();
     expect(await cases(orderId)).toHaveLength(1);
     expect((await notices(owner.userId, orderId)).filter((n) => n.title.startsWith('Check your MMG for order'))).toHaveLength(1);
+    // [BUG-HUNT-2 G14c] The customer who said they paid is told once, and their card says support is on it.
+    const toldCustomer = (await notices(customer.userId, orderId)).filter((n) => n.title === 'Swift support is checking your MMG payment');
+    expect(toldCustomer).toHaveLength(1);
+    expect(toldCustomer[0]!.body).toContain('Keep your MMG message');
+    expect(toldCustomer[0]!.data).toMatchObject({ kind: 'mmg_store_silent', audience: 'customer' });
+    expect((await customerView(orderId))['mmgClaim']).toMatchObject({ customerClaim: 'PAID', storeSilent: true });
     // Still locked until the store confirms; the store's tap (same reference) lets it go ahead.
     expect((await preparing(orderId)).statusCode).toBe(409);
     const tap = await paidWith(orderId, reference);

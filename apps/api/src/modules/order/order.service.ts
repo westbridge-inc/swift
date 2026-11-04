@@ -29,7 +29,7 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
+import { cancellationVerdict, mmgPaidCancelMessage, readAssignedAt, readNoMoverFound } from './cancel-policy';
 import { pickupCancelledStoreNotice } from './pickup-not-collected';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { readOrderSize, DEFAULT_LOAD_BANDS } from '../../utils/load';
@@ -2947,7 +2947,7 @@ export class OrderService {
           // directs the store to refund directly.
           if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
             // [owner #46 · Opus S3-1] The same words the order screen shows beside the store's number.
-            throw new AppError(409, 'MMG_CANCEL_UNAVAILABLE', MMG_PAID_STORE_CANCELS_MESSAGE);
+            throw new AppError(409, 'MMG_CANCEL_UNAVAILABLE', mmgPaidCancelMessage(order));
           }
 
           const now = new Date();

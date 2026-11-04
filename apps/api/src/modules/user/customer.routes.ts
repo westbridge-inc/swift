@@ -36,7 +36,7 @@ import { cartVatByVendor } from '../store-vat/order-vat';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { MAX_DELIVERY_RADIUS_KM, brandBranchesFor, brandFactsFor, collapseBrands, oneDishPerBrand } from '../vendor/brand';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
+import { customerCancelView, mmgPaidCancelMessage, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE } from '../order/cancel-policy';
 import { answerMmgRefund, customerMmgRefund, tellStoreOfRefundAnswer } from '../order/mmg-refund-rail';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { ORDER_TRANSITIONS } from '../order/order-status';
@@ -2974,7 +2974,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // one rail where it matters most.
     const refusal = cancelView?.cancelUnavailable
       ?? (cancellableStage && mmgPaidToStore && order.vendorId
-        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: MMG_PAID_STORE_CANCELS_MESSAGE }
+        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: mmgPaidCancelMessage(order) }
         : null);
     const cancelUnavailable = refusal
       ? {

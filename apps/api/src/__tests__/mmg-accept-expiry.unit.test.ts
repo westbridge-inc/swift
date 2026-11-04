@@ -70,7 +70,7 @@ describe('[PAYMENT-SIMPLIFY] the MMG acceptance pay window', () => {
 
   it('the customer card explains only this cancellation', () => {
     const closed = { status: 'CANCELLED', cancellationReason: MMG_ACCEPT_EXPIRY_REASON, cancelledBy: null, orderNumber: 'SW-1' };
-    expect(mmgAcceptExpiryNotice(closed, 'Window Diner')).toContain('within 30 minutes of accepting');
+    expect(mmgAcceptExpiryNotice(closed, 'Window Diner')).toContain('within 30 minutes of');
     expect(mmgAcceptExpiryNotice({ ...closed, cancelledBy: 'u1' }, 'Window Diner')).toBeNull();
     expect(mmgAcceptExpiryNotice({ ...closed, cancellationReason: 'Customer cancelled' }, 'Window Diner')).toBeNull();
     expect(mmgAcceptExpiryNotice({ ...closed, status: 'ACCEPTED' }, 'Window Diner')).toBeNull();
