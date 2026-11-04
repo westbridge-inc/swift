@@ -129,6 +129,7 @@ import { assertNotBannedGoods, catalogueChecksFor, flaggedItemsInTenant, prohibi
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
 import { REGISTRATION_KINDS } from '../verification/doc-registry';
 import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealOrderPartyPhone } from './order-contact';
+import { PROOF_PHOTO_NAMES, openProofPhoto } from './order-proof-photo';
 import { moverUserOf, PAYER_INCLUDE, subscriptionTenantWhere } from '../subscription/subscription-owner';
 import { readDeliveryPause, setDeliveryPause } from '../dispatch/delivery-pause';
 
@@ -3227,6 +3228,22 @@ export async function adminRoutes(app: FastifyInstance) {
       { orderId: id, party, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
     );
     // [REVIEW-G #2162 S4-1] A full number is never kept by a cache.
+    reply.header('cache-control', 'no-store');
+    return { success: true, data: result };
+  });
+
+  /**
+   * [BUG-HUNT-2 G11] The audited door to one proof photo on an order. The stored value is an opaque key, not a link: this
+   * is the only way an admin sees the photo (modules/admin/order-proof-photo.ts).
+   */
+  const proofPhotoQuery = z.object({ photo: z.enum(PROOF_PHOTO_NAMES) });
+  app.get('/orders/:id/proof-photo', { preHandler: [adminGuard] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { photo } = proofPhotoQuery.parse(request.query);
+    const result = await openProofPhoto(
+      { prisma: app.prisma },
+      { orderId: id, photo, actorId: request.user.userId, reason: reasonOf(undefined, request.headers), ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
     reply.header('cache-control', 'no-store');
     return { success: true, data: result };
   });

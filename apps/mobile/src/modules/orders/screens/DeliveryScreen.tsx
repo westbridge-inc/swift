@@ -829,7 +829,7 @@ export function DeliveryScreen() {
     ? 'rider'
     : o.fulfillment === 'APPOINTMENT' ? 'provider' : 'seller or rider';
   const mmgPayee = mmgPaymentAction?.recipientName
-    ?? (o.orderType === 'COURIER' ? 'the named payee' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
+    ?? (o.orderType === 'COURIER' ? 'the rider' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
   // The last two food sentences a booking could reach on this screen were both
   // cancellation copy on the MMG rail — the one rail where the money may have
   // already moved. They name the party who holds it from the fulfillment, the
@@ -1499,7 +1499,7 @@ export function DeliveryScreen() {
                 {terminal
                   ? `Cash is handled directly with the ${directPayee}. Swift has not held ${money(o.totalAmount ?? o.total)}.`
                   : o.orderType === 'COURIER'
-                  ? 'Cash is paid directly to the rider by the named payer. Swift does not hold this money.'
+                  ? 'Cash is paid directly to the rider. Swift does not hold this money.'
                   : `Cash — have ${money(o.totalAmount ?? o.total)} ready for the ${directPayee}. Swift does not hold this money.`}
               </T>
             </View>

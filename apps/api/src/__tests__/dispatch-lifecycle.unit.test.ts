@@ -1260,7 +1260,7 @@ describe('R11 truthful dispatch responses', () => {
 describe('[Q10] every offer is pushed by default, in every pool', () => {
   const pools = [
     { mover: 'delivery rider', orderType: 'FOOD_DELIVERY', status: 'READY_FOR_PICKUP', title: '\u{1F6F5} Order available nearby' },
-    { mover: 'courier', orderType: 'COURIER', status: 'READY_FOR_PICKUP', title: '\u{1F6F5} Order available nearby' },
+    { mover: 'courier', orderType: 'COURIER', status: 'READY_FOR_PICKUP', title: '\u{1F6F5} Parcel available nearby' },
     { mover: 'taxi driver', orderType: 'TAXI', status: 'PENDING', title: '\u{1F695} Someone nearby needs a pickup' },
   ];
 

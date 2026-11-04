@@ -309,7 +309,7 @@ describe('flag off — the booking screen is exactly today’s', () => {
     expect(byTestId('taxi-add-stop')).toBeNull();
     expect(host.querySelector('[data-testid^="taxi-stop"]')).toBeNull();
     expect(text()).not.toMatch(/Add a stop|One fare for the whole trip|Your route|stops/);
-    expect(text()).toContain('Fare estimate · pay the driver cash or MMG at drop-off');
+    expect(text()).toContain('Your fare · pay the driver cash or MMG at drop-off');
 
     for (const config of sent('post /rides/estimate')) expect(Object.keys(bodyOf(config))).toEqual(['pickup', 'dropoff']);
 

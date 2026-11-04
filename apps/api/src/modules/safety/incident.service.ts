@@ -428,7 +428,7 @@ export class IncidentService {
           userId: input.subjectUserId,
           type: 'SAFETY',
           title: 'Account suspended pending review',
-          body: `A ${this.categoryLabel(input.category)} report is under review on your account. You are offline while our safety team reviews it — contact support to respond.`,
+          body: `${this.aCategory(input.category)} report is under review on your account. You are offline while our safety team reviews it — contact support to respond.`,
           data: {
             kind: 'incident_interim_suspension',
             caseId: kase.id,
@@ -632,7 +632,7 @@ export class IncidentService {
       userId: updated.subjectUserId,
       type: 'SAFETY',
       title: 'Account under review',
-      body: `A ${this.categoryLabel(updated.category)} report is under review on your account. You can keep working while our safety team reviews it — contact support to respond.`,
+      body: `${this.aCategory(updated.category)} report is under review on your account. You can keep working while our safety team reviews it — contact support to respond.`,
       data: { kind: 'incident_shadow_restricted', caseNumber: updated.caseNumber, category: updated.category },
     });
     return updated;
@@ -813,6 +813,12 @@ export class IncidentService {
 
   private categoryLabel(category: string): string {
     return category.replace(/^SAFETY_/, '').replace(/_/g, ' ').toLowerCase();
+  }
+
+  /** [BUG-HUNT-2 G18] "An identity mismatch report", never "A identity mismatch report". */
+  private aCategory(category: string): string {
+    const label = this.categoryLabel(category);
+    return `${/^[aeiou]/.test(label) ? 'An' : 'A'} ${label}`;
   }
 
   /** The single CAS transition point — rejects and logs any illegal move. */
