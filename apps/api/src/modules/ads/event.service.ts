@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient, type AdEventType } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { adTokenMatchesPrincipal, userHash, verifyImpressionToken } from './ads-token';
+import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 
 // Ad event ingestion (ads-platform spec §12.2). The anti-fraud core: an event
 // is only counted if its impression token verifies (HMAC + expiry) — a token
@@ -26,6 +27,10 @@ export interface AdEventRequestPrincipal {
 }
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
+
+/** [TENANT-WALL] The one system read of a guest's ad event: the operator of
+ *  the campaign its verified token names, and nothing else. */
+export const AD_EVENT_GUEST_CAPABILITY = 'ad-event-guest';
 
 export class AdEventService {
   constructor(private prisma: PrismaClient) {}
@@ -54,11 +59,22 @@ export class AdEventService {
 
     const occurredAt = this.safeDate(ev.occurredAt, now);
 
+    // [TENANT-WALL] A guest's event carries no session, so no tenant is bound,
+    // and under the tenant wall its unbound transaction saw no campaign at all:
+    // every guest event was counted invalid. A guest's event is read and
+    // written in the operator of the campaign its verified token names (one
+    // named system read); a signed-in caller's stays in the tenant
+    // authentication bound.
+    const bound = getTenantId();
+    const guestTenant = bound ? null : await runAsSystem(AD_EVENT_GUEST_CAPABILITY, async () =>
+      (await this.prisma.adCampaign.findUnique({ where: { id: campaignId }, select: { tenantId: true } }))?.tenantId ?? null);
+    if (!bound && !guestTenant) return 'invalid';
+
     // Campaign authority, the exact dedupe claim, frequency mutation, and the
     // billing-grade event are one commit. FOR KEY SHARE makes a concurrently
     // deleted campaign wait until this event commits; an already-missing
     // campaign is invalid and can never fall through to a default tenant.
-    return this.prisma.$transaction(async (tx): Promise<EventVerdict> => {
+    const commit = () => this.prisma.$transaction(async (tx): Promise<EventVerdict> => {
       const campaigns = await tx.$queryRaw<Array<{ tenantId: string }>>(Prisma.sql`
         SELECT "tenantId"
         FROM "ad_campaigns"
@@ -100,6 +116,7 @@ export class AdEventService {
       });
       return 'accepted';
     });
+    return guestTenant ? runWithTenant(guestTenant, commit) : commit();
   }
 
   private safeDate(iso: string, fallback: Date): Date {
