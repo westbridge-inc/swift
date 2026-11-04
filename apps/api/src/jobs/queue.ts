@@ -2016,6 +2016,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (handovers.pending > 0) ctx.log.warn(handovers, 'handover notices remain pending');
           else if (handovers.expired > 0) ctx.log.warn(handovers, 'handover pushes closed unconfirmed; the inbox notices remain');
         });
+        await drain('delivery-custody-lift', async () => {
+          // [BUG-HUNT F18] The suspension a finished delivery lifts commits with the delivery, at every door;
+          // whatever its post-commit attempt could not finish is finished here.
+          const { drainDeliveryLifts, liftAfterDelivery } = await import('../modules/safety/delivery-lift');
+          const lifts = await drainDeliveryLifts({ prisma: ctx.prisma, lift: liftAfterDelivery(ctx.prisma, ctx.io) });
+          if (lifts.pending > 0) ctx.log.warn(lifts, 'delivery lifts remain owed');
+          else if (lifts.expired > 0) ctx.log.warn(lifts, 'delivery lifts closed unfinished; the cases stay with a person');
+        });
         await drain('driver-pickup-notice', async () => {
           // [L07] The passenger's "driver on the way / arrived" notice commits with
           // the assignment-bound pickup advance; whatever its own post-commit

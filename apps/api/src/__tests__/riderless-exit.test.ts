@@ -434,9 +434,9 @@ describe('[OF-01] the dispatch notices are told once per order state, not once p
     expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('READY_FOR_PICKUP');
     const customer = await noticesOf(id, cast.customer.userId);
     // Four 6-hour cycles ran (main: 8 "Still looking" + 4 "No movers").
-    expect(count(customer, 'Still looking for a mover')).toBe(1);
-    expect(count(customer, 'No movers available right now')).toBe(1);
-    expect(count(await noticesOf(id, cast.vendorOwner.userId), 'No movers available')).toBe(1);
+    expect(count(customer, 'Still looking for a rider')).toBe(1);
+    expect(count(customer, 'No riders available right now')).toBe(1);
+    expect(count(await noticesOf(id, cast.vendorOwner.userId), 'No riders available')).toBe(1);
     expect(count(await noticesOf(id, w.admin.userId), 'Dispatch exhausted — no mover found')).toBe(1);
 
     // A real change of state: a rider takes it and hands it back.
@@ -447,8 +447,8 @@ describe('[OF-01] the dispatch notices are told once per order state, not once p
     await offline(cast);
     await advance(w, cast, 24 * 60 * MIN, 30 * MIN);
     const after = await noticesOf(id, cast.customer.userId);
-    expect(count(after, 'Still looking for a mover')).toBeLessThanOrEqual(2);
-    expect(count(after, 'No movers available right now')).toBeLessThanOrEqual(2);
+    expect(count(after, 'Still looking for a rider')).toBeLessThanOrEqual(2);
+    expect(count(after, 'No riders available right now')).toBeLessThanOrEqual(2);
   }, 600_000);
 });
 

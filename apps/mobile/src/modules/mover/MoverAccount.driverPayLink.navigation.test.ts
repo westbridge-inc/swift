@@ -92,7 +92,7 @@ vi.mock('../../hooks', () => {
     useActiveJob: () => ({ data: null }), useBroadcastLocation: () => undefined,
     useMoverKind: () => ({ kind: 'DRIVER', profile: fx.profile }),
     useVerificationStatus: () => ({ data: { roleVerified: true }, isLoading: false }),
-    useMoverStanding: () => read, useEarningsSummary: () => read, useMoverSubscription: () => read,
+    useActiveJobs: () => ({ legs: [] }), useMoverStanding: () => read, useEarningsSummary: () => read, useMoverSubscription: () => read,
     useSetMoverBillingMethod: () => write, useUploadVehiclePhoto: () => write,
   };
 });

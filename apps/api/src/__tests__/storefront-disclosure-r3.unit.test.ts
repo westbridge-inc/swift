@@ -107,6 +107,8 @@ async function fixture(status = 'ACTIVE') {
     docType: { count: async () => 1, findMany: async () => [] },
     documentRecord: { findFirst: async () => null, findMany: vi.fn(async (q: Query) => records.filter(r => matches(r, q.where)).map(r => project(r, q.select))) },
     extractionRun: { findMany: extracted }, auditLog: { create: audit },
+    // [BUG-HUNT F07] The owner is told the first time a store goes live; publishing it is NotificationService's own seam.
+    notification: { create: vi.fn(async () => ({ id: 'notice-fixture' })), findUnique: async () => null, findFirst: async () => null },
     promoCode: { findMany: async () => [] }, actorRatingStat: { findMany: async () => [] },
     customer: { count: async () => 0 },
     // [FOOD-PERMIT · owner 24 Oct 2026] This fixture is a registered restaurant: its owner has given the food handlers

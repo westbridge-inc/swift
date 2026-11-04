@@ -107,7 +107,7 @@ export function foodHandlersNotice(storeName: string, goingLive: boolean): { tit
   return goingLive
     ? {
       title: 'Confirm your food handlers',
-      body: `${storeName} has everything else it needs. Tick “${FOOD_HANDLERS_TICK_V1}” under Documents, and your store goes live. ${FOOD_HANDLERS_WHERE}`,
+      body: `${storeName} is nearly ready. The next step is to tick “${FOOD_HANDLERS_TICK_V1}” under Documents. Swift tells you when your store is live. ${FOOD_HANDLERS_WHERE}`,
     }
     : {
       title: 'Confirm your food handlers',

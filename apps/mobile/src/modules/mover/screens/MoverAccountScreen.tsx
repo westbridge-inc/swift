@@ -11,7 +11,8 @@ import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
+import { useActiveJobs, useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
+import { moverLogoutBody } from '../../../lib/moverLogoutWords';
 import { StandingCard } from '../../../components/StandingCard';
 import {
   AuthSessionBoundaryError,
@@ -32,14 +33,13 @@ import { useMoverPreview } from '../../../stores/moverPreview';
 export function MoverAccountScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
   const { user } = useAuthStore();
+  const { kind, profile } = useMoverKind();
   // What the server does when a mover logs out (mover-authority.ts): the mover
   // goes offline, and a job not yet picked up is released back to dispatch. A
-  // job already in their hands stays theirs; operations are paged.
-  const { requestLogout, logoutDialog } = useLogoutConfirm({
-    body: 'You’ll go offline, and a job you haven’t picked up yet goes back to dispatch. Your earnings, vehicle and documents stay with your account.',
-  });
+  // job already in their hands stays theirs; operations are paged. The box says
+  // what that means for this person, right now (lib/moverLogoutWords).
+  const { requestLogout, logoutDialog } = useLogoutConfirm({ body: moverLogoutBody(useActiveJobs(kind).legs) });
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
-  const { kind, profile } = useMoverKind();
   const standingQ = useMoverStanding<any>(kind);
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);

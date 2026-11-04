@@ -161,6 +161,7 @@ vi.mock('../hooks', async () => {
   return {
     useVerificationStatus: real.useVerificationStatus, useBecomePartner: real.useBecomePartner, useChangeVehicle: real.useChangeVehicle,
     useActiveJob: () => ({ data: null }), useBroadcastLocation: () => undefined, useMoverKind: () => ({ kind: 'RIDER', profile: null }),
+    useActiveJobs: () => ({ legs: [] }), useMoverSubscription: () => ({ data: null }),
   };
 });
 // The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).

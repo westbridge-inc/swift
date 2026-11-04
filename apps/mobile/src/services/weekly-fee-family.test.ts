@@ -66,6 +66,7 @@ vi.mock('../modules/mover/screens/JobHistoryScreen', () => ({ JobHistoryScreen: 
 vi.mock('../modules/mover/screens/MoverAccountScreen', () => ({ MoverAccountScreen: 'MoverAccountScreen' }));
 vi.mock('../modules/mover/screens/MoverDocumentsScreen', () => ({ MoverDocumentsScreen: 'MoverDocumentsScreen' }));
 vi.mock('../modules/mover/screens/MoverVehicleScreen', () => ({ MoverVehicleScreen: 'MoverVehicleScreen' }));
+vi.mock('../modules/mover/MoverNoAnswer', () => ({ MoverNoAnswer: () => null }));
 vi.mock('../modules/mover/screens/MoverOnboardingScreen', () => ({ MoverOnboardingScreen: 'MoverOnboardingScreen' }));
 vi.mock('../modules/profile/screens/GetHelpScreen', () => ({ GetHelpScreen: 'GetHelpScreen' }));
 vi.mock('../modules/safety/screens/LivenessCheckScreen', () => ({ LivenessCheckScreen: 'LivenessCheckScreen' }));

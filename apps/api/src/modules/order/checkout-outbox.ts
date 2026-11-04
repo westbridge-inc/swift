@@ -56,8 +56,10 @@ export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
  *  (handover/handover-notice.ts).
  *  [L07] `driver-pickup-notice`: the passenger's pickup-progress notice from
  *  the assignment-bound advance, drained by `drainDriverPickupNotices`
- *  (rides/driver-pickup.ts). */
-export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'rescue-notice', 'rider-cancel-notice', 'handover-completed-notice', 'driver-pickup-notice'];
+ *  (rides/driver-pickup.ts).
+ *  [BUG-HUNT F18] `delivery-custody-lift`: the suspension a finished delivery
+ *  lifts, drained by `drainDeliveryLifts` (safety/delivery-lift.ts). */
+export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'rescue-notice', 'rider-cancel-notice', 'handover-completed-notice', 'driver-pickup-notice', 'delivery-custody-lift'];
 
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */

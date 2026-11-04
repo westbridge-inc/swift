@@ -39,7 +39,7 @@ const FAQ: QA[] = [
     q: 'Then how does Swift make money?',
     a: (
       <>
-        Businesses and movers pay a flat weekly subscription for the software. That is the entire
+        Businesses, riders and drivers pay a flat weekly subscription for the software. That is the entire
         revenue line. Swift takes <b>no commission</b> on any sale, fare or tip — not a reduced
         rate, not an introductory offer. There is no percentage anywhere in the model.
       </>

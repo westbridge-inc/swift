@@ -5,7 +5,7 @@ import { site, launch, SITE_ORIGIN } from '@/site.config';
 
 export const metadata: Metadata = {
   title: 'About',
-  description: `Swift is a super-app for food, groceries, shops, couriers, rides and services, operating in ${launch.markets[0]}. Businesses and movers keep 100% of what they earn.`,
+  description: `Swift is a super-app for food, groceries, shops, couriers, rides and services, operating in ${launch.markets[0]}. Businesses, riders and drivers keep 100% of what they earn.`,
   alternates: { canonical: `${SITE_ORIGIN}/about` },
 };
 
@@ -63,7 +63,7 @@ export default function AboutPage() {
             </p>
             <p>
               Most delivery platforms take a percentage of every sale. Swift does not, and it is not
-              a promotion that expires. Businesses and movers pay one flat weekly subscription and
+              a promotion that expires. Businesses, riders and drivers pay one flat weekly subscription and
               keep <b className="font-semibold text-[var(--swift-ink)]">100%</b> of every sale, fare
               and tip. The subscription is the entire business model — there is no commission line,
               no service fee taken from a driver, and no markup added to a customer&apos;s bill.

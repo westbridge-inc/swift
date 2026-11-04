@@ -348,6 +348,14 @@ class Wired(unittest.TestCase):
         text = (DEPLOY / 'pilot-up.sh').read_text()
         self.assertLess(text.index('stop api worker'), text.index('python3 "$HERE/keep-logs.py"'))
 
+    def test_a_stop_gives_the_api_and_worker_time_to_finish_their_own_shutdown(self):
+        # Docker's default is 10 s, under the process's own 15 s cap: it would kill them mid-close.
+        text = (DEPLOY / 'docker-compose.yml').read_text()
+        for service in ('api', 'worker'):
+            block = re.search(rf'\n  {service}:\n(.*?)\n  [a-z]+:\n', text, re.S).group(1)
+            seconds = int(re.search(r'stop_grace_period: (\d+)s', block).group(1))
+            self.assertGreater(seconds, 15, service)
+
     def test_compose_caps_the_live_log_of_every_app_service(self):
         text = (DEPLOY / 'docker-compose.yml').read_text()
         self.assertRegex(text, r'x-bounded-logs: &bounded-logs\n  driver: json-file\n  options:\n    max-size: "50m"\n    max-file: "5"\n')

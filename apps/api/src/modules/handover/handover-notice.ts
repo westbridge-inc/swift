@@ -4,6 +4,7 @@ import { upsertNoticeFor } from '../../lib/owner-wall-notices';
 import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import type { NotificationService } from '../notification/notification.service';
 import { checkoutOutboxId } from '../order/checkout-outbox';
+import { orderDeliveredWords } from '../order/order-notice-words';
 
 export const HANDOVER_NOTICE_KIND = 'handover-completed-notice';
 /** [REVIEW-B 14 Oct S2-1] A failing push is retried for this long, then closed
@@ -12,7 +13,7 @@ export const HANDOVER_NOTICE_WINDOW_MS = 30 * 60_000;
 
 /** Terminal proof and its customer-facing obligation share the same commit. */
 export async function persistHandoverNotice(tx: Prisma.TransactionClient, order: {
-  id: string; tenantId: string; customerId: string; orderNumber: string; status: string;
+  id: string; tenantId: string; customerId: string; orderNumber: string; status: string; vendor?: { vendorType?: string | null } | null;
 }): Promise<void> {
   const dedupeKey = `order:${order.id}:${HANDOVER_NOTICE_KIND}`;
   const id = checkoutOutboxId(dedupeKey);
@@ -22,7 +23,7 @@ export async function persistHandoverNotice(tx: Prisma.TransactionClient, order:
   await upsertNoticeFor(tx, {
     id: notificationId, userId: order.customerId, dedupeKey, type: 'ORDER_UPDATE',
     title: pickup ? 'Order collected' : 'Delivered!',
-    body: pickup ? `Your order ${order.orderNumber} has been collected.` : `Your order ${order.orderNumber} has been delivered. Enjoy your meal!`,
+    body: pickup ? `Your order ${order.orderNumber} has been collected.` : orderDeliveredWords(order.orderNumber, order.vendor?.vendorType),
     data: { orderId: order.id, orderNumber: order.orderNumber, status: order.status, audience: 'customer' },
   });
   await tx.orderOutbox.upsert({ where: { id }, update: {}, create: {
