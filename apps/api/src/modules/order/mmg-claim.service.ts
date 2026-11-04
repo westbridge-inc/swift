@@ -511,8 +511,8 @@ export async function stageStoreMmgClaim(
  * obligation — the `audit` callback is the route's `auditWithin`, invoked as
  * the last write inside this transaction.
  */
-export async function resolveMmgClaimDisagreement(
-  tx: MmgClaimTx,
+export async function resolveMmgClaimDisagreement<Tx extends MmgClaimTx>(
+  tx: Tx,
   input: {
     orderId: string;
     tenantId: string;
@@ -522,6 +522,8 @@ export async function resolveMmgClaimDisagreement(
     actorId: string;
     now?: Date;
     audit: (tx: MmgClaimTx, facts: AuditFacts) => Promise<void>;
+    /** What the decision opens elsewhere, on this lock and in this commit. Not called on a replay. */
+    afterDecision?: (tx: Tx, decided: MmgClaimFacts) => Promise<void>;
   },
 ): Promise<MmgClaimCommandOutcome> {
   const now = input.now ?? new Date();
@@ -553,6 +555,7 @@ export async function resolveMmgClaimDisagreement(
     note: input.note,
     noticeObligation: id,
   });
+  await input.afterDecision?.(tx, decision.next);
   await mmgClaimLockObserver.beforeCommit?.({ orderId: input.orderId, actor: 'ADMIN' });
   return { replayed: false, facts: decision.next, notice, outboxId: id };
 }

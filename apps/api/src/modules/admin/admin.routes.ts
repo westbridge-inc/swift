@@ -7037,22 +7037,21 @@ export async function adminRoutes(app: FastifyInstance) {
     }).parse(request.body);
     const tenantId = requireTenantId();
     let returned = null as ReturnOutcome;
-    const outcome = await app.prisma.$transaction(async (tx) => {
-      const decided = await resolveMmgClaimDisagreement(tx, {
-        orderId: id,
-        tenantId,
-        resolution: body.resolution,
-        expectedClaimRevision: body.expectedClaimRevision,
-        note: body.note,
-        actorId: request.user.userId,
-        audit: (auditTx, facts) => auditWithin(auditTx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
-      });
+    const outcome = await app.prisma.$transaction((tx) => resolveMmgClaimDisagreement(tx, {
+      orderId: id,
+      tenantId,
+      resolution: body.resolution,
+      expectedClaimRevision: body.expectedClaimRevision,
+      note: body.note,
+      actorId: request.user.userId,
+      audit: (auditTx, facts) => auditWithin(auditTx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
       // [BUG-HUNT-2 G22] Support found the customer paid and the goods are already back: owed, in the finding's commit.
-      if (!decided.replayed && decided.facts.status === 'RETURNED' && body.resolution === 'CUSTOMER_PAID') {
-        returned = await openMmgRefundOnReturn(tx, id, request.user.userId, new Date());
-      }
-      return decided;
-    });
+      afterDecision: async (decidedTx, decided) => {
+        if (decided.status === 'RETURNED' && body.resolution === 'CUSTOMER_PAID') {
+          returned = await openMmgRefundOnReturn(decidedTx, id, request.user.userId, new Date());
+        }
+      },
+    }));
     // An owed refund's words are the finding's own notice. With no figure, a person is asked; the case stands if this fails.
     if (returned?.kind === 'NO_FIGURE') {
       await tellOfReturnRefund(app.prisma, notifications, returned)

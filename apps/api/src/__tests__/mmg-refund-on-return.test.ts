@@ -14,6 +14,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { MMG_RETURN_NO_FIGURE_SUBJECT, MMG_RETURN_REFUND_REASON } from '../modules/order/mmg-refund-rail';
+import { resolveMmgClaimDisagreement } from '../modules/order/mmg-claim.service';
 import { walkOrderStatus } from './helpers/order-status-walk';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
@@ -258,6 +259,17 @@ describe('[G22] a paid MMG order came back with a dispute open', () => {
     expect((await row(o.id)).paymentStatus).toBe('CLAIMED');
     expect((await resolve(o.id, 'CUSTOMER_PAID', o.mmgClaimRevision)).statusCode).toBeLessThan(500);
     expect(await owedOn(o.id)).toHaveLength(1);
+  });
+
+  it('the finding and what it opens are one commit: a record that fails takes the finding back', async () => {
+    const o = await disputed();
+    await expect(sys(() => app.prisma.$transaction((tx) => resolveMmgClaimDisagreement(tx, {
+      orderId: o.id, tenantId: o.tenantId, resolution: 'CUSTOMER_PAID', expectedClaimRevision: o.mmgClaimRevision, note: 'Checked the store statement', actorId: admin.id,
+      audit: async () => undefined,
+      afterDecision: async () => { throw new Error('the record was refused'); },
+    })))).rejects.toThrow('the record was refused');
+    expect(await row(o.id)).toMatchObject({ mmgClaimResolution: null, mmgClaimRevision: o.mmgClaimRevision });
+    expect((await row(o.id)).mmgClaimMismatchAt).toBeInstanceOf(Date);
   });
 
   it('a finding on an order still out with the rider records nothing: it can still be delivered', async () => {

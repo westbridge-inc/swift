@@ -942,6 +942,8 @@ describe('route contracts — no unlocked writer survives', () => {
     expect(h).toMatch(/expectedClaimRevision: z\.number\(\)\.int\(\)\.min\(0\)/);
     expect(h).toMatch(/\$transaction\(\s*\(tx\) => resolveMmgClaimDisagreement\(tx,/);
     expect(h).toMatch(/auditWithin\(/);
+    // [BUG-HUNT-2 G22] A record the finding opens is a callback of that same call: it has no transaction of its own to be in.
+    expect(h).toMatch(/\$transaction\(\s*\(tx\) => resolveMmgClaimDisagreement\(tx, \{[\s\S]*afterDecision: async \(decidedTx, decided\) => \{[\s\S]*openMmgRefundOnReturn\(decidedTx,[\s\S]*\}\)\);/);
     expect(h).not.toMatch(/await audit\(/);
     expect(h).not.toMatch(/app\.prisma\.order\.update\(/);
     // [R5] A replay writes no row of its own: it is marked with the decision's
