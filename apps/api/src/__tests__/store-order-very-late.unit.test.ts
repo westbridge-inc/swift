@@ -145,3 +145,12 @@ describe('[owner 17 Oct] an accepted store order promised nothing is never stuck
     expect(verdict({ ...unpromised, status: 'PENDING', acceptedAt: null, placedAt: ago(1) })).toEqual({ allowed: true, free: true, reason: 'AWAITING_STORE' });
   });
 });
+
+describe('[BUG-HUNT-2 G07] a ready pickup at a store Swift paused', () => {
+  const ready: CancellationSnapshot = { ...store, status: 'READY_FOR_PICKUP', orderType: 'GROCERY_DELIVERY', fulfillment: 'PICKUP', storeCannotHandOver: true };
+
+  it('a cash order is free to cancel; a paid MMG one is not, because the store holds that money', () => {
+    expect(verdict({ ...ready, paymentMethod: 'CASH' })).toMatchObject({ allowed: true, free: true, reason: 'STORE_PAUSED' });
+    expect(verdict({ ...ready, paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CONFIRMED' })).toMatchObject({ allowed: false });
+  });
+});
