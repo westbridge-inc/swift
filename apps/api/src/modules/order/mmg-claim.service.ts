@@ -664,6 +664,34 @@ const REASON_TEXT: Record<MmgDisagreementReason, { customer: string; store: stri
 };
 
 /**
+ * [BUG-HUNT-2 G22] What a finished review says. A live order goes on or stops. A returned one does neither: the goods are
+ * back at the store, so it can no longer continue or be cancelled, and a payment that reached the store is the store's to
+ * give back.
+ */
+function claimDecisionWords(orderNumber: string, upheld: boolean, returned: boolean): { customer: string; store: string } {
+  if (returned) {
+    return upheld
+      ? {
+        customer: `Swift support found that your MMG payment for order #${orderNumber} reached the store. The order went back to the store, so the store refunds you directly. If the store does not answer, contact Swift support.`,
+        store: `Swift support found that the customer's MMG payment for order #${orderNumber} reached you. The order came back to you, so you owe the customer that money back.`,
+      }
+      : {
+        customer: `Swift support found that no MMG payment for order #${orderNumber} reached the store. The order went back to the store, so you have nothing to pay and nothing more to do.`,
+        store: `Swift support decided the MMG payment for order #${orderNumber} did not arrive. The order came back to you, so there is nothing more to do.`,
+      };
+  }
+  return upheld
+    ? {
+      customer: `Swift support accepted the store's report that your MMG payment for order #${orderNumber} arrived. The order can continue.`,
+      store: `Swift support accepted your payment report for order #${orderNumber}. You can continue with the order.`,
+    }
+    : {
+      customer: `Swift support found that no MMG payment for order #${orderNumber} reached the store. It won't be prepared or delivered — you can cancel it from the order screen.`,
+      store: `Swift support decided the MMG payment for order #${orderNumber} did not arrive. Don't prepare or hand over this order.`,
+    };
+}
+
+/**
  * Deliver one obligation. Every notice is keyed by (order, generation, role),
  * so a retry — the request's own fast path, the outbox sweep, a replayed job —
  * collapses into the first delivery. Each notice is re-checked against the
@@ -733,21 +761,18 @@ export async function deliverMmgClaimNotice(deps: MmgClaimNoticeDeps, notice: Mm
       }
     } else if (order.mmgClaimRevision === notice.revision && order.mmgClaimResolvedRevision === notice.revision && notice.resolution) {
       const upheld = notice.resolution === 'CUSTOMER_PAID';
+      const words = claimDecisionWords(order.orderNumber, upheld, order.status === RETURNED_STATUS);
       plan.push({
         role: 'customer', userId: order.customerId, type: 'ORDER_UPDATE',
         title: 'Payment review finished',
-        body: upheld
-          ? `Swift support accepted the store's report that your MMG payment for order #${order.orderNumber} arrived. The order can continue.`
-          : `Swift support found that no MMG payment for order #${order.orderNumber} reached the store. It won't be prepared or delivered — you can cancel it from the order screen.`,
+        body: words.customer,
         data: { orderId: order.id, kind: 'mmg_claim_resolved', claimRevision: notice.revision },
       });
       if (businessUserId) {
         plan.push({
           role: 'business', userId: businessUserId, type: 'ORDER_UPDATE',
           title: 'Payment review finished',
-          body: upheld
-            ? `Swift support accepted your payment report for order #${order.orderNumber}. You can continue with the order.`
-            : `Swift support decided the MMG payment for order #${order.orderNumber} did not arrive. Don't prepare or hand over this order.`,
+          body: words.store,
           data: { orderId: order.id, kind: 'mmg_claim_resolved', claimRevision: notice.revision },
         });
       }

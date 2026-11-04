@@ -181,6 +181,26 @@ describe('[G22] after the goods came back', () => {
     return row(o.id);
   };
 
+  const finished = (userId: string, orderId: string) => sys(() => app.prisma.notification.findMany({ where: { userId, title: 'Payment review finished', data: { path: ['orderId'], equals: orderId } } }));
+
+  it('a decision on a returned order never says it can continue or be cancelled: paid means the store refunds', async () => {
+    const o = await returned();
+    expect((await resolve(o.id, 'CUSTOMER_PAID', o.mmgClaimRevision)).statusCode).toBe(200);
+    const [toCustomer] = await finished(customer.id, o.id);
+    expect(toCustomer!.body).toBe(`Swift support found that your MMG payment for order #${o.orderNumber} reached the store. The order went back to the store, so the store refunds you directly. If the store does not answer, contact Swift support.`);
+    const [toStore] = await finished(owner.id, o.id);
+    expect(toStore!.body).toBe(`Swift support found that the customer's MMG payment for order #${o.orderNumber} reached you. The order came back to you, so you owe the customer that money back.`);
+  });
+
+  it('and not paid means nothing more to do, on either side', async () => {
+    const o = await returned();
+    expect((await resolve(o.id, 'CUSTOMER_DID_NOT_PAY', o.mmgClaimRevision)).statusCode).toBe(200);
+    const [toCustomer] = await finished(customer.id, o.id);
+    expect(toCustomer!.body).toBe(`Swift support found that no MMG payment for order #${o.orderNumber} reached the store. The order went back to the store, so you have nothing to pay and nothing more to do.`);
+    const [toStore] = await finished(owner.id, o.id);
+    expect(toStore!.body).toBe(`Swift support decided the MMG payment for order #${o.orderNumber} did not arrive. The order came back to you, so there is nothing more to do.`);
+  });
+
   it('support can still decide the customer did not pay: the dispute closes and the card stops saying paused', async () => {
     const o = await returned();
     expect(o.mmgClaimMismatchAt).toBeInstanceOf(Date);
