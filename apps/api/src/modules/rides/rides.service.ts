@@ -17,7 +17,7 @@ import { log } from '../../utils/logger';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
 
-const ACTIVE_TAXI_STATUSES = [
+export const ACTIVE_TAXI_STATUSES = [
   'PENDING',
   'DRIVER_ASSIGNED',
   'DRIVER_EN_ROUTE',

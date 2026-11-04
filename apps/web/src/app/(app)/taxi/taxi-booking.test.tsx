@@ -105,7 +105,7 @@ describe('[Row 117] with web booking on, the customer books at the fare on the b
   });
 
   it('[quote proof] the waiting terms printed under the fare travel with the booking', async () => {
-    const text = 'Waiting: 300 per 10 minutes after your driver arrives';
+    const text = 'Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride';
     vi.mocked(rides.rideEstimate).mockResolvedValue({ ...ESTIMATE, waiting: { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', text } } as never);
     const user = await pricedPage();
     expect(screen.getAllByText(text).length).toBeGreaterThan(0);

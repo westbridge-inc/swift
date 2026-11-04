@@ -412,6 +412,10 @@ export const allowMoverPlanMove = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/mover-plan/allow-move`, { method: 'POST', body: JSON.stringify({}), reason });
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+/** [BUG-HUNT F20] A verified deletion request from someone who cannot sign in. Founder only, answers 202
+ *  APPROVAL_REQUIRED, and runs the person's own deletion with every blocker once approved. */
+export const deleteVerifiedRequest = (id: string, check: { identityCheck: string; identityNote: string }, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/verified-deletion`, { method: 'POST', body: JSON.stringify({ ...check, reason }), reason });
 /** [BUG-HUNT F22] What the screens tell a store to ask support for: a type picked by mistake, a checked name. */
 export const changeStoreType = (id: string, vendorType: string, reason: string) =>
   apiFetch(`/api/v1/admin/vendors/${id}/type`, { method: 'PUT', body: JSON.stringify({ vendorType }), reason });
@@ -795,6 +799,10 @@ export const setDriverRideClass = (id: string, rideClass: string, reason: string
 // anything refunded — settleOrderRefund below is the only thing that can.
 export const cancelOrder = (id: string, body: { refund?: boolean }, reason: string) =>
   apiFetch(`/api/v1/admin/orders/${id}/cancel`, { method: 'PUT', body: JSON.stringify({ ...body, reason }), reason });
+
+/** [BUG-HUNT-2 G01] A ride in progress that cannot finish: closed with no fare, and both sides told. */
+export const endStuckRide = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/orders/${id}/end-ride`, { method: 'POST', body: '{}', reason });
 
 /** The cash actually went back: a unique reference and the amount handed over. */
 export const settleOrderRefund = (id: string, reference: string, amount: string | number, reason: string) =>
