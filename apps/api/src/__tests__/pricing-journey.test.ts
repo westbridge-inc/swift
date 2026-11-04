@@ -127,6 +127,8 @@ function receiptOf(order: Order, items: Array<{ name: string; quantity: number; 
 }
 const receiptTotal = (html: string) => /<tr class="grand"><td>Total<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1];
 const receiptDeliveryPay = (html: string) => /Delivery pay for your rider(?: \(express\))?<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1] ?? null;
+/** [BUG-HUNT-2 G16] A parcel's own word on its receipt: the fee is the whole price, there is no store order above it. */
+const receiptParcelFee = (html: string) => /Delivery fee(?: \(express\))?<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1] ?? null;
 
 async function purge() {
   await sys(async () => {
@@ -430,7 +432,7 @@ describe('courier — estimate = job = rider offer = receipt', () => {
     expect([Number(stored.deliveryFee), Number(stored.totalAmount), Number(stored.subtotalBase), Number(stored.billableKm)]).toEqual([fee, fee, 0, km]);
     expect(cashMathForOffer(stored)).toEqual({ collectFromCustomer: fee, payToVendor: 0, youKeep: fee });
     const receipt = receiptOf(stored);
-    expect(receiptDeliveryPay(receipt)).toBe(money(fee));
+    expect(receiptParcelFee(receipt)).toBe(money(fee));
     expect(receiptTotal(receipt)).toBe(money(fee));
   });
 });
