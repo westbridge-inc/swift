@@ -39,6 +39,8 @@ import {
 interface ProviderProfile {
   id: string;
   trade: string;
+  /** The server's words for the trade. Absent on an older API. */
+  tradeLabel?: string;
   bio?: string | null;
   isVerified: boolean;
   certified?: boolean;
@@ -176,7 +178,8 @@ function ProviderDashboard({
         <IconChip icon={presentation.live ? 'check-circle' : 'shield'} />
         <View style={{ flex: 1 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: space.sm }}>
-            <T variant="heading">{provider.trade}</T>
+            {/* [BUG-HUNT F24] The server's words for the trade, never its code ("ac_refrigeration"). */}
+            <T variant="heading">{provider.tradeLabel ?? provider.trade}</T>
             <TonePill
               label={presentation.label}
               tone={presentation.live ? 'success' : 'neutral'}

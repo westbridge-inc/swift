@@ -3,6 +3,7 @@ import { Prisma, type UserStatus } from '@prisma/client';
 import { requireStepUp } from '../auth/step-up';
 import { AppError } from '../../utils/errors';
 import { isAdminAccount, sendAdminEmailChangeNotice } from '../admin/admin-email-change';
+import { assertNameNotLocked } from './legal-name';
 
 type ProfileUpdate = { firstName?: string; lastName?: string; email?: string };
 const INACTIVE: readonly UserStatus[] = ['DEACTIVATED', 'BANNED', 'SUSPENDED'];
@@ -30,6 +31,7 @@ const PROFILE_SELECT = {
  * Customers are unchanged until #1550: no code, no notice.
  */
 export async function updateCustomerProfile(app: FastifyInstance, userId: string, sessionId: string | null, body: ProfileUpdate) {
+  await assertNameNotLocked(app.prisma, userId, body);
   if (body.email) {
     const existing = await app.prisma.user.findFirst({ where: { email: body.email, id: { not: userId } }, select: { id: true } });
     if (existing) throw emailTaken();

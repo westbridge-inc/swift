@@ -20,7 +20,7 @@ import {
 } from '@/lib/vendor-order-view';
 import {
   acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder, markNotCollected,
-  markDelivered, markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
+  markDelivered, markPreparing, markReady, markRefundSent, money, proposeSubstitution, refundLine, rejectOrder,
   retryDispatch, setFulfillmentMode, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
 import { statusChip, timeAgo } from './order-chip';
@@ -383,6 +383,18 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       refresh();
     },
   });
+  // [BUG-HUNT-2 G08] "Refund sent": the store sends it from its own MMG, then gives Swift the reference.
+  const [refundReference, setRefundReference] = useState('');
+  const [refundOpen, setRefundOpen] = useState(false);
+  const refundSent = useMutation({
+    mutationFn: () => {
+      setError(null);
+      return markRefundSent(id, refundReference.trim(), order.data?.mmgRefund?.amount ?? '');
+    },
+    onSuccess: () => setRefundOpen(false),
+    onError: (e) => setError((e as Error).message),
+    onSettled: refresh,
+  });
   const notCollected = useMutation({
     mutationFn: async () => {
       setError(null);
@@ -740,6 +752,25 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
         </section>
       )}
       {prepLine && <p className="mt-3 text-xs text-[var(--swift-muted)]">{prepLine}</p>}
+      {o.mmgRefund && (
+        <section aria-label="MMG refund" className="mt-4 rounded-xl border border-[var(--swift-border)] p-4">
+          <h3 className="text-sm font-semibold">MMG refund</h3>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">{o.mmgRefund.line}</p>
+          {o.mmgRefund.canMarkSent === true && !refundOpen && (
+            <button onClick={() => { setError(null); setRefundOpen(true); }} className="mt-3 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white">Refund sent</button>
+          )}
+          {refundOpen && (
+            <div role="dialog" aria-label="Confirm refund sent" className="mt-3">
+              <p className="text-sm text-[var(--swift-muted)]">Send the refund from your MMG first. Then enter the reference from your MMG message.</p>
+              <input value={refundReference} onChange={(e) => setRefundReference(e.target.value)} aria-label="MMG reference" className="mt-2 w-full rounded-lg border border-[var(--swift-border)] px-3 py-2 text-sm" />
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button onClick={() => refundSent.mutate()} disabled={refundSent.isPending || refundReference.trim().length === 0} className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{refundSent.isPending ? 'Sending…' : 'I sent it'}</button>
+                <button onClick={() => setRefundOpen(false)} disabled={refundSent.isPending} className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50">Not yet</button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
       {/* [STORE-DASH · owner 22 Oct "fast taps"] The next step is a big button in a bar that stays at the
           bottom of the window while it scrolls, as on the phone (VendorOrderDetailScreen action bar). */}
       {(actions.length > 0 || confirmDelivered || confirmReject || confirmNoShow || noShowRecorded || confirmNotCollected || notCollectedDone !== null || error) && (

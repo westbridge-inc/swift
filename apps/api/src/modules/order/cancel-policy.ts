@@ -179,7 +179,7 @@ export const MMG_STORE_REFUNDS_SENTENCE = 'If you already sent the MMG payment, 
 /** [owner #46 · Opus S3-1] An MMG store order whose payment already reached the store: the store cancels and
  *  refunds (Swift never holds the money), so the customer is pointed at the store, with its published number. */
 export const MMG_PAID_STORE_CANCELS_CODE = 'MMG_PAID_STORE_CANCELS';
-export const MMG_PAID_STORE_CANCELS_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money.';
+export const MMG_PAID_STORE_CANCELS_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money. If the store does not answer, contact Swift support.';
 
 /** [BUG-HUNT-2 G14a] The same refusal to someone who told Swift they did not pay: never "already paid" beside "you disagree". */
 export const MMG_DISPUTED_CANCEL_MESSAGE = 'You and the store disagree about this payment, so the order is paused until a person at Swift decides. It cannot be cancelled until then.';

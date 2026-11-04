@@ -56,6 +56,7 @@ import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { cancelChainDealChange, chainOf, changeChainDeal, setChainDeal } from '../vendor/chain-deal';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
+import { assertMayDecideRefund, openRefundWhere, refundResolvedNotice, refundVoidedNotice, resolveMmgRefundDispute, tellBothOfRefund, voidMmgRefundObligation } from '../order/mmg-refund-rail';
 import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -119,6 +120,7 @@ import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCas
 import { maskSubscription, maskUserPhone } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
+import { changeLegalName } from '../user/legal-name';
 import { assertNameNotReserved, FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
@@ -187,6 +189,7 @@ const vendorsQuerySchema = z.object({
 });
 
 // Riders/drivers list filters use UI keywords, not DB enums
+const legalNameChangeSchema = z.object({ firstName: z.string().trim().min(1).max(80), lastName: z.string().trim().min(1).max(80) });
 const storeTypeChangeSchema = z.object({ vendorType: z.nativeEnum(VendorType) });
 const storeNameChangeSchema = z.object({ name: z.string().trim().min(2).max(100) });
 const phoneChangeSchema = z.object({ phone: z.string().trim().min(7).max(20) });
@@ -1454,6 +1457,21 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await riskScoreFor(app.prisma, id) };
   });
 
+  /**
+   * [BUG-HUNT F21] An approved partner's name is locked in the apps: "verified" must keep meaning a person checked it.
+   * This is the person. The trail names what changed, never the names: an audit row is never erased, a name must be.
+   */
+  app.put('/users/:id/name', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { firstName, lastName } = legalNameChangeSchema.parse(request.body ?? {});
+    const changed = await changeLegalName(app.prisma, id, { firstName, lastName }, (tx, fields) => auditIn(tx, request.user.userId, 'CHANGE_LEGAL_NAME', 'User', id, { changed: fields }, request));
+    await notifications.send({
+      userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your name was changed',
+      body: 'Swift support changed the name on your account after checking it. Contact Swift support if this looks wrong.',
+    });
+    return { success: true, data: { changed } };
+  });
+
   /** [BUG-HUNT F22] Move an account to a new number: the code goes to the new number (admin/phone-change.ts). */
   app.post('/users/:id/phone-change', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
@@ -2135,7 +2153,7 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Vendor Suspended',
+      title: 'Store suspended',
       body: reason || `${vendor.name} has been suspended. Please contact support.`,
       data: { vendorId: id },
     });
@@ -3657,6 +3675,8 @@ export async function adminRoutes(app: FastifyInstance) {
         userAgent: request.headers['user-agent'],
       },
       invalidStatus: (current) => new AppError(400, 'INVALID_STATUS', `Cannot cancel an order with status ${current}`),
+      // [BUG-HUNT-2 G08] Support is told its own door, not the customer's sentence.
+      paidMmgRefusal: () => new AppError(409, 'MMG_CANCEL_UNAVAILABLE', 'This order is paid by MMG. Use Close: store refunds on the order, which records the refund the store owes.'),
       // [A-14] The obligation is part of the cancellation fact, not a follow-up
       // write: an operator who decided the customer is owed money must never be
       // able to leave a cancelled order with no record of it.
@@ -3751,6 +3771,7 @@ export async function adminRoutes(app: FastifyInstance) {
       adminUserId: request.user.userId,
       expectedClaimRevision: body.expectedClaimRevision,
       reason,
+      authorize: (tx, parties) => assertMayDecideRefund(tx, request.user.userId, parties, approvalId),
       audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
     });
 
@@ -3774,6 +3795,63 @@ export async function adminRoutes(app: FastifyInstance) {
       });
     }
     return { success: true, data: { orderId: id, status: 'CANCELLED', disposition: MMG_STORE_CLOSE_DISPOSITION } };
+  });
+
+  /**
+   * [BUG-HUNT-2 G08] GET /mmg-refunds — what stores owe customers back by MMG: open, overdue or disputed, oldest due first.
+   * A list of records: names and amounts, never a phone number. Swift holds none of this money.
+   */
+  app.get('/mmg-refunds', { preHandler: [adminGuard] }, async (request) => {
+    const { filter } = z.object({ filter: z.enum(['open', 'overdue', 'disputed']).default('open') }).parse(request.query ?? {});
+    const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
+    const now = new Date();
+    const where: Prisma.MmgRefundObligationWhereInput = filter === 'overdue'
+      ? { status: 'OWED', dueAt: { lte: now } }
+      : filter === 'disputed' ? { status: 'DISPUTED' } : openRefundWhere;
+    const [rows, total] = await Promise.all([
+      tenantPrisma.mmgRefundObligation.findMany({
+        where, orderBy: { dueAt: 'asc' }, skip, take: limit,
+        select: {
+          id: true, orderId: true, status: true, amount: true, currencyCode: true, dueAt: true, missedAt: true, createdAt: true, reason: true,
+          order: { select: { orderNumber: true, vendor: { select: { name: true } } } },
+          send: { select: { id: true, mmgRefundRef: true, sentAt: true, answer: true, answeredAt: true, supportTicketId: true } },
+        },
+      }),
+      tenantPrisma.mmgRefundObligation.count({ where }),
+    ]);
+    const data = rows.map((row) => ({
+      id: row.id, orderId: row.orderId, orderNumber: row.order.orderNumber, storeName: row.order.vendor?.name ?? null, status: row.status,
+      amount: row.amount.toFixed(2), currencyCode: row.currencyCode, dueAt: row.dueAt, overdue: row.status === 'OWED' && row.dueAt.getTime() <= now.getTime(),
+      missedAt: row.missedAt, createdAt: row.createdAt, reason: row.reason, send: row.send,
+    }));
+    return { success: true, ...paginatedResponse(data, total, { page, limit, skip }) };
+  });
+
+  /** [BUG-HUNT-2 G08] POST /mmg-refunds/sends/:id/resolve — support's finding on a disputed refund. Record only. */
+  app.post('/mmg-refunds/sends/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { received, note } = z.object({ received: z.boolean(), note: z.string().trim().min(3).max(500) }).parse(request.body);
+    const done = await resolveMmgRefundDispute(tenantPrisma as unknown as PrismaClient, {
+      sendId: id, actorId: request.user.userId, received, note,
+      authorize: (tx, parties) => assertMayDecideRefund(tx, request.user.userId, parties),
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    });
+    await tellBothOfRefund(tenantPrisma as unknown as PrismaClient, notifications, done, refundResolvedNotice(done.orderNumber, done.amount, received), `mmg-refund-resolved:${id}:${received ? 'yes' : 'no'}`);
+    return { success: true, data: { sendId: id, orderId: done.orderId, received } };
+  });
+
+  /** [BUG-HUNT-2 G08] POST /mmg-refunds/:id/void — nothing is owed on this record any more. Two people. The record stays. */
+  app.post('/mmg-refunds/:id/void', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { note } = z.object({ note: z.string().trim().min(3).max(500) }).parse(request.body);
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const done = await voidMmgRefundObligation(tenantPrisma as unknown as PrismaClient, {
+      obligationId: id, actorId: request.user.userId, note,
+      authorize: (tx, parties) => assertMayDecideRefund(tx, request.user.userId, parties, approvalId),
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+    await tellBothOfRefund(tenantPrisma as unknown as PrismaClient, notifications, done, refundVoidedNotice(done.orderNumber, done.amount), `mmg-refund-voided:${id}`);
+    return { success: true, data: { id, orderId: done.orderId, status: 'VOIDED' } };
   });
 
   /**

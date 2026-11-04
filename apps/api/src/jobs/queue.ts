@@ -689,6 +689,64 @@ export async function expireUnpaidMmgAcceptancesJob(ctx: JobContext, batch = 100
   return cancelled;
 }
 
+/** [BUG-HUNT-2 G08] The refund deadline. An OWED refund past its deadline is marked missed once, under the order lock, and
+ *  its store is told; one platform page stands while any is overdue. A "Refund sent" the customer has not answered in two
+ *  days is asked once more. Record only: it moves no money and closes nothing. */
+export async function mmgRefundDeadlinesJob(ctx: JobContext, batch = 200): Promise<{ missed: number; overdue: number; nudged: number }> {
+  const {
+    MMG_REFUND_NUDGE_AFTER_HOURS, MMG_REFUND_OVERDUE_KEY, MMG_REFUND_OVERDUE_TITLE, MMG_REFUND_OVERDUE_WINDOW_SECONDS,
+    markMmgRefundMissed, refundNudgeCustomerNotice, refundOverdueStoreNotice,
+  } = await import('../modules/order/mmg-refund-rail');
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const { pageOps, resolveOpsPage } = await import('../modules/ops/ops-page');
+  const notifications = new NotificationService(ctx.prisma, ctx.io);
+  const now = new Date();
+  const due = await ctx.prisma.mmgRefundObligation.findMany({
+    where: { status: 'OWED', missedAt: null, dueAt: { lte: now } }, orderBy: { dueAt: 'asc' }, take: batch,
+    select: { id: true, orderId: true, amount: true, order: { select: { orderNumber: true, vendor: { select: { owner: { select: { userId: true } } } } } } },
+  });
+  let missed = 0;
+  for (const row of due) {
+    const marked = await inTenantOf(ctx.prisma, { order: row.orderId }, () => markMmgRefundMissed(ctx.prisma, row.id, now))
+      .catch((err: unknown) => { ctx.log.error({ err, obligationId: row.id }, 'refund deadline failed: the next sweep retries'); return false; });
+    if (!marked) continue;
+    missed += 1;
+    const ownerUserId = row.order.vendor?.owner.userId;
+    if (!ownerUserId) continue;
+    await inTenantOf(ctx.prisma, { order: row.orderId }, () => notifications.send({
+      userId: ownerUserId, type: 'ORDER_UPDATE', audience: 'business', ...refundOverdueStoreNotice(row.order.orderNumber, row.amount),
+      data: { orderId: row.orderId, kind: 'mmg_refund_overdue' }, dedupeKey: `mmg-refund-overdue:${row.id}`,
+    })).catch((err: unknown) => ctx.log.warn({ err, obligationId: row.id }, 'refund overdue notice failed'));
+  }
+  const unanswered = await ctx.prisma.mmgRefundSend.findMany({
+    where: { answer: null, sentAt: { lte: new Date(now.getTime() - MMG_REFUND_NUDGE_AFTER_HOURS * 3_600_000) }, obligations: { some: { status: 'SENT' } } },
+    orderBy: { sentAt: 'asc' }, take: batch,
+    select: { id: true, orderId: true, customerId: true, amount: true, order: { select: { orderNumber: true } } },
+  });
+  for (const send of unanswered) {
+    await inTenantOf(ctx.prisma, { order: send.orderId }, () => notifications.send({
+      userId: send.customerId, type: 'ORDER_UPDATE', audience: 'customer', ...refundNudgeCustomerNotice(send.order.orderNumber, send.amount),
+      data: { orderId: send.orderId, kind: 'mmg_refund_sent' }, dedupeKey: `mmg-refund-nudge:${send.id}`,
+    })).catch((err: unknown) => ctx.log.warn({ err, sendId: send.id }, 'refund nudge failed'));
+  }
+  const overdue = await ctx.prisma.mmgRefundObligation.findMany({
+    where: { status: 'OWED', dueAt: { lte: now } }, orderBy: { dueAt: 'asc' }, take: batch,
+    select: { orderId: true, order: { select: { orderNumber: true } } },
+  });
+  if (overdue.length === 0) {
+    await resolveOpsPage(ctx.prisma, MMG_REFUND_OVERDUE_TITLE, 'no-mmg-refund-overdue');
+    return { missed, overdue: 0, nudged: unanswered.length };
+  }
+  await pageOps({ prisma: ctx.prisma, redis: ctx.redis, notifications }, {
+    key: MMG_REFUND_OVERDUE_KEY,
+    windowSeconds: MMG_REFUND_OVERDUE_WINDOW_SECONDS,
+    title: MMG_REFUND_OVERDUE_TITLE,
+    body: `${overdue.length} MMG refund(s) past the deadline, oldest order ${overdue[0]!.order.orderNumber}. See MMG refunds, then call the store.`,
+    data: { kind: 'ops_mmg_refund_overdue', overdue: overdue.length, orderIds: overdue.slice(0, 10).map((row) => row.orderId) },
+  });
+  return { missed, overdue: overdue.length, nudged: unanswered.length };
+}
+
 /** [BUG-HUNT-2 G20] A ready pickup nobody collected: its store told once at 24 hours (dedupe key per order, in the order's
  *  tenant), and one platform page for support at 48 hours, closed when none is left. It closes no order. */
 export async function pickupNotCollectedWatchJob(ctx: JobContext, batch = 500): Promise<{ notCollected: number; overTwoDays: number }> {
@@ -1526,6 +1584,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { NotificationService } = await import('../modules/notification/notification.service');
         const result = await watchMalwareScanner({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
         if (result.state === 'down') ctx.log.warn({ ...result }, 'malware scanner not answering');
+        return;
+      }
+      if (job.name === 'mmg-refund-deadlines') {
+        const result = await mmgRefundDeadlinesJob(ctx);
+        if (result.overdue > 0) ctx.log.warn({ ...result }, 'MMG refunds past the deadline');
         return;
       }
       if (job.name === 'ride-overdue-watch') {
@@ -3091,6 +3154,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // failed ask in a row pages ops. Nothing is dialled while MALWARE_SCAN is dark.
   await queues.verificationQueue.add('malware-scanner-watch', {}, {
     repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [BUG-HUNT-2 G08] Every fifteen minutes: an MMG refund past its deadline.
+  await queues.verificationQueue.add('mmg-refund-deadlines', {}, {
+    repeat: { every: 15 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });
