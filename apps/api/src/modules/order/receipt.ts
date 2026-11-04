@@ -17,6 +17,7 @@ type ReceiptOrder = {
   status: string;
   orderType: string;
   fulfillment: string | null;
+  fulfillmentMode?: string | null;
   paymentMethod: string | null;
   paymentStatus: string;
   subtotalCustomer: unknown;
@@ -128,6 +129,9 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   // legacy terminal can reach DELIVERED with paymentStatus still PENDING, and
   // "Paid in cash" there asserts a collection nobody recorded. Say what the
   // ledger can prove: captured → paid; otherwise → due.
+  // [FIXES-4] Not where the business takes the cash itself. A receipt is issued once the order
+  // is complete, and completing a pickup, an appointment or a store's own delivery writes the
+  // status only: the customer owes nothing that Swift knows of, and Swift cannot say it was paid.
   const cashCaptured = order.paymentStatus === 'CAPTURED';
   // [review S3-2] A delivery handed over short is CAPTURED with less cash than
   // the total: say the cash actually taken and what was not collected, never
@@ -143,12 +147,14 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
           ? 'MMG payment reported received by the store — not confirmed by the provider'
           : 'MMG payment to the store — confirmation pending')
       : order.fulfillment === 'PICKUP'
-        ? (cashCaptured ? 'Paid in cash at the store' : 'Cash due at the store')
+        ? (cashCaptured ? 'Paid in cash at the store' : 'Cash to the store, not recorded by Swift')
         : order.fulfillment === 'APPOINTMENT'
-          ? (cashCaptured ? 'Paid at the appointment' : 'Due at the appointment')
+          ? (cashCaptured ? 'Paid at the appointment' : 'Cash to the business, not recorded by Swift')
           : shortCash
             ? `Paid ${formatMoney(order.doorCashCollectedAmount, currency, { whole: true })} in cash on delivery (${formatMoney(shortfall, currency, { whole: true })} not collected)`
-            : (cashCaptured ? 'Paid in cash on delivery' : 'Cash due on delivery');
+            : cashCaptured
+              ? 'Paid in cash on delivery'
+              : order.fulfillmentMode === 'VENDOR_DELIVERY' ? 'Cash to the store, not recorded by Swift' : 'Cash due on delivery';
   // [SUBSTITUTION · owner 17 Oct] A line that came off the order (the store
   // removed it, the customer declined the swap, or nobody answered in time)
   // was never charged: the receipt says so and prices it at nothing, so the

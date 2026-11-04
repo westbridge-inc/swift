@@ -459,6 +459,9 @@ export default function OrderDetailPage() {
   const stopped = cancelled || refunded || failed;
   const completed = ['DELIVERED', 'COMPLETED'].includes(order.status)
     || (order.fulfillment === 'PICKUP' && order.status === 'PICKED_UP');
+  // [FIXES-4] The business takes this cash itself: completing a pickup, an appointment or the store's own
+  // delivery writes the status only, so Swift never records it and nothing will ever confirm it.
+  const cashWithBusiness = order.fulfillment === 'PICKUP' || order.fulfillment === 'APPOINTMENT' || Boolean(order.ownRiderNotice);
   const mmgAmbiguous = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING';
   const holdExpiryMs = holdExpiresAt ? new Date(holdExpiresAt).getTime() : 0;
   const holdActive = !stopped && !order.rider && order.status === 'PENDING' && Number.isFinite(holdExpiryMs) && holdExpiryMs > now;
@@ -897,7 +900,7 @@ export default function OrderDetailPage() {
                           : paymentCaptured
                             ? isTaxi ? 'Cash received after the ride' : order.fulfillment === 'DELIVERY' ? 'Cash received at handover' : 'Business confirmed cash received'
                             : completed
-                              ? 'Cash status awaiting confirmation'
+                              ? cashWithBusiness ? 'Cash is handled by the business' : 'Cash status awaiting confirmation'
                               : isTaxi ? 'Cash due to the driver' : order.fulfillment === 'DELIVERY' ? 'Cash due at handover' : 'Cash due to the business'
                         : 'Payment status from Swift'}
                 </strong>
@@ -934,7 +937,7 @@ export default function OrderDetailPage() {
                               ? 'Swift’s order record confirms cash was received directly at handover.'
                               : 'Swift’s order record confirms the business received cash directly.'
                           : completed
-                            ? `${isTaxi ? 'The ride' : order.fulfillment === 'APPOINTMENT' ? 'The appointment' : order.fulfillment === 'PICKUP' ? 'The collection' : 'The handover'} is complete, but this order does not yet show confirmed cash receipt.`
+                            ? `${isTaxi ? 'The ride' : order.fulfillment === 'APPOINTMENT' ? 'The appointment' : order.fulfillment === 'PICKUP' ? 'The collection' : 'The handover'} is complete${cashWithBusiness ? '. Cash goes to the business directly, so Swift has no record of it. Swift did not hold any order money.' : ', but this order does not yet show confirmed cash receipt.'}`
                             : `Pay ${isTaxi ? 'the driver' : order.fulfillment === 'DELIVERY' ? 'the rider' : 'the business'} directly. Swift does not hold your money.`
                         : 'Swift can’t show this order’s payment status. Check again shortly.'}
                 </p>
