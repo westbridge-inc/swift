@@ -31,7 +31,7 @@ import { ensureLedgerAccounts } from '../modules/billing/ledger';
 import { getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type SandboxCheckoutKeys } from '../providers/mmg/mmg-checkout';
 import {
-  SandboxMmgProvider, lookupDetailFrom, sandboxAddHistory, sandboxResetMmg, sandboxScriptReversal,
+  SandboxMmgProvider, lookupDetailFrom, sandboxAddHistory, sandboxResetMmg, sandboxScriptReversal, sandboxSetTxStatus,
   type MmgCheckoutLookupClient, type MmgLookupDetail, type MmgReversalClient,
 } from '../providers/mmg/mmg-provider';
 import { FakeMmgHistory } from './helpers/mmg-history-fake';
@@ -465,10 +465,10 @@ describe('[Row 156 3] a case closes on MMG\'s proof and nothing else', () => {
     const heldReversal = await ask(held.checkoutId, held.amount);
     const row = await caseOf(p.checkoutId);
     const close = (id: string, reversalId: string | null) => raw(`UPDATE fee_refund_cases SET state = 'REFUNDED', "reversalId" = $1, "refundedAt" = now() WHERE id = $2`, reversalId, id);
-    await expect(close(row.id, null)).rejects.toThrow(/fee_refund_cases_closed_check|only a REVERSED reversal/);
-    await expect(close(row.id, 'typed-by-a-person')).rejects.toThrow(/only a REVERSED reversal/);
-    await expect(close(row.id, otherReversal.id)).rejects.toThrow(/only a REVERSED reversal/);
-    await expect(close((await caseOf(held.checkoutId)).id, heldReversal.id)).rejects.toThrow(/only a REVERSED reversal/);
+    await expect(close(row.id, null)).rejects.toThrow(/fee_refund_cases_closed_check|only MMG's proof/);
+    await expect(close(row.id, 'typed-by-a-person')).rejects.toThrow(/only MMG's proof/);
+    await expect(close(row.id, otherReversal.id)).rejects.toThrow(/only MMG's proof/);
+    await expect(close((await caseOf(held.checkoutId)).id, heldReversal.id)).rejects.toThrow(/only MMG's proof/);
     expect((await caseOf(p.checkoutId)).state).toBe('OPEN');
   });
 
@@ -487,6 +487,57 @@ describe('[Row 156 3] a case closes on MMG\'s proof and nothing else', () => {
     await expect(raw(`UPDATE fee_refund_cases SET state = 'OPEN', "reversalId" = NULL, "refundedAt" = NULL WHERE id = $1`, row.id)).rejects.toThrow(/final/);
     await expect(raw(`UPDATE fee_refund_cases SET "refundedAt" = now() WHERE id = $1`, row.id)).rejects.toThrow(/final/);
     expect((await caseOf(p.checkoutId)).reversalId).toBe(reversal.id);
+  });
+
+  /** MMG returned it after the money had paid for a week: a person closes the return on MMG's proof, and the wallet stays. */
+  const returnedNotBooked = async (p: { checkoutId: string; subId: string; txn: string; amount: number }, reference: string) => {
+    sandboxScriptReversal(p.txn, 'pending');
+    const sent = await ask(p.checkoutId, p.amount);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const held = await asTenant(() => reversals.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    expect(held).toMatchObject({ state: 'HELD', heldReason: 'WALLET_NO_LONGER_HOLDS_IT' });
+    return asTenant(() => reversals.resolveHeld({ tenantId: 'swift-default', reversalId: held.id, outcome: 'RETURNED_NOT_BOOKED', mmgReference: reference, actorId: admin.userId }, async () => {}));
+  };
+
+  it('a return closed as returned, not booked, closes the case: MMG proved the money went back', async () => {
+    const p = await paidCheckout();
+    await open(p.checkoutId);
+    const closed = await returnedNotBooked(p, `CASEB${seq}`);
+    expect(closed).toMatchObject({ state: 'FAILED', resolution: 'RETURNED_NOT_BOOKED' });
+    expect((await sweep()).refunded).toBe(1);
+    const row = await caseOf(p.checkoutId);
+    expect(row).toMatchObject({ state: 'REFUNDED', reversalId: closed.id });
+    expect(row.refundedAt?.toISOString()).toBe(closed.failedAt?.toISOString());
+  });
+
+  it('no case opens on such a payment: the return\'s own rule says it went back', async () => {
+    const p = await paidCheckout();
+    await returnedNotBooked(p, `CASEC${seq}`);
+    const res = await open(p.checkoutId);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('ALREADY_REVERSED');
+  });
+
+  it('a person\'s "not returned" is not proof: the sweep leaves it and the database refuses it', async () => {
+    const p = await paidCheckout();
+    await open(p.checkoutId);
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    expect(held.state).toBe('HELD');
+    const answered = await asTenant(() => reversals.resolveHeld({ tenantId: 'swift-default', reversalId: held.id, outcome: 'NOT_RETURNED', mmgReference: `CASED${seq}`, actorId: admin.userId }, async () => {}));
+    expect(answered).toMatchObject({ state: 'FAILED', resolution: 'NOT_RETURNED' });
+    expect((await sweep()).refunded).toBe(0);
+    const row = await caseOf(p.checkoutId);
+    await expect(raw(`UPDATE fee_refund_cases SET state = 'REFUNDED', "reversalId" = $1, "refundedAt" = now() WHERE id = $2`, held.id, row.id)).rejects.toThrow(/only MMG's proof/);
+  });
+
+  it('a case is never deleted, whoever asks', async () => {
+    const p = await paidCheckout();
+    await open(p.checkoutId);
+    const row = await caseOf(p.checkoutId);
+    await expect(raw('DELETE FROM fee_refund_cases WHERE id = $1', row.id)).rejects.toThrow(/a case is never deleted/);
+    expect(await caseOf(p.checkoutId)).toMatchObject({ id: row.id, state: 'OPEN' });
   });
 
   it('no route or console word can close one: the module writes REFUNDED in the sweep alone', () => {
@@ -540,6 +591,22 @@ describe('[Row 156 4 + 5] overdue: one bounded platform page', () => {
     const t0 = page!.createdAt.getTime();
     for (const s of [300, 900, 3600, 7000]) await runWithoutTenant(() => escalateOverdueOpsAlerts(app.prisma, notifications, getChannels().sms, { now: new Date(t0 + s * 1000), limit: 100, alertIds: [page!.id], smsDay: app.redis }), 'test:fee-refund-case');
     expect(texts()).toHaveLength(1);
+  });
+
+  it('a second case overdue after the page closed pages at once, not a day later', async () => {
+    const first = await paidCheckout();
+    await open(first.checkoutId);
+    const due = AFTER_DUE(await caseOf(first.checkoutId));
+    await sweep(due);
+    expect(await pages()).toHaveLength(1);
+    await ask(first.checkoutId, first.amount);
+    expect(await sweep(due)).toEqual({ refunded: 1, overdue: 0 });
+    const second = await paidCheckout();
+    await open(second.checkoutId);
+    await sweep(AFTER_DUE(await caseOf(second.checkoutId)));
+    const rows = await pages();
+    expect(rows).toHaveLength(2);
+    expect(rows[1]!.closedAt).toBeNull();
   });
 
   it('closes when nothing is overdue any more', async () => {

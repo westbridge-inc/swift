@@ -48,6 +48,8 @@ export async function watchOverdueRides(
   const overdue = rides.filter((ride) => now.getTime() > overdueAt(ride));
   if (overdue.length === 0) {
     await resolveOpsPage(deps.prisma, RIDE_OVERDUE_TITLE, 'no-ride-overdue');
+    // The page is closed, so its window goes with it: the next overdue ride pages at once.
+    await deps.redis.del(RIDE_OVERDUE_KEY);
     return { overdue: 0, outcome: 'quiet' };
   }
   const page = await pageOps(deps, {

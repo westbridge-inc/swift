@@ -93,6 +93,10 @@ export interface ReversalDeps {
 }
 
 
+/** MMG's lookup proved this payment went back: a return that booked, or one a person closed because the money had already
+ *  paid for a week. Both rest on MMG's own record, and in both the money is back with the partner. */
+export const RETURN_PROVEN = { OR: [{ state: 'REVERSED' }, { resolution: 'RETURNED_NOT_BOOKED' }] } satisfies Prisma.MmgFeeReversalWhereInput;
+
 /**
  * Can this payment be returned, right now? Read under the payer's billing lock
  * and the checkout's row lock. `expectAmount` is the whole amount the admin
