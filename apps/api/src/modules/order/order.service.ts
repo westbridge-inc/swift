@@ -29,7 +29,7 @@ import { getMapsProvider, type MapsProvider, type RouteSource } from '../../prov
 import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
-import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
+import { cancellationVerdict, mmgPaidCancelMessage, readAssignedAt, readNoMoverFound } from './cancel-policy';
 import { readStoreCannotHandOver } from '../vendor/store-hold';
 import { pickupCancelledStoreNotice } from './pickup-not-collected';
 import { readTooLateToDeliver } from '../dispatch/rescue';
@@ -751,6 +751,9 @@ export interface CanonicalOrderTransitionInput {
    * (orders_paid_mmg_terminal_needs_refund_obligation). Only
    * `closeMmgOrderAsStoreRefund` (order/mmg-store-close.ts) sets it. */
   paidMmgStoreRefundClosure?: true;
+  /** [BUG-HUNT-2 G08] The words of the paid-MMG refusal for THIS caller: "the store cancels and refunds you" is the customer's
+   * sentence, and false said to the store or to support. The refusal itself never changes. */
+  paidMmgRefusal?: () => AppError;
   /** Admin's explicit action evidence belongs in the same commit as the order
    * state. The generic after-response route audit remains defence in depth. */
   operatorAudit?: {
@@ -2557,7 +2560,7 @@ export class OrderService {
       && MMG_MONEY_MOVED.has(source.paymentStatus)
       && !storeRefundClosure
     ) {
-      throw new AppError(
+      throw input.paidMmgRefusal?.() ?? new AppError(
         409,
         'MMG_CANCEL_UNAVAILABLE',
         'This order is already paid by MMG to the store. The store cancels and refunds you directly — Swift never holds the money.',
@@ -2946,7 +2949,7 @@ export class OrderService {
           // directs the store to refund directly.
           if (order.paymentMethod === 'MOBILE_MONEY' && MMG_MONEY_MOVED.has(order.paymentStatus)) {
             // [owner #46 · Opus S3-1] The same words the order screen shows beside the store's number.
-            throw new AppError(409, 'MMG_CANCEL_UNAVAILABLE', MMG_PAID_STORE_CANCELS_MESSAGE);
+            throw new AppError(409, 'MMG_CANCEL_UNAVAILABLE', mmgPaidCancelMessage(order));
           }
 
           const now = new Date();

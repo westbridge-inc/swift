@@ -36,7 +36,7 @@ const DAY = 24 * 60 * 60 * 1000;
 const PUBLISHED = '+5926001234';
 const REFUSED_MESSAGE = 'The store has accepted your order, so it can no longer be cancelled in the app. Contact the store to change or cancel it.';
 const AWAITING_STORE_MESSAGE = 'You can cancel for free until the store accepts your order.';
-const MMG_PAID_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money.';
+const MMG_PAID_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money. If the store does not answer, contact Swift support.';
 const TOO_LATE_MESSAGE = 'Your order is running very late. You can cancel it for free.';
 
 let app: FastifyInstance;

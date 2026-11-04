@@ -203,6 +203,32 @@ describe('[MC-AD5] an MMG payment dispute', () => {
   });
 });
 
+describe('[G08] a paid MMG order that cannot be fulfilled', () => {
+  const paid = () => orderOf({ mmgClaimMismatchAt: null, customerMmgClaim: 'PAID', canCloseStoreRefund: true });
+
+  it('has its close on the order, bound to the revision on screen, with a reason, and a second admin is the next step', async () => {
+    const fetchMock = serveOrder(paid(), () => ({ status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this.', details: { approvalId: 'apr_1' } } } }));
+    const { user } = detail();
+    await user.click(await screen.findByRole('button', { name: 'Close: store refunds' }));
+    const dialog = screen.getByRole('dialog', { name: 'Close SW-2002 as refund handled by the store?' });
+    expect(dialog.textContent).toContain('Swift records that and moves no money');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Close it' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(String(url)).toMatch(/\/api\/v1\/admin\/orders\/ord-d-1\/close-store-refund$/);
+    expect(JSON.parse(String(init?.body))).toEqual({ expectedClaimRevision: 4 });
+    expect(new Headers(init?.headers).get('x-swift-reason')).toBe(REASON);
+  });
+
+  it('is not offered when the server says it does not apply', async () => {
+    serveOrder(orderOf({ mmgClaimMismatchAt: null, canCloseStoreRefund: false }));
+    detail();
+    await screen.findByRole('button', { name: 'Cancel order' });
+    expect(screen.queryByRole('button', { name: 'Close: store refunds' })).toBeNull();
+  });
+});
+
 describe('reviewed door recovery paths', () => {
   it('shows a release with failed dispatch and offers a dispatch retry', async () => {
     const fetchMock = serveOrders({ body: { success: true, data: [heldOrder] } }, (request) => request.url.pathname.endsWith('/retry-dispatch')

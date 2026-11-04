@@ -402,7 +402,7 @@ describe('[item 20] support tickets: the census', () => {
       'jobs/queue.ts findFirst': 1,
       'modules/order/mmg-accept-expiry.ts updateMany': 1,
     });
-    expect(helperCalls).toEqual({ 'modules/order/pickup-not-collected.ts': 1, 'jobs/queue.ts': 1 });
+    expect(helperCalls).toEqual({ 'modules/order/mmg-refund-rail.ts': 1, 'modules/order/pickup-not-collected.ts': 1, 'jobs/queue.ts': 1 });
     expect(actionCalls).toEqual({ 'jobs/queue.ts orderCaseExists': 1, 'modules/order/mmg-accept-expiry.ts closeOrderCase': 1, 'modules/order/pickup-not-collected.ts orderCaseExists': 1 });
     expect(named).toEqual([]);
     // The sweep's order filter (a system job) and closeStoreSilentMmgCase's type.
