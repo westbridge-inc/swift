@@ -511,7 +511,8 @@ describe('[#15] every publication to a store room goes through the team gate', (
     // + [BOOK-S3] a booking confirmed at checkout (INSTANT_BOOKING): the store board refreshes on
     // order:status_changed instead of order:new (which sounds the new-order alarm), through the gate.
     // + [BOOK-FU2 · owner B3] "Customer didn't come": the store board hears its closed appointment, through the gate.
-    expect(publishers).toBe(18);
+    // + [BUG-HUNT-2 G20] a pickup the customer never collected, cancelled free: the store board hears it, through the gate.
+    expect(publishers).toBe(19);
   });
 });
 

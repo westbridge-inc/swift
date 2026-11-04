@@ -1388,6 +1388,8 @@ export const vendorApi = {
   markNoShow: (id: string) => api.put(`/vendor/orders/${id}/no-show`),
   /** [BUG-HUNT-2 G08] The store's "Refund sent": its MMG reference and the amount it sent. */
   markRefundSent: (id: string, body: { reference: string; amount: string }) => api.post(`/vendor/orders/${id}/mmg-refunds/send`, body),
+  /** [BUG-HUNT-2 G20] A ready pickup nobody came for. */
+  markNotCollected: (id: string) => api.put(`/vendor/orders/${id}/not-collected`),
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),

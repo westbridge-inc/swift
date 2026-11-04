@@ -76,6 +76,8 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'erasure-ledger-watch': { policy: 'SAFE_REPLAY', why: 'Reads ledger counts and ages and pages through pageOps, which dedupes on an open page. It writes no business rows.' },
   'malware-scanner-watch': { policy: 'SAFE_REPLAY', why: 'Asks the scanner PING, counts consecutive failures in one Redis key and pages through pageOps, which keeps one open page per title. It writes no business rows; a replay is one more ask.' },
   'mmg-refund-deadlines': { policy: 'SAFE_REPLAY', why: 'Each miss is the law\'s compare-and-set under the order lock, set once. The notices carry per-row dedupe keys and the page goes through pageOps. It moves no money and closes nothing; a replay finds nothing left to mark.' },
+  'pickup-not-collected-watch': { policy: 'SAFE_REPLAY', why: 'Reads the ready pickups past 24 hours. Each store notice carries a per-order dedupe key and the support page goes through pageOps, which keeps one open page per title. It closes no order; a replay is one more read.' },
+  'fee-refund-case-sweep': { policy: 'SAFE_REPLAY', why: 'Closes a case by a compare-and-set on OPEN, only on a REVERSED reversal of its payment, and pages through pageOps, which keeps one open page per title. It moves no money; a replay finds the closed cases gone from the open set.' },
   'error-rate-watch': { policy: 'SAFE_REPLAY', why: 'Reads the hourly error tally and pages through pageOps, which keeps one open page per title and one delivered page per key window; a closed page stays closed. It writes no business rows; a replay is one more read.' },
   'upload-rescan': { policy: 'SAFE_REPLAY', why: 'Each row closes by a compare-and-set on rescannedAt IS NULL; a replay finds closed rows gone from the open set. A positive moved to quarantine is no longer open, and its page goes through pageOps (one open page per title).' },
   'backup-freshness': { policy: 'SAFE_REPLAY', why: 'Reads backup state and pages through opsPageOnce, which is explicitly deduped. It writes no business rows.' },
@@ -147,6 +149,8 @@ export type JobName =
   | 'erasure-ledger-watch'
   | 'malware-scanner-watch'
   | 'mmg-refund-deadlines'
+  | 'pickup-not-collected-watch'
+  | 'fee-refund-case-sweep'
   | 'error-rate-watch'
   | 'upload-rescan'
   | 'reaper-lag'

@@ -30,6 +30,7 @@ import { canonicalBillableKm } from '../../utils/billable-distance';
 import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
+import { pickupCancelledStoreNotice } from './pickup-not-collected';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { readOrderSize, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { vehicleTypesForPackageSize } from '../../config/vehicle-classes';
@@ -2896,6 +2897,7 @@ export class OrderService {
       heldNow: boolean;
       noMoverFree: boolean;
       tooLateFree: boolean;
+      notCollectedFree: boolean;
       cancelledSearches: number;
     } | undefined;
 
@@ -2973,6 +2975,7 @@ export class OrderService {
           if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
           const noMoverFree = verdict.reason === 'NO_MOVER';
           const tooLateFree = verdict.reason === 'TOO_LATE';
+          const notCollectedFree = verdict.reason === 'NOT_COLLECTED';
 
           // The row lock makes this update and every dependent release below one
           // canonical state transition. No stale riderId/driverId can escape.
@@ -3031,6 +3034,7 @@ export class OrderService {
             heldNow,
             noMoverFree,
             tooLateFree,
+            notCollectedFree,
             cancelledSearches: searches.count,
           };
         });
@@ -3045,7 +3049,7 @@ export class OrderService {
     }
 
     if (!committed) throw new Error('Cancellation transaction did not produce a result');
-    const { order, heldNow, noMoverFree, tooLateFree, cancelledSearches } = committed;
+    const { order, heldNow, noMoverFree, tooLateFree, notCollectedFree, cancelledSearches } = committed;
     if (cancelledSearches > 0) dispatchSearchesCounter.inc({ status: 'cancelled' }, cancelledSearches);
     // [DISPATCH 1/3 · B4] The cancel committed: the card it leaves behind goes
     // too, so the pinged mover cannot keep accepting it and is free at once.
@@ -3089,13 +3093,24 @@ export class OrderService {
       });
     }
 
+    // [BUG-HUNT-2 G20] The store still has the order on the shelf for someone who has now cancelled it.
+    if (notCollectedFree && order.vendorId) {
+      const ownerUserId = (await this.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { owner: { select: { userId: true } } } }))?.owner.userId;
+      if (ownerUserId) {
+        await this.notifications.send({
+          userId: ownerUserId, type: 'ORDER_UPDATE', audience: 'business', ...pickupCancelledStoreNotice(order.orderNumber),
+          data: { orderId, status: 'CANCELLED' }, dedupeKey: `pickup-not-collected:cancelled:${orderId}`,
+        });
+      }
+    }
+
     // [Item 64] The plain reason, when the platform found nobody to do the job.
     // [owner #46/#52] ...and when it was running very late.
     const noun = cancelNoun(order);
     const worker = order.orderType === 'TAXI' ? 'driver' : 'rider';
     return customerCancelAnswer(order, noMoverFree
       ? `${noun} cancelled — no ${worker} was found.`
-      : tooLateFree ? `${noun} cancelled because it was running very late.` : null);
+      : tooLateFree || notCollectedFree ? `${noun} cancelled because it was running very late.` : null);
   }
 
   /** [L07 · Opus S3] The first delivery attempt of a committed rider

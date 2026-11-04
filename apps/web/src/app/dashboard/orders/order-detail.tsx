@@ -19,7 +19,7 @@ import {
   confirmedOrderFields, customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, vendorStatusLabel, whenLabel,
 } from '@/lib/vendor-order-view';
 import {
-  acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder,
+  acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder, markNotCollected,
   markDelivered, markPreparing, markReady, markRefundSent, money, proposeSubstitution, refundLine, rejectOrder,
   retryDispatch, setFulfillmentMode, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
@@ -94,6 +94,8 @@ function actionsFor(o: VendorOrder) {
   } else if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) {
     // [STORE-DASH · O-2] With the store's pickup code off: one tap after checking the name and order number.
     out.push(handoverNeedsNoCode(o) ? { label: 'Handed to customer', kind: 'handed-to-customer' } : { label: 'Mark picked up', kind: 'complete-pickup' });
+    // [BUG-HUNT-2 G20] A day after it was ready, on the server's word (PUT /orders/:id/not-collected).
+    if (o.notCollected?.allowed === true) out.push({ label: 'Not collected', kind: 'not-collected', tone: 'danger' });
   } else if (canMarkHandedToRider(o)) {
     out.push({ label: 'Handed to rider', kind: 'handed-to-rider' });
   } else if (
@@ -307,6 +309,9 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   // [BOOK-S5b · owner B3] "Customer didn't come": asked once, then the server's answer (or its refusal, verbatim).
   const [confirmNoShow, setConfirmNoShow] = useState(false);
   const [noShowRecorded, setNoShowRecorded] = useState(false);
+  // [BUG-HUNT-2 G20] "Not collected": asked once, then the server's answer (or its refusal, verbatim).
+  const [confirmNotCollected, setConfirmNotCollected] = useState(false);
+  const [notCollectedDone, setNotCollectedDone] = useState<'closed' | 'support' | null>(null);
   // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
   const [lastOut, setLastOut] = useState(false);
 
@@ -389,6 +394,20 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
     onSuccess: () => setRefundOpen(false),
     onError: (e) => setError((e as Error).message),
     onSettled: refresh,
+  });
+  const notCollected = useMutation({
+    mutationFn: async () => {
+      setError(null);
+      return markNotCollected(id);
+    },
+    onSuccess: (answer) => {
+      setNotCollectedDone(answer?.sentToSupport === true ? 'support' : 'closed');
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => {
+      setConfirmNotCollected(false);
+      refresh();
+    },
   });
   const reject = useMutation({
     mutationFn: (why: string) => rejectOrder(id, why),
@@ -754,7 +773,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       )}
       {/* [STORE-DASH · owner 22 Oct "fast taps"] The next step is a big button in a bar that stays at the
           bottom of the window while it scrolls, as on the phone (VendorOrderDetailScreen action bar). */}
-      {(actions.length > 0 || confirmDelivered || confirmReject || confirmNoShow || noShowRecorded || error) && (
+      {(actions.length > 0 || confirmDelivered || confirmReject || confirmNoShow || noShowRecorded || confirmNotCollected || notCollectedDone !== null || error) && (
         <div data-testid="order-action-bar" className="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 flex flex-wrap items-center gap-2 border-t border-[var(--swift-border)] bg-[var(--swift-card)] px-6 py-4">
           {!paused && customerDeciding(o) && <p role="status" className="w-full text-sm font-semibold text-amber-800">{OUT_OF_STOCK_WORDS.deciding}</p>}
           {!paused && nothingToAccept(o) && <p role="status" className="w-full text-sm font-semibold text-[var(--swift-red)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
@@ -787,9 +806,11 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
                       ? setConfirmReject(true)
                       : a.kind === 'no-show'
                         ? (setError(null), setConfirmNoShow(true))
-                        : act.mutate(a.kind)}
-                aria-busy={(act.isPending && act.variables === a.kind) || (a.kind === 'no-show' && noShow.isPending)}
-                disabled={act.isPending || reject.isPending || noShow.isPending || picksOut || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
+                        : a.kind === 'not-collected'
+                          ? (setError(null), setConfirmNotCollected(true))
+                          : act.mutate(a.kind)}
+                aria-busy={(act.isPending && act.variables === a.kind) || (a.kind === 'no-show' && noShow.isPending) || (a.kind === 'not-collected' && notCollected.isPending)}
+                disabled={act.isPending || reject.isPending || noShow.isPending || notCollected.isPending || picksOut || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
                 className={`min-h-12 flex-1 rounded-xl px-5 py-3 text-base font-bold disabled:opacity-50 ${
                   a.tone === 'danger'
                     ? 'border border-[var(--swift-red)]/30 text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5'
@@ -874,6 +895,34 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
               </div>
             </div>
           )}
+          {confirmNotCollected && (
+            <div role="dialog" aria-label="Confirm not collected" className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
+              <p className="text-sm font-semibold text-[var(--swift-red)]">Mark as not collected?</p>
+              <p className="mt-1 text-sm text-[var(--swift-muted)]">
+                {o.notCollected?.goesToSupport === true
+                  ? 'It was paid by MMG, so Swift support closes it with you. The order stays open until they do.'
+                  : 'The order closes. No money moves. The customer is told.'}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={() => notCollected.mutate()}
+                  disabled={notCollected.isPending}
+                  className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {notCollected.isPending ? 'Sending…' : 'Yes, nobody came'}
+                </button>
+                <button
+                  onClick={() => setConfirmNotCollected(false)}
+                  disabled={notCollected.isPending}
+                  className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                >
+                  Keep the order
+                </button>
+              </div>
+            </div>
+          )}
+          {notCollectedDone === 'support' && <p role="status" className="w-full text-sm font-semibold">Swift support has this order. They close it and record the refund you owe the customer.</p>}
+          {notCollectedDone === 'closed' && <p role="status" className="w-full text-sm font-semibold">Order closed: recorded as not collected. No money moved.</p>}
           {noShowRecorded && (
             <p role="status" className="w-full text-sm font-semibold">Booking closed: you recorded that the customer didn&rsquo;t come. The customer has been told.</p>
           )}

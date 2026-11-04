@@ -207,6 +207,7 @@ const ROUTE_CLASS: Record<string, 'ordering' | 'open'> = {
   '/dashboard/settings/delete-account': 'open', // [WEB-DELETE] a store's people delete (or close) their own account
   '/portal': 'open', '/portal/account': 'open', '/portal/documents': 'open', '/portal/history': 'open',
   '/portal/notifications': 'open', '/portal/weekly-fee': 'open', '/portal/account/delete': 'open', // [WEB-DELETE]
+  '/portal/help': 'open', '/dashboard/help': 'open', // [BUG-HUNT F04] a partner's way to a person works before launch
   '/advertiser': 'open', '/advertiser/account': 'open', '/advertiser/notifications': 'open',
   '/advertiser/campaigns/[advertiserId]/[campaignId]': 'open',
   // A link someone was sent (a parcel or trip to follow) and the QR fallback pages: no ordering on them.

@@ -206,6 +206,7 @@ describe('[PERF item 3] a store\'s tap answers without waiting for the customer\
       // [BOOK-FU2 · owner B3] "Customer didn't come": the business closes an appointment and the customer is told by push, like complete-appointment.
       'PUT /api/v1/vendor/orders/:id/no-show',
       'POST /api/v1/vendor/orders/:id/mmg-refunds/send',
+      'PUT /api/v1/vendor/orders/:id/not-collected',
       'POST /api/v1/rider/orders/:id/accept', 'PUT /api/v1/rider/orders/:id/en-route-pickup', 'PUT /api/v1/rider/orders/:id/arrived-pickup',
       'PUT /api/v1/rider/orders/:id/picked-up', 'PUT /api/v1/rider/orders/:id/en-route-delivery', 'PUT /api/v1/rider/orders/:id/arrived', 'PUT /api/v1/rider/orders/:id/delivered',
       'POST /api/v1/rider/orders/:id/handover',

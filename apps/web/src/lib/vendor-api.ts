@@ -105,6 +105,8 @@ export interface VendorOrder {
   noShow?: { allowed?: unknown } | null;
   /** [BUG-HUNT-2 G08] What this store owes back by MMG, in the server's words. Null: no refund on this order. */
   mmgRefund?: { state: string; amount: string; line: string; canMarkSent?: boolean } | null;
+  /** [BUG-HUNT-2 G20] The server's word on "Not collected" for this ready pickup, at the read. */
+  notCollected?: { allowed?: unknown; goesToSupport?: unknown } | null;
   /** The server's accept deadline for a PENDING order (order/response-sla.ts); null otherwise. */
   respondBy?: string | null;
   acceptedAt?: string | null;
@@ -329,6 +331,9 @@ export const completePickup = (id: string, code?: string) =>
 /** [BUG-HUNT-2 G08] The store's "Refund sent": its MMG reference and the amount it sent. Swift moves no money. */
 export const markRefundSent = (id: string, reference: string, amount: string) =>
   apiFetch(`${V}/orders/${id}/mmg-refunds/send`, { method: 'POST', body: JSON.stringify({ reference, amount }) });
+/** [BUG-HUNT-2 G20] A ready pickup nobody came for: a cash order closes, a paid MMG one goes to Swift support. */
+export const markNotCollected = (id: string): Promise<{ sentToSupport?: boolean }> =>
+  apiFetch(`${V}/orders/${id}/not-collected`, { method: 'PUT', body: '{}' }).then((r) => r.data);
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });
 /** [AF-MOB-006 · U25] The store confirms returned goods are back with it (closes the return). */
 export const confirmReturnReceived = (id: string) =>

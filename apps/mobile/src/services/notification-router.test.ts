@@ -373,6 +373,7 @@ const CENSUS: Case[] = [
   { k: 'mmg_refund_disputed', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] the customer says the refund did not arrive [audience rule]' },
   { k: 'mmg_refund_overdue', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] a refund is past its deadline; the order desk holds Refund sent [audience rule]' },
   { k: 'mmg_refund_resolved', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] support found or voided a refund; the customer copy opens their order [audience rule]' },
+  { k: 'pickup_not_collected', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store owner — [G20] a pickup has been ready for a day and nobody came; the order desk holds Not collected [audience rule]' },
   { k: 'mmg_customer_says_paid', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store owner — [owner 18 Oct] the customer says they paid and the store has not tapped Paid by MMG 30 minutes after accepting; the order desk holds the Paid by MMG button [audience rule]' },
   // `d` must mirror what the API actually SENDS. The drift check compares only
   // `kind` strings, so a payload that grows a field goes unnoticed here and the
@@ -405,6 +406,7 @@ const CENSUS: Case[] = [
   { k: 'ops_rider_waiting_long', d: { ...O, riderId: 'r1', waitedMinutes: 61, opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [OF-33 · DRILL-STORM] the loud ops-alert page: a rider has waited 3 release windows at a store that is not ready; a person decides — the page is acknowledged on Ops alerts (the order screen was the CUSTOMER tracking screen)' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_mmg_refund_overdue', d: { overdue: 1, orderIds: ['o1'] }, to: null, why: 'admins' },
+  { k: 'ops_pickup_uncollected', d: { count: 1, orderIds: ['o1'] }, to: null, why: 'admins' },
   { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
   { k: 'ops_cash_door_short', d: { ...O, due: 3500, collected: 2800, shortfall: 700 }, to: DELIVERY('o1'), why: 'admins — [L02 row 34] a cash order was handed over for less than due; the mismatch is held for review' },
   { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [DRILL-STORM] partial cash could not be handed back and remains with the rider; it is an ops page, acknowledged on Ops alerts' },
@@ -508,6 +510,7 @@ const CENSUS: Case[] = [
 
   // ── Admin / ops pages. null is CORRECT: there is no mobile admin app.
   { k: 'ops_error_spike', to: null, why: 'admins' },
+  { k: 'ops_fee_refund_overdue', to: null, why: 'admins' },
   { k: 'ops_error_sustained', to: null, why: 'admins' },
   { k: 'ops_collusion_affinity', to: null, why: 'admins' },
   { k: 'ops_billing_failures', to: null, why: 'admins' },

@@ -373,6 +373,8 @@ describe('[item 20] support tickets: the census', () => {
     expect(sites).toEqual({
       // The person's own: filing, listing, the closure request (in its own transaction).
       'modules/support/support.service.ts create': 1,
+      // [BUG-HUNT-2 G20] The store's own case on a paid pickup: wall-off branch of the check beside the sweep's, under the order lock.
+      'modules/order/pickup-not-collected.ts findFirst': 1,
       'modules/support/support.service.ts findMany': 2, // listForUser (own) + listForAdmin (the queue: capability when on)
       // The admin queue (SupportService.queue: tenantPrisma off, the capability on): count, the resolve read (off/on), update.
       'modules/support/support.service.ts count': 1,
@@ -400,8 +402,8 @@ describe('[item 20] support tickets: the census', () => {
       'jobs/queue.ts findFirst': 1,
       'modules/order/mmg-accept-expiry.ts updateMany': 1,
     });
-    expect(helperCalls).toEqual({ 'modules/order/mmg-refund-rail.ts': 1, 'jobs/queue.ts': 1 });
-    expect(actionCalls).toEqual({ 'jobs/queue.ts orderCaseExists': 1, 'modules/order/mmg-accept-expiry.ts closeOrderCase': 1 });
+    expect(helperCalls).toEqual({ 'modules/order/mmg-refund-rail.ts': 1, 'modules/order/pickup-not-collected.ts': 1, 'jobs/queue.ts': 1 });
+    expect(actionCalls).toEqual({ 'jobs/queue.ts orderCaseExists': 1, 'modules/order/mmg-accept-expiry.ts closeOrderCase': 1, 'modules/order/pickup-not-collected.ts orderCaseExists': 1 });
     expect(named).toEqual([]);
     // The sweep's order filter (a system job) and closeStoreSilentMmgCase's type.
     // (and the inactive-account sweep's user filter, a system job).

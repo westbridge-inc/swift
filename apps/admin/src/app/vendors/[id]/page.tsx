@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, setChainDeal, setChainBrand, setBranchListedAlone, changeChainDeal, withdrawChainDealChange, fetchVendorChain, type ChainDealOutcome, type DealChangeOutcome, type VendorActivationChecklist } from '@/lib/api';
+import { fetchVendorDetail, fetchVendorActivationChecklist, approveVendor, changeStoreName, changeStoreType, suspendVendor, featureVendor, revokeStoreVat, revealVendorPartyPhone, setChainDeal, setChainBrand, setBranchListedAlone, changeChainDeal, withdrawChainDealChange, fetchVendorChain, type ChainDealOutcome, type DealChangeOutcome, type VendorActivationChecklist } from '@/lib/api';
 import { label, ratingText, type Tone } from '@/lib/labels';
 import { JUDGED_FIELD_WORDS, PROHIBITED_CLASS_LABELS } from '@/lib/prohibited-items';
 import type { ProhibitedClass } from '@/lib/api';
@@ -130,6 +130,12 @@ const VAT_STATUS_WORDS: Readonly<Record<string, string>> = {
   REVOKED: 'Withdrawn',
 };
 
+/** [BUG-HUNT F22] The four store types, in the words the sign-up uses. */
+const STORE_TYPES = [
+  { value: 'RESTAURANT', label: 'Restaurant' }, { value: 'SUPERMARKET', label: 'Supermarket' },
+  { value: 'STORE', label: 'Store' }, { value: 'SERVICE', label: 'Service business' },
+];
+
 export default function VendorDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const qc = useQueryClient();
@@ -251,6 +257,29 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     context,
     submit: ({ reason }) => suspendVendor(id, reason),
     success: () => `${v.name} is suspended and has stopped taking orders. The owner was sent your reason.`,
+  }));
+
+  // [BUG-HUNT F22] What the screens tell a store to ask support for. A store that has been live keeps its type: its
+  // fee and its documents rest on it, so the server refuses and this button is not offered.
+  const changeType = async () => show(await dialog.run({
+    title: `Change the type of ${v.name}?`,
+    body: <p>Use this when the owner picked the wrong type at sign-up. The documents they need follow the new type, and they are told.</p>,
+    confirmLabel: 'Change type',
+    fields: [{ kind: 'choice', name: 'vendorType', label: 'Store type', options: STORE_TYPES.filter((option) => option.value !== v.vendorType) }],
+    reason: { hint: 'Kept on the permanent record; not sent to the owner.' },
+    context,
+    submit: ({ reason, values }) => changeStoreType(id, String(values['vendorType']), reason),
+    success: () => `The store type is changed and the owner is told.`,
+  }));
+  const changeName = async () => show(await dialog.run({
+    title: `Change the name of ${v.name}?`,
+    body: <p>A person checks the new name before it is changed: the app sends owners here for that. The owner is told.</p>,
+    confirmLabel: 'Change name',
+    fields: [{ kind: 'text', name: 'name', label: 'New store name', required: true, minLength: 2, maxLength: 100 }],
+    reason: { hint: 'How the new name was checked. Kept on the permanent record; not sent to the owner.' },
+    context,
+    submit: ({ reason, values }) => changeStoreName(id, String(values['name']).trim(), reason),
+    success: () => `The store's name is changed and the owner is told.`,
   }));
 
   // [STORE-VAT · owner O-5] Withdraw a store's approved VAT (e.g. the GRA cancelled its registration). New orders stop
@@ -430,6 +459,8 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
           <button type="button" className="mc-btn" onClick={toggleFeatured}>
             {v.isFeatured ? 'Remove from featured…' : 'Feature…'}
           </button>
+          <button type="button" className="mc-btn" onClick={changeName}>Change name…</button>
+          {!v.firstLiveAt && !v.subscription ? <button type="button" className="mc-btn" onClick={changeType}>Change type…</button> : null}
           {v.status === 'ACTIVE' ? (
             <button type="button" className="mc-btn mc-btn-danger" onClick={suspend}>Suspend…</button>
           ) : null}

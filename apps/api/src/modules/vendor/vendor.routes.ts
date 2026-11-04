@@ -34,7 +34,7 @@ import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
 import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, mmgDispatchBlocked, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService, lockBusinessTime } from '../booking/booking.service';
 import { fmtSlotTime, MAX_BUFFER_MINUTES, MAX_MIN_NOTICE_MINUTES, peakMoment } from '../booking/availability';
@@ -46,6 +46,7 @@ import { NO_SHOW_REASON, noShowCustomerNotice, noShowRefusal, noShowView, record
 import { assertMmgRefundAmount } from '../order/mmg-refund-law';
 import { recordMmgRefundSent, refundSentCustomerNotice, storeRefundView } from '../order/mmg-refund-rail';
 import { parseExactAmount } from '../money/evidence';
+import { NOT_COLLECTED_REASON, notCollectedCustomerNotice, notCollectedGoesToSupport, notCollectedRefusal, notCollectedView, openNotCollectedCase } from '../order/pickup-not-collected';
 import { bookingLimitsFor } from '../booking/booking-limits';
 import { MAX_BOOKING_CAPACITY } from '../booking/one-at-a-time';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -2575,7 +2576,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [BUG-HUNT-2 G08] What this store owes back by MMG, and the door. Null on an order with no refund.
     const refundRows = order.paymentMethod === 'MOBILE_MONEY' ? await app.prisma.mmgRefundObligation.findMany({ where: { orderId: order.id }, select: { status: true, amount: true, dueAt: true, currencyCode: true, sendId: true } }) : [];
     const mmgRefund = storeRefundView(refundRows, new Date(), canConfirmPayment(role));
-    return { success: true, data: { ...redactCustomerContact({ ...order, ...handover, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role), ...noShow, mmgRefund }), custodyRecovery } };
+    // [BUG-HUNT-2 G20] A ready pickup says whether "Not collected" may be recorded now, and whether it goes to support.
+    const notCollected = order.fulfillment === 'PICKUP' && order.status === 'READY_FOR_PICKUP' ? { notCollected: notCollectedView(order, new Date()) } : {};
+    return { success: true, data: { ...redactCustomerContact({ ...order, ...handover, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role), ...noShow, ...notCollected, mmgRefund }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -3637,6 +3640,62 @@ export async function vendorRoutes(app: FastifyInstance) {
       }).catch((err: unknown) => request.log.warn({ err, orderId: order.id }, 'refund-sent notice failed; the order screen still asks'));
     }
     return { success: true, data: { orderId: order.id, sendId: sent.sendId, status: 'SENT', replayed: sent.replayed } };
+  });
+
+  /** PUT /orders/:id/not-collected — [BUG-HUNT-2 G20] a pickup nobody came for (order/pickup-not-collected.ts). From 24
+   *  hours after it was ready a cash order closes as a true record through the one canonical cancel: no money moved, no
+   *  fee, no strike, the customer told. A paid MMG order stays open and opens one case for support, whose close records
+   *  the refund the store owes. The same team and the same operate gate as complete-pickup. */
+  app.put<{ Params: IdParam }>('/orders/:id/not-collected', tap, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
+    // A second tap after a lost reply: the first one worked, so this is the answer it lost.
+    if (order.status === 'CANCELLED' && order.cancellationReason === NOT_COLLECTED_REASON) {
+      return { success: true, data: { id: order.id, status: order.status } };
+    }
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
+    const refusal = notCollectedRefusal(order, new Date());
+    if (refusal) throw refusal;
+    if (notCollectedGoesToSupport(order)) {
+      const opened = await openNotCollectedCase(app.prisma, order.id, request.user.userId, new Date());
+      if (opened) {
+        await notifyAdmins(app.prisma, notifications, {
+          tenantId: opened.tenantId,
+          title: 'Paid pickup not collected',
+          body: `Order ${opened.orderNumber}: paid by MMG, and the store says nobody collected it. Close it as refund handled by the store.`,
+          data: { kind: 'support_ticket', ticketId: opened.ticketId, orderId: order.id },
+        }).catch((err: unknown) => request.log.warn({ err, orderId: order.id }, 'admin page for the not-collected case failed; the ticket is open'));
+      }
+      return { success: true, data: { id: order.id, status: order.status, sentToSupport: true } };
+    }
+    await orderService.transitionOrderAtomically({
+      orderId: order.id,
+      target: 'CANCELLED',
+      allowedFrom: ['READY_FOR_PICKUP'],
+      expectedFulfillment: 'PICKUP',
+      changedBy: request.user.userId,
+      note: NOT_COLLECTED_REASON,
+      cancellation: { by: request.user.userId, reason: NOT_COLLECTED_REASON },
+      // Judged again on the locked row: a handover or a cancel that committed first wins.
+      withinTransaction: async (_tx, lockedSource) => {
+        const lockedRefusal = notCollectedRefusal(lockedSource, new Date());
+        if (lockedRefusal) throw lockedRefusal;
+        if (notCollectedGoesToSupport(lockedSource)) throw new AppError(409, 'NOT_COLLECTED_NOT_OPEN', 'This order changed. Open it again.');
+      },
+      invalidStatus: () => new AppError(409, 'NOT_COLLECTED_NOT_OPEN', 'Only a pickup that is ready and waiting can be marked Not collected.'),
+    });
+    const event = { orderId: order.id, status: 'CANCELLED', reason: NOT_COLLECTED_REASON, timestamp: new Date().toISOString() };
+    await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', event);
+    await emitToStoreRoom(app.prisma, app.io, order.vendorId!, 'order:status_changed', event);
+    const storeName = (await app.prisma.vendor.findUnique({ where: { id: order.vendorId! }, select: { name: true } }))?.name ?? 'the store';
+    await notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      audience: 'customer',
+      ...notCollectedCustomerNotice(order.orderNumber, storeName),
+      dedupeKey: `pickup-not-collected:customer:${order.id}`,
+      data: { orderId: order.id, status: 'CANCELLED' },
+    }).catch(() => undefined);
+    return { success: true, data: { id: order.id, status: 'CANCELLED' } };
   });
 
   /** PUT /orders/:id/delivered — [F-0026] the self-delivery terminal.
