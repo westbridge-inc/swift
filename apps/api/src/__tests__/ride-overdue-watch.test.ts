@@ -28,7 +28,6 @@ const HOUR = 60 * MIN;
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'test:ride-overdue-watch');
 let app: FastifyInstance;
 const ONCALL = testPhone();
-let admin = '';
 const userIds: string[] = [];
 const driverIds: string[] = [];
 const orderIds: string[] = [];
@@ -82,7 +81,7 @@ beforeAll(async () => {
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.ready();
-  admin = await person(['ADMIN', 'CUSTOMER'], { status: 'ACTIVE', admin: { create: { permissions: ['*'] } } });
+  await person(['ADMIN', 'CUSTOMER'], { status: 'ACTIVE', admin: { create: { permissions: ['*'] } } });
   const ctx = { prisma: app.prisma, redis: app.redis, io: { to: () => ({ emit: () => {} }), in: () => ({ fetchSockets: async () => [] }) }, log } as unknown as JobContext;
   await createWorkers(ctx, {} as never);
   await sys(() => app.prisma.order.updateMany({ where: { orderType: 'TAXI', status: 'RIDE_IN_PROGRESS' }, data: { status: 'FAILED' } }));
