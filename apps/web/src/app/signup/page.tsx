@@ -232,7 +232,7 @@ export default function SignupPage() {
     if (r.signedIn) {
       markSignedIn();
       // Existing account: route by its ACTUAL roles, not the tile they tapped.
-      const { kind } = roleHome(r.user);
+      const { kind, home } = roleHome(r.user);
       const isVendor = kind === 'business';
       const isMover = kind === 'earner';
       // [FLOW-QA F9] An existing account that chose another partner door goes on to that door's step (its account is
@@ -242,8 +242,8 @@ export default function SignupPage() {
       if (customerReturnPath) continueJourney();
       clearDraft();
       // [REVIEW-GMF2 S4] a self-employed pro (no partner role) goes where sign-in sends them: their weekly fee
-      const pro = !customerReturnPath && !isVendor && !isMover && await isPro();
-      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : pro ? '/portal/weekly-fee' : '/'));
+      const pro = !customerReturnPath && kind === 'customer' && await isPro();
+      router.replace(customerReturnPath || (pro ? '/portal/weekly-fee' : home));
       return;
     }
     setStep('name');
