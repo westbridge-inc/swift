@@ -633,7 +633,7 @@ export interface MmgClaimNoticeDeps {
   notifications: {
     send(payload: {
       userId: string; type: 'ORDER_UPDATE' | 'PAYMENT_RECEIVED'; title: string; body: string;
-      audience: 'customer' | 'business'; data: Record<string, unknown>; dedupeKey: string;
+      audience: 'customer' | 'business' | 'earner'; data: Record<string, unknown>; dedupeKey: string;
     }): Promise<string>;
   };
   /** Pages the tenant's operators; returns how many were actually reached. */
@@ -643,7 +643,7 @@ export interface MmgClaimNoticeDeps {
 export interface MmgClaimDelivery {
   /** Every notice still owed was persisted (and operators were reached, where owed). */
   complete: boolean;
-  sent: Array<'customer' | 'business' | 'admin'>;
+  sent: Array<'customer' | 'business' | 'earner' | 'admin'>;
   skipped: Array<'customer' | 'business' | 'admin'>;
   adminReached: number | null;
 }
@@ -681,7 +681,7 @@ export async function deliverMmgClaimNotice(deps: MmgClaimNoticeDeps, notice: Mm
     if (!order) return { complete: true, sent, skipped: ['customer', 'business', 'admin'], adminReached: null };
 
     const businessUserId = order.vendor?.owner?.userId ?? null;
-    const key = (role: 'customer' | 'business' | 'admin') => `mmg-claim:${order.id}:r${notice.revision}:${role}`;
+    const key = (role: 'customer' | 'business' | 'earner' | 'admin') => `mmg-claim:${order.id}:r${notice.revision}:${role}`;
     const plan: Array<{ role: 'customer' | 'business' | 'earner'; userId: string; type: 'ORDER_UPDATE' | 'PAYMENT_RECEIVED'; title: string; body: string; data: Record<string, unknown> }> = [];
     let page: { title: string; body: string } | null = null;
 
