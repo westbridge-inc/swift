@@ -4908,6 +4908,24 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await creativeSvc.queue() };
   });
 
+  // ── [ADS-ON · 4 Oct ruling] The allow-list of outside websites ads may open. Only a person moves a
+  //    website, and the row says who and when. Refusing an approved website stops what links to it. ──
+  app.get('/ads/link-domains', { preHandler: [adminGuard] }, async (request) => {
+    const { status } = z.object({ status: z.enum(['PENDING', 'APPROVED', 'REJECTED']).optional() }).parse(request.query ?? {});
+    return { success: true, data: await creativeSvc.links.listDomains(await adsTenant(), status) };
+  });
+
+  app.put('/ads/link-domains/:id/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    return { success: true, data: await creativeSvc.links.approveDomain(id, request.user.userId) };
+  });
+
+  app.put('/ads/link-domains/:id/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { reason } = z.object({ reason: z.string().trim().min(12).max(500) }).parse(request.body ?? {});
+    return { success: true, data: await creativeSvc.links.rejectDomain(id, request.user.userId, reason) };
+  });
+
   app.put('/ads/creatives/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     return { success: true, data: await creativeSvc.approve(id, request.user.userId) };
@@ -5158,6 +5176,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (posterBuffer && !looksLikeImage(posterBuffer)) throw new AppError(400, 'BAD_POSTER', 'Poster must be an image.');
 
     const tenantId = await adsTenant();
+    // [ADS-ON] Before the file is stored: a house ad's link meets the same rules as a paid one.
+    const link = await creativeSvc.links.houseLink(tenantId, body.destinationType, body.destinationValue, request.user.userId);
     await scanUpload(fileBuffer, { surface: 'admin', log: request.log });
     if (posterBuffer) await scanUpload(posterBuffer, { surface: 'admin', log: request.log });
     const { url } = await getStorageProvider().upload({ buffer: fileBuffer, filename: fileName || 'house-ad', mimeType: fileMime, folder: 'ads/house' });
@@ -5169,7 +5189,7 @@ export async function adminRoutes(app: FastifyInstance) {
       data: {
         tenantId, placementId: body.placementId, kind: body.kind, fileUrl: url, posterUrl,
         headline: body.headline ?? null, ctaLabel: body.ctaLabel ?? null,
-        destinationType: body.destinationType, destinationValue: body.destinationValue ?? null,
+        ...link,
         sort: body.sort,
       },
     });
@@ -6468,7 +6488,15 @@ export async function adminRoutes(app: FastifyInstance) {
     }).parse(request.body ?? {});
     const existing = await app.prisma.houseAd.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError('HouseAd', id);
-    const row = await app.prisma.houseAd.update({ where: { id }, data: body });
+    // [ADS-ON] A changed link, or a house ad coming back on, passes the same check as a new one.
+    const type = body.destinationType ?? existing.destinationType;
+    const value = body.destinationValue === undefined ? existing.destinationValue : body.destinationValue;
+    const relink = type !== existing.destinationType || value !== existing.destinationValue || (body.active === true && !existing.active);
+    const link = relink ? await creativeSvc.links.houseLink(existing.tenantId, type, value, request.user.userId) : {};
+    const row = await app.prisma.houseAd.update({
+      where: { id },
+      data: { headline: body.headline, ctaLabel: body.ctaLabel, sort: body.sort, active: body.active, ...link },
+    });
     return { success: true, data: row };
   });
 

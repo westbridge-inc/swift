@@ -112,6 +112,8 @@ const TENANT_QUERY_EXTENSIONS = {
   advertiser: scoped, adPlacement: scoped, adCampaign: scoped, adInvoice: scoped,
   adRefundIntent: scoped, adRefundItem: scoped, adRefundOutbox: scoped,
   adEvent: scoped, houseAd: scoped, adsSettings: scoped, adsAuditLog: scoped,
+  // [ADS-ON] The allow-list of outside websites an ad may open is each operator's own.
+  adLinkDomain: scoped,
   // Ratings.
   actorRatingStat: scoped, ratingReport: scoped, itemFeedback: scoped, ratingTagDef: scoped,
   // [STORE-002] Who a person refuses contact with is theirs and their
