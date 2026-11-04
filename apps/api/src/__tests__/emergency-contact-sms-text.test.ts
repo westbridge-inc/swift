@@ -55,9 +55,16 @@ describe('[R20] emergency-contact confirmation text', () => {
     expect(gsm7Name('Ānanda', EMERGENCY_CONTACT_NAME_MAX)).toBe('Ananda');
     expect(gsm7Name('Zoë', EMERGENCY_CONTACT_NAME_MAX)).toBe('Zoe'); // ë is not GSM: base letter e
     expect(gsm7Name('José', EMERGENCY_CONTACT_NAME_MAX)).toBe('José'); // é is GSM: kept
-    expect(gsm7Name('Zoë-Marie O’Neil', EMERGENCY_CONTACT_NAME_MAX)).toBe('Zoe-Marie ONeil');
+    expect(gsm7Name('Zoë-Marie O’Neil', EMERGENCY_CONTACT_NAME_MAX)).toBe("Zoe-Marie O'Neil"); // [REVIEW-G5 S4-3] a phone's curly apostrophe stays an apostrophe
+    expect(gsm7Name('D’Aguiar', EMERGENCY_CONTACT_NAME_MAX)).toBe("D'Aguiar");
+    expect(gsm7Name('Anne\u2011Marie', EMERGENCY_CONTACT_NAME_MAX)).toBe('Anne-Marie');
     expect(gsm7Name('  Ravi   Singh 😀 ', EMERGENCY_CONTACT_NAME_MAX)).toBe('Ravi Singh');
     expect(gsm7Name('X'.repeat(60), EMERGENCY_CONTACT_NAME_MAX)).toHaveLength(EMERGENCY_CONTACT_NAME_MAX);
+    // [REVIEW-G5 S4-2] punctuation alone is not a name: the caller's own words take over
+    expect(gsm7Name('李.', EMERGENCY_CONTACT_NAME_MAX)).toBe('');
+    expect(gsm7Name('😀!', EMERGENCY_CONTACT_NAME_MAX)).toBe('');
+    expect(gsm7Name('- -', EMERGENCY_CONTACT_NAME_MAX)).toBe('');
+    expect(gsm7Name('Ravi 2', EMERGENCY_CONTACT_NAME_MAX)).toBe('Ravi 2');
   });
 });
 
