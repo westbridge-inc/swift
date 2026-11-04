@@ -900,6 +900,8 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'POST /promos': 'creates the row; there is no before state to digest',
   // [MMG REVERSAL] the claim row is the record; the audit facts name it
   'POST /billing/mmg-checkouts/:id/reverse': 'creates the reversal claim row; the audit facts carry the reversal id, the checkout, the amount and the MMG transaction',
+  // [Row 156] the case row is the record; the audit facts name it
+  'POST /billing/mmg-checkouts/:id/refund-case': 'creates the case row; the audit facts carry the case id, the checkout, the kind and the due date',
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',
