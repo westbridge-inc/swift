@@ -6,7 +6,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { log } from '../../utils/logger';
 import { mondayOf } from './ads-weeks';
 import { assertAdvertiserApprovedWithin, SUSPENSION_PAUSE_PREFIX } from './advertiser.service';
-import { LINK_PAUSE_PREFIX } from './ad-link-policy';
+import { AD_LINK_NOT_FIXABLE, LINK_PAUSE_PREFIX } from './ad-link-policy';
 
 // Campaign lifecycle (ads-platform spec §6.1). ONE transition function owns
 // every campaign status change downstream of payment — it validates the table,
@@ -18,7 +18,8 @@ import { LINK_PAUSE_PREFIX } from './ad-link-policy';
 //   PENDING_REVIEW ─all_creatives_approved→ SCHEDULED ─week_start→ LIVE ─week_end→ COMPLETED
 //   PENDING_REVIEW ─auto_cancel_unapproved→ CANCELLED
 //   LIVE ⇄ PAUSED (pause / resume);  PAUSED ─week_end→ COMPLETED
-//   SCHEDULED|LIVE ─link_check_failed→ PAUSED (the ad's link failed its check)
+//   SCHEDULED|LIVE|PAUSED ─link_check_failed→ PAUSED (the ad's link failed its check)
+//   a link pause ─cancel→ CANCELLED: resume is closed while the link fails, so cancel stays open
 //   DRAFT|PENDING_REVIEW|SCHEDULED|LIVE ─cancel→ CANCELLED
 //   any non-terminal ─kill→ REJECTED
 // Terminal: COMPLETED, CANCELLED, REJECTED. No hard deletes.
@@ -45,7 +46,7 @@ const TABLE: Record<CampaignEvent, { from: AdCampaignStatus[]; to: AdCampaignSta
   week_end: { from: ['LIVE', 'PAUSED'], to: 'COMPLETED' },
   pause: { from: ['LIVE'], to: 'PAUSED' },
   resume: { from: ['PAUSED'], to: 'LIVE' },
-  link_check_failed: { from: ['SCHEDULED', 'LIVE'], to: 'PAUSED' },
+  link_check_failed: { from: ['SCHEDULED', 'LIVE', 'PAUSED'], to: 'PAUSED' },
   cancel: { from: ['DRAFT', 'PENDING_REVIEW', 'SCHEDULED', 'LIVE'], to: 'CANCELLED' },
   kill: { from: ['DRAFT', 'PENDING_PAYMENT', 'PENDING_REVIEW', 'SCHEDULED', 'LIVE', 'PAUSED'], to: 'REJECTED' },
 };
@@ -67,7 +68,11 @@ const RESUMED_BEFORE_START = { title: 'Campaign resumed', body: 'Your campaign i
 /** [ADS-ON] The advertiser's notice when a link check pauses their campaign: what failed, and the way back. */
 function linkPauseNotice(reason: string | undefined) {
   const why = (reason ?? '').slice(LINK_PAUSE_PREFIX.length);
-  return { title: 'Campaign paused: check your ad link', body: `Your campaign stopped showing because ${why || 'its link failed the check'}. Fix the page, then resume the campaign. It goes back on once the link passes.`, kind: 'ad_campaign_paused' };
+  const cancel = 'You can cancel it from your campaign, which shows what is refunded first.';
+  const way = AD_LINK_NOT_FIXABLE.includes(why)
+    ? `It cannot go back on with this link. ${cancel} Contact support with any questions.`
+    : `Fix the page, then resume the campaign: it goes back on once the link passes. Or ${cancel.charAt(0).toLowerCase()}${cancel.slice(1)}`;
+  return { title: 'Campaign paused: check your ad link', body: `Your campaign stopped showing because ${why || 'its link failed the check'}. ${way}`, kind: 'ad_campaign_paused' };
 }
 
 export class AdsLifecycleService {
@@ -101,7 +106,10 @@ export class AdsLifecycleService {
     if (TERMINAL.includes(before.status)) {
       throw new AppError(409, 'CAMPAIGN_TERMINAL', `A ${before.status} campaign is terminal and cannot transition.`);
     }
-    if (!rule.from.includes(before.status)) {
+    // [ADS-ON · REVIEW-M9] A link pause never strands money: the campaign cannot resume while its link fails, so
+    // cancel, with the refund the preview shows, stays open. Any other pause still goes through resume.
+    const cancelFromLinkPause = event === 'cancel' && before.status === 'PAUSED' && !!before.statusReason?.startsWith(LINK_PAUSE_PREFIX);
+    if (!rule.from.includes(before.status) && !cancelFromLinkPause) {
       log().warn({ campaignId, from: before.status, event }, 'illegal ad campaign transition rejected');
       throw new AppError(409, 'INVALID_CAMPAIGN_TRANSITION', `Cannot ${event} a ${before.status} campaign.`);
     }

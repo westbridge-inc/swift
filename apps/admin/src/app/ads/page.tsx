@@ -381,7 +381,7 @@ export default function AdsReviewPage() {
                 <li key={d.id} className="mc-card">
                   <p className="mc-card-title break-all">{d.host}</p>
                   <p className="mc-muted text-xs mt-1">
-                    {DOMAIN_STATUS_WORDS[d.status] ?? d.status}
+                    {DOMAIN_STATUS_WORDS[d.status] ?? 'Status not known'}
                     {d.reviewedAt ? ` · ${d.reviewedByName ?? 'An operator'}, ${shortDate(d.reviewedAt)}` : ` · first seen ${shortDate(d.createdAt)}`}
                   </p>
                   {d.reviewNotes ? <p className="mc-note mt-2">Why refused: {d.reviewNotes}</p> : null}

@@ -5,6 +5,7 @@ import { log } from '../../utils/logger';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { AD_LINK_REFUSAL_WORDS, classifyAdLink, LINK_PAUSE_PREFIX, type AdLinkVerdict } from './ad-link-policy';
 import { AD_LINK_CHECK_WORDS, checkAdLink, type AdLinkCheck, type AdLinkHop } from './ad-link-probe';
+import { SUSPENSION_PAUSE_PREFIX } from './advertiser.service';
 import { AdsLifecycleService } from './lifecycle.service';
 import { AdServingService } from './serving.service';
 
@@ -195,8 +196,16 @@ export class AdLinkService {
     const domain = await this.decide(id, adminUserId, 'REJECTED', 'LINK_DOMAIN_REJECT', reason);
     AdServingService.invalidateTenant(domain.tenantId);
     const words = 'Swift no longer allows ads to link to that website';
+    // A campaign its advertiser paused is told too, or it would resume into nothing. A pause that is already the
+    // link check's, or a suspension's, stands: reinstating a suspension brings it back, and the serve gate holds it.
     const campaigns = await this.prisma.adCampaign.findMany({
-      where: { tenantId: domain.tenantId, destinationHost: domain.host, status: { in: ['SCHEDULED', 'LIVE'] } },
+      where: {
+        tenantId: domain.tenantId, destinationHost: domain.host,
+        OR: [
+          { status: { in: ['SCHEDULED', 'LIVE'] } },
+          { status: 'PAUSED', OR: [{ statusReason: null }, { NOT: { OR: [{ statusReason: { startsWith: LINK_PAUSE_PREFIX } }, { statusReason: { startsWith: SUSPENSION_PAUSE_PREFIX } }] } }] },
+        ],
+      },
       select: { id: true },
     });
     for (const c of campaigns) await this.pause(c.id, words);

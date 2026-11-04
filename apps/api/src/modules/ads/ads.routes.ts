@@ -282,7 +282,8 @@ export async function adsRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Params: { id: string } }>('/campaigns/:id/pause', auth, memberEvent('pause'));
-  app.post<{ Params: { id: string } }>('/campaigns/:id/resume', auth, memberEvent('resume'));
+  // [ADS-ON] A resume after a link pause fetches the advertiser's website: bounded per person.
+  app.post<{ Params: { id: string } }>('/campaigns/:id/resume', { ...auth, config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, memberEvent('resume'));
 
   /** GET /campaigns/:id/stats — the advertiser dashboard numbers (spec §12.3).
    *  Reads the nightly AdStatsDaily rollups ONLY; the reconciliation merge-gate

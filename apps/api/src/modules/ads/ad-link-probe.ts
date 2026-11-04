@@ -48,17 +48,20 @@ export const AD_LINK_CHECK_WORDS: Record<AdLinkCheckFailure, string> = {
 const BLOCKED = new BlockList();
 for (const [network, prefix] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24],
-  ['192.0.2.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
+  ['192.0.2.0', 24], ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
 ] as const) BLOCKED.addSubnet(network, prefix, 'ipv4');
-for (const [network, prefix] of [
-  ['::', 128], ['::1', 128], ['64:ff9b::', 96], ['100::', 64], ['2001:db8::', 32], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8],
-] as const) BLOCKED.addSubnet(network, prefix, 'ipv6');
+// IPv6 is the other way round: only global unicast is public, less the ranges inside it that tunnel to IPv4 (6to4,
+// Teredo) or are documentation. Everything else stays blocked: mapped, compatible, translated, site-local, the rest.
+const GLOBAL_IPV6 = new BlockList();
+GLOBAL_IPV6.addSubnet('2000::', 3, 'ipv6');
+for (const [network, prefix] of [['2001::', 32], ['2001:db8::', 32], ['2002::', 16]] as const) BLOCKED.addSubnet(network, prefix, 'ipv6');
 
-/** Anything that is not provably a public address is blocked. IPv4 mapped into IPv6 is judged as IPv4. */
+/** Anything that is not provably a public address is blocked. */
 export function isBlockedAddress(address: string): boolean {
   const family = isIP(address);
   if (family === 0) return true;
-  return BLOCKED.check(address, family === 6 ? 'ipv6' : 'ipv4');
+  if (family === 4) return BLOCKED.check(address, 'ipv4');
+  return !GLOBAL_IPV6.check(address, 'ipv6') || BLOCKED.check(address, 'ipv6');
 }
 
 type LookupAnswer = Array<{ address: string; family: number }>;

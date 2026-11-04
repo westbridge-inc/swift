@@ -55,7 +55,10 @@ async function user(roles: Array<'CUSTOMER' | 'ADMIN'>) {
 /** Invoice numbers count the rows, so a suite that deletes an invoice leaves a gap the next checkout collides
  *  with. Like the checkout suites, a test that issues an invoice leaves its fixtures in place. */
 const keepFixtures = (owner: string, advertiserId: string, placementId: string, campaignId: string) => {
-  for (const [list, id] of [[userIds, owner], [advertiserIds, advertiserId], [placementIds, placementId], [campaignIds, campaignId]] as const) list.splice(list.indexOf(id), 1);
+  for (const [list, id] of [[userIds, owner], [advertiserIds, advertiserId], [placementIds, placementId], [campaignIds, campaignId]] as const) {
+    const at = list.indexOf(id);
+    if (at >= 0) list.splice(at, 1);
+  }
 };
 
 async function advertiser(ownerUserId: string) {
@@ -565,6 +568,96 @@ describe('the weekly re-check', () => {
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
     vi.stubEnv('ADS_ENABLED', '1');
+  });
+});
+
+// [REVIEW-M9 S2-1] A link pause must never strand money: while the link cannot pass, resume is closed, so cancel
+// has to stay open, with the same plan the preview shows.
+describe('a link pause never strands paid money', () => {
+  const cancelIt = (id: string, token: string) => app.inject({ method: 'POST', url: `/api/v1/ads/campaigns/${id}/cancel`, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, payload: {} });
+  const previewOf = (id: string, token: string) => app.inject({ method: 'GET', url: `/api/v1/ads/campaigns/${id}/refund-preview`, headers: { authorization: `Bearer ${token}` } });
+
+  /** Paid for a week that has not started, then paused because Swift refused the website. */
+  async function paidThenRefused() {
+    const h = host('stranded');
+    const domain = await allow(h);
+    const owner = await user(['CUSTOMER']);
+    const a = await advertiser(owner.userId);
+    const p = await placement();
+    const start = new Date(week().getTime() + 28 * DAY);
+    const c = await prisma.adCampaign.create({ data: { tenantId, advertiserId: a.id, placementId: p.id, name: 'Paid', cities: ['*'], startWeek: start, endWeek: start, status: 'SCHEDULED', totalAmount: 5000, destinationType: 'URL', destinationValue: `https://${h}/a`, destinationHost: h, destinationApprovedAt: new Date(), destinationCheckedAt: new Date() } });
+    const booking = await prisma.adBooking.create({ data: { campaignId: c.id, placementId: p.id, city: '*', weekStart: start, amount: 5000, status: 'CONFIRMED' } });
+    const invoice = await prisma.adInvoice.create({ data: { tenantId, advertiserId: a.id, campaignId: c.id, number: `ADS-LINK-${nanoid(8)}`, amount: 5000, status: 'PAID', provider: 'MMG', paidAt: new Date() } });
+    await new AdLinkService(prisma, io).rejectDomain(domain.id, 'admin-1', 'This website now sells a banned item');
+    expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: c.id } })).status).toBe('PAUSED');
+    keepFixtures(owner.userId, a.id, p.id, c.id);
+    return { owner, campaign: c, booking, invoice };
+  }
+
+  it('an advertiser whose link cannot pass can cancel, and gets exactly what the preview promised', async () => {
+    const f = await paidThenRefused();
+    const preview = await previewOf(f.campaign.id, f.owner.token);
+    expect(preview.json().data.total).toBe(5000);
+    const res = await cancelIt(f.campaign.id, f.owner.token);
+    expect(res.statusCode, res.body).toBe(200);
+    expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: f.campaign.id } })).status).toBe('CANCELLED');
+    expect((await prisma.adBooking.findUniqueOrThrow({ where: { id: f.booking.id } })).status).toBe('REFUNDED');
+    const invoice = await prisma.adInvoice.findUniqueOrThrow({ where: { id: f.invoice.id } });
+    expect([invoice.status, Number(invoice.refundedAmount)]).toEqual(['REFUNDED', 5000]);
+  });
+
+  it('a pause an advertiser made themselves still goes through resume, and a suspension is still Swift\'s', async () => {
+    const { AdsLifecycleService } = await import('../modules/ads/lifecycle.service');
+    const lifecycle = new AdsLifecycleService(prisma, io);
+    const plain = await live({ value: 'swift://store/plain', host: 'plain' });
+    await prisma.adCampaign.update({ where: { id: plain.campaign.id }, data: { status: 'PAUSED', statusReason: null } });
+    await expect(lifecycle.transition(plain.campaign.id, 'cancel', plain.owner.userId, undefined, { byAdvertiser: true })).rejects.toMatchObject({ code: 'INVALID_CAMPAIGN_TRANSITION' });
+    const held = await live({ value: 'swift://store/held', host: 'held' });
+    await prisma.adCampaign.update({ where: { id: held.campaign.id }, data: { status: 'PAUSED', statusReason: 'Advertiser suspended: a reason' } });
+    await expect(lifecycle.transition(held.campaign.id, 'cancel', held.owner.userId, undefined, { byAdvertiser: true })).rejects.toMatchObject({ code: 'INVALID_CAMPAIGN_TRANSITION' });
+  });
+
+  it('the notice is true: a refused website has no fix, and it says what can be done', async () => {
+    const f = await paidThenRefused();
+    const body = (await notices(f.owner.userId)).map((n) => n.body).join(' ');
+    expect(body).toContain('Swift no longer allows ads to link to that website');
+    expect(body).toContain('cannot go back on with this link');
+    expect(body).toContain('cancel');
+    expect(body).not.toContain('Fix the page');
+  });
+
+  it('a page that can be fixed says so, and says cancel is there too', async () => {
+    const h = host('fixable');
+    await allow(h);
+    const { campaign, owner } = await live({ value: `https://${h}/a`, host: h, checkedDaysAgo: AD_LINK_RECHECK_DAYS + 1 });
+    const s = new AdLinkService(prisma, io);
+    s.hop = sends({ ...page, status: 404 });
+    await s.recheckDue(new Date(), { campaignIds: [campaign.id], houseAdIds: [] });
+    const body = (await notices(owner.userId)).map((n) => n.body).join(' ');
+    expect(body).toContain('Fix the page');
+    expect(body).toContain('cancel');
+  });
+
+  it('a campaign its advertiser had paused on a refused website is told too, and cannot resume into nothing', async () => {
+    const h = host('ownpaused');
+    const domain = await allow(h);
+    const { campaign, owner } = await live({ value: `https://${h}/a`, host: h });
+    await prisma.adCampaign.update({ where: { id: campaign.id }, data: { status: 'PAUSED', statusReason: null } });
+    await new AdLinkService(prisma, io).rejectDomain(domain.id, 'admin-1', 'This website now sells a banned item');
+    const row = await prisma.adCampaign.findUniqueOrThrow({ where: { id: campaign.id } });
+    expect(row.statusReason?.startsWith(LINK_PAUSE_PREFIX)).toBe(true);
+    expect((await notices(owner.userId)).map((n) => n.title).join()).toContain('check your ad link');
+    const res = await app.inject({ method: 'POST', url: `/api/v1/ads/campaigns/${campaign.id}/resume`, headers: { authorization: `Bearer ${owner.token}`, 'content-type': 'application/json' }, payload: {} });
+    expect(res.statusCode).toBe(409);
+  });
+
+  it('a campaign Swift suspended keeps that pause: refusing a website never rewrites it', async () => {
+    const h = host('suspended');
+    const domain = await allow(h);
+    const { campaign } = await live({ value: `https://${h}/a`, host: h });
+    await prisma.adCampaign.update({ where: { id: campaign.id }, data: { status: 'PAUSED', statusReason: 'Advertiser suspended: a reason' } });
+    await new AdLinkService(prisma, io).rejectDomain(domain.id, 'admin-1', 'This website now sells a banned item');
+    expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: campaign.id } })).statusReason).toBe('Advertiser suspended: a reason');
   });
 });
 

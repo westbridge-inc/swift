@@ -126,6 +126,12 @@ export function classifyAdLink(type: 'NONE' | 'URL' | 'DEEPLINK', raw: string | 
 
 /** The statusReason a failed link check pauses a campaign with: Swift's pause, lifted only by a passing check. */
 export const LINK_PAUSE_PREFIX = 'Swift paused: link check: ';
+/** Why a link check failed when nothing the advertiser can do to their page would make it pass. */
+export const AD_LINK_NOT_FIXABLE: readonly string[] = [
+  'Swift no longer allows ads to link to that website',
+  'the website is not on the approved list',
+  'the link is not allowed',
+];
 
 export interface AdLinkFields {
   destinationType: 'NONE' | 'URL' | 'DEEPLINK';
@@ -133,8 +139,8 @@ export interface AdLinkFields {
   destinationApprovedAt: Date | null;
 }
 
-/** The serve gate. An ad with a link serves only if a person approved that link, and an outside website is
- *  still on the allow-list at this moment. Nothing that reaches a phone gets past this. */
+/** The serve gate. An ad with a link serves only if a person approved that link, and an outside website is on the
+ *  allow-list when the pool is built, at most five minutes before it serves. Nothing that reaches a phone gets past this. */
 export function adLinkServable(row: AdLinkFields, approvedHosts: ReadonlySet<string>): boolean {
   const verdict = classifyAdLink(row.destinationType, row.destinationValue);
   if (!verdict.ok) return false;
