@@ -10,20 +10,18 @@
  * someone else's folder, a path that climbs out of it, a photo that was never
  * captured — shows nothing rather than a stand-in face.
  */
+import { isStoredName } from '../../providers/storage/stored-name';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { SELFIE_COMPARE_DOC_TYPES } from './doc-registry';
 
 export interface SignupSelfie { url: string; capturedAt: string }
-
-const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** Is this stored pointer the applicant's own selfie object (local path or storage key)? */
 export function isOwnSelfiePointer(userId: string, avatar: string | null | undefined): boolean {
   if (!avatar) return false;
   const key = avatar.startsWith('/uploads/') ? avatar.slice('/uploads/'.length) : avatar;
   const parts = key.split('/');
-  return parts.length === 3 && parts[0] === 'avatars' && parts[1] === userId
-    && SAFE_NAME.test(parts[2]!) && !parts[2]!.includes('..');
+  return parts.length === 3 && parts[0] === 'avatars' && parts[1] === userId && isStoredName(parts[2]!);
 }
 
 /** The selfie to show beside this document, or null. Only a photo ID carries one (national ID, passport or licence). */
