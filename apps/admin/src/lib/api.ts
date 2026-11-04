@@ -388,6 +388,9 @@ export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<Ven
   apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
 export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
   apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
+/** [BUG-HUNT F05] "Contact support to move it": allows one move between delivery and taxi work, for a week. */
+export const allowMoverPlanMove = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/mover-plan/allow-move`, { method: 'POST', body: JSON.stringify({}), reason });
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const suspendVendor = (id: string, reason: string) =>

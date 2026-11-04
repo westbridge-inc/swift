@@ -174,6 +174,9 @@ const vendorsQuerySchema = z.object({
 });
 
 // Riders/drivers list filters use UI keywords, not DB enums
+/** [BUG-HUNT F05] How long a person has to make the one move support allowed. */
+const MOVER_PLAN_MOVE_DAYS = 7;
+
 const moverFilterQuerySchema = z.object({
   status: z.enum(['online', 'offline', 'verified', 'unverified']).optional(),
   type: z.nativeEnum(RiderType).optional(),
@@ -1421,6 +1424,27 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!user) throw new NotFoundError('User', id);
     const { riskScoreFor } = await import('../cash/risk-score.service');
     return { success: true, data: await riskScoreFor(app.prisma, id) };
+  });
+
+  /**
+   * [BUG-HUNT F05] "Contact support to move it to taxi work": this is that door. It allows one move for a week; the
+   * person makes it in the app, because the vehicle is theirs to name (partner.service changeVehicleWithAuthority).
+   */
+  app.post('/users/:id/mover-plan/allow-move', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const plan = await app.prisma.subscription.findFirst({
+      where: { OR: [{ rider: { userId: id } }, { driver: { userId: id } }], status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE', 'PAUSED', 'SUSPENDED'] } },
+      select: { id: true },
+    });
+    if (!plan) throw new AppError(409, 'NO_PLAN_TO_MOVE', 'This person has no weekly plan on a rider or driver profile, so nothing is stopping a vehicle change.');
+    const until = new Date(Date.now() + MOVER_PLAN_MOVE_DAYS * 86_400_000);
+    await app.prisma.user.update({ where: { id }, data: { moverPlanMoveUntil: until, moverPlanMoveBy: request.user.userId } });
+    await audit(request.user.userId, 'ALLOW_MOVER_PLAN_MOVE', 'User', id, { until: until.toISOString() }, request);
+    await notifications.send({
+      userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'You can change your vehicle now',
+      body: `Swift support has opened this for you. Change your vehicle in the app within ${MOVER_PLAN_MOVE_DAYS} days. Your weekly fee follows the new work: a higher fee starts only after 14 days’ notice, and a week you have paid keeps its price.`,
+    });
+    return { success: true, data: { until } };
   });
 
   app.put('/users/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
