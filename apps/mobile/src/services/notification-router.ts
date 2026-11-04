@@ -1,3 +1,4 @@
+import { rideIsOver } from '../lib/rideAfterTrip';
 import { teamInviteKeys } from '../hooks/teamInviteKeys';
 import * as Notifications from 'expo-notifications';
 import { navigationRef, safeNavigate } from '../navigation/navigationRef';
@@ -444,7 +445,8 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // available mover home. Bare historical order ids keep the generic contract.
   if (data['orderType'] === 'TAXI' && orderId && data['rideId'] === orderId) {
     if (audience === 'earner') return { screen: 'Main' };
-    if (audience === 'customer') return { screen: 'Taxi' };
+    // [BUG-HUNT-2 G06] "Ride Complete" opened an empty booking form. A ride that is over opens the ride.
+    if (audience === 'customer') return rideIsOver(data['status']) ? { screen: 'RideDetail', params: { rideId: orderId } } : { screen: 'Taxi' };
   }
 
   // Orders: any payload carrying an orderId lands on that order's tracking

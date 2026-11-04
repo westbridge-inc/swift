@@ -558,6 +558,10 @@ export const assignCustodyRelay = (id: string, riderId: string, reason: string) 
 export const confirmCustodyReturn = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/custody-cases/${id}/confirm-return`, { method: 'POST', body: '{}', reason });
 
+/** [BUG-HUNT-2 G05] A new ride code for a ride stuck at the pickup. The passenger reads it in their app; nobody here sees it. */
+export const resetRideCode = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/orders/${id}/handover-secret/reset-ride-pin`, { method: 'POST', body: JSON.stringify({ reason }), reason });
+
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);
 // [A-13] "Refund" records an OBLIGATION (REFUND_DUE), not a completed payment.

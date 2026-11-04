@@ -43,6 +43,7 @@ import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyR
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 import { isTaxiOrder } from '../../../lib/orderTrackRoute';
+import { rideIsOver } from '../../../lib/rideAfterTrip';
 import { pickupShowsCode, pickupWords } from '../pickup-words';
 import { BookingRescheduleCard } from '../BookingRescheduleCard';
 import { appointmentBookingView } from '../../../lib/appointmentBooking';
@@ -410,7 +411,9 @@ export function DeliveryScreen() {
   useEffect(() => {
     if (!isTaxiOrder(o) || rideHandedOn.current) return;
     rideHandedOn.current = true;
-    navigation.replace('Taxi');
+    // [BUG-HUNT-2 G06] A ride that is over has its own screen: "Rate your ride" landed on an empty booking form.
+    if (rideIsOver(o?.status)) navigation.replace('RideDetail', { rideId: o.id });
+    else navigation.replace('Taxi');
   }, [navigation, o]);
   const orderStatus = String(o?.status ?? '').toUpperCase();
   const liveTrackingAllowed = LIVE_TRACKING_STATUSES.has(orderStatus)

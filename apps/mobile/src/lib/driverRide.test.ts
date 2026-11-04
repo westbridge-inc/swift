@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canDriverHandbackRide } from './driverRide';
+import { canDriverHandbackRide, driverStepFailedWords } from './driverRide';
 
 describe('driver ride handback visibility', () => {
   it.each(['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'])(
@@ -24,5 +24,16 @@ describe('driver ride handback visibility', () => {
   it('does not offer an action without a ride', () => {
     expect(canDriverHandbackRide(null)).toBe(false);
     expect(canDriverHandbackRide(undefined)).toBe(false);
+  });
+});
+
+describe('[G05] a failed driver step says why', () => {
+  it('in the server\'s words', () => {
+    expect(driverStepFailedWords({ response: { data: { error: { message: 'Incorrect PIN. 3 attempt(s) remaining.' } } } })).toBe('Incorrect PIN. 3 attempt(s) remaining.');
+  });
+  it('with no answer, what to try: never nothing', () => {
+    expect(driverStepFailedWords(new Error('Network Error'))).toBe('That didn’t go through. Check your connection and try again.');
+    expect(driverStepFailedWords({ response: { data: { error: { message: ' ' } } } })).toBe('That didn’t go through. Check your connection and try again.');
+    expect(driverStepFailedWords(undefined)).toBe('That didn’t go through. Check your connection and try again.');
   });
 });

@@ -68,6 +68,17 @@ describe('destinationFor — the tap table', () => {
 // S0: PUSHES THAT OPENED THE APP AND DID NOTHING
 // ───────────────────────────────────────────────────────────────────────────
 
+describe('[G06] a ride that is over opens the ride', () => {
+  const ride = { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer' };
+  it.each(['DELIVERED', 'COMPLETED', 'CANCELLED', 'FAILED'])('%s opens its screen, not an empty booking form', (status) => {
+    expect(destinationFor({ ...ride, status })).toEqual({ screen: 'RideDetail', params: { rideId: 'r1' } });
+  });
+  it('a live ride still opens the taxi screen, and a driver still goes home', () => {
+    expect(destinationFor({ ...ride, status: 'DRIVER_EN_ROUTE' })).toEqual({ screen: 'Taxi' });
+    expect(destinationFor({ ...ride, status: 'DELIVERED', audience: 'earner' })).toEqual({ screen: 'Main' });
+  });
+});
+
 describe('a push never lands on a route its recipient cannot reach [S0]', () => {
   // THE SHAPE OF THIS WHOLE CLASS OF BUG. `Delivery` is the CUSTOMER order
   // screen. It is mounted by CustomerStack and by nothing else — so a push

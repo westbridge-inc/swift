@@ -1,8 +1,11 @@
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { randomInt } from 'crypto';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { handoverBreakGlassCounter } from '../../plugins/observability';
 import { newRidePin } from '../rides/ride-pin';
+import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
+import { consoleRoleOf } from '../auth/console-role';
+import { requireIdentityAuthority } from '../integrity/identity-review';
 
 // ---------------------------------------------------------------------------
 // [A-15] THE ONE AUDITED DOOR TO A HANDOVER SECRET.
@@ -42,6 +45,9 @@ export interface HandoverRevealDeps {
   /** test seam: called at named boundaries so a death mid-ceremony can be proven */
   failpoint?: (boundary: string, ctx?: Record<string, unknown>) => Promise<void>;
 }
+
+/** A ride's code is live from the assignment until it is verified at the pickup. */
+const RIDE_PIN_WINDOW = ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'] as const;
 
 export interface RevealInput {
   orderId: string;
@@ -249,4 +255,59 @@ export async function resetDeliveryPin(deps: HandoverRevealDeps, input: RevealIn
 
   handoverBreakGlassCounter.labels('reset_delivery_pin').inc();
   return { auditId: audit.id, rotated: true };
+}
+
+/**
+ * [BUG-HUNT-2 G05] Who may reset a ride's code, read inside the transaction on the people the locked row names, from the
+ * database, never the session. Nobody acts on a ride they are on through any account of theirs; an identity waiting for a
+ * person refuses, since nobody can then say who is on the ride; a staff account on it goes to a SUPER_ADMIN who is not.
+ */
+async function assertMayResetRideCode(tx: Prisma.TransactionClient, actorId: string, parties: readonly string[]): Promise<void> {
+  const onRide = new Set<string>();
+  for (const party of parties) {
+    onRide.add(party);
+    for (const linked of (await requireIdentityAuthority(tx, party)).memberIds) onRide.add(linked);
+  }
+  await requireIdentityAuthority(tx, actorId);
+  if (onRide.has(actorId)) throw new AppError(403, 'OWN_RIDE', 'You are on this ride. Someone else at Swift must reset its code.');
+  const rows = await tx.user.findMany({ where: { id: { in: [actorId, ...onRide] } }, select: { id: true, roles: true } });
+  const roleOf = (userId: string) => consoleRoleOf(rows.find((row) => row.id === userId)?.roles);
+  if ([...onRide].some((person) => roleOf(person) !== null) && roleOf(actorId) !== 'SUPER_ADMIN') {
+    throw new AppError(403, 'STAFF_ON_RIDE', 'A staff account is on this ride. Only a SUPER_ADMIN who is not on it can reset its code.');
+  }
+}
+
+/**
+ * [BUG-HUNT-2 G05] A ride's code, reset by support. The driver was told "contact support" after five wrong tries, and support's
+ * two doors answered 404: neither knew a ride. The only exit was handing the ride back with the passenger at the car. The same
+ * door as the delivery PIN (step-up, a reason, an audit row, a counter): a new code, a cleared budget, read by the passenger on
+ * their own screen. Only before the code is verified: a passenger aboard has no code to reset. Nobody resets a ride they are on.
+ */
+export async function resetRidePin(deps: HandoverRevealDeps, input: RevealInput): Promise<RotateResult & { customerId: string }> {
+  const reason = assertReason(input.reason);
+  const next = newRidePin();
+  const { audit, customerId } = await deps.prisma.$transaction(async (tx) => {
+    await lockTaxiOrderForCustodyDecision(tx, input.orderId);
+    const order = await tx.order.findUnique({
+      where: { id: input.orderId },
+      select: { id: true, orderNumber: true, customerId: true, status: true, orderType: true, ridePin: true, ridePinAttempts: true, ridePinVerified: true, ridePinVerifiedAt: true, driver: { select: { userId: true } } },
+    });
+    if (!order) throw new NotFoundError('Order', input.orderId);
+    if (order.orderType !== 'TAXI' || !order.ridePin) throw new AppError(404, 'NO_RIDE_PIN', 'This order has no ride code to reset.');
+    if (!(RIDE_PIN_WINDOW as readonly string[]).includes(order.status) || order.ridePinVerified || order.ridePinVerifiedAt) {
+      throw new AppError(409, 'RIDE_PIN_CLOSED', 'A ride code can be reset only before it has been verified.');
+    }
+    await assertMayResetRideCode(tx, input.actorId, [order.customerId, ...(order.driver ? [order.driver.userId] : [])]);
+    await tx.order.update({ where: { id: order.id }, data: { ridePin: next, ridePinAttempts: 0 } });
+    const row = await tx.auditLog.create({
+      data: {
+        userId: input.actorId, action: 'RESET_RIDE_PIN', entity: 'Order', entityId: order.id,
+        changes: { reason, orderNumber: order.orderNumber, customerId: order.customerId, orderStatus: order.status, attemptsCleared: order.ridePinAttempts },
+        ipAddress: input.ip, userAgent: input.userAgent,
+      },
+    });
+    return { audit: row, customerId: order.customerId };
+  });
+  handoverBreakGlassCounter.labels('reset_ride_pin').inc();
+  return { auditId: audit.id, rotated: true, customerId };
 }

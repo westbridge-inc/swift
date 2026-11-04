@@ -595,7 +595,9 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] As /active while the ride is live; once finished, the
     // fare it was paid at, itemised (route fare + waiting = total).
     const waiting = await decorateRideWaiting(app.prisma, ride, itinerary?.stops ?? null);
-    return { success: true, data: itinerary || waiting.waiting || waiting.fareBreakdown ? { ...ride, ...itinerary, ...waiting } : ride };
+    // [BUG-HUNT-2 G06] The finished-ride screen asks for a rating only once.
+    const hasBeenRated = await app.prisma.rating.count({ where: { orderId: ride.id, raterId: request.user.userId } }) > 0;
+    return { success: true, data: { ...ride, ...itinerary, ...waiting, hasBeenRated } };
   });
 
   /** POST /:id/cancel — rides ride the same state machine as everything else. */

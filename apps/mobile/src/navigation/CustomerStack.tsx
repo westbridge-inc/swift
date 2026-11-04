@@ -42,6 +42,7 @@ import { LocationPickerScreen } from '../modules/profile/screens/LocationPickerS
 
 // Surviving verticals + infra (outside this rebuild's scope, still reachable)
 import { TaxiScreen } from '../modules/movement/screens/TaxiScreen';
+import { RideDetailScreen } from '../modules/movement/screens/RideDetailScreen';
 import { CourierScreen } from '../modules/movement/screens/CourierScreen';
 import { DestinationSearchScreen } from '../modules/movement/screens/DestinationSearchScreen';
 import { PinConfirmScreen } from '../modules/movement/screens/PinConfirmScreen';
@@ -178,6 +179,7 @@ export function CustomerStack() {
       <Stack.Screen name="LocationPicker" component={LocationPickerScreen} />
       {/* Surviving verticals + infra */}
       <Stack.Screen name="Taxi" component={TaxiScreen} />
+      <Stack.Screen name="RideDetail" component={RideDetailScreen} />
       <Stack.Screen name="Courier" component={CourierScreen} />
       <Stack.Screen name="DestinationSearch" component={DestinationSearchScreen} />
       <Stack.Screen name="PinConfirm" component={PinConfirmScreen} />
