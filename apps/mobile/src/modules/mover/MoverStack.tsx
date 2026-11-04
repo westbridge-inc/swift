@@ -23,6 +23,7 @@ import { MoverDocumentsScreen } from './screens/MoverDocumentsScreen';
 import { MoverVehicleScreen } from './screens/MoverVehicleScreen';
 import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
+import { MoverNoAnswer } from './MoverNoAnswer';
 // [B-support] The ticket screen is role-agnostic (generic create+list); the
 // mover stack simply never registered it — an earner mid-shift had NO route
 // to a human. Registration, not a rewrite.
@@ -40,7 +41,7 @@ const Stack = createNativeStackNavigator();
 // flip itself gets its moment (the went-live popup), Uber-style.
 function MoverRoot({ navigation }: any) {
   const preview = useMoverPreview((s) => s.preview);
-  const { data: status, isLoading } = useVerificationStatus<any>('MOVER', undefined, { poll: true });
+  const { data: status, isLoading, refetch } = useVerificationStatus<any>('MOVER', undefined, { poll: true });
   // Documents can be approved before a vehicle is saved. The server's vehicleType is null until a rider or driver
   // profile exists: Home has nothing to run on then, and the vehicle form is on the onboarding screen.
   const verified = !!status?.roleVerified && status?.vehicleType !== null;
@@ -57,6 +58,9 @@ function MoverRoot({ navigation }: any) {
       </Screen>
     );
   }
+
+  // [BUG-HUNT F11] No answer is not "not signed up": a working rider never reads the sign-up form because of a bad signal.
+  if (!status) return <MoverNoAnswer onRetry={() => void refetch()} />;
 
   return (
     <>

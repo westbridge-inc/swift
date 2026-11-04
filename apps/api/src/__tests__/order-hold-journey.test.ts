@@ -525,9 +525,10 @@ describe.each([
 
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, buyer.token);
     expect(mine.json().data).toMatchObject({ status: 'CANCELLED', canCancel: false, cancellationFee: 0 });
-    // A second tap is refused, never a second cancellation.
+    // A second tap gets the first tap's answer, never a second cancellation.
     const again = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, buyer.token, {});
-    expect(again.statusCode).toBe(400);
+    expect(again.statusCode).toBe(200);
+    if (stock != null) expect(await stockOf(store.itemId)).toBe(stock);
 
     expect(await storeHeard(store, order)).toEqual(HEARD_NOTHING);
   });

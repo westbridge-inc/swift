@@ -39,6 +39,7 @@ import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND, storeGoLiv
 import { storeFeeNotice, storeFeeNoticeDedupeKey, storeFeeStanding, type StoreFeeQuote } from '../partner/store-fee';
 import { FOOD_HANDLERS_NOTICE_KIND, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, FOOD_HANDLERS_WHERE, foodHandlerAttestationView, foodHandlersNotice, foodHandlerStoresOf, foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
 import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { docTypeName } from './doc-names';
 import { lastPaperHeld, partnerApprovalsOpen, PARTNER_APPROVAL_HELD, type PartnerAtTheLastPaper } from './approval-brake';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
@@ -520,7 +521,7 @@ function assertStoreVatDoor(docType: string, decision: { storeVatDecision?: true
 /** The words of the decision notices — one place, for the in-transaction and the direct sends. */
 /** [STORE-VAT] The words a notice uses for a document type ("VAT", not "vat", for the store's VAT certificate). */
 function docTypeWords(docType: string): string {
-  return docType === VAT_CERTIFICATE_DOC_TYPE ? 'VAT registration certificate' : docType.replace(/_/g, ' ');
+  return docType === VAT_CERTIFICATE_DOC_TYPE ? 'VAT registration certificate' : docTypeName(docType);
 }
 export function approvedNotice(docType: string): { title: string; body: string } {
   return { title: 'Document approved', body: `Your ${docTypeWords(docType)} has been approved.` };
@@ -2668,14 +2669,18 @@ export class VerificationService {
         });
         // [RETIER PR-A] The first time a store is made live, for good (partner/store-fee.ts: only a never-live store is
         // priced on its catalogue).
-        await db.vendor.updateMany({ where: { id: vendor.id, firstLiveAt: null }, data: { firstLiveAt: new Date() } });
+        const firstLive = await db.vendor.updateMany({ where: { id: vendor.id, firstLiveAt: null }, data: { firstLiveAt: new Date() } });
         // [#1541 · #1516 review S4] A store whose weekly fee billing holds goes live UNDER that hold
         // (billing-access.ts), never open while its fee is unpaid; the promotion below then finds it not pending.
-        if (await holdActivationForUnpaidFee(db, vendor.id)) await this.tellOwnerFeeHoldsGoLive(db, userId, vendor);
+        const heldForFee = await holdActivationForUnpaidFee(db, vendor.id);
+        if (heldForFee) await this.tellOwnerFeeHoldsGoLive(db, userId, vendor);
         await db.vendor.updateMany({
           where: { id: vendor.id, status: 'PENDING_APPROVAL' },
           data: { status: 'ACTIVE' },
         });
+        // [BUG-HUNT F07] The owner hears the day it happens, once, instead of finding out by opening the app. A person's
+        // approve button sends its own "approved and now live" notice (admin.routes.ts).
+        if (firstLive.count === 1 && !heldForFee && !vendor.closurePausedAt && !scope.personApproved) await this.tellOwnerStoreIsLive(db, userId, vendor);
       } else if (vendor.isVerified) {
         // [REPORT-012 F-012-05] A negative projection revokes ORDERING too:
         // leaving acceptingOrders on kept an existing cart checkout-able
@@ -2710,7 +2715,9 @@ export class VerificationService {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Add the number customers can call',
-      body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
+      // [BUG-HUNT F07] Never "everything else": a food handlers tick or a fee tick may still come after this. The next
+      // step is the true thing to say, and the notice below says when the store is live.
+      body: `${vendor.name}'s documents are approved. The next step is the phone number customers can call: add it in Account. Swift tells you when your store is live.`,
       // The literal keeps the kind visible to the cross-app notification census.
       data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
     });
@@ -2788,6 +2795,22 @@ export class VerificationService {
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Documents approved',
       body: `${vendor.name}'s documents are approved. Pay the weekly fee to open the store for orders.`,
+      data: { vendorId: vendor.id },
+    });
+    this.projectionNotices.get(db)?.push(notice.id);
+  }
+
+  /** [BUG-HUNT F07] The one notice for the first time a store goes live. Delivered after the projection commits. */
+  private async tellOwnerStoreIsLive(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    vendor: { id: string; name: string },
+  ): Promise<void> {
+    const notice = await insertNoticeFor(db, {
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Your store is live',
+      body: `${vendor.name} is live on Swift. Customers can find it now and order from it while it is open.`,
       data: { vendorId: vendor.id },
     });
     this.projectionNotices.get(db)?.push(notice.id);

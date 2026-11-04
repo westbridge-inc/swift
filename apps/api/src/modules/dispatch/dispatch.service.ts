@@ -2519,7 +2519,7 @@ export class DispatchService {
     if (verdict.holder && verdict.holder !== moverId && !(await this.offerRanOut(orderId, moverId))) {
       throw this.offerTaken(pool);
     }
-    throw fallback ?? new AppError(409, 'OFFER_EXPIRED', 'This offer has expired or went to another mover');
+    throw fallback ?? new AppError(409, 'OFFER_EXPIRED', `This offer has expired or went to another ${pool === 'DRIVER' ? 'driver' : 'rider'}`);
   }
 
   /** Did a card of this mover for this order end by its timeout, or by their
@@ -2653,7 +2653,7 @@ export class DispatchService {
         ? moverAuthority?.activeRole === 'MOVER' || moverAuthority?.activeRole === 'DRIVER'
         : moverAuthority?.activeRole === 'MOVER' || moverAuthority?.activeRole === 'RIDER';
       if (!moverAuthority || moverAuthority.status !== 'ACTIVE' || !allowedRole) {
-        throw new AppError(409, 'MOVER_INACTIVE', 'This mover is no longer available to accept work');
+        throw new AppError(409, 'MOVER_INACTIVE', 'This account cannot accept work right now');
       }
 
       // Lock the order after the User (the platform-wide lock order) and make
@@ -2799,7 +2799,7 @@ export class DispatchService {
             data: { riderId: moverId, status: 'RIDER_ASSIGNED' },
           });
       if (claimed.count === 0) {
-        throw new AppError(409, 'ALREADY_TAKEN', 'Another mover already took this job');
+        throw new AppError(409, 'ALREADY_TAKEN', `Another ${pool === 'DRIVER' ? 'driver' : 'rider'} already took this job`);
       }
 
       if (pool === 'DRIVER') {
@@ -3075,6 +3075,9 @@ export class DispatchService {
     });
     const epoch = state ? `${state.status}.${state.riderAssignmentVersion}.${state.driverAssignmentVersion}` : (replayTag ?? 'unknown');
     const isParcel = order.orderType === 'COURIER';
+    // [BUG-HUNT F14] "Mover" is Swift's word for the two jobs; a customer or a store reads "rider" or "driver".
+    const isTaxi = order.orderType === 'TAXI';
+    const worker = isTaxi ? 'driver' : 'rider';
     if (attempts < EXHAUST_CAP && this.scheduleRedispatch) {
       const retryDelay = order.isExpress ? EXPRESS_REDISPATCH_DELAY_MS : REDISPATCH_DELAY_MS;
       if (await this.scheduleRedispatch(order.id, retryDelay, replayTag ? redispatchJobId(order.id, replayTag) : undefined)) {
@@ -3086,8 +3089,8 @@ export class DispatchService {
         await this.notifications.send({
           userId: order.customerId,
           type: 'SYSTEM_ANNOUNCEMENT',
-          title: 'Still looking for a mover',
-          body: `All nearby movers are busy right now — we are automatically retrying for order ${order.orderNumber}.`,
+          title: `Still looking for a ${worker}`,
+          body: `All nearby ${worker}s are busy right now — we are automatically retrying for ${isTaxi ? 'your ride' : `order ${order.orderNumber}`}.`,
           audience: 'customer',
           data: order.orderType === 'TAXI' ? taxiNotificationData(order.id, { kind: 'dispatch_retrying' }) : { kind: 'dispatch_retrying', orderId: order.id },
           // [OF-01] Once per order state (see `epoch` above): every later
@@ -3207,12 +3210,14 @@ export class DispatchService {
     await this.notifications.send({
       userId: order.customerId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'No movers available right now',
+      title: `No ${worker}s available right now`,
       // [OF-17] A parcel has no store to "hold it": its sender may cancel for
       // free at any time while nobody has taken it.
       body: isParcel
         ? `We could not find a rider for your parcel ${order.orderNumber} yet. We are still looking — you can cancel it for free at any time while no rider has taken it.`
-        : `We could not find a mover for order ${order.orderNumber}. ${order.vendor?.name ?? 'The vendor'} can hold it or cancel — we will keep you posted.`,
+        : isTaxi
+          ? `We could not find a driver for your ride yet. You can cancel it for free, or wait while we keep looking.`
+          : `We could not find a rider for order ${order.orderNumber}. ${order.vendor?.name ?? 'The vendor'} can hold it or cancel — we will keep you posted.`,
       audience: 'customer',
       data: order.orderType === 'TAXI' ? taxiNotificationData(order.id, { kind: 'dispatch_exhausted' }) : { kind: 'dispatch_exhausted', orderId: order.id },
       // [OF-01] Once per order state; a redelivered run [E36] or a later
@@ -3228,8 +3233,8 @@ export class DispatchService {
       await this.notifications.send({
         userId: order.vendor.owner.userId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'No movers available',
-        body: `No mover accepted order ${order.orderNumber}. You can hold it and retry, or cancel it.`,
+        title: 'No riders available',
+        body: `No rider accepted order ${order.orderNumber}. You can hold it and retry, or cancel it.`,
         audience: 'business',
         data: { kind: 'dispatch_exhausted', orderId: order.id },
         dedupeKey: `dispatch-exhausted:${order.id}:${epoch}`,

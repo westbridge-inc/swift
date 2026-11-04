@@ -19,6 +19,7 @@ import { vendorAlertSms } from './vendor-alert-sms';
 import { PAYER_INCLUDE, payerUserIdOf } from '../subscription/subscription-owner';
 import { providerFeeNotice } from './provider-fee-kinds';
 import { formatGuyanaTime } from '../../utils/guyana-day';
+import { orderDeliveredWords, orderReadyWords, type OrderReadyFacts } from '../order/order-notice-words';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -771,12 +772,11 @@ export class NotificationService {
     });
   }
 
-  async orderReady(customerId: string, orderNumber: string, orderId: string): Promise<void> {
+  async orderReady(customerId: string, orderNumber: string, orderId: string, order: OrderReadyFacts): Promise<void> {
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
-      title: 'Food Ready!',
-      body: `Your order ${orderNumber} is ready and waiting for a rider.`,
+      ...orderReadyWords(orderNumber, order),
       data: { orderId, orderNumber, status: 'READY_FOR_PICKUP' },
     });
   }
@@ -843,12 +843,12 @@ export class NotificationService {
     });
   }
 
-  async orderDelivered(customerId: string, orderNumber: string, orderId: string, orderType?: string): Promise<void> {
+  async orderDelivered(customerId: string, orderNumber: string, orderId: string, orderType?: string, vendorType?: string | null): Promise<void> {
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
       title: orderType === 'TAXI' ? 'Ride completed' : 'Delivered!',
-      body: orderType === 'TAXI' ? 'Your ride is complete. Open Swift to view your trip.' : `Your order ${orderNumber} has been delivered. Enjoy your meal!`,
+      body: orderType === 'TAXI' ? 'Your ride is complete. Open Swift to view your trip.' : orderDeliveredWords(orderNumber, vendorType),
       data: orderType === 'TAXI' ? taxiNotificationData(orderId, { status: 'DELIVERED' }) : { orderId, orderNumber, status: 'DELIVERED' },
     });
   }

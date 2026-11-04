@@ -11,7 +11,7 @@ import { CANCEL_ORDER_FAQ_ANSWER } from '../../../lib/cancelPolicyCopy';
 const FAQS: { q: string; a: string }[] = [
   {
     q: 'How do I pay?',
-    a: 'Cash on delivery. You pay the rider (or the store on pickup) when your order arrives — Swift never charges your card.',
+    a: 'Cash when your order arrives: you pay the rider, or the store on pickup. Where a store offers MMG, you can pay the store by MMG instead. Swift never charges your card.',
   },
   {
     q: 'Does Swift add fees or markups?',
@@ -38,7 +38,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: 'How do refunds work with cash?',
-    a: 'If something goes wrong, report it from the order. Claims are reviewed with GPS and photo evidence and settled under Swift’s guarantee policy.',
+    a: 'Paying cash, you pay only when the order is handed over, so a cancelled order has nothing to refund. If something is wrong with an order you received, report it from the order. Any refund is made by the business: order money never passes through Swift, so Swift cannot send it, but we help you get an answer.',
   },
   // [Owner ruling 11 Oct 2026] the two licences, said plainly
   TAXI_DOCUMENTS_FAQ,
