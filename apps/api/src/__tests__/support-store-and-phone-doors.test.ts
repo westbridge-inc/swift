@@ -14,6 +14,10 @@ import { guyanaDayKey } from '../utils/guyana-day';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
+import { injectWithApproval } from './helpers/admin-approval';
+import { confirmPhoneChange } from '../modules/admin/phone-change';
+import { AuthService } from '../modules/auth/auth.service';
+import { getChannels } from '../providers/notifications/channels';
 
 // ---------------------------------------------------------------------------
 // [BUG-HUNT F22 · COORD 4 Nov 2026] Support can do what the screens tell people to ask support for. A store type picked
@@ -58,11 +62,32 @@ async function clearCounters(phone: string) {
   await app.redis.del(`otp_phone_day:${day}:${phone}`, `sms_global_day:${day}`, `sms_known_day:${day}`, `otp_ip_day:${day}:127.0.0.1`);
 }
 
+/** The ask, a second person agreeing, and the ask carried out: the whole of the number door's first step. */
+const twoPeople = (token: string, userId: string, phone: string) => injectWithApproval(app, {
+  method: 'POST', url: `/api/v1/admin/users/${userId}/phone-change`, payload: { phone },
+  headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-swift-reason': TEST_ADMIN_REASON },
+});
+
+/** A member of staff, signed in through the real door. */
+async function makeStaff(role: 'ADMIN' | 'SUPER_ADMIN') {
+  const phone = testPhone();
+  const user = await app.prisma.user.create({
+    data: { phone, firstName: 'Staff', lastName: `Door${seq}`, roles: [role, 'CUSTOMER'], activeRole: role, isPhoneVerified: true, admin: { create: { permissions: ['*'] } } },
+  });
+  userIds.push(user.id);
+  const token: string = (await loginWithOtp(app, phone)).json().data.tokens.accessToken;
+  return { user, token };
+}
+
+const smsTo = (phone: string, since: number) => devChannelLog.slice(since).filter((entry) => entry.channel === 'sms' && entry.to === phone);
+const phoneOf = async (id: string) => (await app.prisma.user.findUniqueOrThrow({ where: { id } })).phone;
+const confirm = (userId: string, code: string) => call('POST', `/api/v1/admin/users/${userId}/phone-change/confirm`, { code });
+
 /** The code the new number received. */
 async function startMove(userId: string, phone: string) {
   await clearCounters(phone);
   const before = devChannelLog.length;
-  const res = await call('POST', `/api/v1/admin/users/${userId}/phone-change`, { phone });
+  const res = await twoPeople(adminToken, userId, phone);
   expect(res.statusCode, res.body).toBe(200);
   const sms = devChannelLog.slice(before).filter((entry) => entry.channel === 'sms' && entry.to === phone).at(-1);
   const code = sms?.body.match(/\b(\d{6})\b/)?.[1];
@@ -249,7 +274,7 @@ describe('[F22] a person\'s number', () => {
     const one = await makeUser('Taken');
     const two = await makeUser('Holder');
     const before = devChannelLog.length;
-    const res = await call('POST', `/api/v1/admin/users/${one.id}/phone-change`, { phone: two.phone });
+    const res = await twoPeople(adminToken, one.id, two.phone);
     expect(res.statusCode).toBe(409);
     expect(res.json().error.code).toBe('PHONE_IN_USE');
     expect(devChannelLog.slice(before).filter((entry) => entry.to === two.phone)).toHaveLength(0);
@@ -257,7 +282,7 @@ describe('[F22] a person\'s number', () => {
 
   it('a number outside Guyana is refused', async () => {
     const one = await makeUser('Abroad');
-    expect((await call('POST', `/api/v1/admin/users/${one.id}/phone-change`, { phone: '+12025550143' })).statusCode).toBe(400);
+    expect((await twoPeople(adminToken, one.id, '+12025550143')).statusCode).toBe(400);
   });
 
   it('a sign-in code for the new number does not open this door, nor this code that one', async () => {
@@ -266,5 +291,163 @@ describe('[F22] a person\'s number', () => {
     const code = await startMove(one.id, next);
     expect(await app.redis.get(`otp:${next}`)).toBeNull();
     expect(code).toMatch(/^\d{6}$/);
+  });
+});
+
+describe('[F22] the number door: one member of staff is never enough, and staff accounts are out of reach', () => {
+  it('asking takes a second person: no text goes out, and nothing moves, until they agree', async () => {
+    const person = await makeUser('Ask');
+    const next = testPhone();
+    await clearCounters(next);
+    const since = devChannelLog.length;
+    const asked = await call('POST', `/api/v1/admin/users/${person.id}/phone-change`, { phone: next });
+    expect(asked.statusCode, asked.body).toBe(202);
+    expect(asked.json().error.code).toBe('APPROVAL_REQUIRED');
+    expect(smsTo(next, since)).toHaveLength(0);
+    expect(await phoneOf(person.id)).toBe(person.phone);
+  });
+
+  it('a plain ADMIN cannot take a SUPER_ADMIN\'s account, even with a second person agreeing: no text, and a real sign-in on that number is somebody else', async () => {
+    const attacker = await makeStaff('ADMIN');
+    const owner = await makeStaff('SUPER_ADMIN');
+    const mine = testPhone();
+    await clearCounters(mine);
+    const since = devChannelLog.length;
+    const res = await twoPeople(attacker.token, owner.user.id, mine);
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error.code).toBe('STAFF_ACCOUNT');
+    expect(smsTo(mine, since)).toHaveLength(0);
+    expect(await phoneOf(owner.user.id)).toBe(owner.user.phone);
+    const signedIn = (await loginWithOtp(app, mine)).json();
+    expect(signedIn.data?.user?.id).not.toBe(owner.user.id);
+    expect(JSON.stringify(signedIn)).not.toContain('SUPER_ADMIN');
+  });
+
+  it('a founder is refused on their own account too', async () => {
+    const owner = await makeStaff('SUPER_ADMIN');
+    const res = await twoPeople(owner.token, owner.user.id, testPhone());
+    expect(res.statusCode, res.body).toBe(403);
+    expect(await phoneOf(owner.user.id)).toBe(owner.user.phone);
+  });
+
+  it('an account wearing a customer hat with a staff role underneath is staff', async () => {
+    const person = await makeUser('Hat');
+    await app.prisma.user.update({ where: { id: person.id }, data: { roles: ['CUSTOMER', 'ADMIN'] } });
+    const res = await twoPeople(adminToken, person.id, testPhone());
+    expect(res.statusCode, res.body).toBe(403);
+  });
+
+  it('made staff after the code went out: the read-back is refused on the row read under the lock', async () => {
+    const person = await makeUser('Promoted');
+    const code = await startMove(person.id, testPhone());
+    await app.prisma.user.update({ where: { id: person.id }, data: { roles: ['CUSTOMER', 'SUPER_ADMIN'] } });
+    const res = await confirm(person.id, code);
+    expect(res.statusCode, res.body).toBe(403);
+    expect(await phoneOf(person.id)).toBe(person.phone);
+  });
+
+  it('closed between the code and the read-back: the tombstone stays', async () => {
+    const person = await makeUser('Closed');
+    const code = await startMove(person.id, testPhone());
+    const tombstone = `deleted:${person.id}`;
+    await app.prisma.user.update({ where: { id: person.id }, data: { phone: tombstone, status: 'DEACTIVATED' } });
+    const since = devChannelLog.length;
+    const res = await confirm(person.id, code);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('ACCOUNT_CLOSED');
+    expect(await phoneOf(person.id)).toBe(tombstone);
+    expect(devChannelLog.slice(since).filter((entry) => entry.channel === 'sms')).toHaveLength(0); // nobody is told of a move that cannot happen
+  });
+
+  it('banned in the last instant, after the first read: the row read under the lock refuses it, and the sessions stay', async () => {
+    const person = await makeUser('Instant');
+    const token = app.jwt.sign({ userId: person.id, role: 'CUSTOMER', jti: nanoid(8) });
+    await app.prisma.session.create({ data: { userId: person.id, token, refreshToken: nanoid(48), deviceId: 'instant', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+    const code = await startMove(person.id, testPhone());
+    await expect(confirmPhoneChange(
+      {
+        prisma: app.prisma, redis: app.redis, channels: getChannels(), log: app.log,
+        moveWithSessions: async (write) => {
+          await app.prisma.user.update({ where: { id: person.id }, data: { status: 'BANNED' } });
+          await new AuthService(app).logoutAll(person.id, write);
+        },
+      },
+      { userId: person.id, code, within: async () => undefined },
+    )).rejects.toMatchObject({ code: 'ACCOUNT_BANNED' });
+    expect(await phoneOf(person.id)).toBe(person.phone);
+    expect(await app.prisma.session.count({ where: { userId: person.id } })).toBe(1);
+  });
+
+  it('a banned account keeps its number, at either step', async () => {
+    const asked = await makeUser('Banned');
+    await app.prisma.user.update({ where: { id: asked.id }, data: { status: 'BANNED' } });
+    const refused = await twoPeople(adminToken, asked.id, testPhone());
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('ACCOUNT_BANNED');
+    const late = await makeUser('Late');
+    const code = await startMove(late.id, testPhone());
+    await app.prisma.user.update({ where: { id: late.id }, data: { status: 'BANNED' } });
+    expect((await confirm(late.id, code)).statusCode).toBe(409);
+    expect(await phoneOf(late.id)).toBe(late.phone);
+  });
+
+  it('a real sign-in on the new number reaches the same account, and the old session is gone', async () => {
+    const person = await makeUser('Real');
+    const token = app.jwt.sign({ userId: person.id, role: 'CUSTOMER', jti: nanoid(8) });
+    await app.prisma.session.create({ data: { userId: person.id, token, refreshToken: nanoid(48), deviceId: 'real', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+    const next = testPhone();
+    const code = await startMove(person.id, next);
+    expect((await confirm(person.id, code)).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { authorization: `Bearer ${token}` } })).statusCode).toBe(401);
+    const signedIn = await loginWithOtp(app, next);
+    expect(signedIn.json().data.user.id).toBe(person.id);
+  });
+
+  it('the move, the end of every session and the trail are one commit, and the old number is told first', async () => {
+    const person = await makeUser('Atomic');
+    const token = app.jwt.sign({ userId: person.id, role: 'CUSTOMER', jti: nanoid(8) });
+    await app.prisma.session.create({ data: { userId: person.id, token, refreshToken: nanoid(48), deviceId: 'atomic', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+    const code = await startMove(person.id, testPhone());
+    const since = devChannelLog.length;
+    await expect(confirmPhoneChange(
+      { prisma: app.prisma, redis: app.redis, channels: getChannels(), log: app.log, moveWithSessions: (write) => new AuthService(app).logoutAll(person.id, write) },
+      { userId: person.id, code, within: async () => { throw new Error('the trail refused'); } },
+    )).rejects.toThrow('the trail refused');
+    expect(await phoneOf(person.id)).toBe(person.phone);
+    expect(await app.prisma.session.count({ where: { userId: person.id } })).toBe(1);
+    expect(smsTo(person.phone, since)).toHaveLength(1);
+  });
+});
+
+describe('[F22] the store doors', () => {
+  it('a store owned by a staff account is out of reach, on type and on name', async () => {
+    const staff = await makeStaff('SUPER_ADMIN');
+    const store = await makeStore(staff.user.id);
+    const type = await call('PUT', `/api/v1/admin/vendors/${store.id}/type`, { vendorType: 'STORE' });
+    expect(type.statusCode, type.body).toBe(403);
+    const name = await call('PUT', `/api/v1/admin/vendors/${store.id}/name`, { name: `Door Mart ${wordFreeTag(6)}` });
+    expect(name.statusCode, name.body).toBe(403);
+    const after = await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } });
+    expect(after.vendorType).toBe(store.vendorType);
+    expect(after.name).toBe(store.name);
+  });
+
+  it('an admin cannot use these doors on their own store', async () => {
+    const staff = await makeStaff('ADMIN');
+    const store = await makeStore(staff.user.id);
+    const own = (url: string, payload: Record<string, unknown>) => app.inject({
+      method: 'PUT', url, payload, headers: { authorization: `Bearer ${staff.token}`, 'content-type': 'application/json', 'x-swift-reason': TEST_ADMIN_REASON },
+    });
+    expect((await own(`/api/v1/admin/vendors/${store.id}/type`, { vendorType: 'STORE' })).statusCode).toBe(403);
+    expect((await own(`/api/v1/admin/vendors/${store.id}/name`, { name: `Door Mart ${wordFreeTag(6)}` })).statusCode).toBe(403);
+  });
+
+  it('a name with words a person has to check is refused, as the app holds it', async () => {
+    const owner = await makeUser('Words');
+    const store = await makeStore(owner.id);
+    const res = await call('PUT', `/api/v1/admin/vendors/${store.id}/name`, { name: 'Ganja Corner' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('STORE_NAME_HELD');
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).name).toBe(store.name);
   });
 });

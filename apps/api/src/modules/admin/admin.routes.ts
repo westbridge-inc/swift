@@ -41,6 +41,7 @@ import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dis
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
+import { refuseStaffAccount } from './admin-email-change';
 import { EVIDENCE_REFERENCE_MAX, EVIDENCE_REFERENCE_MIN, EVIDENCE_REFERENCE_SHAPE } from '../billing/evidence-reference';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
 import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
@@ -76,7 +77,7 @@ import {
   startSoloApproval,
 } from './solo-approval';
 import { AuthService, sanitizeUser } from '../auth/auth.service';
-import { confirmPhoneChange, lastFour, startPhoneChange, tellOldNumber } from './phone-change';
+import { confirmPhoneChange, lastFour, startPhoneChange } from './phone-change';
 import { getChannels } from '../../providers/notifications/channels';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { executeTenantBoundServiceJobTransaction } from '../services/service-job-transaction';
@@ -1450,11 +1451,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/users/:id/phone-change/confirm', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { code } = phoneChangeCodeSchema.parse(request.body ?? {});
-    const deps = phoneChangeDeps();
-    const moved = await confirmPhoneChange(deps, { userId: id, code });
-    await audit(request.user.userId, 'CHANGE_USER_PHONE', 'User', id, { fromLastFour: lastFour(moved.from), toLastFour: lastFour(moved.to) }, request);
-    await new AuthService(app).logoutAll(id);
-    await tellOldNumber(deps, moved.from);
+    await confirmPhoneChange({ ...phoneChangeDeps(), moveWithSessions: (write) => new AuthService(app).logoutAll(id, write) }, {
+      userId: id, code,
+      within: (tx, moved) => auditIn(tx, request.user.userId, 'CHANGE_USER_PHONE', 'User', id, { fromLastFour: lastFour(moved.from), toLastFour: lastFour(moved.to) }, request),
+    });
     await notifications.send({
       userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your number was changed',
       body: 'Swift support moved your account to a new number. Sign in with it from now on. If this was not you, contact Swift support right away.',
@@ -2108,9 +2108,10 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { vendorType } = storeTypeChangeSchema.parse(request.body ?? {});
     const vendor = await app.prisma.vendor.findUnique({
-      where: { id }, include: { owner: { select: { userId: true } }, subscription: { select: { id: true } } },
+      where: { id }, include: { owner: { select: { userId: true, user: { select: { roles: true, activeRole: true } } } }, subscription: { select: { id: true } } },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
+    refuseStaffAccount(vendor.owner.user);
     if (vendor.vendorType === vendorType) throw new AppError(409, 'NOTHING_TO_CHANGE', `${vendor.name} is already that type.`);
     if (vendor.firstLiveAt || vendor.subscription) {
       throw new AppError(409, 'STORE_HAS_BEEN_LIVE', `${vendor.name} has been live, so its weekly fee and documents rest on its type. It cannot be changed here.`);
@@ -2132,11 +2133,15 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const { name } = storeNameChangeSchema.parse(request.body ?? {});
     const vendor = await app.prisma.vendor.findUnique({
-      where: { id }, select: { name: true, tradesUnderOwnName: true, owner: { select: { userId: true, user: { select: { phone: true } } } } },
+      where: { id }, select: { ...STORE_WORDS_SELECT, tradesUnderOwnName: true, owner: { select: { userId: true, user: { select: { phone: true, roles: true, activeRole: true } } } } },
     });
     if (!vendor) throw new NotFoundError('Vendor', id);
+    refuseStaffAccount(vendor.owner.user);
     if (vendor.name.trim() === name) throw new AppError(409, 'NOTHING_TO_CHANGE', 'The store already has that name.');
     assertNameNotReserved(name, vendor.owner.user.phone, vendor.name);
+    if (storeCheckOf({ ...vendor, name }).state === 'WAITING') {
+      throw new AppError(409, 'STORE_NAME_HELD', 'That name has words a person has to check first. Choose another name, or clear it in the store review.');
+    }
     if (vendor.tradesUnderOwnName) {
       throw new AppError(409, 'OWN_NAME_RENAME', 'This store trades under its owner’s own name, which a person checked. A different name has to be registered as a business name first.');
     }

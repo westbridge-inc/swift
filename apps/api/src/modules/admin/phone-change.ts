@@ -5,20 +5,25 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { generateOtp, storeOtp, verifyOtp } from '../../utils/otp';
 import { normalizePhone } from '../../utils/phone';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { publicLaunchCountryFromPhone } from '../auth/launch-market';
 import type { NotificationChannels } from '../../providers/notifications/channels';
+import { refuseStaffAccount } from './admin-email-change';
 
 /**
  * [BUG-HUNT F22 · COORD 4 Nov 2026] A person whose SIM or number changes had no door anywhere: the phone number IS the
- * sign-in. Support moves the account, with a reason, and only after the person reads back a code sent to the NEW number:
- * the code proves they hold it, and a member of staff cannot point an account at a number of their own choosing without
- * that person being the one with the phone in hand. The code uses the same hashed, five-try, five-minute record as a
- * sign-in code, under a key no sign-in can reach. After the move every session ends, the old number is told, and the
- * audit row names the last four digits only.
+ * sign-in, so this door hands over a whole account. A code to the new number proves somebody holds it, not who they
+ * are, so one member of staff is never enough: asking takes a reason and a second person (C5), and only then does the
+ * code go out. Staff accounts are refused for everyone, and so are a closed or banned account, on the row read under
+ * the lock when the code goes out and again when the account moves. The move and the end of every session are one
+ * commit. The old number is told before the write, where it can be reached. The trail names the last four digits only.
  */
 const CODE_LIFE_S = 300;
 const pendingKey = (userId: string) => `phone_change:${userId}`;
 const codeKey = (userId: string, phone: string) => `phone-change:${userId}:${phone}`;
+
+/** Runs `write` under the person's lock and ends every session in the same commit (AuthService.logoutAll). */
+type MoveWithSessions = (write: (tx: Prisma.TransactionClient) => Promise<void>) => Promise<void>;
 
 interface PhoneChangeDeps {
   prisma: PrismaClient;
@@ -29,12 +34,34 @@ interface PhoneChangeDeps {
 
 export const lastFour = (phone: string) => phone.slice(-4);
 
+const PERSON = { phone: true, status: true, roles: true, activeRole: true } as const;
+type Person = Prisma.UserGetPayload<{ select: typeof PERSON }>;
+
+function numberMayMove(person: Person | null, userId: string): Person {
+  if (!person) throw new NotFoundError('User', userId);
+  refuseStaffAccount(person);
+  if (person.phone.startsWith('deleted:') || person.status === 'DEACTIVATED') {
+    throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been closed. Its number cannot be changed.');
+  }
+  if (person.status === 'BANNED') {
+    throw new AppError(409, 'ACCOUNT_BANNED', 'A banned account keeps its number, so that number cannot sign up again.');
+  }
+  return person;
+}
+
+async function lockedPerson(tx: Prisma.TransactionClient, userId: string): Promise<Person> {
+  await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE`;
+  return numberMayMove(await tx.user.findUnique({ where: { id: userId }, select: PERSON }), userId);
+}
+
 /** Send the code to the new number. Nothing about the account changes yet. */
 export async function startPhoneChange(deps: PhoneChangeDeps, input: { userId: string; phone: string; ip: string }): Promise<{ expiresIn: number }> {
   const phone = normalizePhone(input.phone);
   if (!publicLaunchCountryFromPhone(phone)) throw new AppError(400, 'COUNTRY_NOT_ACTIVE', 'Swift is currently available in Guyana only');
-  const person = await deps.prisma.user.findUnique({ where: { id: input.userId }, select: { phone: true } });
-  if (!person || person.phone.startsWith('deleted:')) throw new NotFoundError('User', input.userId);
+  const person = await deps.prisma.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    return lockedPerson(tx, input.userId);
+  });
   if (person.phone === phone) throw new AppError(409, 'SAME_PHONE', 'This account already uses that number.');
   if (await deps.prisma.user.findUnique({ where: { phone }, select: { id: true } })) {
     throw new AppError(409, 'PHONE_IN_USE', 'Another account uses that number. Sort that account out first.');
@@ -54,28 +81,38 @@ export async function startPhoneChange(deps: PhoneChangeDeps, input: { userId: s
   return { expiresIn: CODE_LIFE_S };
 }
 
-/** The person read the code back: the account moves. Returns the old number for the notice, and the last four for the trail. */
-export async function confirmPhoneChange(deps: PhoneChangeDeps, input: { userId: string; code: string }): Promise<{ from: string; to: string }> {
+/** The person read the code back: the account moves. `within` runs in the move's own commit, for the trail. */
+export async function confirmPhoneChange(
+  deps: PhoneChangeDeps & { moveWithSessions: MoveWithSessions },
+  input: { userId: string; code: string; within: (tx: Prisma.TransactionClient, moved: { from: string; to: string }) => Promise<void> },
+): Promise<{ from: string; to: string }> {
   const phone = await deps.redis.get(pendingKey(input.userId));
   if (!phone) throw new AppError(400, 'INVALID_OTP', 'That code has expired. Start again to send a new one.');
+  const before = numberMayMove(await deps.prisma.user.findUnique({ where: { id: input.userId }, select: PERSON }), input.userId);
   const checked = await verifyOtp(deps.redis, codeKey(input.userId, phone), input.code);
   if (!checked.valid) throw new AppError(400, 'INVALID_OTP', 'That code is not right. Ask the person to read it again.');
   await deps.redis.del(pendingKey(input.userId));
-  const person = await deps.prisma.user.findUnique({ where: { id: input.userId }, select: { phone: true } });
-  if (!person) throw new NotFoundError('User', input.userId);
+  await tellOldNumber(deps, before.phone);
+  let from: string | undefined;
   try {
-    await deps.prisma.user.update({ where: { id: input.userId }, data: { phone } });
+    await deps.moveWithSessions(async (tx) => {
+      const person = await lockedPerson(tx, input.userId);
+      from = person.phone;
+      await tx.user.update({ where: { id: input.userId }, data: { phone } });
+      await input.within(tx, { from, to: phone });
+    });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       throw new AppError(409, 'PHONE_IN_USE', 'Another account took that number in the meantime.');
     }
     throw error;
   }
-  return { from: person.phone, to: phone };
+  if (from === undefined) throw new NotFoundError('User', input.userId);
+  return { from, to: phone };
 }
 
-/** Best effort: the move has happened. A number the person lost may never read this; the account's inbox says it too. */
-export async function tellOldNumber(deps: PhoneChangeDeps, oldPhone: string): Promise<void> {
-  await deps.channels.sms.sendSms(oldPhone, 'Your Swift account was moved to a new number by Swift support. If this was not you, email support right away.')
+/** Best effort: a number the person lost may never read this, and the account's inbox says it too. */
+async function tellOldNumber(deps: PhoneChangeDeps, oldPhone: string): Promise<void> {
+  await deps.channels.sms.sendSms(oldPhone, 'Your Swift account is being moved to a new number by Swift support. If this was not you, email support right away.')
     .catch((err: unknown) => deps.log.warn({ err }, 'the old number could not be told of a phone change'));
 }

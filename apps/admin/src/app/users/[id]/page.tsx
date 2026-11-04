@@ -152,7 +152,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           ) : u.status !== 'BANNED' ? (
             <button type="button" className="mc-btn" onClick={suspend}>Suspend…</button>
           ) : null}
-          <PhoneChangeAction userId={id} name={name} onResult={show} />
+          {(u.roles ?? []).some((r: string) => r === 'ADMIN' || r === 'SUPER_ADMIN') ? null : <PhoneChangeAction userId={id} name={name} onResult={show} />}
           {u.status !== 'BANNED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={ban}>Ban…</button> : null}
         </div>
       </header>

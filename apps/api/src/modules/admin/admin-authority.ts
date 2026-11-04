@@ -277,7 +277,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /missed-appointments': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
   // [BUG-HUNT F22] A person's number is their sign-in: its own capability, never in a support grant. The code goes to the new number.
-  'POST /users/:id/phone-change': c('C3', 'user.phone.change', E.user),
+  // [BUG-HUNT F22] The number is the sign-in, so asking takes two people. The read-back then takes the code.
+  'POST /users/:id/phone-change': c('C5', 'user.phone.change', E.user),
   'POST /users/:id/phone-change/confirm': c('C3', 'user.phone.change', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
