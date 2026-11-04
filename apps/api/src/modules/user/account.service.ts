@@ -24,9 +24,8 @@ import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../.
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import { accountClosedKeptWords, holdForOpenIdentityReviews, investigationHoldSummary } from '../verification/investigation-hold';
 import { identityReviewOpenFor } from '../verification/investigation-hold-core';
-import { openCasesOf } from '../verification/abandoned-application';
+import { refuseVerifiedDeletion } from './verified-deletion-gate';
 import type { FastifyInstance } from 'fastify';
-import type { PrismaClient } from '@prisma/client';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { bindTenantTransaction } from '../../plugins/prisma';
@@ -254,8 +253,7 @@ export class AccountService {
       claimClosure?: (tx: Prisma.TransactionClient) => Promise<boolean>;
       /** Runs once the tombstone is written, past every blocker, in the same transaction: an audit row here shows the effect, and a refusal leaves none. */
       onCutoff?: (tx: Prisma.TransactionClient) => Promise<void>;
-      /** [BUG-HUNT F20] The founder's door for a verified request from someone who cannot sign in, and no other caller:
-       *  a suspended account with no open case may close. A banned one may not. An active one is as self-service is. */
+      /** [BUG-HUNT F20] The founder's door for a verified request from someone who cannot sign in, and no other caller. */
       verifiedRequest?: boolean;
     } = {},
   ) {
@@ -333,18 +331,9 @@ export class AccountService {
         await revokeAccessBeforeCleanup();
         return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
-      // Measured: a closed account's number signs up again, identity tombstones on or off, so a ban would not survive this.
-      if (opts.verifiedRequest && user.status === 'BANNED') {
-        throw new AppError(409, 'BANNED_ACCOUNT', 'This account is banned, and closing it would let its number sign up again. Nothing was deleted. This one goes to the owner.');
-      }
-      const closedForThem = opts.verifiedRequest === true && user.status === 'SUSPENDED';
-      if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED' && !closedForThem) {
+      if (opts.verifiedRequest) await refuseVerifiedDeletion(tx, user);
+      else if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
-      }
-      // Self-service never reaches a suspended account, so this door must not become a way out of an investigation.
-      // The abandoned-application census, so the two lists of what counts as a case cannot drift.
-      if (closedForThem && ((await openCasesOf(tx as unknown as PrismaClient, userId)).length > 0 || await identityReviewOpenFor(tx, userId))) {
-        throw new AppError(409, 'OPEN_CASE', 'This account has an open case. Nothing was deleted. This one goes to the owner.');
       }
 
       // The server, not a navigation flag or active role, chooses the business

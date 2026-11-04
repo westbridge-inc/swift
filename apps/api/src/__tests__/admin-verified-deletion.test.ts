@@ -177,7 +177,7 @@ describe('once approved', () => {
     expect(await auditRows(owner)).toEqual([]);
   });
 
-  it('a SUSPENDED account cannot sign in, so this door closes it, and the row says where it started', async () => {
+  it('a suspended account with nothing against it closes, and the row says where it started', async () => {
     const subject = await person();
     await app.prisma.user.update({ where: { id: subject }, data: { status: 'SUSPENDED' } });
     const { applied } = await askApproveApply(subject);
@@ -188,14 +188,46 @@ describe('once approved', () => {
     expect(row!.changes).toMatchObject({ fromStatus: 'SUSPENDED' });
   });
 
-  it('a BANNED account goes to the owner: closing it would free its number to sign up again', async () => {
+  it('an account that never finished verifying closes', async () => {
     const subject = await person();
-    await app.prisma.user.update({ where: { id: subject }, data: { status: 'BANNED' } });
+    await app.prisma.user.update({ where: { id: subject }, data: { status: 'PENDING_VERIFICATION' } });
+    const { applied } = await askApproveApply(subject);
+    expect(applied.statusCode, applied.payload).toBe(200);
+  });
+
+  const refused = async (subject: string, status: 'ACTIVE' | 'SUSPENDED' | 'BANNED') => {
+    await app.prisma.user.update({ where: { id: subject }, data: { status } });
     const { applied } = await askApproveApply(subject);
     expect(applied.statusCode, applied.payload).toBe(409);
     expect(applied.json().error.message).toMatch(/goes to the owner/);
-    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status: 'BANNED' });
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status });
     expect(await auditRows(subject)).toEqual([]);
+  };
+  const incident = (subject: string, over: Record<string, unknown> = {}) => app.prisma.incidentCase.create({ data: {
+    caseNumber: `INC-${nanoid(8).toUpperCase()}`, status: 'OPEN', severity: 'S1', category: 'SAFETY_ASSAULT', intake: 'OPS_CREATED', subjectUserId: subject, summary: 'synthetic', slaAckBy: new Date(), slaDecideBy: new Date(), ...over,
+  } as never }) as unknown as Promise<{ id: string }>;
+  const fraud = (subject: string, over: Record<string, unknown> = {}) => app.prisma.fraudCase.create({ data: {
+    subjectUserId: subject, submissionId: `sub-${nanoid(6)}`, caseId: randomUUID(), reasonCode: 'DOC_FORGED', confirmedBy: requester.id, linkedAccountIds: [], ...over,
+  } as never });
+
+  it('a BANNED account goes to the owner: closing it would free its number to sign up again', async () => {
+    await refused(await person(), 'BANNED');
+  });
+
+  it.each([
+    ['an enforcement action', (subject: string) => app.prisma.enforcementAction.create({ data: { accountId: subject, level: 'REVIEW_FIRST', reasonCode: 'SYNTHETIC', signalsFired: [], decidedBy: 'SYSTEM' } as never })],
+    ['a closed incident that took an interim action', (subject: string) => incident(subject, { status: 'CLOSED', interimAction: 'SUSPENDED_PENDING_REVIEW' })],
+  ])('suspended by enforcement or safety, shown by %s: refused, even with nothing open', async (_what, mark) => {
+    const subject = await person();
+    await mark(subject);
+    await refused(subject, 'SUSPENDED');
+  });
+
+  it('an enforcement action on an active account with nothing open is no refusal', async () => {
+    const subject = await person();
+    await app.prisma.enforcementAction.create({ data: { accountId: subject, level: 'REVIEW_FIRST', reasonCode: 'SYNTHETIC', signalsFired: [], decidedBy: 'SYSTEM' } as never });
+    const { applied } = await askApproveApply(subject);
+    expect(applied.statusCode, applied.payload).toBe(200);
   });
 
   it('only this door: the person\'s own deletion and every other caller still refuse a suspended or banned account', async () => {
@@ -229,13 +261,7 @@ describe('once approved', () => {
     expect(await auditRows(owner)).toEqual([]);
   });
 
-  describe('a suspended account with an open case: this door is no way out of an investigation', () => {
-    const incident = (subject: string, over: Record<string, unknown> = {}) => app.prisma.incidentCase.create({ data: {
-      caseNumber: `INC-${nanoid(8).toUpperCase()}`, status: 'OPEN', severity: 'S1', category: 'SAFETY_ASSAULT', intake: 'OPS_CREATED', subjectUserId: subject, summary: 'synthetic', slaAckBy: new Date(), slaDecideBy: new Date(), ...over,
-    } as never });
-    const fraud = (subject: string, over: Record<string, unknown> = {}) => app.prisma.fraudCase.create({ data: {
-      subjectUserId: subject, submissionId: `sub-${nanoid(6)}`, caseId: randomUUID(), reasonCode: 'DOC_FORGED', confirmedBy: requester.id, linkedAccountIds: [], ...over,
-    } as never });
+  describe.each(['ACTIVE', 'SUSPENDED'] as const)('any open case on a %s account: this door is no way out of an investigation', (status) => {
     const cases: Array<[string, (subject: string) => Promise<unknown>]> = [
       ['a fraud case about them', (subject) => fraud(subject)],
       ['a fraud case on one of their documents', async (subject) => {
@@ -258,13 +284,17 @@ describe('once approved', () => {
         await app.prisma.identityCluster.create({ data: { id: merged, mergedIntoId: root } });
         await app.prisma.identityClusterMember.create({ data: { accountId: subject, clusterId: merged, linkedVia: [] } });
       }],
-      ['an open appeal', (subject) => app.prisma.enforcementAction.create({ data: { accountId: subject, level: 'REVIEW_FIRST', reasonCode: 'SYNTHETIC', signalsFired: [], decidedBy: 'SYSTEM', appeal: 'OPEN' } as never })],
+      ['an open appeal', (subject) => app.prisma.enforcementAction.create({ data: { accountId: subject, level: 'NONE', reasonCode: 'SYNTHETIC', signalsFired: [], decidedBy: 'SYSTEM', appeal: 'OPEN' } as never })],
       ['an open incident about them', (subject) => incident(subject)],
       ['an open incident they reported', async (subject) => { await incident(await person(), { reporterUserId: subject }); }],
       ['a closed incident under the police flag', (subject) => incident(subject, { status: 'CLOSED', legalHold: true })],
       ['a closed incident with a legal hold record', async (subject) => {
-        const kase = await incident(subject, { status: 'CLOSED' }) as { id: string };
+        const kase = await incident(subject, { status: 'CLOSED' });
         await app.prisma.legalHold.create({ data: { caseId: kase.id, placedBy: requester.id, reason: 'synthetic' } });
+      }],
+      ['an evidence bundle on legal hold, its case closed', async (subject) => {
+        const kase = await incident(subject, { status: 'CLOSED' });
+        await app.prisma.evidenceBundle.create({ data: { bundleNumber: `EB-${nanoid(8)}`, caseId: kase.id, subjectUserId: subject, legalHold: true } as never });
       }],
       ['an unreleased document hold', (subject) => app.prisma.docLegalHold.create({ data: { subjectUserId: subject, reason: 'synthetic', ownerId: requester.id, reviewBy: new Date(Date.now() + 86_400_000), placedBy: requester.id } })],
     ];
@@ -272,35 +302,25 @@ describe('once approved', () => {
     it.each(cases)('%s: refused, nothing deleted, no row', async (_what, open) => {
       const subject = await person();
       await open(subject);
-      await app.prisma.user.update({ where: { id: subject }, data: { status: 'SUSPENDED' } });
-      const { applied } = await askApproveApply(subject);
-      expect(applied.statusCode, applied.payload).toBe(409);
-      expect(applied.json().error.message).toMatch(/goes to the owner/);
-      expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status: 'SUSPENDED' });
-      expect(await auditRows(subject)).toEqual([]);
+      await refused(subject, status);
     });
 
     it('a closed incident under no hold is no open case', async () => {
       const subject = await person();
       await incident(subject, { status: 'CLOSED' });
-      await app.prisma.user.update({ where: { id: subject }, data: { status: 'SUSPENDED' } });
+      await app.prisma.user.update({ where: { id: subject }, data: { status } });
       const { applied } = await askApproveApply(subject);
       expect(applied.statusCode, applied.payload).toBe(200);
     });
   });
 
-  describe('an active account: as self-service, a hold is escrowed and the deletion goes on', () => {
-    it('an open incident: closed, and the case and an escrow stay', async () => {
-      const subject = await person();
-      const kase = await app.prisma.incidentCase.create({ data: {
-        caseNumber: `INC-${nanoid(8).toUpperCase()}`, status: 'OPEN', severity: 'S1', category: 'SAFETY_ASSAULT', intake: 'OPS_CREATED', subjectUserId: subject, summary: 'kept whole', slaAckBy: new Date(), slaDecideBy: new Date(),
-      } as never });
-      const { applied } = await askApproveApply(subject);
-      expect(applied.statusCode, applied.payload).toBe(200);
-      expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status: 'DEACTIVATED' });
-      expect(await app.prisma.incidentCase.findUniqueOrThrow({ where: { id: kase.id } })).toMatchObject({ status: 'OPEN', summary: 'kept whole' });
-      expect(await app.prisma.safetyDeletionHold.findFirst({ where: { userId: subject, status: 'PENDING' } })).toMatchObject({ reasons: ['OPEN_INCIDENT'] });
-    });
+  it('the person\'s own deletion is unchanged: a hold there is escrowed and the deletion goes on', async () => {
+    const subject = await person();
+    const kase = await incident(subject);
+    await new AccountService(app).deleteAccount(subject);
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status: 'DEACTIVATED' });
+    expect(await app.prisma.incidentCase.findUniqueOrThrow({ where: { id: kase.id } })).toMatchObject({ status: 'OPEN', summary: 'synthetic' });
+    expect(await app.prisma.safetyDeletionHold.findFirst({ where: { userId: subject, status: 'PENDING' } })).toMatchObject({ reasons: ['OPEN_INCIDENT'] });
   });
 
   it('a staff account is never closed here', async () => {
