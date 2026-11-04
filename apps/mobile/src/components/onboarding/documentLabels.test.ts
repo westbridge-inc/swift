@@ -63,3 +63,9 @@ describe('[TRADES · 13 Oct 2026; R15] service-trade documents read in plain wor
     expect(docLabels()[docType]).toBeUndefined();
   });
 });
+
+describe('[CHECKLIST-LEGAL · COORD 1 Nov 2026 (d)] the restaurant licence carries the GRA\'s own name', () => {
+  it('reads "GRA Food Restaurant Licence"', () => {
+    expect(docLabels()['gra_restaurant_licence']).toBe('GRA Food Restaurant Licence');
+  });
+});
