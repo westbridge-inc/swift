@@ -5,6 +5,7 @@ import { ZodError } from '../lib/zod';
 import { isDevelopment } from '../utils/runtime-mode';
 import { requestLogContext } from '../utils/logger-config';
 import { captureError } from '../plugins/observability';
+import { tallyServerError, type ServerErrorTallyWriter } from '../lib/server-error-tally';
 
 /**
  * [VIEWER-FIX] What a 5xx log line may say about its error: its class, its
@@ -51,6 +52,11 @@ export function registerErrorHandler(app: FastifyInstance) {
       const retryAfter = error.details?.['retryAfterSeconds'];
       if (error.statusCode === 429 && typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0) {
         reply.header('Retry-After', String(Math.ceil(retryAfter)));
+      }
+      // [FIXES-4] A 500 is always logged [VIEWER-FIX], the AppError kind too: a broken
+      // invariant is our fault. A deliberate refusal (502, 503) stays off the error log.
+      if (error.statusCode === 500) {
+        request.log.error({ ...serverErrorLogFields(error), statusCode: error.statusCode, ...requestLogContext(request) }, 'Unhandled error');
       }
       return reply.status(error.statusCode).send({
         success: false,
@@ -157,6 +163,12 @@ export function registerErrorHandler(app: FastifyInstance) {
       } catch {
         // The tracker must never break the error response already on its way.
       }
+      // [FIXES-4] Every 500 and every unhandled 5xx goes in the hourly tally the
+      // worker's error-rate watch reads. A deliberate AppError refusal (a 502 or
+      // 503 that says "try later") is an answer, not a fault. Fire-and-caught,
+      // and a minimal test harness without redis just skips it.
+      const redis = (app as { redis?: ServerErrorTallyWriter }).redis;
+      if (redis && (reply.statusCode === 500 || !(error instanceof AppError))) void tallyServerError(redis).catch(() => {});
     }
     return sent;
   });
