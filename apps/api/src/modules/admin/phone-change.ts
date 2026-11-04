@@ -10,14 +10,15 @@ import { runAsSystem } from '../../plugins/tenant-context';
 import { publicLaunchCountryFromPhone } from '../auth/launch-market';
 import type { NotificationChannels } from '../../providers/notifications/channels';
 import { refuseStaffAccount } from './admin-email-change';
+import { suspendedByEnforcement } from '../user/verified-deletion-gate';
 
 /**
  * [BUG-HUNT F22 · COORD 4 Nov 2026] A person whose SIM or number changes had no door anywhere: the phone number IS the
  * sign-in, so this door hands over a whole account. A code to the new number proves somebody holds it, not who they
  * are, so one member of staff is never enough: asking takes a reason and a second person (C5), and only then does the
- * code go out. Staff accounts are refused for everyone, and so are a closed or banned account, on the row read under
- * the lock when the code goes out and again when the account moves. The move and the end of every session are one
- * commit. The old number is told before the write, where it can be reached. The trail names the last four digits only.
+ * code go out. Staff accounts are refused for everyone, and so are a closed or banned account and one suspended by
+ * enforcement or safety, on the row read under the lock when the code goes out and again when the account moves. The
+ * move and the end of every session are one commit. The old number is told before the write, where it can be reached. The trail names the last four digits only.
  */
 const CODE_LIFE_S = 300;
 const pendingKey = (userId: string) => `phone_change:${userId}`;
@@ -52,7 +53,12 @@ function numberMayMove(person: Person | null, userId: string): Person {
 
 async function lockedPerson(tx: Prisma.TransactionClient, userId: string): Promise<Person> {
   await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE`;
-  return numberMayMove(await tx.user.findUnique({ where: { id: userId }, select: PERSON }), userId);
+  const person = numberMayMove(await tx.user.findUnique({ where: { id: userId }, select: PERSON }), userId);
+  // A number that moves is a number free to sign up again: a suspension must not walk away from itself.
+  if (await suspendedByEnforcement(tx, { id: userId, status: person.status })) {
+    throw new AppError(409, 'SUSPENDED_BY_ENFORCEMENT', 'This account was suspended by enforcement or safety, so it keeps its number. This one goes to the owner.');
+  }
+  return person;
 }
 
 /** Send the code to the new number. Nothing about the account changes yet. `within` is the trail, in the checks' commit. */
