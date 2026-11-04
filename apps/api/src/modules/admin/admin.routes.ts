@@ -77,6 +77,8 @@ import {
 } from './solo-approval';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
+import { executeTenantBoundServiceJobTransaction } from '../services/service-job-transaction';
+import { transitionServiceJob } from '../services/service-job-transition';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
@@ -1345,6 +1347,7 @@ export async function adminRoutes(app: FastifyInstance) {
         rider: { select: ADMIN_USER_MOVER_SELECT },
         driver: { select: ADMIN_USER_MOVER_SELECT },
         vendorOwner: { select: { vendors: { select: ADMIN_USER_VENDOR_SELECT } } },
+        serviceProvider: { select: { id: true, trade: true, isVerified: true } },
         // The trust story + the paper trail the operator acts on.
         strikes: { orderBy: { createdAt: 'desc' }, take: 20 },
         orders: {
@@ -2935,6 +2938,51 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
     });
     return { success: true, data: state };
+  });
+
+  /** A person's service jobs, as customer or as pro, newest first. Names only: a number is its own audited read. */
+  app.get('/users/:id/service-jobs', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const jobs = await app.prisma.serviceJob.findMany({
+      where: { tenantId, OR: [{ customerId: id }, { provider: { userId: id } }] },
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+      select: {
+        id: true, status: true, description: true, quoteAmount: true, scheduledFor: true, providerConfirmedAt: true, createdAt: true,
+        customer: { select: { id: true, firstName: true, lastName: true } },
+        provider: { select: { userId: true, trade: true, user: { select: { firstName: true, lastName: true } } } },
+      },
+    });
+    return { success: true, data: jobs };
+  });
+
+  /**
+   * Swift support closes a job the customer cannot (a started job, or a pro who has gone quiet). No money moves: Swift
+   * holds none of it. The reason stays in the record (the guard requires it); both sides are told, in the same words.
+   */
+  app.post('/service-jobs/:id/close', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const job = await app.prisma.serviceJob.findFirst({ where: { id, tenantId }, include: { provider: { select: { userId: true } } } });
+    if (!job) throw new NotFoundError('ServiceJob', id);
+    if (job.status === 'COMPLETED' || job.status === 'CANCELLED') throw new AppError(409, 'SERVICE_JOB_CLOSED', 'This job is already closed.');
+    const cancelledAt = new Date();
+    const closedNotice = (userId: string) => ({
+      userId, type: 'ORDER_UPDATE' as const, title: 'Job closed by Swift',
+      body: 'Swift support closed this job. Swift moved no money. If you have a question, open Get Help.',
+      data: { kind: 'booking_cancelled', jobId: id },
+    });
+    const closed = await executeTenantBoundServiceJobTransaction(app.prisma, (tx) => transitionServiceJob(tx, {
+      jobId: id, actorUserId: request.user.userId, expectedUpdatedAt: job.updatedAt, from: job.status, to: 'CANCELLED',
+      data: { cancelledAt }, action: 'SERVICE_JOB_CLOSED_BY_SWIFT',
+      audit: { cancelledAt: cancelledAt.toISOString(), cancelledBy: 'SWIFT', reason: reasonOf(request.body, request.headers) },
+      closeChatRoomId: job.chatRoomId, notices: [closedNotice(job.customerId), closedNotice(job.provider.userId)], now: cancelledAt,
+    }));
+    await Promise.all(closed.notificationIds.map((noticeId) => notifications.publishPersisted(noticeId)));
+    return { success: true, data: { id: closed.job.id, status: closed.job.status } };
   });
 
   app.get('/orders/:id', { preHandler: [adminGuard] }, async (request) => {

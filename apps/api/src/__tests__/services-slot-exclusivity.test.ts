@@ -324,7 +324,8 @@ describe('Services — double-booking a provider is impossible at the data layer
 
     // [TRANSFORMED, coordinator ruling 14 Oct · Terms §7] A booked job is no longer the
     // customer's to cancel in the app (they contact the provider), so the provider cancels
-    // it here; the slot is freed exactly as before.
+    // it here; the slot is freed exactly as before. Booked means the provider confirmed the time.
+    expect((await inject('POST', `/api/v1/services/jobs/${jobA}/confirm`, await commandState(jobA), provider.token)).statusCode).toBe(200);
     expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, await commandState(jobA), first.token)).statusCode).toBe(409);
     expect((await inject('POST', `/api/v1/services/jobs/${jobA}/cancel`, await commandState(jobA), provider.token)).statusCode).toBe(200);
     expect((await schedule(jobB, slot, second.token)).statusCode).toBe(200);

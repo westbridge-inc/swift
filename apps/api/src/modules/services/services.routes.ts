@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { shownRatingTotals, shownRatingsFor, shownSurface } from '../rating/rating-groups';
-import type { Prisma } from '@prisma/client';
+import type { Prisma, ServiceJob } from '@prisma/client';
 import { z } from '../../lib/zod';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
@@ -40,7 +40,7 @@ import { executeTenantBoundServiceJobTransaction } from './service-job-transacti
 import { canonicalSlotStart } from '../booking/availability';
 import { isServiceJobExclusionViolation } from './provider-time';
 import { registerProviderBookableRoutes } from './provider-bookable.routes';
-import { proBookableFromListOf, registerProBookingRoutes, serviceAppointmentViewFor } from './pro-booking.routes';
+import { proBookableFromListOf, registerProBookingRoutes, serviceAppointmentViewFor, serviceJobCustomerCancelFor } from './pro-booking.routes';
 import {
   commandGeneration,
   legacyQuoteSchema,
@@ -638,6 +638,13 @@ export async function servicesRoutes(app: FastifyInstance) {
     return { success: true, data: job };
   });
 
+  /** A job as its reader gets it. Each field is added only when it answers something (older apps ignore both). */
+  const withCustomerCancelViews = <J extends ServiceJob>(job: J, viewerId: string, now: Date) => {
+    const appointment = serviceAppointmentViewFor(job, viewerId, now);
+    const customerCancel = serviceJobCustomerCancelFor(job, viewerId, now);
+    return { ...job, ...(appointment ? { appointment } : {}), ...(customerCancel ? { customerCancel } : {}) };
+  };
+
   app.get('/jobs', auth, async (request) => {
     const userId = request.user.userId;
     const jobs = await app.prisma.serviceJob.findMany({
@@ -650,18 +657,14 @@ export async function servicesRoutes(app: FastifyInstance) {
     const now = new Date();
     return {
       success: true,
-      data: jobs.map((job) => {
-        const appointment = serviceAppointmentViewFor(job, userId, now);
-        return appointment ? { ...job, appointment } : job;
-      }),
+      data: jobs.map((job) => withCustomerCancelViews(job, userId, now)),
     };
   });
 
   app.get('/jobs/:id', auth, async (request) => {
     const { id } = request.params as { id: string };
     const job = await jobForUser(id, request.user.userId);
-    const appointment = serviceAppointmentViewFor(job, request.user.userId);
-    return { success: true, data: appointment ? { ...job, appointment } : job };
+    return { success: true, data: withCustomerCancelViews(job, request.user.userId, new Date()) };
   });
 
   app.post('/jobs/:id/quote', auth, async (request) => {
