@@ -243,10 +243,13 @@ const SCOPE: Record<string, Entry> = {
 
 /** Verb-matched routes that create none of the eight things (reviewed). */
 const OUT: Record<string, string> = {
+  // [Row 156] A note that a clock started, not one of the eight: it moves no money, and checkoutId is unique, so a retry is 409.
+  [`${ADMIN}|POST|/billing/mmg-checkouts/:id/refund-case`]: 'records a partner\'s ask on one payment: unique per payment (a retry is REFUND_CASE_EXISTS), and it moves no money',
   // [WEB-DELETE · owner ruling 1 Nov 2026]
   [`${CUSTOMER}|POST|/account/closure-request/cancel`]: 'The owner takes back their own closure request: it resolves that ticket and lifts its pause on new orders, under the person lock (a replay finds no open request and is refused). No order or money.',
   [`${CUSTOMER}|POST|/orders/:id/reorder`]: 'Fills the CART from a past order; nothing is ordered until checkout (which holds its own key).',
   [`${CUSTOMER}|PUT|/cart/tip`]: 'Sets the tip VALUE on the cart (a replay sets the same value); the money moves at checkout.',
+  'modules/admin/admin.routes.ts|POST|/users/:id/phone-change/confirm': 'Moves an existing account to the number the code went to: nothing is created and no money moves, and the code is spent on first use, so a replay is refused.',
   'modules/ads/ads.routes.ts|POST|/campaigns': 'Creates a DRAFT campaign; no money is reserved or charged until reserve / checkout (both guarded).',
   'modules/courier/courier.routes.ts|POST|/order/:id/return': 'A state transition of an existing parcel (return to sender), not a new parcel; the parcel state machine refuses a second one.',
   'modules/billing/card-rail.routes.ts|POST|/return': 'The card page returning to Swift: it credits nothing itself (the card rail is off, and a card payment is credited only after the provider\'s own lookup).',

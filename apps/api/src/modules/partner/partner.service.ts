@@ -22,6 +22,7 @@ import { lockVendorActivationBilling } from '../billing/billing-access';
 import { hasActiveHold } from '../integrity/enforcement';
 import { FOOD_HANDLERS_CONSENT_TYPE, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, foodHandlerTickApplies } from '../vendor/food-handlers';
 import { publicPhoneForWrite } from '../../utils/vendor-public-phone';
+import { moveMoverFeeToDelivery } from '../subscription/mover-fee-authority';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -515,8 +516,8 @@ export class PartnerService {
     return this.prisma.$transaction(async (tx) => {
       const now = new Date();
       // The global lock order (mover-authority): User, then Rider, then Driver.
-      const users = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; lastMoverRole: string | null; countryCode: string; tenantKind: string }>>`
-        SELECT u."id", u."roles", u."lastMoverRole", u."countryCode", t."kind"::text AS "tenantKind"
+      const users = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; lastMoverRole: string | null; countryCode: string; tenantId: string; tenantKind: string }>>`
+        SELECT u."id", u."roles", u."lastMoverRole", u."countryCode", u."tenantId", t."kind"::text AS "tenantKind"
         FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId" WHERE u."id" = ${userId} FOR UPDATE OF u
       `;
       const user = users[0];
@@ -543,6 +544,7 @@ export class PartnerService {
         : user.lastMoverRole === 'RIDER' && rider ? 'RIDER' : rider ? 'RIDER' : 'DRIVER';
       const currentProfile = (current === 'DRIVER' ? driver : rider)!;
       const previousVehicleType = currentProfile.vehicleType;
+      let planMoved = false;
       const next = input.vehicle;
       // The vehicle's details after the change. A rider naming the SAME vehicle without
       // details keeps the ones it has (the payload omitted them, it did not ask to clear
@@ -566,15 +568,24 @@ export class PartnerService {
         };
       }
       if (target !== current) {
+        // [BUG-HUNT F05] The fee decides, not the row: one fee can sit on either profile, and after a move it stays on the
+        // old one. A taxi fee moving to delivery work, or the reverse, is what needs a person.
         const plan = await tx.subscription.findFirst({
-          where: { ...(current === 'RIDER' ? { riderId: currentProfile.id } : { driverId: currentProfile.id }), status: { in: [...LIVE_PLAN] } },
-          select: { id: true },
+          where: { OR: [...(rider ? [{ riderId: rider.id }] : []), ...(driver ? [{ driverId: driver.id }] : [])], status: { in: [...LIVE_PLAN] } },
+          select: { type: true },
         });
-        if (plan) {
-          throw new AppError(409, 'PLAN_ON_CURRENT_ROLE', current === 'RIDER'
+        const feeType = plan ? (await tx.moverFeeAuthority.findUnique({ where: { userId }, select: { feeType: true } }))?.feeType ?? plan.type : null;
+        const crossesPlan = feeType !== null && (feeType === 'TAXI_DRIVER' ? 'DRIVER' : 'RIDER') !== target;
+        // Support allows one move, for a week (POST /admin/users/:id/mover-plan/allow-move): spent here.
+        const allowed = crossesPlan
+          ? await tx.user.updateMany({ where: { id: userId, moverPlanMoveUntil: { gt: now } }, data: { moverPlanMoveUntil: null, moverPlanMoveBy: null } })
+          : null;
+        if (allowed?.count === 0) {
+          throw new AppError(409, 'PLAN_ON_CURRENT_ROLE', target === 'DRIVER'
             ? 'Your weekly plan is for delivery work. Contact support to move it to taxi work.'
             : 'Your weekly plan is for taxi work. Contact support to move it to delivery work.');
         }
+        planMoved = allowed?.count === 1;
       }
 
       // The target profile carries the new vehicle; it is created when this is the first
@@ -737,6 +748,10 @@ export class PartnerService {
           },
         },
       });
+
+      // [BUG-HUNT F05] Taxi to delivery: the fee follows here, the rider's vehicle now being known. Delivery to taxi
+      // re-tiers when the taxi papers are approved (SubscriptionService.moverRow), under the 14-day rule.
+      if (planMoved && target === 'RIDER') await moveMoverFeeToDelivery(tx, { userId, tenantId: user.tenantId }, userId);
 
       const authorityCleanup = await transitionAuthority(tx, target);
       return {

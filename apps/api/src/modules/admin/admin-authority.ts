@@ -173,8 +173,9 @@ const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIE
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
+  deliveryCashSettlement: { model: 'deliveryCashSettlement', fields: ['status', 'amount', 'closedAt', 'closedById'] },
   serviceJob: { model: 'serviceJob', fields: ['status', 'cancelledAt'] },
-  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired', 'brandListedAlone'] },
+  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired', 'brandListedAlone', 'vendorType', 'name'] },
   // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
   // lives in `documentsVerified*`, and a safety suspension is a timestamp.
   rider: { model: 'rider', fields: ['documentsVerified', 'documentsVerifiedAt', 'isAvailable', 'isOnline', 'safetySuspendedAt'] },
@@ -276,6 +277,12 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [BOOK-FU2 · owner B3] Repeat "Customer didn't come" records for a person to review: counts and dates, numbers masked.
   'GET /missed-appointments': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
+  // [BUG-HUNT F22] A person's number is their sign-in: its own capability, never in a support grant. The code goes to the new number.
+  // [BUG-HUNT F22] The number is the sign-in, so asking takes two people. The read-back then takes the code.
+  'POST /users/:id/phone-change': c('C5', 'user.phone.change', E.user),
+  'POST /users/:id/phone-change/confirm': c('C3', 'user.phone.change', E.user),
+  // [BUG-HUNT F05] Allows one move between delivery and taxi work. No money moves; the fee follows the existing rule.
+  'POST /users/:id/mover-plan/allow-move': c('C3', 'subscription.plan.move', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
   'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
@@ -292,6 +299,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /vendors/:id/approve': c('C3', 'vendor.approve', E.vendor),
   'PUT /vendors/:id/suspend': c('C3', 'vendor.suspend', E.vendor),
   'PUT /vendors/:id/feature': c('C2', 'vendor.feature', E.vendor),
+  // [BUG-HUNT F22] What the screens tell a store to ask support for: a type picked by mistake, a checked name.
+  'PUT /vendors/:id/type': c('C3', 'vendor.edit', E.vendor),
+  'PUT /vendors/:id/name': c('C3', 'vendor.edit', E.vendor),
 
   // ── Movers ──────────────────────────────────────────────────────────────
   'GET /riders': c('C1', 'mover.read'),
@@ -376,6 +386,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /finance/vat-tracker': c('C0', 'finance.read'),
   'GET /finance/settlements': c('C0', 'finance.read'),
   'GET /finance/cash-settlements': c('C0', 'finance.read'),
+  // Record-only, like the close of a store-claimed MMG order above: a debt between two people stops being tracked, and
+  // no money moves. It closes a claim about money, so: money class, reason, two admins.
+  'POST /finance/cash-settlements/:id/close': c('C4', 'order.refund.settle', E.deliveryCashSettlement),
   'GET /finance/payment-mix': c('C0', 'finance.read'),
   'PUT /finance/settlements/:id/process': c('C4', 'finance.settlement.process', E.settlement),
   'POST /finance/settlements/:id/adjust': c('C4', 'finance.settlement.adjust', E.settlement),
@@ -480,6 +493,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/mmg-checkouts/:id/reversal': c('C0', 'billing.read'),
   'POST /billing/mmg-checkouts/:id/reverse': c('C4', 'billing.mmg.reverse'),
   'POST /billing/mmg-fee-reversals/:id/check': c('C2', 'billing.mmg.reverse.check'),
+  // [Row 156] A partner asked for a weekly-fee payment back: a clock and a record, no money. A reason, one person; the
+  // return itself stays the C4 above. A case closes only on a REVERSED reversal, never from here.
+  'GET /billing/fee-refund-cases': c('C1', 'billing.mmg.read'),
+  'GET /billing/mmg-checkouts/:id/refund-case': c('C1', 'billing.mmg.read'),
+  'POST /billing/mmg-checkouts/:id/refund-case': c('C3', 'billing.mmg.refund.case'),
   // [DS1112] A person closes a HELD return on MMG's evidence: money (C4).
   'POST /billing/mmg-fee-reversals/:id/resolve': c('C4', 'billing.mmg.reverse.resolve', E.feeReversal),
   'GET /billing/collections': c('C0', 'billing.read'),
@@ -901,6 +919,8 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'POST /promos': 'creates the row; there is no before state to digest',
   // [MMG REVERSAL] the claim row is the record; the audit facts name it
   'POST /billing/mmg-checkouts/:id/reverse': 'creates the reversal claim row; the audit facts carry the reversal id, the checkout, the amount and the MMG transaction',
+  // [Row 156] the case row is the record; the audit facts name it
+  'POST /billing/mmg-checkouts/:id/refund-case': 'creates the case row; the audit facts carry the case id, the checkout, the kind and the due date',
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',

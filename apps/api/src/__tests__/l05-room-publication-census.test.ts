@@ -77,6 +77,7 @@ describe('sensitive room publication census', () => {
     //   item left gets no answer (picking.service, both through the gate).
     // + [BOOK-FU2 · owner B3] "Customer didn't come": the appointment closed by its business (vendor no-show, through the gate).
     // + [BUG-HUNT-2 G05] Support gives a ride a new code (through the gate).
-    expect(orderPublishers).toBe(53);
+    // + [BUG-HUNT-2 G20] "Not collected": a pickup closed by its store (vendor not-collected, through the gate).
+    expect(orderPublishers).toBe(54);
   });
 });
