@@ -10,6 +10,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { AccountService } from '../modules/user/account.service';
+import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { ACTIVE_TAXI_STATUSES } from '../modules/rides/rides.service';
 import { walkOrderStatus } from './helpers/order-status-walk';
@@ -35,16 +36,16 @@ async function user(roles: string[] = ['CUSTOMER'], extra: Record<string, unknow
   return row.id;
 }
 
-async function staff(permissions: string[]) {
-  const id = await user(['ADMIN', 'CUSTOMER'], { status: 'ACTIVE', admin: { create: { permissions } } });
-  const token = app.jwt.sign({ userId: id, role: 'ADMIN', jti: nanoid(8) });
+async function staff(permissions: string[], role: 'ADMIN' | 'SUPER_ADMIN' = 'ADMIN') {
+  const id = await user([role, 'CUSTOMER'], { status: 'ACTIVE', admin: { create: { permissions } } });
+  const token = app.jwt.sign({ userId: id, role, jti: nanoid(8) });
   await app.prisma.session.create({ data: { userId: id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `ride-${nanoid(4)}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
   return { id, token };
 }
 
-async function ride(status: 'RIDE_IN_PROGRESS' | 'DRIVER_ARRIVED' | 'DRIVER_ASSIGNED' = 'RIDE_IN_PROGRESS', pin: { ridePinVerified?: boolean; ridePinVerifiedAt?: Date } = {}) {
-  const customerId = await user();
-  const driverUser = await user(['MOVER', 'CUSTOMER']);
+async function ride(status: 'RIDE_IN_PROGRESS' | 'DRIVER_ARRIVED' | 'DRIVER_ASSIGNED' = 'RIDE_IN_PROGRESS', pin: { ridePinVerified?: boolean; ridePinVerifiedAt?: Date } = {}, on: { passenger?: string; driver?: string } = {}) {
+  const customerId = on.passenger ?? await user();
+  const driverUser = on.driver ?? await user(['MOVER', 'CUSTOMER']);
   const driver = await app.prisma.driver.create({ data: {
     userId: driverUser, vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleColor: 'White', vehicleYear: 2015, licensePlate: `END ${nanoid(4)}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
   } as never });
@@ -228,5 +229,94 @@ describe('support ends a ride whose driver is gone', () => {
     const r = await ride();
     const support = await staff(['order.read']);
     expect((await end(r.orderId, support.token)).statusCode).toBe(403);
+  });
+
+  // [COORD ruling on REVIEW-M9's 11:21Z] Nobody ends a ride they are on. A ride with staff on it goes to a SUPER_ADMIN who is
+  // not on it, so nothing stays stuck. Every test here is the real route, and a refusal leaves no trace at all.
+  const refused = async (orderId: string, token: string, code: string, status = 'RIDE_IN_PROGRESS') => {
+    const res = await end(orderId, token);
+    expect(res.statusCode, res.payload).toBe(403);
+    expect(res.json().error.code).toBe(code);
+    expect(await app.prisma.order.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status });
+    expect(await app.prisma.auditLog.count({ where: { action: 'END_STUCK_RIDE', entityId: orderId } })).toBe(0);
+    expect(await app.prisma.notification.count({ where: { title: 'Ride closed by Swift', data: { path: ['orderId'], equals: orderId } } })).toBe(0);
+  };
+
+  it('nobody ends a ride they are the passenger of', async () => {
+    const me = await staff(['*']);
+    await refused((await ride('RIDE_IN_PROGRESS', {}, { passenger: me.id })).orderId, me.token, 'OWN_RIDE');
+  });
+
+  it('nobody ends a ride they are the driver of, on the narrowest grant', async () => {
+    const me = await staff(['order.ride.end']);
+    await refused((await ride('RIDE_IN_PROGRESS', {}, { driver: me.id })).orderId, me.token, 'OWN_RIDE');
+  });
+
+  it('not a SUPER_ADMIN either, and not from the verified-code state', async () => {
+    const owner = () => staff(['*'], 'SUPER_ADMIN');
+    const passenger = await owner();
+    await refused((await ride('RIDE_IN_PROGRESS', {}, { passenger: passenger.id })).orderId, passenger.token, 'OWN_RIDE');
+    const driver = await owner();
+    await refused((await ride('RIDE_IN_PROGRESS', {}, { driver: driver.id })).orderId, driver.token, 'OWN_RIDE');
+    const boarded = await owner();
+    await refused((await ride('DRIVER_ARRIVED', { ridePinVerified: true }, { passenger: boarded.id })).orderId, boarded.token, 'OWN_RIDE', 'DRIVER_ARRIVED');
+  });
+
+  it('nor through an account linked to the same person', async () => {
+    const me = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    for (const party of [r.customerId, r.driverUser]) {
+      const cluster = await app.prisma.identityCluster.create({ data: {} });
+      await app.prisma.identityClusterMember.createMany({ data: [
+        { accountId: party, clusterId: cluster.id, linkedVia: [] }, { accountId: me.id, clusterId: cluster.id, linkedVia: [] },
+      ] });
+      try {
+        await refused(r.orderId, me.token, 'OWN_RIDE');
+      } finally {
+        await app.prisma.identityClusterMember.deleteMany({ where: { clusterId: cluster.id } });
+        await app.prisma.identityCluster.delete({ where: { id: cluster.id } });
+      }
+    }
+  });
+
+  it.each(['ADMIN', 'SUPER_ADMIN'] as const)('a ride with a %s on it is out of an ADMIN\'s reach, on either side, and a SUPER_ADMIN not on it ends it', async (role) => {
+    const onRide = await staff(['*'], role);
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const asPassenger = await ride('RIDE_IN_PROGRESS', {}, { passenger: onRide.id });
+    await refused(asPassenger.orderId, admin.token, 'STAFF_ON_RIDE');
+    expect((await end(asPassenger.orderId, owner.token)).statusCode).toBe(200);
+    const asDriver = await ride('RIDE_IN_PROGRESS', {}, { driver: onRide.id });
+    await refused(asDriver.orderId, admin.token, 'STAFF_ON_RIDE');
+    expect((await end(asDriver.orderId, owner.token)).statusCode).toBe(200);
+  });
+
+  /** Runs `change` after the route's guard and before the order's lock: what the close reads is what the database says then. */
+  const beforeTheLock = (change: () => Promise<unknown>) => {
+    const real = OrderService.prototype.stageCanonicalOrderTransition;
+    return vi.spyOn(OrderService.prototype, 'stageCanonicalOrderTransition').mockImplementationOnce(async function stage(this: OrderService, tx, input) {
+      await change();
+      return real.call(this, tx, input);
+    });
+  };
+
+  it('made staff while the request was on its way: the roles are the database\'s, under the lock', async () => {
+    const r = await ride();
+    const spy = beforeTheLock(() => app.prisma.user.update({ where: { id: r.customerId }, data: { roles: ['ADMIN', 'CUSTOMER'] } }));
+    await refused(r.orderId, admin.token, 'STAFF_ON_RIDE');
+    spy.mockRestore();
+  });
+
+  it('a SUPER_ADMIN stood down while the request was on its way is an ADMIN at the close', async () => {
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const onRide = await staff(['*']);
+    const r = await ride('RIDE_IN_PROGRESS', {}, { passenger: onRide.id });
+    const spy = beforeTheLock(() => app.prisma.user.update({ where: { id: owner.id }, data: { roles: ['ADMIN', 'CUSTOMER'] } }));
+    await refused(r.orderId, owner.token, 'STAFF_ON_RIDE');
+    spy.mockRestore();
+  });
+
+  it('a plain ride stays with any ADMIN holding the grant', async () => {
+    const narrow = await staff(['order.ride.end']);
+    expect((await end((await ride()).orderId, narrow.token)).statusCode).toBe(200);
   });
 });

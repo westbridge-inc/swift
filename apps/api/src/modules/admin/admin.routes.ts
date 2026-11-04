@@ -85,6 +85,7 @@ import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } fr
 import { LIVE_SOS_STATUSES } from '../safety/sos.service';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
+import { assertMayEndRide } from '../rides/end-ride-authority';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -3385,15 +3386,11 @@ export async function adminRoutes(app: FastifyInstance) {
     const reason = reasonOf(request.body, request.headers) ?? '';
     const order = await app.prisma.order.findUnique({
       where: { id },
-      select: { status: true, orderType: true, customerId: true, ridePinVerified: true, ridePinVerifiedAt: true, driver: { select: { userId: true } } },
+      select: { status: true, orderType: true, ridePinVerified: true, ridePinVerifiedAt: true },
     });
     if (!order) throw new NotFoundError('Order', id);
     if (order.orderType !== 'TAXI') throw new AppError(409, 'NOT_A_RIDE', 'Only a taxi ride ends here.');
     const closed = 'Swift support closed this ride. Swift has no record of what was paid, and moved no money.';
-    const parties = [
-      { userId: order.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
-      ...(order.driver ? [{ userId: order.driver.userId, body: `${closed} If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
-    ];
     const noticeIds: string[] = [];
     const closeNote = 'Closed by Swift support: no payment on record';
     // The code was verified and the driver never tapped Start: the passenger is in the car, so a cancel is refused and the
@@ -3416,7 +3413,13 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       invalidStatus: (current) => new AppError(409, 'RIDE_NOT_IN_PROGRESS', `This ride is not in progress (it is ${current}).`),
       // The close, the audit row and both notices commit together, as the job close does.
-      withinTransaction: async (tx) => {
+      withinTransaction: async (tx, locked) => {
+        const driver = locked.driverId ? await tx.driver.findUnique({ where: { id: locked.driverId }, select: { userId: true } }) : null;
+        const parties = [
+          { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
+          ...(driver ? [{ userId: driver.userId, body: `${closed} If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
+        ];
+        await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
         if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
           throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
         }
