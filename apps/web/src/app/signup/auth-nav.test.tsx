@@ -135,20 +135,30 @@ describe('[FLOW-QA F5b] the public header knows a signed-in partner', () => {
   });
 });
 
+/**
+ * The page paints a step first, then records it in effects after the paint: its own idea of the step, then the address.
+ * A step on screen is not yet the step the page knows, so a test that reads the address or fires Back gets there
+ * through here. It waits on the address, the last thing that pass writes, not on the clock.
+ */
+async function reached<T>(onScreen: Promise<T>, step: string): Promise<T> {
+  const shown = await onScreen;
+  await waitFor(() => expect(new URLSearchParams(window.location.search).get('step')).toBe(step));
+  return shown;
+}
+
 async function toCodeStep(door: RegExp) {
   render(<SignupPage />);
   fireEvent.click(await screen.findByRole('button', { name: door }));
   fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '600 1234' } });
   fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
-  return screen.findByLabelText('Verification code');
+  return reached(screen.findByLabelText('Verification code'), 'code');
 }
 
 describe('[FLOW-QA F6] sign-up survives Back and refresh', () => {
   it('each step is its own address, and a refresh comes back to it with what was typed', async () => {
     window.history.replaceState(null, '', '/signup');
     await toCodeStep(/Put my business on Swift|business/i);
-    // The page writes the address in an effect, after the code step is on screen: a read here can land before it.
-    await waitFor(() => expect(new URLSearchParams(window.location.search).get('step')).toBe('code'));
+    expect(new URLSearchParams(window.location.search).get('step')).toBe('code');
     // a refresh: the page starts again at the same address
     const { unmount } = { unmount: () => document.body.replaceChildren() };
     unmount();
@@ -235,8 +245,7 @@ describe('[REVIEW-GMF2 S3-1] a partner page’s sign-up (?as=…) resumes its st
     render(<SignupPage />);
     fireEvent.change(await screen.findByLabelText('Phone number'), { target: { value: '600 1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
-    await screen.findByLabelText('Verification code');
-    await waitFor(() => expect(new URLSearchParams(window.location.search).get('step')).toBe('code'));
+    await reached(screen.findByLabelText('Verification code'), 'code');
     expect(new URLSearchParams(window.location.search).get('as')).toBe('rider');
     document.body.replaceChildren();
     render(<SignupPage />);
@@ -266,7 +275,7 @@ describe('[REVIEW-GMF2 S3-3] once the account exists, Back leaves sign-up instea
     mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 'u1', roles: ['MOVER'] } });
     fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    await screen.findByText('Add a business to your Swift account.');
+    await reached(screen.findByText('Add a business to your Swift account.'), 'business');
     const back = vi.spyOn(window.history, 'back').mockImplementation(() => {});
     const push = vi.spyOn(window.history, 'pushState');
     act(() => {
@@ -284,7 +293,7 @@ describe('[REVIEW-GMF2 S3-3] once the account exists, Back leaves sign-up instea
     mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 'u1', roles: ['MOVER'] } });
     fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    await screen.findByText('Add a business to your Swift account.');
+    await reached(screen.findByText('Add a business to your Swift account.'), 'business');
     const back = vi.spyOn(window.history, 'back').mockImplementation(() => {});
     act(() => {
       // the client-side link the person came by: the page they were on before sign-up
