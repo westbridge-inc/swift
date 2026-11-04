@@ -147,7 +147,8 @@ describe('[FLOW-QA F6] sign-up survives Back and refresh', () => {
   it('each step is its own address, and a refresh comes back to it with what was typed', async () => {
     window.history.replaceState(null, '', '/signup');
     await toCodeStep(/Put my business on Swift|business/i);
-    expect(new URLSearchParams(window.location.search).get('step')).toBe('code');
+    // The page writes the address in an effect, after the code step is on screen: a read here can land before it.
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('step')).toBe('code'));
     // a refresh: the page starts again at the same address
     const { unmount } = { unmount: () => document.body.replaceChildren() };
     unmount();
@@ -235,7 +236,7 @@ describe('[REVIEW-GMF2 S3-1] a partner page’s sign-up (?as=…) resumes its st
     fireEvent.change(await screen.findByLabelText('Phone number'), { target: { value: '600 1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
     await screen.findByLabelText('Verification code');
-    expect(new URLSearchParams(window.location.search).get('step')).toBe('code');
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('step')).toBe('code'));
     expect(new URLSearchParams(window.location.search).get('as')).toBe('rider');
     document.body.replaceChildren();
     render(<SignupPage />);

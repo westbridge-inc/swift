@@ -233,7 +233,12 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
               {(u.vendorOwner?.vendors ?? []).map((v: { id: string; name: string; status: string }) => (
                 <li key={v.id}><Link href={`/vendors/${v.id}`} className="mc-row min-h-11"><Truncate text={v.name} /><StatusBadge group="VendorStatus" value={v.status} /></Link></li>
               ))}
-              {!u.rider && !u.driver && (u.vendorOwner?.vendors ?? []).length === 0 ? <li className="mc-muted">Customer only.</li> : null}
+              {/* A MOVER who stopped before the vehicle step has neither profile: not a customer, and which kind is not known yet. */}
+              {!u.rider && !u.driver && (u.roles ?? []).includes('MOVER') ? (
+                <li className="mc-muted">Signed up as a rider or driver and has not added a vehicle yet, so which one is not known.</li>
+              ) : !u.rider && !u.driver && (u.vendorOwner?.vendors ?? []).length === 0 ? (
+                <li className="mc-muted">Customer only.</li>
+              ) : null}
             </ul>
           </section>
 
