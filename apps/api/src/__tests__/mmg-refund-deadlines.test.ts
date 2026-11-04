@@ -10,7 +10,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { openMmgRefundObligation } from '../modules/order/mmg-refund-law';
-import { MMG_REFUND_OVERDUE_KEY, MMG_REFUND_OVERDUE_TITLE } from '../modules/order/mmg-refund-rail';
+import { MMG_REFUND_OVERDUE_KEY, MMG_REFUND_OVERDUE_TITLE, markMmgRefundMissed } from '../modules/order/mmg-refund-rail';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 const state = vi.hoisted(() => ({ workers: new Map<string, (job: unknown) => Promise<unknown>>() }));
@@ -134,6 +134,9 @@ describe('[G08] the deadline', () => {
     expect(first.status).toBe('OWED');
     expect(first.missedAt).toBeInstanceOf(Date);
     await run();
+    expect((await row(obligationId)).missedAt).toEqual(first.missedAt);
+    // Two sweeps that both read it as due: the second finds it marked, under the order lock.
+    expect(await sys(() => markMmgRefundMissed(app.prisma, obligationId, new Date(Date.now() + HOUR)))).toBe(false);
     expect((await row(obligationId)).missedAt).toEqual(first.missedAt);
     const told = await noticesFor(ownerUserId, order.id);
     expect(told.map((notice) => notice.title)).toEqual(['Refund overdue']);

@@ -383,6 +383,17 @@ describe('[G08] the send is judged under the lock', () => {
     expect((await obligationOf(order.id)).status).toBe('OWED');
   });
 
+  it('a finding cannot be made twice the other way either: a refund found received stays found', async () => {
+    const { order, sendId } = await disputed();
+    expect((await resolve(sendId, true)).statusCode).toBe(200);
+    const settled = await obligationOf(order.id);
+    const second = await resolve(sendId, false);
+    expect(second.statusCode, second.body).toBe(409);
+    expect(second.json().error.code).toBe('MMG_REFUND_NOT_OPEN');
+    expect(await sendOf(order.id)).toMatchObject({ resolution: 'RECEIVED' });
+    expect((await obligationOf(order.id)).status).toBe(settled.status);
+  });
+
   it('a finding on a send nothing is covered by is refused, and nothing is written', async () => {
     const { order, sendId } = await disputed();
     await voidRow(order.id);
