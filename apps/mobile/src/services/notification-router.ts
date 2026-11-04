@@ -52,16 +52,17 @@ function feeFamilyOf(audience: string, openApp?: OpenApp): 'vendor' | 'mover' {
 }
 
 /** The documents screen of the role a document belongs to: the mover
- *  checklist, the customer's ID screen, or the store's Account tab (its
- *  Documents section; a store still in onboarding shows its checklist on the
- *  same VendorRoot). The server tag says whose document it is; an untagged
- *  notice (notifyRejection sends none) follows the open app. */
+ *  checklist, or the store's Account tab (its Documents section; a store still
+ *  in onboarding shows its checklist on the same VendorRoot). The server tag
+ *  says whose document it is; an untagged notice (notifyRejection sends none)
+ *  follows the open app. [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] A
+ *  customer has no ID screen any more (Swift asks for no customer ID): the
+ *  app opens normally. */
 function documentsFor(audience: string, openApp?: OpenApp): Destination {
   const who = audience || openApp?.() || 'customer';
   if (who === 'earner' || who === 'mover') return { screen: 'MoverDocuments' };
   if (who === 'business' || who === 'vendor') return { screen: 'VendorRoot', params: { screen: 'Account' } };
-  if (who === 'customer') return { screen: 'IdentityVerification' };
-  return { screen: HOME_SCREEN }; // an advertiser account has no documents screen
+  return { screen: HOME_SCREEN }; // a customer or an advertiser account has no documents screen
 }
 
 /** PURE: payload → destination. The single source of tap-routing truth —
@@ -127,8 +128,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // Taken offline for a lapsed document, a vehicle's papers lapsed, or a
   // routine review wants them re-submitted: renewing them is the way back.
   if (MOVER_DOCUMENT_KINDS.has(kind)) return { screen: 'MoverDocuments' };
-  // "Your ID is on file" — the customer's ID screen shows it.
-  if (kind === 'verification_l2') return { screen: 'IdentityVerification' };
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] "Your ID is on file" is no longer sent (no customer ID): an inbox
+  // row sent before opens the app normally.
+  if (kind === 'verification_l2') return { screen: HOME_SCREEN };
   // Trusted status earned: no screen shows the trust tier; the notice is the
   // whole message. A review of theirs was removed: the payload names no rating
   // and no store. The person a trip was shared with: the trip ended, and they

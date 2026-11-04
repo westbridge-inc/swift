@@ -132,7 +132,8 @@ export function isDocStateViolation(err: unknown): boolean {
  */
 export async function hopDocState(
   tx: Prisma.TransactionClient,
-  where: { id: string; userId?: string },
+  // [REVIEW-G S2-2] a caller may also pin the document's type and role (the customer-ID retirement does)
+  where: { id: string; userId?: string } & Pick<Prisma.VerificationDocumentWhereInput, 'docType' | 'role'>,
   from: DocState | readonly DocState[],
   to: DocState,
   extra: Prisma.VerificationDocumentUpdateManyMutationInput = {},

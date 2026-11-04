@@ -174,7 +174,8 @@ describe('the words: Terms s7, the refunds page and both FAQs, from the same num
   // [BILL-PRO PR7] Served now under 2026-10-29.2 (the Business Agreement covers Providers; material for Providers only):
   // a customer is still not asked. [EXPRESS-FEE · owner 1 Nov] ... and under 2026-11-01 (non-material) on top of that.
   it('published as 2026-10-29.1 (served now under 2026-11-01), classed non-material: nobody is asked again (a person at 2026-10-29 or 2026-10-28.1 stays)', () => {
-    expect(LEGAL_VERSION).toBe('2026-11-01');
+    // [CHECKLIST-LEGAL] served now under 2026-11-01.1 (the customer ID removal: non-material, same day)
+    expect(LEGAL_VERSION).toBe('2026-11-01.1');
     expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-10-29.1')).toHaveLength(1);
     expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-29.1');
     for (const accepted of ['2026-10-29', '2026-10-28.1']) {

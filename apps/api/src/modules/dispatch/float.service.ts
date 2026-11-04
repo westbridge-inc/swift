@@ -1,5 +1,4 @@
 import { PrismaClient, Prisma, TrustLevel } from '@prisma/client';
-import { floatTrustLevel } from '../verification/customer-id';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
 
@@ -102,6 +101,37 @@ export function floatAdvice(
   return { level: 'ok', limit, committed, available, usedPct, sentence: null };
 }
 
+/** [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] The level a rider's float is sized from, before the documents check:
+ *  L2 (retired) counts as L1. */
+export function floatTrustLevel(trustLevel: TrustLevel): TrustLevel {
+  return trustLevel === 'L2' ? 'L1' : trustLevel;
+}
+
+/** The roles a rider's own partner documents are filed under. */
+const PARTNER_DOCUMENT_ROLES = ['MOVER', 'RIDER', 'DRIVER'] as const;
+
+/**
+ * [CHECKLIST-LEGAL · COORD security review, 1 Nov 2026] Has a PERSON approved the rider's own partner documents? The
+ * rider is verified, holds at least one committed partner document, and every committed one carries a person's
+ * APPROVE decision (an automatic approval records none). Earned customer trust (L3) lifts the float only on top of
+ * this: L3 needs no ID any more, so twenty self-placed paid orders must never buy cash-fronting room by themselves.
+ */
+export async function riderDocumentsPersonApproved(db: Tx, userId: string): Promise<boolean> {
+  const rider = await db.rider.findUnique({ where: { userId }, select: { documentsVerified: true } });
+  if (!rider?.documentsVerified) return false;
+  const committed = await db.verificationDocument.findMany({
+    where: { userId, role: { in: [...PARTNER_DOCUMENT_ROLES] }, state: 'COMMITTED', purgedAt: null },
+    select: { id: true },
+  });
+  if (committed.length === 0) return false;
+  const approved = await db.reviewCase.findMany({
+    where: { submissionId: { in: committed.map((d) => d.id) }, decisions: { some: { outcome: 'APPROVE' } } },
+    select: { submissionId: true },
+  });
+  const byPerson = new Set(approved.map((c) => c.submissionId));
+  return committed.every((d) => byPerson.has(d.id));
+}
+
 export class FloatService {
   constructor(private prisma: Tx) {}
 
@@ -120,16 +150,24 @@ export class FloatService {
     return Number(byLevel[trustLevel] ?? cfg.floatL1);
   }
 
-  /** Recompute + persist a rider's floatLimit from their User.trustLevel + country. A customer ID
-   *  that is only ON FILE (owner ruling 8 Oct 2026 — no person reviewed it) does not lift the
-   *  float: such an account is sized as L1 (customer-id.ts floatTrustLevel). */
+  /** Recompute + persist a rider's floatLimit from their User.trustLevel + country. [CHECKLIST-LEGAL · owner ruling
+   *  1 Nov 2026 (b)] L2 is retired (a customer ID was its only source, and Swift no longer keeps them), so an account
+   *  still marked L2 is sized as L1: nothing a customer ID gave lifts the cash a rider may front. L3 is earned on the
+   *  paid-order history (cash-rules maybePromoteToL3) and sizes the float only once a person approved the rider's own
+   *  partner documents (riderDocumentsPersonApproved); until then the float stays at L1. Fails closed: a read that
+   *  throws sizes it at L1. */
   async recomputeForUser(userId: string): Promise<void> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { trustLevel: true, countryCode: true, rider: { select: { id: true } } },
     });
     if (!user?.rider) return;
-    const limit = await this.floatLimitFor(user.countryCode, await floatTrustLevel(this.prisma, userId, user.trustLevel));
+    let level = floatTrustLevel(user.trustLevel);
+    if (level !== 'L1') {
+      const approved = await riderDocumentsPersonApproved(this.prisma, userId).catch(() => false);
+      if (!approved) level = 'L1';
+    }
+    const limit = await this.floatLimitFor(user.countryCode, level);
     await this.prisma.rider.update({ where: { id: user.rider.id }, data: { floatLimit: limit } });
   }
 

@@ -123,9 +123,11 @@ describe('No customer ID before a taxi ride (owner 24 Oct 2026; replaces §5 L2-
   });
 });
 
+// [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q2 — a DELIBERATE change to this pin] L3 is earned from L1 directly on
+// the same rule: L2 needed a customer ID, and Swift keeps none (L2 is retired).
 describe('L3 is earned on completed history', () => {
-  it('the qualifying delivery promotes an L2 customer with a clean record', async () => {
-    const u = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L2', ageDays: 45 });
+  it('the qualifying delivery promotes an L1 customer (no ID) with a clean record', async () => {
+    const u = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L1', ageDays: 45 });
 
     // 19 completed paid orders in history…
     for (let i = 0; i < 19; i++) {
@@ -167,7 +169,7 @@ describe('L3 is earned on completed history', () => {
   });
 
   it('a strike blocks the promotion', async () => {
-    const u = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L2', ageDays: 45 });
+    const u = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L1', ageDays: 45 });
     await app.prisma.strike.create({
       data: { userId: u.userId, reason: 'no_show', orderId: null },
     });
@@ -200,7 +202,7 @@ describe('L3 is earned on completed history', () => {
     await orderService.updateStatus(order.id, 'DELIVERED', 'tier-test');
 
     const after = await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId } });
-    expect(after.trustLevel).toBe('L2');
+    expect(after.trustLevel).toBe('L1');
   });
 });
 

@@ -162,7 +162,8 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(enc?.wrappedDek).toBeNull();
     expect(enc?.shreddedAt).not.toBeNull();
     expect((await app.prisma.verificationDocument.findUnique({ where: { id: doc.id } }))?.purgedAt).not.toBeNull();
-    expect(PRIVACY).toContain("A customer's own ID is not on that schedule: it is kept while the account is open and deleted when the account is deleted.");
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b) — a DELIBERATE change] the policy no longer keeps one while the account is open
+    expect(PRIVACY).toContain("Swift no longer keeps customers' IDs: any a customer added before 1 November 2026 is withdrawn and deleted, unless a legal or safety hold keeps it until the hold ends.");
   });
 
   it('[NR-3 gap 6] ephemeral high-risk rows go with the account', async () => {

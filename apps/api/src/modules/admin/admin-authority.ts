@@ -274,6 +274,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
   'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b), Q1] a person lifts a strike restriction from Help (the same hands as a suspension)
+  'POST /users/:id/strike-restriction/lift': c('C3', 'user.suspend', E.user),
 
   // ── Vendors ─────────────────────────────────────────────────────────────
   'GET /vendors': c('C0', 'vendor.read'),

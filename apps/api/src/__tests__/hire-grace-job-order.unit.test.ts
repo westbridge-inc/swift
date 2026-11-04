@@ -18,13 +18,15 @@ it('a failed hire-licence reminder does not prevent the daily retention purge', 
     scheduleRejectedDocumentRetention: async () => { effects.push('schedule-rejected'); return 0; },
     sweepAbandonedApplications: async () => { effects.push('abandoned'); return { noticed: 0, purged: 0, failed: 0 }; },
     sweepStaleUnclaimedUploads: async () => { effects.push('uploads'); return { people: 0, erased: 0, held: 0, pending: 0 }; },
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] the customer-ID retirement runs before the reaper, in its own try
+    retireCustomerIds: async () => { effects.push('retire-ids'); return { withdrawn: 0, purged: 0, held: 0, failed: 0 }; },
     purgeExpiredDocuments: async () => { effects.push('purge'); return 0; },
     // [owner 15 Oct · no grace] TRANSFORMED: the sweep is the hire-licence sweep (was hirePermitGraceSweep).
     hireLicenceSweep: async () => { effects.push('grace'); throw new Error('synthetic grace unavailable'); },
   };
   const ctx = { log: { error: () => effects.push('logged'), info: () => undefined } };
   await expect(run(verification, ctx)).rejects.toThrow('synthetic grace unavailable');
-  expect(effects).toEqual(['expire', 'remind', 'schedule-rejected', 'abandoned', 'uploads', 'purge', 'grace']);
+  expect(effects).toEqual(['expire', 'remind', 'schedule-rejected', 'abandoned', 'uploads', 'retire-ids', 'purge', 'grace']);
 });
 
 // [R24] The rejected-document clocks are set before the reaper runs, and a failure setting
@@ -43,10 +45,12 @@ it('a failed rejected-document schedule does not prevent the daily retention pur
     scheduleRejectedDocumentRetention: async () => { effects.push('schedule-rejected'); throw new Error('synthetic schedule unavailable'); },
     sweepAbandonedApplications: async () => { effects.push('abandoned'); throw new Error('synthetic abandoned-application sweep unavailable'); },
     sweepStaleUnclaimedUploads: async () => { effects.push('uploads'); return { people: 0, erased: 0, held: 0, pending: 0 }; },
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] the customer-ID retirement runs before the reaper, in its own try
+    retireCustomerIds: async () => { effects.push('retire-ids'); throw new Error('synthetic retirement unavailable'); },
     purgeExpiredDocuments: async () => { effects.push('purge'); return 0; },
     hireLicenceSweep: async () => { effects.push('grace'); return 0; },
   };
   const ctx = { log: { error: () => effects.push('logged'), info: () => undefined } };
   await run(verification, ctx);
-  expect(effects).toEqual(['expire', 'remind', 'schedule-rejected', 'logged', 'abandoned', 'logged', 'uploads', 'purge', 'grace']);
+  expect(effects).toEqual(['expire', 'remind', 'schedule-rejected', 'logged', 'abandoned', 'logged', 'uploads', 'retire-ids', 'logged', 'purge', 'grace']);
 });

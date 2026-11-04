@@ -1024,12 +1024,8 @@ export const verificationApi = {
   /** [POLICE-CLEARANCE CONSENT] withdraw this checklist's police clearance: erased now, only a note kept. */
   withdrawPoliceClearance: (role: string, session?: AuthSessionSnapshot) =>
     api.post('/verification/police-clearance/withdraw', { role }, capturedAuthConfig(session)),
-  submitIdentity: (
-    // [ROLE-DOCS · owner 21 Oct 2026] the ID alone: a customer never gives a photo (the server drops build 9's selfieUrl)
-    // [Owner ruling 24 Oct 2026] the current app sends the customer_id_v2 tick; v1 is build 12's own
-    data: { idDocumentUrl: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' | 'customer_id_v2' },
-    session?: AuthSessionSnapshot,
-  ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] No customer ID any more: the app never sends one (the server answers
+  // 410 CUSTOMER_ID_NOT_NEEDED to the builds that still do).
 };
 
 // The mover vehicle taxonomy — mirrors the server's VehicleType enum

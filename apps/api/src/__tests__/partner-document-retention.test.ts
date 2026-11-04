@@ -173,7 +173,8 @@ describe('[R24] a partner\'s personal image goes 30 days after the decision; the
 
   // [REVIEW-F S3-1] An individual service provider's documents are stored with role CUSTOMER
   // (roleKeyToUserRole). They are a partner's documents all the same; only the customer's own ID
-  // (identity_l2) is kept while the account is open.
+  // (identity_l2) is not a partner document. [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] It is not kept either: its own
+  // daily sweep withdraws and deletes it (customer-id-removed.test.ts), never this partner image policy.
   it('an individual service provider (role CUSTOMER): police clearance and ID images go after 30 days; their own customer ID stays', async () => {
     const provider = await person('CUSTOMER');
     const clearance = await decided(provider, 'CUSTOMER', 'police_clearance', 31);

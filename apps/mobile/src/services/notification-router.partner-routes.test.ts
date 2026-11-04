@@ -127,7 +127,8 @@ describe('a store notice opens the store it is about, on the tab it is about [PU
 describe('an untagged document notice opens the documents of the app that is open [PUSH-ROUTING]', () => {
   it.each([
     ['mover', 'MoverDocuments', undefined],
-    ['customer', 'IdentityVerification', undefined],
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] no customer ID screen: a customer's document notice opens the app normally
+    ['customer', 'Main', undefined],
   ] as const)('with the %s app open', async (intent, screen, params) => {
     fx.intent = intent;
     tap({ kind: 'verification_rejected' });

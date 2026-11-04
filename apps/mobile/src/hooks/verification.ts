@@ -187,29 +187,6 @@ export function useUploadFile() {
   });
 }
 
-/** Consumer L2: submit a government ID. [Owner ruling 8 Oct 2026] It goes on file at once unless the
- *  server's automatic checks hold it for a person; no selfie, no face match. The result carries
- *  `idCheck` (ON_FILE · WAITING · NOT_ACCEPTED) — read it through lib/customerIdCopy. */
-export function useSubmitIdentity() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (data: { idDocumentUrl: string }) => {
-      const owner = requireAuthSessionSnapshot();
-      const result = await unwrap(verificationApi.submitIdentity(
-        // [R17 · in-app ¶15] the screen's tick is recorded in the consent ledger. [Owner ruling 24 Oct 2026]
-        // v2 = the words that promise no unlock (the API accepts v1 from build 12's own JS as well).
-        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'customer_id_v2' },
-        owner,
-      ));
-      requireAuthSessionForPrincipal(owner);
-      void qc.invalidateQueries({ queryKey: ['verification'] });
-      // The Profile row reads the new idCheck from /customer/profile.
-      void qc.invalidateQueries({ queryKey: ['customer', 'profile'] });
-      return result;
-    },
-  });
-}
-
 /** Upload a picked file to storage, then submit it as a checklist document. */
 export function useUploadDocument(role: string) {
   const qc = useQueryClient();

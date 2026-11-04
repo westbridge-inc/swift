@@ -454,14 +454,14 @@ const CENSUS: Case[] = [
   { k: 'claim_update', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — same screen' },
 
   // ── Verification / liveness / safety of the person receiving it [PUSH-ROUTING: no row opens nothing].
-  { k: 'verification_approved', d: { docId: 'd1', audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — [PUSH-ROUTING] the documents screen of the role the document belongs to: earner -> MoverDocuments, customer -> IdentityVerification, business -> the store’s Account tab (its Documents section). Untagged rows follow the app that is open (table below)' },
-  { k: 'verification_rejected', to: { screen: 'IdentityVerification' }, why: 'document owner — they must re-upload. notifyRejection sends no audience, so the open app decides (table below); with no app context, the customer ID screen' },
+  { k: 'verification_approved', d: { docId: 'd1', audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — [PUSH-ROUTING] the documents screen of the role the document belongs to: earner -> MoverDocuments, customer -> home ([CHECKLIST-LEGAL] no customer ID screen any more), business -> the store’s Account tab (its Documents section). Untagged rows follow the app that is open (table below)' },
+  { k: 'verification_rejected', to: HOME, why: 'document owner — they must re-upload. notifyRejection sends no audience, so the open app decides (table below); with no app context, home ([CHECKLIST-LEGAL] no customer ID screen any more)' },
   { k: 'verification_expired', d: { docId: 'd1', audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — renew it on the documents screen of its role' },
   { k: 'verification_expiry_reminder', d: { docId: 'd1', daysLeft: 3, audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — an approved document re-opens for upload in its renewal window, on that screen' },
   { k: 'verification_application_abandoned', d: { audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'applicant — [Row 249] their unfinished application documents will be deleted in 14 days; finishing it happens on the documents screen of its role' },
   { k: 'verification_forced_offline', d: { audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'mover — taken offline because a required document lapsed; renewing it is the way back online' },
   { k: 'verification_vehicle_lapsed', d: { docId: 'd1', subjectId: 's1', suspended: 3, audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'mover who owns the vehicle — a vehicle document lapsed and its drivers cannot take jobs; it is renewed on the mover documents checklist' },
-  { k: 'verification_l2', d: { audience: 'customer' }, to: { screen: 'IdentityVerification' }, why: 'customer — their ID is on file; the ID screen shows it' },
+  { k: 'verification_l2', d: { audience: 'customer' }, to: HOME, why: 'customer — "your ID is on file". [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] No longer sent (Swift keeps no customer ID): an inbox row sent before opens the app normally', scan: false },
   { k: 'trust_l3', to: HOME, why: 'HOME: customer — trusted status earned; no screen shows the trust tier, so the notice is the whole message' },
   { k: 'liveness_midshift_prompt', d: { respondBy: '2026-01-01T00:00:00.000Z', profile: 'DRIVER' }, to: { screen: 'LivenessCheck', params: { profile: 'DRIVER', respondBy: '2026-01-01T00:00:00.000Z' } }, why: 'E12: the timed selfie check, deadline riding along' },
   { k: 'liveness_midshift_missed', to: { screen: 'LivenessCheck', params: { profile: 'DRIVER' } }, why: 'E12: a fresh PASS is the only way back online' },
@@ -675,13 +675,13 @@ const STORE_COPIES: Record<string, unknown>[] = [
 /** [payload (+ the app that is open, as `intent`), where it lands]. */
 const DOCUMENT_COPIES: Array<[Record<string, unknown>, Dest]> = DOCUMENT_KINDS.flatMap((kind): Array<[Record<string, unknown>, Dest]> => [
   [{ kind, docId: 'd1', audience: 'earner' }, { screen: 'MoverDocuments' }],
-  [{ kind, docId: 'd1', audience: 'customer' }, { screen: 'IdentityVerification' }],
+  [{ kind, docId: 'd1', audience: 'customer' }, HOME],
   [{ kind, docId: 'd1', audience: 'business' }, VENDOR_TAB('Account')],
   // notifyRejection (and any older row) sends no audience: the open app decides.
   [{ kind, intent: 'mover' }, { screen: 'MoverDocuments' }],
   [{ kind, intent: 'vendor' }, VENDOR_TAB('Account')],
-  [{ kind, intent: 'customer' }, { screen: 'IdentityVerification' }],
-  [{ kind, intent: null }, { screen: 'IdentityVerification' }],
+  [{ kind, intent: 'customer' }, HOME],
+  [{ kind, intent: null }, HOME],
   // An advertiser account has no documents screen: its home, on purpose.
   [{ kind, intent: 'advertiser' }, HOME],
 ]);

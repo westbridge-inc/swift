@@ -86,7 +86,8 @@ describe('[MC-PR2] a store waiting for documents', () => {
     expect(within(panel).getByText('1 of 4 approved')).toBeTruthy();
     const rows = within(panel).getAllByRole('listitem').map((li) => li.textContent);
     expect(rows[0]).toMatch(/National ID.*Approved/);
-    expect(rows[1]).toMatch(/GRA restaurant licence.*Waiting for review/);
+    // [CHECKLIST-LEGAL (d) — a DELIBERATE change] the licence carries the GRA's own name
+    expect(rows[1]).toMatch(/GRA Food Restaurant Licence.*Waiting for review/);
     expect(rows[2]).toMatch(/Food handler certificate.*Reviewer: The certificate is for a different person\..*Rejected/);
     expect(rows[3]).toMatch(/Storefront photo.*Not sent yet/);
     expect(within(panel).getByText(/When the last required one is approved in the Review Center, Swift makes Target Store live by itself\./)).toBeTruthy();

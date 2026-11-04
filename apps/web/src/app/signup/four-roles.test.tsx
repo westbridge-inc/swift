@@ -69,6 +69,8 @@ describe('[W9] four ways to join', () => {
     const user = await throughName(/Deliver with Swift/);
     expect(fx.register.mock.calls[0]![0]).toMatchObject({ role: 'MOVER' });
     expect(options()).toEqual([['MOTORCYCLE', 'Motorbike'], ['BICYCLE', 'Bicycle']]);
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] said where the rider picks: a bicycle is pedal only.
+    expect(screen.getByText(/^Bicycle means a pedal bike\./)).toBeTruthy();
     expect(screen.queryByLabelText('Make')).toBeNull();
     expect(screen.queryByLabelText('Licence plate')).toBeNull();
     const create = screen.getByRole('button', { name: 'Create rider account' }) as HTMLButtonElement;
@@ -85,6 +87,7 @@ describe('[W9] four ways to join', () => {
     const user = await throughName(/Drive a taxi with Swift/);
     expect(fx.register.mock.calls[0]![0]).toMatchObject({ role: 'MOVER' });
     expect(options()).toEqual([['CAR', 'Car'], ['WAGON_CAR', 'Wagon Car']]);
+    expect(screen.queryByText(/^Bicycle means a pedal bike\./)).toBeNull();
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }

@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone } from '@/lib/api';
+import { fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction } from '@/lib/api';
 import { label } from '@/lib/labels';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
@@ -102,6 +102,17 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
     submit: ({ reason }) => unsuspendUser(id, reason),
     success: () => `${name} can use Swift again.`,
   }));
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] After repeated failed cash payments ordering is paused until the
+  // strikes are 90 days old; a person who reviewed the account (from Help) can open it sooner. The server says whether
+  // there is a restriction to lift; the strikes stay on the record and still count toward a ban.
+  const liftRestriction = async () => show(await dialog.run({
+    title: `Open ordering again for ${name}?`,
+    body: <p>Their strikes stay on the record and still count toward a ban, but the ones given until now stop pausing their orders and rides. Use this after you have reviewed the account with them through Help.</p>,
+    confirmLabel: 'Open ordering again',
+    reason: { hint: 'Kept on the permanent record.' },
+    submit: ({ reason }) => liftStrikeRestriction(id, reason),
+    success: () => `${name} can order and ride again.`,
+  }));
   const ban = async () => show(await dialog.run({
     title: `Permanently ban ${name}?`,
     body: <p>They lose access for good, and their documents are scheduled for deletion under the retention rules. Only a super admin can lift a ban.</p>,
@@ -168,16 +179,19 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             {(u.strikes ?? []).length === 0 ? (
               <p className="mc-muted">Clean record — no strikes.</p>
             ) : (
-              <ul className="grid gap-2">
-                {u.strikes.map((s: { id: string; reason: string; createdAt: string }) => (
-                  <li key={s.id} className="mc-doc mc-doc-bad">
-                    <span className="min-w-0 flex-1">
-                      <span className="block font-semibold">{STRIKE_REASON[s.reason] ?? 'Strike'}</span>
-                      <span className="block mc-muted text-xs">{when(s.createdAt, true)}</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="grid gap-2">
+                  {u.strikes.map((s: { id: string; reason: string; createdAt: string }) => (
+                    <li key={s.id} className="mc-doc mc-doc-bad">
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-semibold">{STRIKE_REASON[s.reason] ?? 'Strike'}</span>
+                        <span className="block mc-muted text-xs">{when(s.createdAt, true)}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <button type="button" className="mc-btn mt-3" onClick={() => void liftRestriction()}>Open ordering again…</button>
+              </>
             )}
           </section>
         </div>

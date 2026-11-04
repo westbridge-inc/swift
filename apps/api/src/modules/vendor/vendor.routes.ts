@@ -1972,10 +1972,11 @@ export async function vendorRoutes(app: FastifyInstance) {
    * shapes those builds read present and zero. Whether a business registration is on file is still the server's.
    */
   app.get('/tier', auth, async (request) => {
-    await requireVendor(app, request, 'MANAGER');
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const userId = request.user.userId;
     const { REGISTRATION_DOC_TYPES } = await import('../verification/doc-registry');
-    const [registration, registrationDoc] = await Promise.all([
+    const [vendor, registration, registrationDoc] = await Promise.all([
+      app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { tradesUnderOwnName: true } }),
       validRegistrationRecord(app.prisma, userId, new Date()),
       app.prisma.verificationDocument.findFirst({ where: { userId, docType: { in: [...REGISTRATION_DOC_TYPES] } }, orderBy: { createdAt: 'desc' }, select: { status: true, createdAt: true } }),
     ]);
@@ -1985,6 +1986,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       nearCap: false, promotedPlacement: true,
       registration: registration ? { onFile: true, recordId: registration.id } : { onFile: false, submission: registrationDoc ? { status: registrationDoc.status, submittedAt: registrationDoc.createdAt.toISOString() } : null },
       declaration: null,
+      // [REVIEW-F S4-1] An own-name store needs no registration: the screen must not read as if one were still owed.
+      tradesUnderOwnName: vendor.tradesUnderOwnName,
     } };
   });
 

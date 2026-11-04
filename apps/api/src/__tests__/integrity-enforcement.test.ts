@@ -132,8 +132,9 @@ describe('scenario H — device velocity (Part 5)', () => {
     });
     const verification = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
     // The sandbox marker would auto-approve a clean account; the hold forces
-    // pending_manual — rung 2's whole meaning.
-    const doc = await verification.submitIdentity(u.id, await ownedVerificationFixture(app.prisma, u.id, 'auto-approve'), 'v1');
+    // pending_manual — rung 2's whole meaning. [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] Proven on a partner document:
+    // the customer-ID intake this used is gone.
+    const doc = await verification.submitDocument(u.id, 'STORE', 'owner_national_id', await ownedVerificationFixture(app.prisma, u.id, 'auto-approve'), 'v1');
     expect(doc.status).toBe('PENDING');
   });
 });

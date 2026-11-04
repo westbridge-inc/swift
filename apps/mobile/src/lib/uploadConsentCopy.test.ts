@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CUSTOMER_ID_CONSENT_TEXT, DOCUMENT_CONSENT_TEXT } from './uploadConsentCopy';
+import { DOCUMENT_CONSENT_TEXT } from './uploadConsentCopy';
 
 // ---------------------------------------------------------------------------
 // [R17 · legal research D2/B1/G4, in-app ¶15] Phone build 12 asks for a tick before any upload: the document
-// checklist (partners) and the customer ID screen. The words are the ones the API anchors the ledger row to, the
+// checklist (partners) and the customer ID screen. [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] This app has no
+// customer ID screen any more (Swift asks for no customer ID): the checklist's tick is the one left. The words are the ones the API anchors the ledger row to, the
 // ticks start unticked, nothing uploads before them, and the uploads tell the API the tick was shown. Builds 9-11
 // send no tick and get no ledger row.
 // ---------------------------------------------------------------------------
@@ -17,9 +18,6 @@ const textOf = (key: string) => new RegExp(`${key}: \\{[\\s\\S]*?text: '([^']+)'
 describe('the phone upload ticks', () => {
   it('say the words the API records, word for word', () => {
     expect(textOf('document_v1')).toBe(DOCUMENT_CONSENT_TEXT);
-    // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] The ID tick is v2 now: its words promise no unlock.
-    expect(textOf('customer_id_v2')).toBe(CUSTOMER_ID_CONSENT_TEXT);
-    expect(CUSTOMER_ID_CONSENT_TEXT).not.toMatch(/unlock|taxi|larger orders/i);
   });
 
   it('the checklist: an unticked tick, and every card waits for it', () => {
@@ -39,18 +37,13 @@ describe('the phone upload ticks', () => {
     expect(card).toMatch(/const \[policeTicked, setPoliceTicked\] = useState\(false\);/);
   });
 
-  it('the customer ID: an unticked tick, Send waits for it, and "(DPA 2023)" is gone', () => {
-    const screen = SRC('modules', 'account', 'screens', 'IdentityVerificationScreen.tsx');
-    expect(screen).toMatch(/const \[agreed, setAgreed\] = useState\(false\);/);
-    expect(screen).toMatch(/\{CUSTOMER_ID_CONSENT_TEXT\}/);
-    expect(screen).toMatch(/disabled=\{!idUrl \|\| !agreed\}/);
-    expect(screen).not.toMatch(/DPA 2023/);
+  it('[CHECKLIST-LEGAL (b)] there is no customer ID screen and no customer ID tick', () => {
+    expect(() => SRC('modules', 'account', 'screens', 'IdentityVerificationScreen.tsx')).toThrow();
+    expect(SRC('hooks', 'verification.ts')).not.toMatch(/customer_id_v/);
   });
 
   it('the uploads tell the API which tick they showed', () => {
     const hooks = SRC('hooks', 'verification.ts');
-    expect(hooks).toMatch(/consentTick: 'customer_id_v2'/);
-    expect(hooks).not.toMatch(/consentTick: 'customer_id_v1'/);
     expect(hooks).toMatch(/consentTick: 'document_v1'/);
   });
 

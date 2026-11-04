@@ -3,7 +3,8 @@ import * as labels from './review-center';
 describe('review copy', () => {
   it('uses one human label vocabulary for document, role and vehicle facts', () => {
     expect(labels.docLabel('owner_national_id')).toBe('National ID');
-    expect(labels.docLabel('gra_restaurant_licence')).toBe('GRA restaurant licence');
+    // [CHECKLIST-LEGAL · COORD 1 Nov 2026 (d) — a DELIBERATE change] the GRA's own name for the licence
+    expect(labels.docLabel('gra_restaurant_licence')).toBe('GRA Food Restaurant Licence');
     expect(labels.docLabel('drivers_licence')).toBe("Driver's licence");
     expect(labels.roleLabel('VENDOR_OWNER')).toBe('Business owner');
     expect(labels.roleLabel('MOVER')).toBe('Rider/Driver');

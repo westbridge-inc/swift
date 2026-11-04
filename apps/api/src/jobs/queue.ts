@@ -1685,6 +1685,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         } catch (err) {
           ctx.log.error({ err }, 'unclaimed-upload sweep failed; the reaper still runs');
         }
+        // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] Swift no longer keeps customer IDs: each stored one is withdrawn,
+        // then deleted through the one purge path (shred, delete, probe, receipt); a held one waits for its hold to end.
+        try {
+          const retired = await verification.retireCustomerIds();
+          ctx.log.info(retired, 'customer-ID retirement sweep');
+        } catch (err) {
+          ctx.log.error({ err }, 'customer-ID retirement sweep failed; the reaper still runs');
+        }
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
         try {

@@ -970,7 +970,7 @@ export class OrderService {
 
     const user = await this.prisma.user.findUniqueOrThrow({
       where: { id: input.userId },
-      select: { tenantId: true, trustLevel: true, countryCode: true, createdAt: true, tenant: { select: { kind: true } } },
+      select: { tenantId: true, countryCode: true, createdAt: true, tenant: { select: { kind: true } } },
     });
 
     // [STA-1 DL-5] The store-review fiction places no order: its stores and
@@ -985,8 +985,9 @@ export class OrderService {
     if (restriction === 'banned') {
       throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Ordering is disabled on this account after repeated failed deliveries. Contact support.');
     }
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] No ID lifts it any more: the strikes age out, or a person lifts it.
     if (restriction === 'restricted') {
-      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed deliveries, ordering needs your ID on file. Add your ID in the app — a person will look at it before ordering unlocks.');
+      throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed cash deliveries, ordering is paused on this account. It opens again when those strikes are 90 days old, or sooner if a person at Swift reviews it: contact us from Help.');
     }
 
     // [E27] No profile selfie to place an ordinary order (food, grocery,
@@ -1425,30 +1426,18 @@ export class OrderService {
     const grandTotal = priced.grandTotal;
 
     // The country's USD-equivalent ID-gate threshold. [Owner ruling 24 Oct 2026 ~05:55Z — NO
-    // CUSTOMER ID GATE] An order at or above it no longer needs the customer's ID on file (the old
-    // 403 ID_VERIFICATION_REQUIRED here was Swift's own 8 Oct choice, not a legal duty; builds
-    // 11/12 and vc7/vc8 only ever learnt of it from that refusal, so they stop asking). The number
-    // stays: it still sizes the high-value promo gate below, the store's call-to-confirm flag, and
-    // the rider guarantee cap (cash-rules). Never set it to 0 to switch a gate off: `>= 0` holds
-    // for every amount, so 0 would ask EVERY promo for an ID and cover NO rider claim.
+    // CUSTOMER ID GATE] An order at or above it no longer needs the customer's ID on file.
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] Nor a high-value promo: Swift keeps no customer ID at all. The
+    // number stays: it still sizes the store's call-to-confirm flag and the rider guarantee cap (cash-rules). Never set
+    // it to 0: `>= 0` holds for every amount, so 0 would cover NO rider claim.
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(user.countryCode);
     // [M-36] The order's currency is the buyer's market's — stamped once here
     // so every money column on the row names its unit.
     const orderCurrency = (await this.countryConfig.getByCode(user.countryCode).catch(() => null))?.currencyCode ?? 'GYD';
 
-    // SWIFT-162: high-value promo codes are the multi-account (fresh-SIM) abuse
-    // target (a large discount on a small NET basket). Gate the discount itself:
-    // an L1 account claiming a discount worth at least the ID-gate threshold
-    // must put an ID on file first, raising the bar from a throwaway SIM to an
-    // ID. L2/L3 and ordinary low-value codes flow through untouched. The
-    // threshold is the same CountryConfig ID-gate value — one trust boundary,
-    // tunable per country, no new magic number. [24 Oct 2026] Kept: the owner's
-    // ruling removed the order-size and taxi ID gates, not this abuse guard.
-    if (user.trustLevel === 'L1' && discount >= gateLocal) {
-      throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-        `This promo needs your ID on file. Add it once in the app and it's yours to keep.`,
-        { threshold: gateLocal, discount });
-    }
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] The high-value promo no longer asks for an ID (SWIFT-162's gate is
+    // gone with the customer ID): a code's own limits (per customer, uses, minimum basket) still apply, and no
+    // Swift-funded platform code is created until there is a payout path for one (COORD 1 Nov 17:03Z).
 
     // Deterministic risk heuristic — vendor sees a call-to-confirm prompt
     const accountAgeHours = (now.getTime() - user.createdAt.getTime()) / 3_600_000;

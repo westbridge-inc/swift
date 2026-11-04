@@ -44,8 +44,6 @@ import type { KycProvider } from '../../providers/kyc/kyc-provider';
 import { assertExternalProcessingPermitted } from '../legal/processor-register';
 import { planExtraction, persistExtraction, recordExtractionMetrics, gateAutoApproval, UNKNOWN_ENGINE, type ExtractionPlan, type RoutingType } from './extraction-ledger';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
-import { decryptBuffer, getKeyProvider } from '../../providers/storage/envelope';
-import { customerIdHoldReasons, readCustomerIdFacts, ON_FILE_REVIEWER, type CustomerIdHoldReason } from './customer-id';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../billing/billing-access';
@@ -116,6 +114,19 @@ export interface VendorGoLive {
 
 /** L2 identity rows use this synthetic docType (not part of any checklist). */
 export const IDENTITY_DOC_TYPE = 'identity_l2';
+/** [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] What a reviewer is told when a customer ID is put in front of them. */
+export const CUSTOMER_ID_RETIRED_WORDS = 'Swift no longer keeps customer IDs, so this one cannot be approved. It is withdrawn and deleted by the daily sweep.';
+/** The neutral note a withdrawn, retired customer ID carries (never a reviewer's words). */
+export const CUSTOMER_ID_RETIRED_NOTE = 'RETIRED: Swift no longer keeps customer IDs (owner ruling 1 Nov 2026)';
+/** Who deleted a retired customer ID (the deletion receipt's deletedBy). */
+export const CUSTOMER_ID_RETIRED_ACTOR = 'customer-id-retired';
+/** The states a stored customer ID is withdrawn from: on file, or waiting for a person. */
+const RETIRABLE_CUSTOMER_ID_STATES = ['COMMITTED', 'REVIEW_QUEUED', 'IN_REVIEW', 'INFO_REQUESTED'] as const;
+/**
+ * [REVIEW-G S2-2] The retirement sweep's scope, on every read AND every write it makes: a customer's own ID and nothing
+ * else. A partner document (any other type, or this type filed for a partner role) is never withdrawn or deleted by it.
+ */
+const CUSTOMER_ID_SCOPE = { docType: IDENTITY_DOC_TYPE, role: 'CUSTOMER' } as const satisfies Prisma.VerificationDocumentWhereInput;
 
 /** Checklist docTypes that ARE a government identity document. These are not
  *  merely OCR-checked: the portrait is face-matched against the operator's
@@ -594,12 +605,10 @@ export class VerificationService {
    *  paused (KYC latency), cannot land new PII after the purge committed. */
   private async createDocumentLively(
     data: Prisma.VerificationDocumentUncheckedCreateInput,
-    review: { queue: ReviewQueue; extraction?: ExtractionPlan; authority?: SubmissionAuthority; customerIdHolds?: CustomerIdHoldReason[] } = { queue: 'STANDARD' },
+    review: { queue: ReviewQueue; extraction?: ExtractionPlan; authority?: SubmissionAuthority } = { queue: 'STANDARD' },
   ) {
     const doc = await this.projectionTransaction(async (tx) => {
-      // A customer-ID intake takes the user row FOR UPDATE, like revoke and purge, so two uploads
-      // (or an upload and a withdrawal) are decided one after the other, never side by side.
-      const exclusive = review.authority || review.customerIdHolds;
+      const exclusive = review.authority;
       const alive = await tx.$queryRaw<{ status: string; tenantId: string; countryCode: string }[]>(
         Prisma.sql`SELECT status, "tenantId", "countryCode" FROM users WHERE id = ${data.userId} ${exclusive ? Prisma.sql`FOR UPDATE` : Prisma.sql`FOR SHARE`}`,
       );
@@ -613,30 +622,6 @@ export class VerificationService {
         catch (err) {
           if (!(err instanceof IdentityReviewRequiredError)) throw err;
           data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
-          review.customerIdHolds?.push('IDENTITY_REVIEW');
-        }
-      }
-      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] One ID goes on file at a time: if another customer ID
-      // of this account is waiting or on file now (a parallel upload committed first), this one waits
-      // for a person. Read under the lock above, so it cannot race.
-      if (review.customerIdHolds && data.status === 'APPROVED') {
-        const live = await tx.verificationDocument.count({
-          where: { userId: data.userId, docType: IDENTITY_DOC_TYPE, status: { in: ['APPROVED', 'PENDING'] }, state: { notIn: ['PURGED', 'SUPERSEDED'] } },
-        });
-        if (live > 0) {
-          data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
-          review.customerIdHolds.push('OPEN_SUBMISSION');
-        } else {
-          // A person's rejection or withdrawal that committed after the automatic checks read the
-          // facts (outside this lock) still holds the upload: decisions are re-read here too.
-          const earlier = await tx.verificationDocument.findMany({ where: { userId: data.userId, docType: IDENTITY_DOC_TYPE }, select: { id: true } });
-          const decided = earlier.length > 0 && (await tx.reviewDecision.count({
-            where: { outcome: 'REJECT', case: { submissionId: { in: earlier.map((d) => d.id) } } },
-          })) > 0;
-          if (decided) {
-            data = { ...data, status: 'PENDING', reviewedBy: null, reviewedAt: null, reviewNote: null };
-            review.customerIdHolds.push('EARLIER_DECISION');
-          }
         }
       }
       // [Row 249] Under the person's lock (FOR SHARE/UPDATE, which the unclaimed-upload sweep's FOR UPDATE waits on):
@@ -1025,141 +1010,9 @@ export class VerificationService {
     return doc;
   }
 
-  /**
-   * L2 customer ID. [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] (customer-id.ts): the ID
-   * goes ON FILE at once — L2 now, no admin approval — unless an automatic check flags it; then
-   * it waits for a person, who approves or rejects it. An admin can withdraw it at any time
-   * (revokeDocument → back to L1). No face match, and no selfie at all: [ROLE-DOCS · owner 21 Oct
-   * 2026] a customer never gives a photo (owner 16 Oct), so the selfie store build 9 still sends is
-   * dropped by the route before it reaches this method — never resolved, read, stored or linked
-   * (the route erases that upload right after the intake when it is the caller's own: REVIEW-F S3-1,
-   * user/upload-erasure discardUnusedCustomerSelfie). A document processor that reads
-   * documents can still reject (an auto-reject stands) or refer the document to a person.
-   */
-  async submitIdentity(
-    userId: string,
-    idDocumentUrl: string,
-    privacyNoticeVersion: string,
-  ) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, trustLevel: true, countryCode: true } });
-    if (!user) throw new NotFoundError('User', userId);
-    if (user.trustLevel !== 'L1') {
-      throw new AppError(409, 'ALREADY_VERIFIED', 'Your ID is already on file.');
-    }
-    const object = await resolveVerificationObject(this.prisma, { fileKey: idDocumentUrl, userId });
-    assertClaimableUpload(object);
-
-    // [DGP-1 · DOC-1 §2] the ID check sends the national ID — same gate as any document.
-    assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, 'national_id'), this.kyc.engine);
-    const startedAt = new Date();
-    // [P21] A thrown or hung adapter is an outage, not a verdict: the submission queues for a human.
-    let result: DegradedResult = await extractWithLadder(() => this.kyc.verifyDocument({ userId, docType: 'national_id', fileUrl: idDocumentUrl }));
-    const finishedAt = new Date();
-    result = await this.holdOnCrossSubjectCollision(userId, 'MOVER', idDocumentUrl, result);
-
-    // The automatic checks decide between "on file now" and "a person looks first". The on-shore
-    // manual engine reads nothing and decides nothing, so its "pending" is not a referral; any
-    // other engine's "pending" is. A processor's approval means it read the document, which
-    // stands in for the size check. A processor that did not answer (the P21 ladder's outage) is
-    // a hold. The checks fail closed: the ID goes on file only when every check RAN and none
-    // flagged it; if they cannot run, a person looks.
-    let holdReasons: CustomerIdHoldReason[] | null = null;
-    if (result.status !== 'rejected') {
-      const nobodyReads = this.kyc.engine?.name === 'manual-review';
-      const processorUnavailable = Boolean(result.degraded);
-      try {
-        holdReasons = customerIdHoldReasons(await readCustomerIdFacts(this.prisma, {
-          userId,
-          object,
-          duplicateImage: (result as { collided?: boolean }).collided === true,
-          sizeCheckApplies: result.status !== 'approved',
-          processorReferred: !nobodyReads && !processorUnavailable && result.status !== 'approved',
-          processorUnavailable,
-          readPlaintext: () => this.readVerificationPlaintext(idDocumentUrl, object),
-        }));
-      } catch (err) {
-        log().warn({ errName: err instanceof Error ? err.name : typeof err, userId }, 'customer ID checks could not run; held for a person');
-        holdReasons = ['CHECKS_UNAVAILABLE'];
-      }
-      result = holdReasons !== null && holdReasons.length === 0
-        ? { ...result, status: 'approved' as const }
-        : { ...result, status: 'pending_manual' as const, reason: `Held for a person by the automatic checks: ${(holdReasons ?? ['CHECKS_UNAVAILABLE']).join(', ')}` };
-    }
-    // [DOC-1 P4-4 · P6-4] Ledger rows for the ID check; §0.5 / §6.9 decide whether the decision stands.
-    const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, IDENTITY_DOC_TYPE, result, { startedAt, finishedAt });
-    result = gateAutoApproval(result, extraction, registryType);
-    const processorRead = this.kyc.engine?.name !== 'manual-review';
-    const lateHolds: CustomerIdHoldReason[] = [];
-
-    const doc = await this.createDocumentLively({
-        userId,
-        role: 'CUSTOMER',
-        docType: IDENTITY_DOC_TYPE,
-        fileUrl: idDocumentUrl,
-        kycRef: result.referenceToken,
-        consentAt: new Date(),
-        privacyNoticeVersion,
-        status:
-          result.status === 'approved' ? 'APPROVED'
-          : result.status === 'rejected' ? 'REJECTED'
-          : 'PENDING',
-        // Never a person's id: an ID on file was not reviewed by anyone (customer-id.ts).
-        ...(result.status === 'approved' && { reviewedBy: processorRead ? 'kyc:auto' : ON_FILE_REVIEWER, reviewedAt: new Date() }),
-        ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
-    }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction, customerIdHolds: lateHolds });
-    // A hold decided inside the creation transaction (identity graph, a parallel upload) is named too.
-    if (doc.status === 'PENDING' && lateHolds.length > 0) {
-      holdReasons = [...(holdReasons ?? []), ...lateHolds];
-      result = { ...result, reason: `Held for a person by the automatic checks: ${holdReasons.join(', ')}` };
-    }
-
-    // The hold reasons are for the reviewers (audit trail and the admin notice) — never on the
-    // customer's own document row: "the same picture is on another account" must not leak.
-    await this.recordDecision(userId, doc.id, IDENTITY_DOC_TYPE, doc.status, result.reason,
-      doc.status === 'APPROVED' ? 'CUSTOMER_ID_ON_FILE' : doc.status === 'PENDING' ? 'CUSTOMER_ID_HELD' : undefined);
-
-    // Only the approved L2 verdict may turn OCR into HARD identity evidence.
-    const identityDocumentNumber = approvedIdentityDocumentNumber(
-      IDENTITY_DOC_TYPE,
-      doc.status,
-      result.extracted?.documentNumber,
-    );
-    if (identityDocumentNumber) {
-      const { IdentityService } = await import('../integrity/identity.service');
-      await new IdentityService(this.prisma).capture({
-        accountId: userId, actorRole: 'CUSTOMER',
-        type: 'ID_DOC_NUMBER', normalizedValue: identityDocumentNumber, source: 'AI_ID_ANALYZER',
-      });
-    }
-
-    if (doc.status === 'APPROVED') await this.promoteToL2(userId, 'ON_FILE');
-    if (doc.status === 'REJECTED') await this.notifyRejection(userId, 'identity', result.reason);
-    if (doc.status === 'PENDING') {
-      await notifyAdmins(this.prisma, this.notifications, {
-        // Follows the submitter [NOC-A F45].
-        tenantId: await tenantOfUser(this.prisma, userId),
-        title: 'Customer ID needs a person',
-        body: holdReasons && holdReasons.length > 0
-          ? `The automatic checks held a customer ID (${holdReasons.join(', ')}). It is waiting in the Customers lane of the review queue.`
-          : 'A customer ID is waiting in the Customers lane of the review queue.',
-        data: { kind: 'verification_pending', docId: doc.id, holdReasons: holdReasons ?? [] },
-      });
-    }
-
-    return doc;
-  }
-
-  /** The decrypted bytes of a proven verification upload (the same path the reviewer's render takes). */
-  private async readVerificationPlaintext(
-    fileKey: string,
-    object: { wrappedDek: Uint8Array | null; iv: Uint8Array; authTag: Uint8Array },
-  ): Promise<Buffer> {
-    const keys = getKeyProvider();
-    if (!keys || !object.wrappedDek?.length) throw new Error('verification envelope unavailable');
-    const ciphertext = await getStorageProvider().getObject(fileKey);
-    const dek = await keys.unwrapDek(Buffer.from(object.wrappedDek));
-    return decryptBuffer(ciphertext, dek, Buffer.from(object.iv), Buffer.from(object.authTag));
-  }
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] No customer ID intake any more (submitIdentity and its automatic
+  // checks are gone): Swift no longer takes a customer's ID. POST /verification/identity answers 410 and erases the
+  // picture a shipped app uploaded first; the stored ones are withdrawn and deleted by retireCustomerIds below.
 
   /** [STRAND-2 belt] Reconcile vendor activation projections against document
    *  truth. The decision transaction keeps NEW decisions atomic; this heals
@@ -1227,6 +1080,9 @@ export class VerificationService {
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
     assertStoreVatDoor(candidate.docType, decision);
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] A customer ID is never approved any more: Swift no longer keeps
+    // them, and one still waiting is withdrawn and deleted by the daily sweep (retireCustomerIds). Refused before anything.
+    if (candidate.docType === IDENTITY_DOC_TYPE) throw new AppError(410, 'CUSTOMER_ID_RETIRED', CUSTOMER_ID_RETIRED_WORDS);
     // [DOC-1 §8.6 · R16] Recusal before anything the reviewer typed is judged: a recused reviewer is told so, never
     // asked for a certificate's year or a registration's kind first. (The decision boundary checks it again.)
     await assertNotRecused(this.prisma, adminId, candidate.userId);
@@ -1292,7 +1148,6 @@ export class VerificationService {
         ? resolveApprovalExpiry(candidate.docType, expiresAt, candidate.expiresAt)
         : (expiresAt ?? candidate.expiresAt ?? null);
 
-    let raisedToL2 = false;
     const updated = await this.transitionPendingDocument(docId, 'APPROVED', {
         status: 'APPROVED',
         reviewedBy: adminId,
@@ -1307,17 +1162,12 @@ export class VerificationService {
         }),
     }, { reviewerId: adminId, approval: { expiresAt, insurance, ...(issuedOn ? { issuedOn } : {}) } }, async (tx, decided) => {
       // [S2-29 · KYC-DECISION-ATOMIC] Everything the approval owes commits with it, or none of it does:
-      // the L2 promotion, the approval notice (published after commit), the caller's audit rows, and —
-      // for a partner document — the outbox row that owes the trial decision. A throw anywhere here
-      // leaves the document PENDING, so the reviewer's retry decides it, once.
-      if (decided.docType === IDENTITY_DOC_TYPE) {
-        raisedToL2 = await this.promoteToL2Within(tx, decided.userId);
-      } else {
-        await tx.verificationDecisionOutbox.create({ data: {
-          tenantId: (await tx.user.findUniqueOrThrow({ where: { id: decided.userId }, select: { tenantId: true } })).tenantId,
-          documentId: decided.id, userId: decided.userId, command: APPROVAL_TAIL,
-        } });
-      }
+      // the approval notice (published after commit), the caller's audit rows, and the outbox row that owes the
+      // trial decision. A throw anywhere here leaves the document PENDING, so the reviewer's retry decides it, once.
+      await tx.verificationDecisionOutbox.create({ data: {
+        tenantId: (await tx.user.findUniqueOrThrow({ where: { id: decided.userId }, select: { tenantId: true } })).tenantId,
+        documentId: decided.id, userId: decided.userId, command: APPROVAL_TAIL,
+      } });
       // (A VAT certificate's store hears from its Store VAT decision, in VAT words: approving the certificate alone
       // changes nothing for its customers.)
       if (decided.docType !== VAT_CERTIFICATE_DOC_TYPE) {
@@ -1342,17 +1192,9 @@ export class VerificationService {
       });
     }
 
-    if (updated.docType === IDENTITY_DOC_TYPE) {
-      // The promotion committed with the decision; only its notice is left, and a failed notice
-      // never turns a committed, audited decision into an error.
-      await this.promoteToL2(updated.userId, 'PERSON', raisedToL2).catch((err) => {
-        log().error({ err, docId }, '[S2-29] L2 notice after a committed approval failed');
-      });
-    } else {
-      // The trial decision, drained now; a failure stays on the row (retried by the sweep, then a
-      // paged dead letter) and never fails the committed decision.
-      await this.processDecisionOutbox({ documentId: docId });
-    }
+    // The trial decision, drained now; a failure stays on the row (retried by the sweep, then a
+    // paged dead letter) and never fails the committed decision.
+    await this.processDecisionOutbox({ documentId: docId });
 
     return updated;
   }
@@ -2323,7 +2165,8 @@ export class VerificationService {
     const namesPoliceClearance = [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE);
     const [rows, policeCleared] = await Promise.all([
       this.prisma.verificationDocument.findMany({
-        where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
+        // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] A customer ID is no longer shown: Swift no longer keeps them.
+        where: { userId, docType: { in: [...checklist, ...optional] } },
         orderBy: { createdAt: 'desc' },
       }),
       namesPoliceClearance ? (policeClearedEarly ?? isPoliceCleared(this.prisma, userId)) : false,
@@ -2335,14 +2178,7 @@ export class VerificationService {
     // [POLICE-CLEARANCE CONSENT] A police clearance the person withdrew is gone for them (only a note is kept; a legal
     // hold may keep its bytes, never its use): the checklist offers a new one instead of showing it "Rejected".
     const documents = rows.filter((d) => d.state !== 'SUPERSEDED' && !(d.docType === POLICE_CLEARANCE_DOC_TYPE && d.reviewNote === POLICE_CLEARANCE_WITHDRAWN_NOTE))
-      .map((d) => (d.status === 'PENDING' && replacedNotes.has(replacedNoteFor(d.id)) ? { ...d, replaced: true } : d))
-      // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a withdrawn customer ID shows a neutral line; the
-      // reviewer's reason ("REVOKED: …") stays in the staff record. Matched on the note as well as
-      // the state: once the customer erases a withdrawn ID (or retention purges it) the row is
-      // PURGED but still carries the reviewer's words, which may name another account.
-      .map((d) => (d.docType === IDENTITY_DOC_TYPE && (d.state === 'REVOKED' || d.reviewNote?.startsWith('REVOKED:'))
-        ? { ...d, reviewNote: WITHDRAWN_BY_TEAM_TEXT }
-        : d));
+      .map((d) => (d.status === 'PENDING' && replacedNotes.has(replacedNoteFor(d.id)) ? { ...d, replaced: true } : d));
 
     const approved = new Set(
       documents
@@ -3286,6 +3122,71 @@ export class VerificationService {
     return scheduled;
   }
 
+  /**
+   * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] Swift no longer keeps customer IDs. Daily, before the reaper, every
+   * customer ID still stored is retired in two steps, each one person at a time and never stopping the others:
+   *  1. WITHDRAWN under the person's lock: an ID on file becomes REVOKED, one still waiting becomes EXPIRED and its open
+   *     review case is closed (no reviewer is asked to decide it), each with a neutral note; when no ID stands the
+   *     account goes back to L1 (the existing rule, owner Q3), and the rider float follows. A hold changes nothing here:
+   *     a held ID confers nothing either.
+   *  2. DELETED through purgeDocumentNow, the one purge path: crypto-shred, delete, probe, receipt (and the extracted
+   *     values shredded). A legal or safety hold wins: its bytes stay until the hold ends, and a later run deletes them.
+   * Idempotent: a withdrawn ID is not withdrawn twice, a purged one is not purged twice.
+   */
+  async retireCustomerIds(batch = 200): Promise<{ withdrawn: number; purged: number; held: number; failed: number }> {
+    const run = { withdrawn: 0, purged: 0, held: 0, failed: 0 };
+    const standing = await this.prisma.verificationDocument.findMany({
+      where: { ...CUSTOMER_ID_SCOPE, purgedAt: null, state: { in: [...RETIRABLE_CUSTOMER_ID_STATES] } },
+      select: { userId: true }, distinct: ['userId'], take: batch,
+    });
+    for (const { userId } of standing) {
+      try { run.withdrawn += await this.withdrawRetiredCustomerIds(userId); } catch (err) {
+        run.failed += 1;
+        log().warn({ errName: err instanceof Error ? err.name : typeof err, userId }, 'customer ID retirement: withdrawal failed; retried tomorrow');
+      }
+    }
+    const stored = await this.prisma.verificationDocument.findMany({
+      where: { ...CUSTOMER_ID_SCOPE, purgedAt: null },
+      select: { id: true, userId: true, fileUrl: true, docType: true, legalHoldId: true, user: { select: { tenantId: true } } },
+      orderBy: [{ legalHoldId: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }], take: batch,
+    });
+    for (const doc of stored) {
+      if (doc.legalHoldId) { run.held += 1; continue; }
+      try {
+        // the scope again at the deletion itself, under the person's lock (shredUnlessHeld and the final transition)
+        const outcome = await this.purgeDocumentNow(doc, CUSTOMER_ID_RETIRED_ACTOR, { requireRetentionElapsed: false, shredFields: true, still: CUSTOMER_ID_SCOPE });
+        if (outcome === 'PURGED') run.purged += 1; else if (outcome === 'PROBE_FAILED') run.failed += 1;
+      } catch (err) {
+        run.failed += 1;
+        log().warn({ errName: err instanceof Error ? err.name : typeof err, docId: doc.id }, 'customer ID retirement: deletion failed; retried tomorrow');
+      }
+    }
+    return run;
+  }
+
+  /** Step 1 of retireCustomerIds for one person, under their lock (the same lock order as revoke and purge). */
+  private async withdrawRetiredCustomerIds(userId: string): Promise<number> {
+    let withdrawn = 0;
+    await this.projectionTransaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-decision-authority */`;
+      const docs = await tx.verificationDocument.findMany({
+        where: { userId, ...CUSTOMER_ID_SCOPE, purgedAt: null, state: { in: [...RETIRABLE_CUSTOMER_ID_STATES] } },
+        select: { id: true, state: true },
+      });
+      const note = { reviewNote: CUSTOMER_ID_RETIRED_NOTE, expiresAt: null };
+      for (const doc of docs) {
+        const won = doc.state === 'COMMITTED'
+          ? await hopDocState(tx, { id: doc.id, userId, ...CUSTOMER_ID_SCOPE }, 'COMMITTED', 'REVOKED', note)
+          : await hopDocState(tx, { id: doc.id, userId, ...CUSTOMER_ID_SCOPE }, doc.state as 'REVIEW_QUEUED' | 'IN_REVIEW' | 'INFO_REQUESTED', 'EXPIRED', note);
+        if (!won) continue;
+        withdrawn += 1;
+        await tx.reviewCase.updateMany({ where: { submissionId: doc.id, closedAt: null }, data: { closedAt: new Date() } });
+      }
+      if (withdrawn > 0) await this.demoteIfNoCustomerIdStands(tx, userId);
+    });
+    return withdrawn;
+  }
+
   /** Purge documents whose retention window elapsed: delete the stored object,
    *  clear the fileKey, and leave an auditable purgedAt marker. Daily job. */
   async purgeExpiredDocuments(): Promise<number> {
@@ -3543,39 +3444,8 @@ export class VerificationService {
     return true;
   }
 
-  /** L1 → L2. `basis` keeps the notice truthful (owner ruling 8 Oct 2026, customer-id.ts): an ID
-   *  that is only ON FILE is never called verified; only a person's approval is. An account
-   *  already above L1 (an earned L3) is never lowered by a second approval. */
-  private async promoteToL2(userId: string, basis: 'ON_FILE' | 'PERSON' = 'PERSON', raisedInDecision?: boolean) {
-    // [S2-29] A reviewer's approval raises the account inside its own decision transaction and
-    // passes the result here for the notice; the automatic on-file path raises it now.
-    const promoted = raisedInDecision ?? await this.projectionTransaction((tx) => this.promoteToL2Within(tx, userId));
-    if (!promoted) return;
-    await this.notifications.send({
-      userId,
-      type: 'SYSTEM_ANNOUNCEMENT',
-      ...(basis === 'ON_FILE'
-        // Truthful: [Owner ruling 24 Oct 2026] taxi rides and bigger orders no longer need the ID, so the
-        // notice claims no unlock; it says where the ID is kept. [16 Oct] A customer never needs a photo.
-        ? { title: 'Your ID is on file', body: 'Thanks — it is kept with your account, as the Privacy Policy explains.' }
-        : { title: 'Identity verified', body: 'A person on our team checked your ID. It is kept with your account, as the Privacy Policy explains.' }),
-      audience: 'customer',
-      data: { kind: 'verification_l2' },
-    });
-  }
-
-  /** Under the same user lock revoke and purge take, and only while a committed customer ID still
-   *  stands: a withdrawal or an erasure that landed after the document committed is never undone. */
-  private async promoteToL2Within(tx: Prisma.TransactionClient, userId: string): Promise<boolean> {
-    await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* customer-id-promotion-authority */`;
-    const standing = await tx.verificationDocument.count({ where: { userId, docType: IDENTITY_DOC_TYPE, state: 'COMMITTED' } });
-    if (standing === 0) return false;
-    const raised = await tx.user.updateMany({ where: { id: userId, trustLevel: 'L1' }, data: { trustLevel: 'L2' } });
-    // D.3 — a higher trust level means a higher float limit (no-op for non-riders; an ID that is
-    // only on file never lifts a rider's float — FloatService.recomputeForUser / floatTrustLevel).
-    await new FloatService(tx).recomputeForUser(userId);
-    return raised.count === 1;
-  }
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] Nothing raises an account to L2 any more (L2 is retired: a customer
+  // ID was its only source). L3 is earned from L1 directly (cash-rules maybePromoteToL3).
 
   /**
    * [S2-29 · KYC-DECISION-ATOMIC] Drain the work committed approvals still owe — the trial
