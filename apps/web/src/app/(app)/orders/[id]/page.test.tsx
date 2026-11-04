@@ -780,6 +780,45 @@ describe('[FIXES-4] cash the business takes itself is never left "awaiting confi
   });
 });
 
+// [BUG-HUNT-2 G08] A closed order can still owe a refund: the server's words on the customer's order page, and "Did it arrive?".
+describe('[G08] the MMG refund on the order page', () => {
+  const closed = { ...ORDER, status: 'CANCELLED', paymentStatus: 'CLAIMED', paymentAction: null };
+  const asked = { state: 'SENT', amount: '3500.00', line: 'Shanta Kitchen says it sent GY$3,500 by MMG, reference R1. Did it arrive?', sendId: 'snd-1', canAnswer: true };
+
+  it('says who owes what, with no question while nothing was sent', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: { state: 'OWED', amount: '3500.00', line: 'Shanta Kitchen owes you GY$3,500 by MMG.', sendId: null, canAnswer: false } } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Shanta Kitchen owes you GY$3,500 by MMG.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'It arrived' })).toBeNull();
+  });
+
+  it('asks once a refund was sent, sends the answer, and reads the order again', async () => {
+    const read = vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: asked } as never);
+    const answer = vi.spyOn(orders, 'answerMmgRefund').mockResolvedValue();
+    const user = userEvent.setup();
+    render(<OrderDetailPage />);
+    await user.click(await screen.findByRole('button', { name: 'It did not arrive' }));
+    await waitFor(() => expect(answer).toHaveBeenCalledWith('order-1', 'snd-1', false));
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it('a refused answer is shown in the server\'s words', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: asked } as never);
+    vi.spyOn(orders, 'answerMmgRefund').mockRejectedValue(new Error('You already answered this.'));
+    const user = userEvent.setup();
+    render(<OrderDetailPage />);
+    await user.click(await screen.findByRole('button', { name: 'It arrived' }));
+    expect(await screen.findByText('You already answered this.')).toBeTruthy();
+  });
+
+  it('an order with no refund shows nothing', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: null } as never);
+    render(<OrderDetailPage />);
+    await screen.findByText(/SW-2001/);
+    expect(screen.queryByLabelText('MMG refund')).toBeNull();
+  });
+});
+
 // [BUG-HUNT-2 G04] At the pickup the server decides whether the passenger may cancel: this page cannot see the ride code.
 describe('[G04] a ride at the pickup on the web', () => {
   const arrived = (over: Record<string, unknown>) => ({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null, ...over });

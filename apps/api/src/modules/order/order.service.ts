@@ -750,6 +750,9 @@ export interface CanonicalOrderTransitionInput {
    * (orders_paid_mmg_terminal_needs_refund_obligation). Only
    * `closeMmgOrderAsStoreRefund` (order/mmg-store-close.ts) sets it. */
   paidMmgStoreRefundClosure?: true;
+  /** [BUG-HUNT-2 G08] The words of the paid-MMG refusal for THIS caller: "the store cancels and refunds you" is the customer's
+   * sentence, and false said to the store or to support. The refusal itself never changes. */
+  paidMmgRefusal?: () => AppError;
   /** Admin's explicit action evidence belongs in the same commit as the order
    * state. The generic after-response route audit remains defence in depth. */
   operatorAudit?: {
@@ -2555,7 +2558,7 @@ export class OrderService {
       && MMG_MONEY_MOVED.has(source.paymentStatus)
       && !storeRefundClosure
     ) {
-      throw new AppError(
+      throw input.paidMmgRefusal?.() ?? new AppError(
         409,
         'MMG_CANCEL_UNAVAILABLE',
         'This order is already paid by MMG to the store. The store cancels and refunds you directly — Swift never holds the money.',

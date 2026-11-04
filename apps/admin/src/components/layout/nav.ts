@@ -57,6 +57,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Catalogue check', href: '/catalogue-check', icon: ShieldAlert, blurb: 'Items a banned word holds hidden until a person checks them', keywords: 'banned prohibited items hidden held' },
       { label: 'Custody cases', href: '/custody', icon: LifeBuoy, blurb: 'Goods a rider is holding that must be returned or handed over', keywords: 'recovery relay return' },
       { label: 'Returns', href: '/returns', icon: PackageOpen, blurb: 'Customer returns and refunds owed', keywords: 'refund' },
+      { label: 'MMG refunds', href: '/mmg-refunds', icon: PackageOpen, blurb: 'What stores owe customers back by MMG', keywords: 'refund mmg overdue' },
       { label: 'Claims', href: '/claims', icon: ShieldAlert, blurb: 'Reimbursement claims to decide and pay', keywords: 'guarantee reimbursement' },
     ],
   },

@@ -41,6 +41,11 @@ export async function getOrder(id: string): Promise<any> { return (await apiFetc
 export async function decideSubstitution(orderId: string, lineId: string, approve: boolean): Promise<any> {
   return (await apiFetch(`/api/v1/customer/orders/${orderId}/items/${lineId}/substitution`, { method: 'POST', body: JSON.stringify({ approve }) })).data;
 }
+/** [BUG-HUNT-2 G08] The customer's word on a "Refund sent": it arrived, or it did not. */
+export async function answerMmgRefund(orderId: string, sendId: string, received: boolean): Promise<void> {
+  await apiFetch(`/api/v1/customer/orders/${orderId}/mmg-refunds/${encodeURIComponent(sendId)}/answer`, { method: 'POST', body: JSON.stringify({ received }) });
+}
+
 export async function cancelOrder(id: string, reason: string) {
   return apiFetch(`/api/v1/customer/orders/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) });
 }

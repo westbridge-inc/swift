@@ -36,6 +36,8 @@ import {
 import { deliveryOwnerView } from './delivery-owner';
 import { NO_SHOW_WORDS, orderNoShowOpen } from '../noShow';
 import { NoShowConfirm, useStartClock } from '../NoShowConfirm';
+import { MmgRefundOwedCard } from '../MmgRefundOwedCard';
+import { parseMmgRefundView } from '../../orders/mmgRefund';
 import { NOT_COLLECTED_WORDS, notCollectedGoesToSupport, notCollectedOpen } from '../notCollected';
 import { NotCollectedConfirm } from '../NotCollectedConfirm';
 
@@ -219,6 +221,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const actions = withHandoverSteps(order, orderActions(order), mmgDisputePaused(order));
   // [BOOK-NS-APP · owner B3] Beside "Mark complete": an accepted appointment whose time has started.
   const canNoShow = orderNoShowOpen(order, noShowNow);
+  // [BUG-HUNT-2 G08] What this store owes back by MMG, as the server projects it.
+  const mmgRefund = parseMmgRefundView(order.mmgRefund);
   const canNotCollected = notCollectedOpen(order);
   const actionBar = actions.length > 0 || canNoShow || canNotCollected;
   // [MOB-050] The one state where a counter hand-over is due.
@@ -284,6 +288,9 @@ function VendorOrderDetailBody({ navigation, route }: any) {
             </T>
           </View>
         ) : null}
+
+        {/* [BUG-HUNT-2 G08] What this store owes back by MMG, on the closed order too. */}
+        {mmgRefund ? <MmgRefundOwedCard orderId={order.id} view={mmgRefund} /> : null}
 
         {/* [AF-MOB-006] A delivery that went wrong after pickup: the store sees
             the case, and confirms when returned goods are back with it. */}

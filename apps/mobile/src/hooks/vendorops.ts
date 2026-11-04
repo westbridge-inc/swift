@@ -673,6 +673,19 @@ export function useMarkNoShow() {
   });
 }
 
+/** [BUG-HUNT-2 G08] "Refund sent". Its popup shows the server's own refusal, so the app-wide toast stays out. */
+export function useMarkRefundSent() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationKey: ['vendor', 'order-refund-sent'],
+    mutationFn: ({ id, reference, amount }: { id: string; reference: string; amount: string }) => unwrap(vendorApi.markRefundSent(id, { reference, amount })),
+    meta: { silent: true },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
+  });
+}
+
 /** [BUG-HUNT-2 G20] "Not collected" on a ready pickup. Its popup (NotCollectedConfirm) shows the server's own refusal or
  *  its answer, so the app-wide toast stays out; the order is read again whatever the outcome. */
 export function useMarkNotCollected() {
