@@ -1,4 +1,5 @@
 import { AppError } from '../../utils/errors';
+import { isProduction } from '../../utils/runtime-mode';
 
 /**
  * [BUG-HUNT F23 · owner 31 Oct + 2 Nov 2026] "Review now, approve on launch day": partners are approved in a batch on
@@ -17,7 +18,7 @@ export function partnerApprovalsOpen(env: Record<string, string | undefined> = p
   const value = env['PARTNER_APPROVALS_OPEN'];
   if (value === '1') return true;
   if (value !== undefined && value !== '') return false;
-  return env['NODE_ENV'] !== 'production';
+  return !isProduction(env);
 }
 
 export const PARTNER_APPROVAL_HELD = 'PARTNER_APPROVAL_HELD';
