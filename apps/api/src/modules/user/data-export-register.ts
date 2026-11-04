@@ -116,6 +116,7 @@ export const STORE_RATING_TYPES: readonly string[] = [...TYPES_FOR_ROLE.VENDOR];
 
 /** The person's own account row. */
 export const ACCOUNT_FIELDS = [
+  'moverPlanMoveUntil',
   'id', 'phone', 'email', 'emailChangedAt', 'firstName', 'lastName', 'selfieCapturedAt', 'roles', 'activeRole', 'lastMoverRole',
   'status', 'isPhoneVerified', 'isEmailVerified', 'acceptedTermsAt', 'tosVersion', 'trustLevel', 'lossProtectionSuspendedAt',
   'countryCode', 'notificationPrefs', 'lastKnownLat', 'lastKnownLng',

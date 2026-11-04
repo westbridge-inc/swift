@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction } from '@/lib/api';
+import { allowMoverPlanMove, fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction } from '@/lib/api';
 import { label } from '@/lib/labels';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
@@ -107,6 +107,15 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
   // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] After repeated failed cash payments ordering is paused until the
   // strikes are 90 days old; a person who reviewed the account (from Help) can open it sooner. The server says whether
   // there is a restriction to lift; the strikes stay on the record and still count toward a ban.
+  // [BUG-HUNT F05] "Contact support to move it to taxi work": this is that door. The person makes the move in the app.
+  const allowPlanMove = async () => show(await dialog.run({
+    title: `Let ${name} move between delivery and taxi work?`,
+    body: <p>They get one move, for 7 days, and make it themselves in the app. Their weekly fee follows the new work: a higher fee starts only after 14 days’ notice, and a week they have paid keeps its price. No money moves.</p>,
+    confirmLabel: 'Allow the move',
+    reason: { hint: 'Kept on the permanent record.' },
+    submit: ({ reason }) => allowMoverPlanMove(id, reason),
+    success: () => `${name} is told, and can change their vehicle in the app for the next 7 days.`,
+  }));
   const liftRestriction = async () => show(await dialog.run({
     title: `Open ordering again for ${name}?`,
     body: <p>Their strikes stay on the record and still count toward a ban, but the ones given until now stop pausing their orders and rides. Use this after you have reviewed the account with them through Help.</p>,
@@ -152,6 +161,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           ) : u.status !== 'BANNED' ? (
             <button type="button" className="mc-btn" onClick={suspend}>Suspend…</button>
           ) : null}
+          {u.rider || u.driver ? <button type="button" className="mc-btn" onClick={allowPlanMove}>Allow plan move…</button> : null}
           {u.status !== 'BANNED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={ban}>Ban…</button> : null}
         </div>
       </header>
