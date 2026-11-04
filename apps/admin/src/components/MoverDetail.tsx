@@ -24,6 +24,7 @@ import { Truncate } from '@/components/mc/Truncate';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { billDateLabel } from '@/lib/bill-date';
+import { liveDocumentsLabel, liveDocumentsOk } from '@/lib/live-documents';
 import { chargedWeeklyFee } from '@/lib/weekly-fee';
 import { gyDate } from '@/lib/dates';
 
@@ -167,8 +168,9 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
             <Truncate text={name} lines={2} focusable />
           </h2>
           <div className="flex flex-wrap items-center gap-2 mt-2">
-            <span className={`mc-badge ${m.documentsVerified ? 'mc-tone-good' : 'mc-tone-warn'}`}>
-              {m.documentsVerified ? 'Documents verified' : 'Documents not verified'}
+            {/* [BUG-HUNT F06] The verdict GO uses, never the old flag the Review Center does not set. */}
+            <span className={`mc-badge ${liveDocumentsOk({ documentsVerified: m.documentsVerified, documentsLive: c?.live }) ? 'mc-tone-good' : 'mc-tone-warn'}`}>
+              {liveDocumentsLabel({ documentsVerified: m.documentsVerified, documentsLive: c?.live })}
             </span>
             <span className={`mc-badge${m.isOnline ? ' mc-tone-good' : ''}`}>{m.isOnline ? 'Online' : 'Offline'}</span>
             {isDriver && m.rideClass ? <span className="mc-badge mc-tone-info">{label('RideClass', m.rideClass)}</span> : null}

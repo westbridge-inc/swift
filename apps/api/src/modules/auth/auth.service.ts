@@ -1324,7 +1324,7 @@ export class AuthService {
     return { ...moverCleanup, outboxId };
   }
 
-  async logoutAll(userId: string) {
+  async logoutAll(userId: string, underLock?: (tx: Prisma.TransactionClient) => Promise<void>) {
     // One invocation can retire more than one auth generation. Keep a stable
     // key outside the transaction callback so any database retry writes the
     // same outbox event instead of inventing a duplicate.
@@ -1339,6 +1339,8 @@ export class AuthService {
       `;
       if (!users[0]) return emptyMoverSessionRevocationCleanup();
 
+      // [BUG-HUNT F22] A change the end of every session must commit with: the person's number.
+      await underLock?.(tx);
       return this.revokeAllLockedSessionsInTransaction(
         tx,
         userId,

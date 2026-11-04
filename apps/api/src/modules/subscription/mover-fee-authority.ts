@@ -266,6 +266,32 @@ export async function activateMoverFeeType(tx: Prisma.TransactionClient, payer: 
   return persistDecision(tx, { ...current, feeType }, 'MOVER_FEE_ACTIVATED', payer.userId);
 }
 
+/**
+ * [BUG-HUNT F05] A taxi driver support let move to delivery work. The fee becomes a delivery fee, and the existing rule
+ * prices it: a lower card rate applies at once, recorded, future weeks only (no charge issued or paid week is touched;
+ * no money moves). A negotiated or waived fee is left as it is. Runs in the vehicle change's transaction, after the
+ * rider profile carries the new vehicle.
+ */
+export async function moveMoverFeeToDelivery(tx: Prisma.TransactionClient, payer: { userId: string; tenantId: string }, actorUserId: string): Promise<MoverFeeResolution | null> {
+  const authority = await lockMoverFeeAuthority(tx, payer);
+  if (!authority || authority.feeType !== 'TAXI_DRIVER') return authority;
+  const moved = await persistDecision(tx, { ...authority, feeType: 'DELIVERY_RIDER' }, 'MOVER_FEE_ACTIVATED', actorUserId, { planMovedFrom: authority.feeType });
+  const fee = await tx.subscription.findUniqueOrThrow({ where: { id: authority.canonicalSubscriptionId } });
+  if (fee.customRate !== null || fee.feeWaived) return moved;
+  const tariff = await moverFeeTariffSubject(tx, moved);
+  const target = partnerRateFor(await subscriptionTiersIn(tx, tariff.countryCode), tariff.subject).rate;
+  const from = Number(fee.weeklyRate);
+  if (target >= from) return moved;
+  await tx.subscription.update({ where: { id: fee.id }, data: { weeklyRate: target } });
+  const sequence = await tx.billingEvent.count({ where: { subscriptionId: fee.id, type: 'TIER_CHANGE' } }) + 1;
+  await tx.billingEvent.create({ data: {
+    subscriptionId: fee.id, type: 'TIER_CHANGE', amount: target, currencyCode: fee.currencyCode,
+    idempotencyKey: `tier:${fee.id}:${sequence}:${from}->${target}`,
+    note: `Moved from taxi to delivery work: the future weekly rate changes from ${from} to ${target}; issued charges and paid periods retained.`,
+  } });
+  return moved;
+}
+
 /** Decide NEW collection authority; never redirect historical settlement. */
 export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, subscriptionId: string): Promise<{ allowed: boolean; mover: MoverFeeResolution | null }> {
   const payer = await lockSubscriptionPayer(tx, subscriptionId);
