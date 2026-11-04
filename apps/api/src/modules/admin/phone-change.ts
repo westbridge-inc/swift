@@ -115,6 +115,42 @@ export async function confirmPhoneChange(
   return { from, to: phone };
 }
 
+const ASK_ACTION = 'POST /users/:id/phone-change';
+
+/** The stored ask with the last four in place of the number, or null when it holds none. */
+function askWithoutNumber(snapshot: Prisma.JsonValue | null): Prisma.InputJsonValue | null {
+  const stored = snapshot as { body?: { phone?: unknown } } | null;
+  const phone = stored?.body?.phone;
+  if (typeof phone !== 'string' || phone.startsWith('…')) return null;
+  return { ...stored, body: { ...stored?.body, phone: `…${lastFour(phone)}` } } as Prisma.InputJsonValue;
+}
+
+/**
+ * [COORD 4 Nov 2026] The second person has to read the number, but no personal data stays in a table erasure does not
+ * name. Once the ask is carried out, whatever the door then answers, the approval row keeps the last four.
+ */
+export async function blankApprovedNumber(prisma: PrismaClient, approvalId: string): Promise<void> {
+  const row = await prisma.privilegedApproval.findUnique({ where: { id: approvalId }, select: { bodySnapshot: true } });
+  const blanked = askWithoutNumber(row?.bodySnapshot ?? null);
+  if (blanked) await prisma.privilegedApproval.update({ where: { id: approvalId }, data: { bodySnapshot: blanked } });
+}
+
+/** The daily sweep's half: an ask that was refused, withdrawn or left to lapse is never carried out. */
+export async function blankClosedNumberAsks(prisma: PrismaClient, now = new Date()): Promise<number> {
+  const rows = await prisma.privilegedApproval.findMany({
+    where: { action: ASK_ACTION, status: { not: 'APPLIED' }, OR: [{ status: { in: ['REJECTED', 'CANCELLED', 'EXPIRED'] } }, { expiresAt: { lte: now } }] },
+    select: { id: true, bodySnapshot: true },
+  });
+  let blanked = 0;
+  for (const row of rows) {
+    const snapshot = askWithoutNumber(row.bodySnapshot);
+    if (!snapshot) continue;
+    await prisma.privilegedApproval.update({ where: { id: row.id }, data: { bodySnapshot: snapshot } });
+    blanked += 1;
+  }
+  return blanked;
+}
+
 /** Best effort: a number the person lost may never read this, and the account's inbox says it too. */
 async function tellOldNumber(deps: PhoneChangeDeps, oldPhone: string): Promise<void> {
   await deps.channels.sms.sendSms(oldPhone, 'Your Swift account is being moved to a new number by Swift support. If this was not you, email support right away.')

@@ -77,7 +77,7 @@ import {
   startSoloApproval,
 } from './solo-approval';
 import { AuthService, sanitizeUser } from '../auth/auth.service';
-import { confirmPhoneChange, lastFour, startPhoneChange } from './phone-change';
+import { blankApprovedNumber, confirmPhoneChange, lastFour, startPhoneChange } from './phone-change';
 import { getChannels } from '../../providers/notifications/channels';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { executeTenantBoundServiceJobTransaction } from '../services/service-job-transaction';
@@ -1441,6 +1441,8 @@ export async function adminRoutes(app: FastifyInstance) {
   /** [BUG-HUNT F22] Move an account to a new number: the code goes to the new number (admin/phone-change.ts). */
   app.post('/users/:id/phone-change', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId;
+    if (approvalId) await blankApprovedNumber(app.prisma, approvalId);
     const { phone } = phoneChangeSchema.parse(request.body ?? {});
     const answer = await startPhoneChange(phoneChangeDeps(), {
       userId: id, phone, ip: request.ip,

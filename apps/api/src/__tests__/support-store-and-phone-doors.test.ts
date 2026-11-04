@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -15,7 +17,7 @@ import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { injectWithApproval } from './helpers/admin-approval';
-import { confirmPhoneChange } from '../modules/admin/phone-change';
+import { blankClosedNumberAsks, confirmPhoneChange } from '../modules/admin/phone-change';
 import { AuthService } from '../modules/auth/auth.service';
 import { getChannels } from '../providers/notifications/channels';
 
@@ -334,6 +336,39 @@ describe('[F22] the number door: one member of staff is never enough, and staff 
     const signedIn = (await loginWithOtp(app, mine)).json();
     expect(signedIn.data?.user?.id).not.toBe(owner.user.id);
     expect(JSON.stringify(signedIn)).not.toContain('SUPER_ADMIN');
+  });
+
+  it('the approval row keeps the last four once the ask is carried out, moved or refused', async () => {
+    const stored = async (entityId: string) => JSON.stringify((await app.prisma.privilegedApproval.findFirstOrThrow({ where: { entityId, action: 'POST /users/:id/phone-change' }, orderBy: { createdAt: 'desc' } })).bodySnapshot);
+    const person = await makeUser('Blank');
+    const next = testPhone();
+    const code = await startMove(person.id, next);
+    expect(await stored(person.id)).not.toContain(next);
+    expect(await stored(person.id)).toContain(next.slice(-4));
+    expect((await confirm(person.id, code)).statusCode).toBe(200);
+    const staff = await makeStaff('SUPER_ADMIN');
+    const held = testPhone();
+    expect((await twoPeople(adminToken, staff.user.id, held)).statusCode).toBe(403);
+    expect(await stored(staff.user.id)).not.toContain(held);
+  });
+
+  it('an ask refused, or left to lapse, gives its number up to the daily sweep; a live one keeps it', async () => {
+    const asked = async () => {
+      const person = await makeUser('Asked');
+      const phone = testPhone();
+      const res = await call('POST', `/api/v1/admin/users/${person.id}/phone-change`, { phone });
+      expect(res.statusCode, res.body).toBe(202);
+      return { phone, id: res.json().error.details.approvalId as string };
+    };
+    const body = async (id: string) => JSON.stringify((await app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id } })).bodySnapshot);
+    const [refused, lapsed, live] = [await asked(), await asked(), await asked()];
+    await app.prisma.privilegedApproval.update({ where: { id: refused.id }, data: { status: 'REJECTED' } });
+    await app.prisma.privilegedApproval.update({ where: { id: lapsed.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await blankClosedNumberAsks(app.prisma);
+    expect(await body(refused.id)).not.toContain(refused.phone);
+    expect(await body(lapsed.id)).not.toContain(lapsed.phone);
+    expect(await body(live.id)).toContain(live.phone);
+    expect(readFileSync(join(__dirname, '../jobs/queue.ts'), 'utf8')).toContain('await blankClosedNumberAsks(ctx.prisma);');
   });
 
   it('a founder is refused on their own account too', async () => {

@@ -1574,6 +1574,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
+        const { blankClosedNumberAsks } = await import('../modules/admin/phone-change');
+        await blankClosedNumberAsks(ctx.prisma);
         const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
         await retryAccountErasures(ctx);
         // [R23 · research C10] Customer accounts unused for 12 months: a notice, then (30 days
