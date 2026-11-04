@@ -4,8 +4,8 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { handoverBreakGlassCounter } from '../../plugins/observability';
 import { newRidePin } from '../rides/ride-pin';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
-import { consoleRoleOf } from '../auth/console-role';
 import { requireIdentityAuthority } from '../integrity/identity-review';
+import { assertClearOfParties } from '../integrity/party-authority';
 
 // ---------------------------------------------------------------------------
 // [A-15] THE ONE AUDITED DOOR TO A HANDOVER SECRET.
@@ -263,18 +263,11 @@ export async function resetDeliveryPin(deps: HandoverRevealDeps, input: RevealIn
  * person refuses, since nobody can then say who is on the ride; a staff account on it goes to a SUPER_ADMIN who is not.
  */
 async function assertMayResetRideCode(tx: Prisma.TransactionClient, actorId: string, parties: readonly string[]): Promise<void> {
-  const onRide = new Set<string>();
-  for (const party of parties) {
-    onRide.add(party);
-    for (const linked of (await requireIdentityAuthority(tx, party)).memberIds) onRide.add(linked);
-  }
   await requireIdentityAuthority(tx, actorId);
-  if (onRide.has(actorId)) throw new AppError(403, 'OWN_RIDE', 'You are on this ride. Someone else at Swift must reset its code.');
-  const rows = await tx.user.findMany({ where: { id: { in: [actorId, ...onRide] } }, select: { id: true, roles: true } });
-  const roleOf = (userId: string) => consoleRoleOf(rows.find((row) => row.id === userId)?.roles);
-  if ([...onRide].some((person) => roleOf(person) !== null) && roleOf(actorId) !== 'SUPER_ADMIN') {
-    throw new AppError(403, 'STAFF_ON_RIDE', 'A staff account is on this ride. Only a SUPER_ADMIN who is not on it can reset its code.');
-  }
+  await assertClearOfParties(tx, actorId, parties, {
+    own: new AppError(403, 'OWN_RIDE', 'You are on this ride. Someone else at Swift must reset its code.'),
+    staff: new AppError(403, 'STAFF_ON_RIDE', 'A staff account is on this ride. Only a SUPER_ADMIN who is not on it can reset its code.'),
+  });
 }
 
 /**

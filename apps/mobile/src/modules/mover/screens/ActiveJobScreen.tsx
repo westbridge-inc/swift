@@ -38,7 +38,7 @@ import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emerg
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { DOOR_CODE_REFUSALS, doorCashDue, doorCashRecordCopy, doorCashReturnOnJob } from '../../../lib/doorCash';
 import { DoorCash } from '../DoorCash';
-import { canDriverHandbackRide, driverStepFailedWords } from '../../../lib/driverRide';
+import { canDriverHandbackRide, driverHandbackDoneWords, driverStepFailedWords } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
 import { driverMapLine } from '../../../lib/routeLine';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
@@ -1363,9 +1363,9 @@ export function ActiveJobScreen({ navigation }: any) {
       >
         <PopupTitle variant="title" center>Hand this ride back?</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          The passenger keeps this ride and Swift will look for another driver. This may affect your driver standing. Pick what happened:
+          Pick what happened. If the passenger did not come, the ride closes once you have waited 5 minutes at the pickup, and this does not count against you. Otherwise the passenger keeps this ride and Swift looks for another driver, and this may affect your driver standing.
         </T>
-        {(['Vehicle problem', 'Road or access blocked', 'Passenger did not arrive'] as const).map((why) => (
+        {(['Vehicle problem', 'Road or access blocked', 'GPS not working', 'Passenger did not arrive'] as const).map((why) => (
           <PillButton
             key={why}
             label={why}
@@ -1379,10 +1379,11 @@ export function ActiveJobScreen({ navigation }: any) {
               driverAct.mutate(
                 { id: rideId, action: 'handback', reason: why },
                 {
-                  onSuccess: () => {
+                  onSuccess: (answer: unknown) => {
                     driverHandbackNavigateAfterDismissRef.current = true;
                     setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'dismissing' } : flow);
-                    toast.show('Ride handed back', 'The passenger is being matched with another driver.');
+                    const done = driverHandbackDoneWords(answer);
+                    toast.show(done.title, done.body);
                   },
                   onError: (e: any) => {
                     setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'confirm' } : flow);

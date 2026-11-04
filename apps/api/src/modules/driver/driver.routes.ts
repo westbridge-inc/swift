@@ -35,6 +35,7 @@ import { moveTaxiStop, type TaxiStopAction } from '../rides/taxi-stop-progress';
 import { chatContentReason } from '../chat/content-filter';
 import { decorateRideWaiting, readFareBreakdown, type TaxiFareBreakdown } from '../rides/taxi-waiting';
 import { freshRidePinReset } from '../rides/ride-pin';
+import { PASSENGER_NO_SHOW_REASON, PASSENGER_NO_SHOW_TAP, passengerNoShowNote, passengerNoShowNotice, passengerNoShowRefusal } from '../rides/passenger-no-show';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
@@ -1167,6 +1168,43 @@ export async function driverRoutes(app: FastifyInstance) {
     const driver = await getDriver(request.user.userId); // authz before body validation
     const { reason } = driverCancelSchema.parse(request.body ?? {});
     const order = await getDriverRide(driver.id, id);
+
+    // [BUG-HUNT-2 G03] "Passenger did not arrive" is not a hand-back: the driver waited, so the ride ends with a true record
+    // and nobody is marked down or sent. A second tap after a lost reply gets the answer it lost.
+    if (reason === PASSENGER_NO_SHOW_TAP) {
+      const noShowAnswer = { success: true, data: { orderId: id, status: 'CANCELLED', reDispatched: false } };
+      if (order.status === 'CANCELLED' && order.cancellationReason === PASSENGER_NO_SHOW_REASON) return noShowAnswer;
+      if (DRIVER_PRE_CUSTODY_STATUSES.includes(order.status) && !hasTaxiPassengerCustody(order)) {
+        const now = new Date();
+        const fix = { lat: driver.currentLat, lng: driver.currentLng, at: driver.lastLocationUpdate };
+        const refusal = passengerNoShowRefusal(order, fix, now);
+        if (refusal) throw refusal;
+        await orderService.transitionOrderAtomically({
+          orderId: id,
+          target: 'CANCELLED',
+          allowedFrom: ['DRIVER_ARRIVED'],
+          expectedDriverId: driver.id,
+          changedBy: request.user.userId,
+          note: passengerNoShowNote(order, fix, now),
+          cancellation: { by: request.user.userId, reason: PASSENGER_NO_SHOW_REASON },
+          // Judged again on the locked row: a code verified or a cancel that committed first wins.
+          withinTransaction: async (_tx, lockedSource) => {
+            const lockedRefusal = passengerNoShowRefusal(lockedSource, fix, new Date());
+            if (lockedRefusal) throw lockedRefusal;
+          },
+          invalidStatus: () => new AppError(409, 'INVALID_STATUS', 'This ride can no longer be closed. Refresh your current ride.'),
+        });
+        await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED', reason: 'passenger_no_show' });
+        await notifications.send({
+          userId: order.customerId,
+          type: 'ORDER_UPDATE',
+          ...passengerNoShowNotice(order.orderNumber),
+          dedupeKey: `passenger-no-show:${id}`,
+          data: taxiNotificationData(id, { status: 'CANCELLED' }),
+        });
+        return noShowAnswer;
+      }
+    }
 
     const cancellable = DRIVER_PRE_CUSTODY_STATUSES;
     if (!cancellable.includes(order.status) || hasTaxiPassengerCustody(order)) {
