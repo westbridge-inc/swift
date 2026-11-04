@@ -248,7 +248,11 @@ export class AccountService {
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
   async deleteAccount(
     userId: string, selfServe = false, surface: ClosureSurface = 'app',
-    opts: { claimClosure?: (tx: Prisma.TransactionClient) => Promise<boolean> } = {},
+    opts: {
+      claimClosure?: (tx: Prisma.TransactionClient) => Promise<boolean>;
+      /** Runs once the tombstone is written, past every blocker, in the same transaction: an audit row here shows the effect, and a refusal leaves none. */
+      onCutoff?: (tx: Prisma.TransactionClient) => Promise<void>;
+    } = {},
   ) {
     const prisma = this.app.prisma;
     const preflight = await prisma.$transaction(async (tx) => {
@@ -408,6 +412,7 @@ export class AccountService {
       // [erasure exceptions] The erasure's own record of its cut-off, committed with the marker. audit_logs is
       // immutable to app logins; the database's erasure exceptions (swift_erased_person) require this row too.
       await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: 'User', entityId: userId } });
+      await opts.onCutoff?.(tx);
       return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);

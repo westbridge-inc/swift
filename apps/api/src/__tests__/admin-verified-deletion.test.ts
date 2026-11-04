@@ -151,6 +151,7 @@ describe('once approved', () => {
     expect(rest).toEqual([]);
     expect(row).toMatchObject({ userId: requester.id, entityId: subject });
     expect(row!.changes).toMatchObject({ reason: TEST_ADMIN_REASON, identityCheck: GOOD.identityCheck, identityNote: GOOD.identityNote, approvalId });
+    expect((row!.changes as { changed: unknown }).changed).toMatchObject({ status: { from: 'ACTIVE', to: 'DEACTIVATED' } });
   });
 
   it('every blocker holds: an open order refuses it, the account stays, and no deletion is recorded', async () => {
