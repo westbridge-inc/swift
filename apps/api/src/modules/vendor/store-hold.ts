@@ -59,3 +59,15 @@ export function storeHoldRefusal(store: { status: string; suspensionSource: stri
   const { message, nextStep } = HOLD_COPY[kind];
   return new AppError(403, 'VENDOR_SUSPENDED', message, { hold: kind, nextStep, canDecline: true, canFinishAccepted: kind === 'FEE_UNPAID' });
 }
+
+/** [BUG-HUNT-2 G07] Swift suspended or closed this store, so it cannot hand over a ready pickup (a weekly-fee hold still
+ *  finishes accepted work). Structural: a transaction or the app client both fit. */
+export async function readStoreCannotHandOver(
+  db: { vendor: { findUnique(args: { where: { id: string }; select: { status: true; suspensionSource: true } }): Promise<{ status: string; suspensionSource: string | null } | null> } },
+  vendorId: string | null,
+): Promise<boolean> {
+  if (!vendorId) return false;
+  const store = await db.vendor.findUnique({ where: { id: vendorId }, select: { status: true, suspensionSource: true } });
+  if (!store) return false;
+  return store.status === 'CLOSED' || (store.status === 'SUSPENDED' && store.suspensionSource !== 'BILLING');
+}
