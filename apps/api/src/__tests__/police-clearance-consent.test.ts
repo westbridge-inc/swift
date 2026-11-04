@@ -346,8 +346,8 @@ describe('[POLICE-CLEARANCE] the Privacy Policy says it (COORD 25 Oct: non-mater
   // [BOOK-P3] ... and under 2026-10-29.1 (the free cancel after a move) on top of that.
   // [BILL-PRO] ... and under 2026-10-29.2 (the Business Agreement covers Providers) on top of that.
   // [EXPRESS-FEE] ... and under 2026-11-01 (the express Delivery-policy wording, non-material) on top of that.
-  it('published as 2026-10-25.2 (served now under 2026-11-01.1), classed non-material (it narrows what is kept and adds a withdrawal right)', () => {
-    expect(LEGAL_VERSION).toBe('2026-11-01.1');
+  it('published as 2026-10-25.2 (served now under 2026-11-04), classed non-material (it narrows what is kept and adds a withdrawal right)', () => {
+    expect(LEGAL_VERSION).toBe('2026-11-04');
     expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-10-25.2')).toHaveLength(1);
     expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-25.2');
   });

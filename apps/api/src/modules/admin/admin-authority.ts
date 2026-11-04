@@ -338,6 +338,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /orders/:id/handover-secret/reset-delivery-pin': c('C2', 'order.handover.rotate'),
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
+  // [BUG-HUNT-2 G01] A ride in progress whose driver is gone: its only exits were the driver's own handover.
+  'POST /orders/:id/end-ride': c('C3', 'order.ride.end', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
   // [MMGCLOSE] Record-only: closes a store-claimed MMG order as "refund handled
   // by the store" (an OWED refund obligation, no money moves) — money class, two admins.
