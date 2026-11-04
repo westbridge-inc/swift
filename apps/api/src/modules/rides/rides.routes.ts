@@ -596,7 +596,12 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] As /active while the ride is live; once finished, the
     // fare it was paid at, itemised (route fare + waiting = total).
     const waiting = await decorateRideWaiting(app.prisma, ride, itinerary?.stops ?? null);
-    return { success: true, data: itinerary || waiting.waiting || waiting.fareBreakdown ? { ...ride, ...itinerary, ...waiting } : ride };
+    // [BUG-HUNT-2 G06] The finished-ride screen asks for a rating only once. A live ride gains no key.
+    const finished = ride.status === 'DELIVERED' || ride.status === 'COMPLETED';
+    const rated = finished
+      ? { hasBeenRated: await app.prisma.rating.count({ where: { orderId: ride.id, raterId: request.user.userId } }) > 0 }
+      : null;
+    return { success: true, data: itinerary || waiting.waiting || waiting.fareBreakdown || rated ? { ...ride, ...rated, ...itinerary, ...waiting } : ride };
   });
 
   /** POST /:id/cancel — rides ride the same state machine as everything else. */

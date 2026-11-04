@@ -23,6 +23,12 @@ export function canDriverHandbackRide(ride: {
   return ride.ridePinVerified !== true && ride.ridePinVerifiedAt == null;
 }
 
+/** [BUG-HUNT-2 G05] Why a driver step did not go through: the server's words, or, with no answer at all, what to try. */
+export function driverStepFailedWords(error: unknown): string {
+  const message = (error as { response?: { data?: { error?: { message?: unknown } } } } | null | undefined)?.response?.data?.error?.message;
+  return typeof message === 'string' && message.trim() !== '' ? message : 'That didn’t go through. Check your connection and try again.';
+}
+
 /** [BUG-HUNT-2 G03] What the driver's screen says after the sheet. "Passenger did not arrive" closes the ride, so the server
  *  answers CANCELLED; any other reason hands it back. The answer decides, never the reason tapped. */
 export function driverHandbackDoneWords(answer: unknown): { title: string; body: string } {

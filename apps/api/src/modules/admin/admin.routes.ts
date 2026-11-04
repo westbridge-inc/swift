@@ -67,7 +67,7 @@ import { mintRenderPath } from '../../providers/storage/envelope';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
-import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
+import { revealPickupCode, rotatePickupCode, resetDeliveryPin, resetRidePin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
 // [SEC-PII · #2170 S3-2] the five more masked reads (own lines, away from the shared person-contact import)
 import { maskPhone } from '../auth/step-up';
@@ -3282,6 +3282,23 @@ export async function adminRoutes(app: FastifyInstance) {
       { orderId: id, actorId: request.user.userId, reason, ip: request.ip, userAgent: request.headers['user-agent'] },
     );
     return { success: true, data: result };
+  });
+
+  // [BUG-HUNT-2 G05] A ride's code: the same door, and the passenger is told where to read the new one.
+  app.post('/orders/:id/handover-secret/reset-ride-pin', { preHandler: [adminGuard] }, async (request) => {
+    await requireStepUp(app, request as never);
+    const { id } = request.params as { id: string };
+    const { reason } = handoverReasonSchema.parse(request.body ?? {});
+    const result = await resetRidePin(
+      { prisma: app.prisma },
+      { orderId: id, actorId: request.user.userId, reason, ip: request.ip, userAgent: request.headers['user-agent'] },
+    );
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'DRIVER_ARRIVED', reason: 'ride_code_reset' });
+    await notifications.send({
+      userId: result.customerId, type: 'ORDER_UPDATE', title: 'New ride code', body: 'Swift support gave your ride a new code. Open your ride to read it to your driver.',
+      data: taxiNotificationData(id, { status: 'DRIVER_ARRIVED' }), dedupeKey: `ride-pin-reset:${result.auditId}`,
+    });
+    return { success: true, data: { auditId: result.auditId, rotated: true } };
   });
 
   /**

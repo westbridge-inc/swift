@@ -38,7 +38,7 @@ import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emerg
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { DOOR_CODE_REFUSALS, doorCashDue, doorCashRecordCopy, doorCashReturnOnJob } from '../../../lib/doorCash';
 import { DoorCash } from '../DoorCash';
-import { canDriverHandbackRide, driverHandbackDoneWords } from '../../../lib/driverRide';
+import { canDriverHandbackRide, driverHandbackDoneWords, driverStepFailedWords } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
 import { driverMapLine } from '../../../lib/routeLine';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
@@ -479,6 +479,10 @@ export function ActiveJobScreen({ navigation }: any) {
                 ? "If your GPS isn't working, ask the passenger to tap 'My driver is here'."
                 : undefined,
             );
+          } else {
+            // [BUG-HUNT-2 G05] Every other failed step was silent: the boxes shook, or nothing moved, and the server's words
+            // ("Incorrect code. 3 attempts left.") never reached the screen.
+            toast.error(driverStepFailedWords(e));
           }
         },
         onSuccess: () => {

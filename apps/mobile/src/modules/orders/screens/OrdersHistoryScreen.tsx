@@ -1,3 +1,4 @@
+import { ridePaidAmount } from '../../../lib/rideAfterTrip';
 /** @jsxImportSource react */
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, FlatList, Pressable, RefreshControl, View } from 'react-native';
@@ -156,7 +157,9 @@ function itemsSummary(o: any): string | null {
  *  "$0" is a lie on a ledger — so a row with no server amount prints an
  *  em-dash instead (as money() itself now does). */
 function rowAmount(o: any, isRide: boolean): number | null {
-  const raw = isRide ? (o.taxiFareTotal ?? o.totalAmount) : (o.totalAmount ?? o.total);
+  // [BUG-HUNT-2 G06] A ride shows what was paid, waiting included: the same number as its receipt.
+  if (isRide) return ridePaidAmount(o);
+  const raw = o.totalAmount ?? o.total;
   const n = Number(raw);
   return raw === null || raw === undefined || !Number.isFinite(n) ? null : n;
 }
@@ -457,12 +460,16 @@ export function OrdersHistoryScreen() {
               // form — nothing prefills the old route — so it says "Book a
               // taxi", not "Book again": a label must never promise a repeat
               // it doesn't perform.
-              <PillButton
-                label="Book a taxi"
-                variant="outline"
-                size="md"
-                onPress={() => navigation.navigate('Taxi')}
-              />
+              <>
+                {/* [BUG-HUNT-2 G06] The ride itself: who drove, what was paid, a rating, and help with it. */}
+                <PillButton label="View ride" variant="outline" size="md" onPress={() => navigation.navigate('RideDetail', { rideId: o.id })} />
+                <PillButton
+                  label="Book a taxi"
+                  variant="outline"
+                  size="md"
+                  onPress={() => navigation.navigate('Taxi')}
+                />
+              </>
             ) : (
               <>
                 <PillButton

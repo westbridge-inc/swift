@@ -340,6 +340,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),
   'POST /orders/:id/handover-secret/reset-delivery-pin': c('C2', 'order.handover.rotate'),
+  'POST /orders/:id/handover-secret/reset-ride-pin': c('C2', 'order.handover.rotate'),
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
   // [BUG-HUNT-2 G01] A ride in progress whose driver is gone: its only exits were the driver's own handover.

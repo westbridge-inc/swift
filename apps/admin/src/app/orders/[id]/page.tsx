@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, closeStoreRefund, endStuckRide, settleOrderRefund, revealOrderPartyPhone, type OrderContactParty } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, closeStoreRefund, endStuckRide, resetRideCode, sendStepUpCode, settleOrderRefund, revealOrderPartyPhone, verifyStepUpCode, type OrderContactParty } from '@/lib/api';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -469,6 +469,38 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                     {o.handover.ridePinLocked
                       ? `Locked — ${o.handover.ridePinAttempts} wrong tries (support reset)`
                       : `Issued to the customer${(o.handover.ridePinAttempts ?? 0) > 0 ? ` · ${o.handover.ridePinAttempts} wrong tries` : ''}`}
+                  </span>
+                </div>
+              )}
+              {/* [BUG-HUNT-2 G05] A ride's code. The driver is told to ask support after five wrong tries: this is what support does. */}
+              {isRide && o.handover?.ridePinIssued && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(o.status) && !o.ridePinVerified && !o.ridePinVerifiedAt && (
+                <div className="flex justify-between gap-4">
+                  <span className="mc-muted">Ride code</span>
+                  <span className={o.handover.ridePinLocked ? 'mc-text-bad' : ''}>
+                    {o.handover.ridePinLocked ? `Locked — ${o.handover.ridePinAttempts} wrong tries` : 'Issued to the passenger'}
+                    {' '}
+                    <button
+                      type="button"
+                      className="mc-btn"
+                      onClick={async () => {
+                        // The door asks for a code to your phone: it is sent first, so the one panel takes both.
+                        await sendStepUpCode().catch(() => undefined);
+                        void actions.run({
+                          title: `Give ${o.orderNumber} a new ride code?`,
+                          body: <p>The passenger reads the new code in their app and is told to. The old code stops working. Nobody here sees it.</p>,
+                          confirmLabel: 'Give a new code',
+                          dismissLabel: 'Keep it',
+                          fields: [{ kind: 'text', name: 'code', label: 'Code sent to your phone', required: true }],
+                          submit: async ({ reason, values }) => {
+                            await verifyStepUpCode(String(values['code']).trim());
+                            return resetRideCode(id, reason);
+                          },
+                          success: () => `${o.orderNumber} has a new ride code. The passenger was told.`,
+                        });
+                      }}
+                    >
+                      New ride code
+                    </button>
                   </span>
                 </div>
               )}
