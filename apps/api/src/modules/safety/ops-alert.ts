@@ -6,6 +6,7 @@ import { log } from '../../utils/logger';
 import { opsAlertCounter, opsAlertGauge } from '../../plugins/observability';
 import { smsAccepted } from '../../providers/notifications/sms-outcome';
 import { ownerWallSystem } from '../../lib/owner-rls';
+import { fitGsm7, toGsm7 } from '../../utils/sms-text';
 
 /**
  * [S-19] War-room socket membership is not delivery acknowledgement.
@@ -73,6 +74,58 @@ export const DRILL_FAILED_REASON = 'drill-failed-unacknowledged';
 export const OPS_UNACKED_KEY = 'ops-alert-unacked';
 /** [DRILL-STORM] Where a page is acknowledged: the console's Ops alerts screen (plain ASCII: it travels by SMS too). */
 export const ACK_WHERE = 'Mission Control > Ops alerts';
+
+/**
+ * [SMS-COST · owner ruling 2 Nov 2026 · GUARDRAILS §3] On-call TEXTS are
+ * bounded harder than pushes, and never silenced.
+ *
+ * A platform page nobody acknowledged texted the on-call phone at every
+ * escalation, every 30 minutes, all day, each text a long UCS-2 message of
+ * several paid parts. Now, for every alert that is not an SOS:
+ *  - the FIRST page texts the on-call list, as before;
+ *  - after that, at most ONE reminder text every OPS_ALERT_SMS_REMINDER_SECONDS
+ *    (2 hours), and at most OPS_ALERT_SMS_MAX_PER_DAY (6) texts per alert per
+ *    UTC day, the first page included. A reminder held back is not dropped:
+ *    the alert stays owed and goes in the next text it is allowed;
+ *  - pushes and the admin inbox re-page exactly as before (the ladder above).
+ * An SOS is texted exactly as before. Every text is GSM-7 and at most
+ * OPS_SMS_MAX_PARTS parts: the title, the count and where to acknowledge it
+ * (an SOS adds its short who/which-order line); the push keeps the full words.
+ * The day count lives in Redis (no schema change), and counts a reminder only
+ * when a provider took it. Without it (no store handed in, Redis failing, or a
+ * read slower than OPS_SMS_DAY_STORE_WAIT_MS) the 2-hour spacing still bounds
+ * the texts to 12 a day: an unreadable counter never stops or delays a text.
+ */
+/** [REVIEW-M3 S4-4] Clamped to [the re-page spacing, 6 hours]: a typo can never make reminders stop. */
+export const smsReminderSeconds = () => { const n = Number(process.env['OPS_ALERT_SMS_REMINDER_SECONDS'] ?? 7200); return Math.min(Math.max(Number.isFinite(n) && n > 0 ? n : 7200, repageSpacingSeconds()), 21_600); };
+export const smsMaxPerDay = () => { const n = Number(process.env['OPS_ALERT_SMS_MAX_PER_DAY'] ?? 6); return Number.isInteger(n) && n >= 1 && n <= 24 ? n : 6; };
+export const OPS_SMS_MAX_PARTS = 2;
+/** The day counter's store: the worker's Redis in production. */
+export type OpsSmsDayStore = { get(key: string): Promise<string | null>; incr(key: string): Promise<number>; expire(key: string, seconds: number): Promise<number> };
+const OPS_SMS_DAY_PREFIX = 'ops_alert_sms_day:';
+const utcDay = (at: Date) => at.toISOString().slice(0, 10);
+export const smsDayKey = (opsAlertId: string, now: Date) => `${OPS_SMS_DAY_PREFIX}${utcDay(now)}:${opsAlertId}`;
+/** [REVIEW-G4 S4-2] The longest the ladder waits on the day counter: a Redis that queues commands while it
+ *  reconnects must never hold a text (an SOS's included) back. A slow read is an unknown count. */
+export const OPS_SMS_DAY_STORE_WAIT_MS = 1_000;
+function bounded<T>(op: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('day counter slower than its bound')), OPS_SMS_DAY_STORE_WAIT_MS); timer.unref?.(); });
+  return Promise.race([op, late]).finally(() => clearTimeout(timer));
+}
+/** A title as a text carries it: GSM-7, at most 100 characters, no closing full stop. */
+function smsTitle(title: string): string {
+  const t = toGsm7(title).replace(/\.+$/u, '');
+  return t.length <= 100 ? t : `${t.slice(0, 97).replace(/\s+\S*$/u, '')}...`;
+}
+/** [SMS-COST] An on-call text: GSM-7, at most OPS_SMS_MAX_PARTS parts, the words that matter first. */
+function opsSmsText(head: string, tail: string): string {
+  return fitGsm7(toGsm7(tail ? `${head} ${tail}` : head), OPS_SMS_MAX_PARTS);
+}
+/** [SMS-COST] The text a page's FIRST page sends the on-call list. */
+export function firstPageSms(alert: { kind: OpsAlertKind; title: string; body: string }): string {
+  return opsSmsText(`Swift ops: ${smsTitle(alert.title)}. Acknowledge it in ${ACK_WHERE}.`, alert.kind === 'SOS' ? alert.body : '');
+}
 
 /** [DRILL-STORM · REVIEW-F S4] A moment as the responder reads it: "25 Oct, 12:35 pm Guyana time" (never raw UTC). */
 export function guyanaTime(at: Date): string {
@@ -230,7 +283,10 @@ async function openOpsAlertUnscoped(
   // (The store-review fiction returned above: its pages text nobody.)
   const phones = input.oncallPhones ?? onCallPhones();
   const sms = input.sms !== undefined ? input.sms : phones.length > 0 ? await defaultOpsSms() : null;
-  const oncallTexted = await textOnCall(sms, phones, alert.id, `Swift ops: ${input.title}. Acknowledge it in ${ACK_WHERE}. ${input.body}`);
+  const oncallTexted = await textOnCall(sms, phones, alert.id, firstPageSms(input));
+  // [SMS-COST] The first page's text starts the alert's reminder clock (an SOS keeps its own ladder).
+  // A first text no provider accepted starts nothing: the next escalation texts at once.
+  if (oncallTexted > 0 && input.kind !== 'SOS') await prisma.opsAlert.update({ where: { id: alert.id }, data: { oncallTextedAt: now } });
   const reached = pushed + oncallTexted;
   opsAlertCounter.labels('opened').inc();
   if (userIds.length === 0) {
@@ -330,16 +386,22 @@ const oldestOf = (alerts: SweptAlert[]) => alerts.reduce((o, a) => (a.createdAt 
 export function repageWords(alerts: SweptAlert[]): { title: string; body: string; text: string } {
   const sorted = [...alerts].sort(byUrgency);
   const first = sorted[0]!;
+  // [SMS-COST] "x", never "×": the push and inbox keep every other word; the TEXT keeps
+  // only the title, the count and where to acknowledge (plus an SOS's short line).
   if (sorted.length === 1) {
-    const title = `UNACKNOWLEDGED (${first.escalationLevel}×): ${first.title}`;
-    return { title, body: `Nobody has acknowledged this alert since ${guyanaTime(first.createdAt)}. ${first.body} Acknowledge it now in ${ACK_WHERE}.`, text: `Swift ops: ${title}. Acknowledge it in ${ACK_WHERE}. ${first.body}` };
+    const title = `UNACKNOWLEDGED (${first.escalationLevel}x): ${first.title}`;
+    return {
+      title,
+      body: `Nobody has acknowledged this alert since ${guyanaTime(first.createdAt)}. ${first.body} Acknowledge it now in ${ACK_WHERE}.`,
+      text: opsSmsText(`Swift ops: UNACKNOWLEDGED (${first.escalationLevel}x): ${smsTitle(first.title)}. Acknowledge it in ${ACK_WHERE}.`, first.kind === 'SOS' ? first.body : ''),
+    };
   }
   const sos = sorted.some((a) => a.kind === 'SOS') ? ', including an SOS' : '';
   const since = guyanaTime(oldestOf(sorted).createdAt);
   return {
     title: `UNACKNOWLEDGED: ${sorted.length} ops alerts${sos}`,
     body: `Nobody has acknowledged ${sorted.length} ops alerts; the oldest has waited since ${since}. First: ${first.title}. Acknowledge them now in ${ACK_WHERE}.`,
-    text: `Swift ops: ${sorted.length} ops alerts are UNACKNOWLEDGED${sos}. The oldest has waited since ${since}. First: ${first.title}. Acknowledge them in ${ACK_WHERE}.`,
+    text: opsSmsText(`Swift ops: ${sorted.length} ops alerts are UNACKNOWLEDGED${sos}. First: ${smsTitle(first.title)}. Acknowledge them in ${ACK_WHERE}.`, ''),
   };
 }
 
@@ -351,8 +413,8 @@ export async function escalateOverdueOpsAlerts(
   prisma: PrismaClient,
   notifications: NotificationService,
   sms: OpsSms | null,
-  /** `alertIds` is a test seam: sweep only these alerts. */
-  options: { now?: Date; limit?: number; alertIds?: string[] } = {},
+  /** `alertIds` is a test seam: sweep only these alerts. `smsDay` counts each alert's texts per UTC day [SMS-COST] (the worker's Redis). */
+  options: { now?: Date; limit?: number; alertIds?: string[]; smsDay?: OpsSmsDayStore | null } = {},
 ): Promise<{ escalated: string[]; closed: string[]; platformPage: string[]; drillsFailed: string[] }> {
   const now = options.now ?? new Date();
   const escalated: string[] = []; const closed: string[] = [];
@@ -435,7 +497,7 @@ export async function escalateOverdueOpsAlerts(
   // The rollback (OPS_ALERT_ESCALATION_KILL) pauses them with the escalation.
   if (!killed) {
     await repageOwed(prisma, notifications, live.map((l) => l.alert), now);
-    await textOnCallOwed(prisma, sms, live.filter((l) => !l.fiction).map((l) => l.alert), now);
+    await textOnCallOwed(prisma, sms, live.filter((l) => !l.fiction).map((l) => l.alert), now, options.smsDay ?? null);
   }
   if (drillsFailed.length > 0) await announceFailedDrills(prisma, notifications, drillsFailed);
   return { escalated, closed, platformPage, drillsFailed: drillsFailed.map((d) => d.id) };
@@ -499,11 +561,53 @@ async function repageOwed(prisma: PrismaClient, notifications: NotificationServi
   }
 }
 
-/** [DRILL-STORM] The on-call list, like a person: ONE text for every alert owed, at most one per spacing, the first SOS escalation never held. */
-async function textOnCallOwed(prisma: PrismaClient, sms: OpsSms | null, alerts: SweptAlert[], now: Date): Promise<number> {
-  const owed = alerts.filter((a) => a.escalationLevel > a.oncallTextedLevel);
+/** [SMS-COST] Texts this alert already had today (UTC): its first page, if opened today and a text has left for it
+ *  (a first page no provider accepted never used up the day), and the reminders counted. */
+async function textsToday(store: OpsSmsDayStore | null, a: SweptAlert, now: Date): Promise<number> {
+  const first = a.oncallTextedAt && utcDay(a.createdAt) === utcDay(now) ? 1 : 0;
+  if (!store) return first;
+  try {
+    return first + (Number(await bounded(store.get(smsDayKey(a.id, now)))) || 0);
+  } catch (err) {
+    opsAlertCounter.labels('oncall_text_day_unknown').inc();
+    log().error({ err, opsAlertId: a.id }, '[SMS-COST] the on-call text day count could not be read: only the 2-hour spacing bounds this reminder');
+    return first;
+  }
+}
+
+/** [SMS-COST] May this (not SOS) alert's reminder be texted now: 2 hours since its last text, and under the day's cap. */
+async function smsReminderAllowed(store: OpsSmsDayStore | null, a: SweptAlert, now: Date): Promise<boolean> {
+  // (a text dated after `now` never holds one back: a skewed clock cannot silence the list)
+  const last = a.oncallTextedAt;
+  if (last && last.getTime() <= now.getTime() && now.getTime() - last.getTime() < smsReminderSeconds() * 1000) return false;
+  return (await textsToday(store, a, now)) < smsMaxPerDay();
+}
+
+/** [SMS-COST] Count a reminder against its alert's UTC day. A failed count is logged, never thrown. */
+async function countReminder(store: OpsSmsDayStore | null, a: SweptAlert, now: Date): Promise<void> {
+  if (!store) return;
+  try {
+    const key = smsDayKey(a.id, now);
+    // The expiry rides on every count: a count that lands after the bound still gets its expiry, and a key left
+    // without one (a crash between the two commands) is healed by the next count.
+    await bounded(store.incr(key).then(() => store.expire(key, 2 * 86_400)));
+  } catch (err) {
+    opsAlertCounter.labels('oncall_text_day_unknown').inc();
+    log().error({ err, opsAlertId: a.id }, '[SMS-COST] the on-call text day count could not be written');
+  }
+}
+
+/** [DRILL-STORM] The on-call list, like a person: ONE text for every alert owed, at most one per spacing, the first SOS escalation never held.
+ *  [SMS-COST] An alert that is not an SOS is owed a text only when its reminder is allowed (2 hours, the day cap). */
+async function textOnCallOwed(prisma: PrismaClient, sms: OpsSms | null, alerts: SweptAlert[], now: Date, smsDay: OpsSmsDayStore | null): Promise<number> {
+  const due = alerts.filter((a) => a.escalationLevel > a.oncallTextedLevel);
   const phones = onCallPhones();
-  if (owed.length === 0 || phones.length === 0) return 0;
+  if (due.length === 0 || phones.length === 0) return 0;
+  // An SOS is owed at once; every other alert's reminder is checked in parallel, each read bounded.
+  const allowed = await Promise.all(due.map((a) => (a.kind === 'SOS' ? true : smsReminderAllowed(smsDay, a, now))));
+  const owed = due.filter((_a, i) => allowed[i]);
+  if (owed.length < due.length) opsAlertCounter.labels('oncall_text_held').inc(due.length - owed.length);
+  if (owed.length === 0) return 0;
   const list = oncallListKey(phones);
   const recent = await prisma.opsAlert.findFirst({ where: { oncallTextedList: list, oncallTextedAt: { gt: new Date(now.getTime() - repageSpacingSeconds() * 1000), lte: now } }, select: { id: true } });
   const firstSos = owed.some((a) => a.kind === 'SOS' && a.oncallTextedLevel === 0);
@@ -515,7 +619,18 @@ async function textOnCallOwed(prisma: PrismaClient, sms: OpsSms | null, alerts: 
   }
   if (claimed.length === 0) return 0;
   const sorted = [...claimed].sort(byUrgency);
-  return textOnCall(sms, phones, sorted[0]!.id, repageWords(sorted).text);
+  const sent = await textOnCall(sms, phones, sorted[0]!.id, repageWords(sorted).text);
+  const reminders = claimed.filter((a) => a.kind !== 'SOS');
+  // [REVIEW-M3 S4-3] A reminder counts against its alert's day only when a provider took it.
+  if (sent > 0) await Promise.all(reminders.map((a) => countReminder(smsDay, a, now)));
+  else {
+    // [REVIEW-G5 S3-2] No provider took it. An alert the list has had a text for keeps its 2-hour clock. One that has
+    // never had a text starts none: a refused send is no text, and the level stays claimed, so the retry waits for the
+    // next escalation, never every sweep.
+    const neverTexted = reminders.filter((a) => !a.oncallTextedAt).map((a) => a.id);
+    if (neverTexted.length > 0) await prisma.opsAlert.updateMany({ where: { id: { in: neverTexted }, oncallTextedAt: now }, data: { oncallTextedAt: null } });
+  }
+  return sent;
 }
 
 /** [DRILL-STORM] ONE notice to platform operators for the drills this sweep closed as FAILED. */

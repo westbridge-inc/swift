@@ -124,7 +124,7 @@ describe('[75] a page with nobody to acknowledge it escalates at once — never 
     if (outcome.status === 'pending') alertIds.push(outcome.opsAlertId);
   });
 
-  it('the very next sweep escalates it: recipients re-resolved, staff paged, on-call texted again', async () => {
+  it('the very next sweep escalates it: recipients re-resolved, staff paged; the on-call reminder waits its 2 hours', async () => {
     const page = await openAlert(null, []);
     resetDevChannelLog();
     const res = await runWithoutTenant(() => escalateOverdueOpsAlerts(app.prisma, notifications(), getChannels().sms, { now: new Date(Date.now() + 1_000), limit: 1_000 }), 'test:l10-paging');
@@ -132,7 +132,9 @@ describe('[75] a page with nobody to acknowledge it escalates at once — never 
     const row = await alertRow(page.opsAlertId);
     expect(row.recipients.map((r) => r.userId)).toContain(superAdmin.userId);
     expect(row.escalationLevel).toBe(1);
-    expect(oncallTexts().some((t) => (t as { body?: string }).body?.includes('UNACKNOWLEDGED'))).toBe(true);
+    // [SMS-COST · owner ruling 2 Nov] the first page texted on-call; a platform page's reminder text
+    // waits 2 hours (ops-alert-sms-cap.test), while the push re-pages now
+    expect(oncallTexts().some((t) => (t as { body?: string }).body?.includes(`UNACKNOWLEDGED (1x): ${row.title}`))).toBe(false);
     const pushed = await app.prisma.notification.count({ where: { userId: superAdmin.userId, data: { path: ['opsAlertId'], equals: page.opsAlertId } } });
     expect(pushed).toBeGreaterThanOrEqual(1);
   });

@@ -1,4 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
+import { toGsm7 } from '../../utils/sms-text';
 
 // ---------------------------------------------------------------------------
 // [STORE-ALERT · owner ruling 18 Oct 2026] The store's backup SMS names the
@@ -22,46 +23,9 @@ import type { PrismaClient } from '@prisma/client';
 
 export const SMS_SINGLE_SEGMENT = 160;
 
-/** GSM 03.38 basic character set (one septet each), minus the line breaks and
- *  escape. The extension table (^ { } \ [ ~ ] | €) costs two septets and some
- *  phones render it badly, so it is mapped or dropped below. */
-const GSM7_BASIC = new Set(Array.from(
-  '@£$¥èéùìòÇØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡'
-  + 'ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà',
-));
-
-const LOOKALIKES: Readonly<Record<string, string>> = {
-  '‘': "'", '’': "'", '‚': "'", '‛': "'", '′': "'", '`': "'", '´': "'",
-  '“': '"', '”': '"', '„': '"', '″': '"', '«': '"', '»': '"',
-  '‐': '-', '‑': '-', '‒': '-', '–': '-', '—': '-', '―': '-', '−': '-',
-  '~': '-', '•': '-', '·': '-',
-  '…': '...',
-  '[': '(', ']': ')', '{': '(', '}': ')',
-  '|': '/', '\\': '/',
-  '€': 'EUR',
-};
-
-/** The text, reduced to the GSM-7 basic set: whitespace becomes one space,
- *  look-alikes are mapped, accented letters lose an accent GSM-7 lacks, and
- *  anything else (emoji, other scripts, ^) is dropped. */
-export function toGsm7(text: string): string {
-  let out = '';
-  for (const ch of text) {
-    if (/\s/u.test(ch)) { out += ' '; continue; }
-    const mapped = LOOKALIKES[ch];
-    if (mapped !== undefined) { out += mapped; continue; }
-    if (GSM7_BASIC.has(ch)) { out += ch; continue; }
-    for (const part of ch.normalize('NFD').replace(/\p{M}/gu, '')) {
-      if (GSM7_BASIC.has(part)) out += part;
-    }
-  }
-  return out.replace(/ {2,}/g, ' ').trim();
-}
-
-export function isGsm7Basic(text: string): boolean {
-  for (const ch of text) if (!GSM7_BASIC.has(ch)) return false;
-  return true;
-}
+/** [SMS-COST] The GSM-7 reduction is shared by every SMS sender now (utils/sms-text.ts):
+ *  the same basic set, the same look-alikes, the same accent folding. */
+export { toGsm7, isGsm7Basic } from '../../utils/sms-text';
 
 /** "It cancels by itself in <N> min." — N rounded down, never inflated. */
 function cancelsIn(cancelAt: Date, now: Date): string {
