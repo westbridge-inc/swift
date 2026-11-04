@@ -47,10 +47,11 @@ function CampaignList({ advertiserId }: { advertiserId: string }) {
     {q.data?.length === 100 && <p className="sw-caption mt-4">Showing the latest 100 campaigns.</p>}
   </>;
 }
-export function AdvertiserCampaigns({ account = false }: { account?: boolean }) {
+export function AdvertiserCampaigns({ account = false, children }: { account?: boolean; children?: React.ReactNode }) {
   const q = useQuery({ queryKey: ['ads-memberships'], queryFn: getAdvertisers });
   return <section className="space-y-6">
     <header className="sw-bleed bg-[var(--swift-red)] py-5 text-white"><h1 className="sw-title text-white">{account ? 'Advertising account' : 'Your campaigns'}</h1><p className="mt-1 text-[13px]">Home-screen advertising · flat weekly rates</p></header>
+    {children}
     {q.isLoading && <div role="status" className="sw-empty"><span className="sw-skeleton h-28 w-full" />Loading your advertising accounts…</div>}
     {q.isError && (adsOff(q.error) ? <AdsNotOpen /> : <DataUnavailable what="your advertising accounts" error={q.error} onRetry={() => void q.refetch()} />)}
     {q.data?.length === 0 && <div className="sw-empty"><h2 className="sw-heading">Your business can advertise here</h2><p className="sw-caption">Register an advertising account in the Swift app to get started.</p></div>}

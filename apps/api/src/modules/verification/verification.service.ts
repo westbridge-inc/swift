@@ -3,7 +3,7 @@ import { documentLapsesAt, isDocumentValidAt, lapsedExpiryAnd, validExpiryOr } f
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import type { DocState, ReviewQueue } from '@prisma/client';
-import { hopDocState } from './doc-state';
+import { hopDocState, NOT_RETIRED_DOC } from './doc-state';
 import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { approveRegistrantLink, linkedAccountIds, normalizeRegistrationMark, plateClassOf, resolveSubject, rootSubjectId } from './subjects';
@@ -2822,7 +2822,9 @@ export class VerificationService {
     const now = new Date();
     const lapsed = await this.prisma.verificationDocument.findMany({
       // [FOLLOWUPS ruling] lapsed = past the end of its expiry day in Guyana (document-validity.ts)
-      where: { status: { in: ['APPROVED', 'PENDING'] }, AND: lapsedExpiryAnd('expiresAt', now) },
+      // [FIXES-4] A retired copy keeps its old status but is no document of anyone's now: nothing can
+      // expire it and nobody can act on it, so it is not held or reported.
+      where: { status: { in: ['APPROVED', 'PENDING'] }, AND: [...lapsedExpiryAnd('expiresAt', now), NOT_RETIRED_DOC] },
     });
 
     let expired = 0;

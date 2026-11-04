@@ -213,7 +213,7 @@ export class AdvertiserService {
       userId: invited.id,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'An advertiser team invitation',
-      body: `${advertiser?.companyName ?? 'An advertiser'} invited you to join their advertiser team as ${role === 'MANAGER' ? 'a manager' : 'an analyst'}. Nothing changes unless you accept.`,
+      body: `${advertiser?.companyName ?? 'An advertiser'} invited you to join their advertiser team as ${role === 'MANAGER' ? 'a manager' : 'an analyst'}. Nothing changes unless you accept. Accept or decline at swiftgy.com/advertiser.`,
       data: { kind: 'ad_team_invite', advertiserId },
     }).catch(() => {});
   }

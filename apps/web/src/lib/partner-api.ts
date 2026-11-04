@@ -17,6 +17,11 @@ export const getAdvertisers = (): Promise<Advertiser[]> => apiFetch('/api/v1/ads
 export interface AdCheckoutStart { ref: string; status: string; checkoutUrl: string | null }
 export const startAdCheckout = (invoiceId: string, key: string): Promise<AdCheckoutStart> =>
   apiFetch(`/api/v1/ads/invoices/${encodeURIComponent(invoiceId)}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key, 'x-client-platform': 'web' } }).then(r => r.data);
+/** [ADS-ON] An open invitation to an advertiser team. Only its own invited person ever reads it. */
+export interface TeamInvite { advertiserId: string; companyName: string; role: string; invitedAt: string }
+export const getTeamInvites = (): Promise<TeamInvite[]> => apiFetch('/api/v1/ads/advertiser/invites').then(r => r.data);
+export const answerTeamInvite = (advertiserId: string, choice: 'accept' | 'decline') =>
+  apiFetch(`/api/v1/ads/advertiser/${encodeURIComponent(advertiserId)}/members/${choice}`, { method: 'POST', body: '{}' });
 export const getCampaigns = (advertiserId: string): Promise<Campaign[]> =>
   apiFetch(`/api/v1/ads/advertiser/${encodeURIComponent(advertiserId)}/campaigns`).then(r => r.data);
 export interface Notice { id: string; title: string; body: string; isRead: boolean; createdAt: string }
