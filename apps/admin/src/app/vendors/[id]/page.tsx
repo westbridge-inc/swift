@@ -256,7 +256,11 @@ export default function VendorDetailPage({ params }: { params: Promise<{ id: str
     reason: { hint: 'The owner receives this reason, and it is kept on the permanent record.' },
     context,
     submit: ({ reason }) => suspendVendor(id, reason),
-    success: () => `${v.name} is suspended and has stopped taking orders. The owner was sent your reason.`,
+    success: (answer) => {
+      // [BUG-HUNT-2 G07] Support is told what the suspension left open: the customers were told, the orders are still there.
+      const live = Number((answer as { data?: { liveOrders?: unknown } } | null | undefined)?.data?.liveOrders ?? 0);
+      return `${v.name} is suspended and has stopped taking orders. The owner was sent your reason.${live > 0 ? ` ${live} live order${live === 1 ? '' : 's'} left open: the customer${live === 1 ? ' was' : 's were'} told. See Orders.` : ''}`;
+    },
   }));
 
   // [BUG-HUNT F22] What the screens tell a store to ask support for. A store that has been live keeps its type: its

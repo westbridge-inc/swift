@@ -80,7 +80,7 @@ describe('vendor suspension mutation', () => {
           request.method === 'PUT' &&
           request.url.pathname === '/api/v1/admin/vendors/vendor-target/suspend'
         ) {
-          return { body: { success: true, data: { ...vendor, status: 'SUSPENDED' } } };
+          return { body: { success: true, data: { ...vendor, status: 'SUSPENDED', liveOrders: 2 } } };
         }
         throw new Error(`Unexpected request: ${request.method} ${request.url}`);
       }),
@@ -111,6 +111,8 @@ describe('vendor suspension mutation', () => {
     expect(JSON.parse(String(init?.body))).toEqual({ reason: 'Repeated no-shows after three written warnings' });
     expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe('Repeated no-shows after three written warnings');
     expect((await screen.findByRole('status')).textContent).toContain('Target Store is suspended');
+    // [BUG-HUNT-2 G07] Support is told what the suspension left open.
+    expect(screen.getByRole('status').textContent).toContain('2 live orders left open: the customers were told.');
     expect(confirm).not.toHaveBeenCalled();
     expect(prompt).not.toHaveBeenCalled();
   });
