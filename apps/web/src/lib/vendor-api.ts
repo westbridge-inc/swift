@@ -103,6 +103,8 @@ export interface VendorOrder {
   appointmentSlot?: string | null;
   /** [#2198] The server's word on "Customer didn't come" for this appointment, at the read. An older server omits it. */
   noShow?: { allowed?: unknown } | null;
+  /** [BUG-HUNT-2 G20] The server's word on "Not collected" for this ready pickup, at the read. */
+  notCollected?: { allowed?: unknown; goesToSupport?: unknown } | null;
   /** The server's accept deadline for a PENDING order (order/response-sla.ts); null otherwise. */
   respondBy?: string | null;
   acceptedAt?: string | null;
@@ -324,6 +326,9 @@ export const confirmPayment = (id: string, reference: string) =>
 // [STORE-DASH · O-2] With the store's pickup code off, no code: JSON drops the undefined key, so the body is {}.
 export const completePickup = (id: string, code?: string) =>
   apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify({ code }) });
+/** [BUG-HUNT-2 G20] A ready pickup nobody came for: a cash order closes, a paid MMG one goes to Swift support. */
+export const markNotCollected = (id: string): Promise<{ sentToSupport?: boolean }> =>
+  apiFetch(`${V}/orders/${id}/not-collected`, { method: 'PUT', body: '{}' }).then((r) => r.data);
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });
 /** [AF-MOB-006 · U25] The store confirms returned goods are back with it (closes the return). */
 export const confirmReturnReceived = (id: string) =>

@@ -31,7 +31,7 @@ interface RiderRow {
 }
 
 const STATUS_OPTIONS: Array<[string, string]> = [
-  ['', 'Anyone'], ['online', 'Online now'], ['offline', 'Offline'], ['verified', 'Documents verified'], ['unverified', 'Documents not verified'],
+  ['', 'Anyone'], ['online', 'Online now'], ['offline', 'Offline'], ['verified', 'Documents complete'], ['unverified', 'Documents missing'],
 ];
 
 export default function RidersPage() {

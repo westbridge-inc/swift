@@ -145,11 +145,11 @@ describe('[F18] a parcel is goods: the suspension lifts when it is delivered', (
 });
 
 describe('[F18] everything else stays as it is', () => {
-  it('a parcel that failed at the door was not delivered: still suspended, a person has it', async () => {
+  it('a parcel coming back from the door was not delivered: still suspended, a person has it', async () => {
     const job = await parcelInCustody('RECIPIENT', { logOut: true });
     const proof = await post(`/order/${job.orderId}/proof`, job.token, { proofPhotoUrl: job.issued, outcome: 'refused', gps: job.drop });
     expect(proof.statusCode, proof.body).toBe(200);
-    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: job.orderId } })).status).toBe('FAILED');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: job.orderId } })).status).toBe('RETURNING');
     expect(await stamp(job)).not.toBeNull();
     expect(await liftRows(job)).toHaveLength(0);
     expect(await app.prisma.notification.count({ where: { userId: job.userId, title: 'Suspension lifted' } })).toBe(0);

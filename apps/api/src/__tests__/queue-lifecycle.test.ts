@@ -252,7 +252,7 @@ describe('BullMQ lifecycle', () => {
     // [R23 · C10] Then the inactive-account step reads its switch; unset here, so it stops there.
     const closureSwitch = vi.fn().mockResolvedValue(null);
     ctx.prisma = {
-      retentionPolicy: { upsert, findMany: async () => policies }, user: { findMany: erasureCensus }, platformConfig: { findUnique: closureSwitch },
+      retentionPolicy: { upsert, findMany: async () => policies }, privilegedApproval: { findMany: async () => [] }, user: { findMany: erasureCensus }, platformConfig: { findUnique: closureSwitch },
     } as unknown as JobContext['prisma'];
     const queues = createQueues(ctx.redis, ctx.log);
     const workers = await createWorkers(ctx, queues);
