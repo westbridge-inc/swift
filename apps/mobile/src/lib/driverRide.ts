@@ -22,3 +22,11 @@ export function canDriverHandbackRide(ride: {
   if (!DRIVER_PRE_CUSTODY_STATUSES.has(String(ride.status ?? '').toUpperCase())) return false;
   return ride.ridePinVerified !== true && ride.ridePinVerifiedAt == null;
 }
+
+/** [BUG-HUNT-2 G03] What the driver's screen says after the sheet. "Passenger did not arrive" closes the ride, so the server
+ *  answers CANCELLED; any other reason hands it back. The answer decides, never the reason tapped. */
+export function driverHandbackDoneWords(answer: unknown): { title: string; body: string } {
+  return (answer as { status?: unknown } | null | undefined)?.status === 'CANCELLED'
+    ? { title: 'Ride closed', body: 'Recorded: the passenger did not come. This does not count against you.' }
+    : { title: 'Ride handed back', body: 'The passenger is being matched with another driver.' };
+}
