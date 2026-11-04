@@ -118,6 +118,7 @@ function smsLiterals(src: string): string[] {
  */
 const SMS_TEXT_FILES: Record<string, { min: number; why: string }> = {
   'modules/admin/solo-approval.ts': { min: 4, why: 'owner approval notices' },
+  'modules/admin/phone-change.ts': { min: 2, why: 'the code to a new number, the notice to the old one' },
   'modules/ops/seed-plan.ts': { min: 4, why: 'solo re-seed code and notices' },
   'modules/auth/auth.service.ts': { min: 3, why: 'sign-in and reset codes, password-changed notice' },
   'modules/auth/step-up.ts': { min: 1, why: 'confirmation code' },

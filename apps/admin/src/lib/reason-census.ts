@@ -36,6 +36,9 @@ export interface ReasonCaller {
 export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── People ─────────────────────────────────────────────────────────────
   { route: 'PUT /users/:id/suspend', helper: 'suspendUser', args: ['usr_1'] },
+  { route: 'POST /users/:id/phone-change', helper: 'startPhoneChange', args: ['usr_1', '+5926001234'], requiredBodyKeys: ['phone'] },
+  { route: 'POST /users/:id/phone-change/confirm', helper: 'confirmPhoneChange', args: ['usr_1', '123456'], requiredBodyKeys: ['code'] },
+  { route: 'POST /users/:id/mover-plan/allow-move', helper: 'allowMoverPlanMove', args: ['usr_1'] },
   { route: 'POST /service-jobs/:id/close', helper: 'closeServiceJob', args: ['job_1'] },
   { route: 'PUT /users/:id/unsuspend', helper: 'unsuspendUser', args: ['usr_1'] },
   // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] a person lifts a strike restriction
@@ -46,12 +49,15 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── Vendors and movers ─────────────────────────────────────────────────
   { route: 'PUT /vendors/:id/approve', helper: 'approveVendor', args: ['vnd_1'] },
   { route: 'PUT /vendors/:id/suspend', helper: 'suspendVendor', args: ['vnd_1'] },
+  { route: 'PUT /vendors/:id/type', helper: 'changeStoreType', args: ['vnd_1', 'STORE'], requiredBodyKeys: ['vendorType'] },
+  { route: 'PUT /vendors/:id/name', helper: 'changeStoreName', args: ['vnd_1', 'New Name'], requiredBodyKeys: ['name'] },
   { route: 'PUT /riders/:id/verify-documents', helper: 'verifyRiderDocuments', args: ['rdr_1'] },
   { route: 'PUT /drivers/:id/verify-documents', helper: 'verifyDriverDocuments', args: ['drv_1'] },
   { route: 'PUT /drivers/:id/ride-class', helper: 'setDriverRideClass', args: ['drv_1', 'COMFORT'], requiredBodyKeys: ['rideClass'] },
 
   // ── Orders ─────────────────────────────────────────────────────────────
   { route: 'PUT /orders/:id/cancel', helper: 'cancelOrder', args: ['ord_1', { refund: false }] },
+  { route: 'POST /finance/cash-settlements/:id/close', helper: 'closeCashSettlement', args: ['cs_1'] },
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
   { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
     requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },

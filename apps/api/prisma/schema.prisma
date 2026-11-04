@@ -24,6 +24,9 @@ model User {
   billingFeeNotices BillingFeeNotice[]
   id               String     @id @default(cuid())
   phone            String     @unique
+  /// [BUG-HUNT F05] Support allowed one move between delivery and taxi work, until this moment; who allowed it.
+  moverPlanMoveUntil DateTime?
+  moverPlanMoveBy    String?
   email            String?    @unique
   /// [OWNER #13 · Opus S2] When the email last changed (PUT /customer/profile).
   /// Solo approval warns the owner at this address, so it stays off for seven
@@ -5046,6 +5049,10 @@ model DeliveryCashSettlement {
   storeConfirmedById  String?
   riderAttestedAmount Decimal?             @db.Decimal(10, 2)
   storeAttestedAmount Decimal?             @db.Decimal(10, 2)
+  /// Swift support closed this record because neither side can (the reason is in the audit row). Nobody can confirm it
+  /// any more and it blocks nobody. Everything above stays as it was: a closed record is not a settled one.
+  closedAt         DateTime?
+  closedById       String?
   createdAt        DateTime             @default(now())
   @@index([tenantId])
 

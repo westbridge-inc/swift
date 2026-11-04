@@ -29,7 +29,7 @@ export async function reconcileHandoverClaims(
   const windowHours = opts.windowHours ?? HANDOVER_CLAIM_WINDOW_HOURS;
   const cutoff = new Date(now.getTime() - windowHours * 3_600_000);
   const rows = await prisma.deliveryCashSettlement.findMany({
-    where: { createdAt: { lte: cutoff } },
+    where: { createdAt: { lte: cutoff }, closedAt: null },
     select: { id: true, orderId: true, riderId: true, vendorId: true, amount: true, status: true, createdAt: true, riderConfirmedAt: true, storeConfirmedAt: true },
     orderBy: { createdAt: 'asc' },
   });

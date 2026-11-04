@@ -29,3 +29,14 @@ export async function withLiveDocuments<T extends { userId: string; vehicleType:
   await Promise.all(Array.from({ length: Math.min(LIVE_DOCUMENTS_CONCURRENCY, rows.length) }, worker));
   return out;
 }
+
+/** [BUG-HUNT F06] A filter reads every candidate's verdict, so it has a ceiling. Far above any market Swift serves. */
+export const LIVE_DOCUMENTS_FILTER_CAP = 2000;
+
+/** [BUG-HUNT F06] The ids of the rows the verdict GO uses calls complete (or not). A failed evaluation is never "complete". */
+export async function idsByLiveDocuments<T extends { id: string; userId: string; vehicleType: VehicleType; documentsVerified: boolean }>(
+  db: Db, rows: T[], kind: 'DRIVER' | 'RIDER', complete: boolean,
+): Promise<string[]> {
+  const judged = await withLiveDocuments(db, rows, kind);
+  return judged.filter((row) => (row.documentsLive?.allowed === true) === complete).map((row) => row.id);
+}

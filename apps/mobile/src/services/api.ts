@@ -1383,6 +1383,8 @@ export const vendorApi = {
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
   /** [BOOK-NS-APP · owner B3] "Customer didn't come": the server closes the started appointment and records it. */
   markNoShow: (id: string) => api.put(`/vendor/orders/${id}/no-show`),
+  /** [BUG-HUNT-2 G20] A ready pickup nobody came for. */
+  markNotCollected: (id: string) => api.put(`/vendor/orders/${id}/not-collected`),
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),

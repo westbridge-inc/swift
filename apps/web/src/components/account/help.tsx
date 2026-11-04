@@ -4,7 +4,8 @@ import { useRef, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { site } from '@/site.config';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { accountApi, type SupportCategory } from './account-api';
+import type { UseQueryResult } from '@tanstack/react-query';
+import { accountApi, type SupportCategory, type Ticket } from './account-api';
 import { AccountFrame, buttonClass, fieldClass, useAccountQuery } from './account-frame';
 
 const categories: { value: SupportCategory; label: string }[] = [
@@ -15,6 +16,16 @@ const categories: { value: SupportCategory; label: string }[] = [
 
 export function Help({ orderId = '' }: { orderId?: string }) {
   const tickets = useAccountQuery('support', accountApi.tickets);
+  return <AccountFrame title="Help"><HelpPanel tickets={tickets} orderId={orderId} /></AccountFrame>;
+}
+
+/** The form and the person's requests. [BUG-HUNT F04] The partner consoles show it too (components/partner-help). */
+export function HelpPanel({ tickets, orderId = '', customerLinks = true }: {
+  tickets: Pick<UseQueryResult<Ticket[]>, 'data' | 'isError' | 'error' | 'refetch'>;
+  orderId?: string;
+  /** "Find your order" and the like: a customer's pages, which a partner never passes through. */
+  customerLinks?: boolean;
+}) {
   const [category, setCategory] = useState<SupportCategory>(orderId ? 'ORDER_ISSUE' : 'OTHER');
   const [order, setOrder] = useState(orderId);
   const [subject, setSubject] = useState('');
@@ -33,14 +44,14 @@ export function Help({ orderId = '' }: { orderId?: string }) {
     } catch (e) { setError((e as Error).message); }
     finally { sending.current = false; setBusy(false); }
   }
-  return <AccountFrame title="Help">
+  return <>
     <p>Tell us what happened. Track your request and our reply here.</p>
     <div className="flex flex-wrap gap-4 text-[var(--swift-red)] underline"><a href={`mailto:${site.supportEmail}`}>Email support</a><Link href="/faq">Frequently asked questions</Link><Link href="/account/safety">Safety</Link></div>
     <form onSubmit={submit} className="space-y-4 sw-card p-5">
       <fieldset disabled={busy} className="space-y-4">
         <label className="block space-y-1"><span>Topic</span><select className={fieldClass} value={category} onChange={(e) => setCategory(e.target.value as SupportCategory)}>{categories.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}</select></label>
         <label className="block space-y-1"><span>Order ID (optional)</span><input className={fieldClass} maxLength={64} value={order} onChange={(e) => setOrder(e.target.value)} /></label>
-        <Link href="/orders" className="inline-block text-sm underline">Find your order</Link>
+        {customerLinks ? <Link href="/orders" className="inline-block text-sm underline">Find your order</Link> : null}
         <label className="block space-y-1"><span>Short summary</span><input className={fieldClass} required minLength={3} maxLength={120} value={subject} onChange={(e) => setSubject(e.target.value)} /></label>
         <label className="block space-y-1"><span>What happened?</span><textarea className={fieldClass} required minLength={5} maxLength={2000} rows={5} value={message} onChange={(e) => setMessage(e.target.value)} /></label>
       </fieldset>
@@ -54,5 +65,5 @@ export function Help({ orderId = '' }: { orderId?: string }) {
         : tickets.data.length === 0 ? <p>No requests yet.</p>
         : <ul className="space-y-3">{tickets.data.map((ticket) => <li key={ticket.id} className="sw-card p-4"><h3 className="font-bold">{ticket.subject}</h3><p>{ticket.status === 'RESOLVED' ? 'Resolved' : ticket.status === 'IN_PROGRESS' ? 'In progress' : 'Open'}</p>{ticket.adminNote && <p>Swift: {ticket.adminNote}</p>}</li>)}</ul>}
     </section>
-  </AccountFrame>;
+  </>;
 }
