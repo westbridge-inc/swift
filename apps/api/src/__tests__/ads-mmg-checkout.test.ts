@@ -29,6 +29,7 @@ import { MMG_AD_PRODUCT_DESCRIPTION, MMG_CHECKOUT_PRODUCT_DESCRIPTION, SANDBOX_M
 import { lookupDetailFrom, type MmgCheckoutLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
 import { FakeMmgHistory } from './helpers/mmg-history-fake';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { testPhone } from './helpers/fixture-ids';
 import { testPrismaClient } from './helpers/test-prisma-client';
 
 // ---------------------------------------------------------------------------
@@ -85,14 +86,13 @@ const RUN = nanoid(6).toUpperCase().replace(/[^A-Z0-9]/g, 'Q');
 let seq = 0;
 const tx = (name: string) => `${name}${RUN}${(seq += 1)}`;
 const key = () => `tap-${nanoid(12)}`;
-const phoneBase = 592_649_000_000 + Math.floor(Math.random() * 900_000);
 const AMOUNT = 5000;
 const FUTURE = new Date('2027-06-07T00:00:00Z');
 
 async function makeUser(role: 'CUSTOMER' | 'ADMIN' = 'CUSTOMER') {
   seq += 1;
   const user = await app.prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Ad', lastName: `Pay${seq}`, roles: [role], activeRole: role, isPhoneVerified: true, ...(role === 'ADMIN' ? { admin: { create: { permissions: ['*'] } } } : {}) },
+    data: { phone: testPhone(), firstName: 'Ad', lastName: `Pay${seq}`, roles: [role], activeRole: role, isPhoneVerified: true, ...(role === 'ADMIN' ? { admin: { create: { permissions: ['*'] } } } : {}) },
   });
   const token = app.jwt.sign({ userId: user.id, role, jti: nanoid(8) });
   await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `adpay-${seq}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
