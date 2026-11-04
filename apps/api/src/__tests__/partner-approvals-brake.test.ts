@@ -12,6 +12,7 @@ import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { VerificationService } from '../modules/verification/verification.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { partnerApprovalsOpen } from '../modules/verification/approval-brake';
+import { providerChecklist } from '../modules/services/services.service';
 import { REVIEW_QUEUE_SELECT, reviewQueueRow } from '../modules/admin/review-queue-row';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
@@ -120,6 +121,7 @@ afterAll(async () => {
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } }).catch(() => undefined);
     await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: userIds } } } }).catch(() => undefined);
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } }).catch(() => undefined);
+    await app.prisma.serviceProvider.deleteMany({ where: { userId: { in: userIds } } }).catch(() => undefined);
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } }).catch(() => undefined);
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.trialGrant.deleteMany({ where: { accountId: { in: userIds } } }).catch(() => undefined);
@@ -253,6 +255,104 @@ describe('[F23] closed: the last paper waits and nothing starts', () => {
     await expect(subscriptions.startTrialForRider(rider.id)).rejects.toMatchObject({ code: 'PARTNER_APPROVAL_HELD' });
     expect(await feeOf({ vendorId: store.id })).toBeNull();
     expect(await feeOf({ riderId: rider.id })).toBeNull();
+  });
+});
+
+describe('[F23] closed: only the paper that newly completes a partner waits', () => {
+  /** A pro with every paper approved but `missing`, on the real provider gate. */
+  async function proWithPapers(opts: { live: boolean; missing: number }) {
+    const user = await makeUser('Pro');
+    await app.prisma.user.update({ where: { id: user.id }, data: { roles: ['CUSTOMER'] as never[] } });
+    await app.prisma.serviceProvider.create({ data: { userId: user.id, trade: 'plumber', isVerified: opts.live } });
+    const checklist = await providerChecklist(app.prisma, user.id);
+    expect(checklist.length).toBeGreaterThan(opts.missing);
+    for (const docType of checklist.slice(opts.missing)) await paper(user.id, docType, 'CUSTOMER', 'APPROVED');
+    return { user, checklist };
+  }
+
+  it('a pro at their last paper waits, in words that say what it does: they have no trial', async () => {
+    const { user, checklist } = await proWithPapers({ live: false, missing: 1 });
+    const last = await paper(user.id, checklist[0]!, 'CUSTOMER', 'PENDING');
+    close();
+    await expect(approve(last.id)).rejects.toMatchObject({
+      code: 'PARTNER_APPROVAL_HELD',
+      message: `This is the last paper for ${user.firstName} ${user.lastName}. Approving it puts them live. Hold it until ordering day.`,
+    });
+    expect(await docOf(last.id)).toMatchObject({ status: 'PENDING' });
+  });
+
+  it('a pro already live renews a paper: approved, no marker', async () => {
+    const { user, checklist } = await proWithPapers({ live: true, missing: 0 });
+    const renewal = await paper(user.id, checklist[0]!, 'CUSTOMER', 'PENDING');
+    close();
+    await approve(renewal.id);
+    expect(await docOf(renewal.id)).toMatchObject({ status: 'APPROVED', approvalHeldAt: null });
+  });
+
+  it('a pro live on the flag whose paper lapsed renews it: they are live, nothing is theirs to wait for', async () => {
+    const { user, checklist } = await proWithPapers({ live: true, missing: 1 });
+    const renewal = await paper(user.id, checklist[0]!, 'CUSTOMER', 'PENDING');
+    close();
+    await approve(renewal.id);
+    expect(await docOf(renewal.id)).toMatchObject({ status: 'APPROVED', approvalHeldAt: null });
+  });
+
+  it('a store live on the flag whose paper lapsed renews it: nothing is theirs to wait for', async () => {
+    const { store, last } = await storeAtTheLastPaper('Lapsed');
+    await app.prisma.vendor.update({ where: { id: store.id }, data: { isVerified: true } });
+    close();
+    await approve(last.id);
+    expect(await docOf(last.id)).toMatchObject({ status: 'APPROVED', approvalHeldAt: null });
+  });
+
+  it('a store\'s renewal is not held by the same person\'s complete mover papers', async () => {
+    const { owner, store, last } = await storeAtTheLastPaper('Both');
+    await subscriptions.startTrialForVendor(store.id);
+    for (const docType of MOVER_DOCS) await paper(owner.id, docType, 'MOVER', 'APPROVED');
+    close();
+    await approve(last.id);
+    expect(await docOf(last.id)).toMatchObject({ status: 'APPROVED', approvalHeldAt: null });
+  });
+
+  it('papers complete before the brake: one more paper goes through, and starts nothing', async () => {
+    const owner = await makeUser('Complete');
+    const store = await makeStore(owner.id);
+    for (const docType of STORE_DOCS) await paper(owner.id, docType, 'VENDOR_OWNER', 'APPROVED');
+    const another = await paper(owner.id, STORE_DOCS[0]!, 'VENDOR_OWNER', 'PENDING');
+    close();
+    await approve(another.id);
+    expect(await docOf(another.id)).toMatchObject({ status: 'APPROVED', approvalHeldAt: null });
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.id } })).toMatchObject({ status: 'PENDING_APPROVAL', isVerified: false });
+    expect(await feeOf({ vendorId: store.id })).toBeNull();
+  });
+
+  it('a rider already verified with no fee renews: approved, and nothing starts', async () => {
+    const { rider, last } = await riderAtTheLastPaper();
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { documentsVerified: true } });
+    close();
+    await approve(last.id);
+    expect(await docOf(last.id)).toMatchObject({ status: 'APPROVED', approvalHeldAt: null });
+    expect(await feeOf({ riderId: rider.id })).toBeNull();
+  });
+
+  it('a mover with a fee on record renews as ever', async () => {
+    const { rider, last } = await riderAtTheLastPaper();
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { documentsVerified: true } });
+    await new SubscriptionService(app.prisma).startTrialForRider(rider.id);
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { documentsVerified: false } });
+    close();
+    await approve(last.id);
+    expect(await docOf(last.id)).toMatchObject({ status: 'APPROVED', approvalHeldAt: null });
+  });
+
+  it('one person, two lists: the paper that finishes the unfinished one still waits', async () => {
+    const { owner, store, last } = await storeAtTheLastPaper('Second');
+    for (const docType of MOVER_DOCS) await paper(owner.id, docType, 'MOVER', 'APPROVED');
+    close();
+    await expect(approve(last.id)).rejects.toMatchObject({
+      code: 'PARTNER_APPROVAL_HELD',
+      message: `This is the last paper for ${store.name}. Approving it starts their free trial. Hold it until ordering day.`,
+    });
   });
 });
 
