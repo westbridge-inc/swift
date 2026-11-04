@@ -15,6 +15,7 @@ import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { gyDate, gyDateTime } from '@/lib/dates';
+import { liveDocumentsLabel, liveDocumentsOk } from '@/lib/live-documents';
 import { ServiceJobsCard } from './service-jobs';
 
 /** [BUG-GUARDS C5] Why a strike was given, in words (cash-rules.service writes
@@ -204,10 +205,10 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             <h2 id="profiles" className="mc-label">Profiles</h2>
             <ul className="grid gap-1">
               {u.rider ? (
-                <li><Link href={`/riders/${u.rider.id}`} className="mc-row min-h-11"><span>Rider profile</span><span className={`mc-badge${u.rider.documentsVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.rider.documentsVerified ? 'Verified' : 'Not verified'}</span></Link></li>
+                <li><Link href={`/riders/${u.rider.id}`} className="mc-row min-h-11"><span>Rider profile</span><span className={`mc-badge${liveDocumentsOk(u.rider) ? ' mc-tone-good' : ' mc-tone-warn'}`}>{liveDocumentsLabel(u.rider)}</span></Link></li>
               ) : null}
               {u.driver ? (
-                <li><Link href={`/drivers/${u.driver.id}`} className="mc-row min-h-11"><span>Driver profile</span><span className={`mc-badge${u.driver.documentsVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.driver.documentsVerified ? 'Verified' : 'Not verified'}</span></Link></li>
+                <li><Link href={`/drivers/${u.driver.id}`} className="mc-row min-h-11"><span>Driver profile</span><span className={`mc-badge${liveDocumentsOk(u.driver) ? ' mc-tone-good' : ' mc-tone-warn'}`}>{liveDocumentsLabel(u.driver)}</span></Link></li>
               ) : null}
               {(u.vendorOwner?.vendors ?? []).map((v: { id: string; name: string; status: string }) => (
                 <li key={v.id}><Link href={`/vendors/${v.id}`} className="mc-row min-h-11"><Truncate text={v.name} /><StatusBadge group="VendorStatus" value={v.status} /></Link></li>

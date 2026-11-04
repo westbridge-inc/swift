@@ -4,7 +4,7 @@
  * uses — and the lists show that. Older API replies (no field) fall back to the legacy flag.
  */
 export interface LiveDocuments { allowed: boolean; reason: 'ok' | 'docs' | 'insurance'; validUntil: string | null }
-type Mover = { documentsVerified?: boolean; documentsLive?: LiveDocuments | null };
+type Mover = { documentsVerified?: boolean; documentsLive?: Pick<LiveDocuments, 'allowed' | 'reason'> | null };
 
 export function liveDocumentsLabel(mover: Mover): string {
   const live = mover.documentsLive;
