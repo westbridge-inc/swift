@@ -23,7 +23,7 @@ import { MMG_CHECKOUT_TTL_MS, AD_HOLD_PAST_CHECKOUT_MS, MmgCheckoutService } fro
 import { MMG_CHECKOUT_RUNTIME_DECORATION, mmgCheckoutPublicRoutes, type MmgCheckoutRuntime } from '../modules/billing/mmg-checkout.routes';
 import { MMG_FEE_REVERSAL_SWITCH, MmgFeeReversalService } from '../modules/billing/mmg-fee-reversal';
 import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTests } from '../modules/billing/provider-identity-backfill';
-import { AD_LATE_PAYMENT_LIKELY, AD_LOOKUP_NEVER_CONFIRMED, AD_NO_REPLY_UNRESOLVED, AD_POSSIBLE_MATCH, AUTO_CLOSE_LATE_RECORD_AUDIT, AUTO_CLOSE_WATCH_EVERY_MS, AUTO_CLOSE_WATCH_FIRST_MS, AUTO_CLOSE_WATCH_MS, AUTO_CLOSE_WATCH_PURPOSE, NO_REPLY_CHECK_MAX_ATTEMPTS, NO_REPLY_CLOSED_REASON, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS } from '../modules/billing/mmg-expired-hold-check';
+import { AD_LATE_PAYMENT_LIKELY, AD_LOOKUP_NEVER_CONFIRMED, AD_NO_REPLY_UNRESOLVED, AD_POSSIBLE_MATCH, AUTO_CLOSE_LATE_RECORD_AUDIT, AUTO_CLOSE_WATCH_EVERY_MS, AUTO_CLOSE_WATCH_FIRST_MS, AUTO_CLOSE_WATCH_MS, AUTO_CLOSE_WATCH_PURPOSE, NO_REPLY_CHECK_BACKOFF_MS, NO_REPLY_CHECK_MAX_ATTEMPTS, NO_REPLY_CLOSED_REASON, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS } from '../modules/billing/mmg-expired-hold-check';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { MMG_AD_PRODUCT_DESCRIPTION, MMG_CHECKOUT_PRODUCT_DESCRIPTION, SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 import { lookupDetailFrom, type MmgCheckoutLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
@@ -57,6 +57,7 @@ const raw = testPrismaClient();
 let app: FastifyInstance;
 let service: MmgCheckoutService;
 let sandbox: SandboxMmgCheckoutProvider;
+let generatedPair: { publicKey: KeyObject; privateKey: KeyObject };
 let checkoutProvider: () => MmgCheckoutProvider;
 let adSettlement: AdCheckoutService;
 const saved: Record<string, string | undefined> = {};
@@ -164,10 +165,10 @@ beforeAll(async () => {
   process.env['MASTER_KEK'] = randomBytes(32).toString('base64');
   process.env['MMG_CHECKOUT_CREATION_ZONE'] = 'GUYANA_WALL_CLOCK';
   resetKeyProviderForTests();
-  const pair = await new Promise<{ publicKey: KeyObject; privateKey: KeyObject }>((res, rej) => {
+  generatedPair = await new Promise<{ publicKey: KeyObject; privateKey: KeyObject }>((res, rej) => {
     generateKeyPair('rsa', { modulusLength: 4096 }, (err, publicKey, privateKey) => (err ? rej(err) : res({ publicKey, privateKey })));
   });
-  sandbox = new SandboxMmgCheckoutProvider({ request: pair, result: pair }, 'GUYANA_WALL_CLOCK');
+  sandbox = new SandboxMmgCheckoutProvider({ request: generatedPair, result: generatedPair }, 'GUYANA_WALL_CLOCK');
   checkoutProvider = () => sandbox;
   app = await buildApp();
   resetProviderIdentityBackfillCacheForTests();
@@ -755,6 +756,51 @@ describe('A6: a page nobody answered', () => {
     expect([row.status, row.reason, row.candidates]).toEqual(['HELD', AD_LOOKUP_NEVER_CONFIRMED, []]);
     expect((await invoiceOf(f.invoice.id)).status).toBe('UNPAID');
     expect((await told(f.owner.userId)).some((n) => (n.data as { status?: string }).status === 'HELD')).toBe(true);
+  });
+
+  /** How long a page can wait for a read: as long as all the checks would have taken. */
+  const CHECKS_SPAN = NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + NO_REPLY_CHECK_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0);
+
+  it('with no time zone to read MMG by, a page waits as long as the checks would have taken, then goes to a person', async () => {
+    const f = await invoiced();
+    const page = await open(f);
+    await raw.mmgCheckoutIntent.update({ where: { id: page.ref }, data: { expiresAt: new Date(Date.now() - MIN) } });
+    await service.pollIntents();
+    const row = await intentOf(page.ref);
+    const keys = { request: generatedPair, result: generatedPair };
+    checkoutProvider = () => new SandboxMmgCheckoutProvider(keys, null);
+    try {
+      await service.pollIntents(after(row, CHECKS_SPAN - MIN));
+      expect([(await intentOf(page.ref)).status, (await intentOf(page.ref)).reason]).toEqual(['EXPIRED', 'NO_REPLY']);
+      await service.pollIntents(after(row, CHECKS_SPAN + MIN));
+    } finally {
+      checkoutProvider = () => sandbox;
+    }
+    expect([(await intentOf(page.ref)).status, (await intentOf(page.ref)).reason]).toEqual(['HELD', AD_NO_REPLY_UNRESOLVED]);
+    expect(history.queries).toEqual([]);
+    expect((await told(f.owner.userId)).some((n) => (n.data as { status?: string }).status === 'HELD')).toBe(true);
+    expect((await invoiceOf(f.invoice.id)).status).toBe('UNPAID');
+  });
+
+  it('with no confirmed payment to prove a read with, a page waits as long as the checks would have taken, then goes to a person', async () => {
+    const operator = `adread-${nanoid(8)}`;
+    await raw.tenant.create({ data: { id: operator, name: 'New operator', slug: operator, isActive: true } });
+    const owner = await makeUser();
+    const advertiser = await raw.advertiser.create({ data: { tenantId: operator, companyName: `New Co ${nanoid(5)}`, industry: 'RETAIL', contactName: 'C', contactEmail: 'c@x.gy', contactPhone: '+5926000000', createdByUserId: owner.userId, status: 'APPROVED' } });
+    const placement = await raw.adPlacement.create({ data: { tenantId: operator, key: `new_${nanoid(6)}`, name: 'New', tier: 3, mediaKind: 'IMAGE', weeklyPrice: AMOUNT, slotsPerWeek: 6 } });
+    const campaign = await raw.adCampaign.create({ data: { tenantId: operator, advertiserId: advertiser.id, placementId: placement.id, name: 'New', cities: ['*'], startWeek: FUTURE, endWeek: FUTURE, totalAmount: AMOUNT } });
+    const invoice = await raw.adInvoice.create({ data: { tenantId: operator, advertiserId: advertiser.id, campaignId: campaign.id, number: `ADS-TEST-${nanoid(8)}`, amount: AMOUNT, provider: 'MMG' } });
+    const page = await raw.mmgCheckoutIntent.create({ data: {
+      tenantId: operator, adInvoiceId: invoice.id, merchantTransactionId: `8${String(Date.now())}${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`, amount: AMOUNT, currencyCode: 'GYD',
+      createdByUserId: owner.userId, platform: 'web', expiresAt: new Date(Date.now() + MIN), checkoutUrlSealed: Buffer.alloc(40, 1), checkoutUrlDek: Buffer.alloc(40, 2),
+    } });
+    await raw.mmgCheckoutIntent.update({ where: { id: page.id }, data: { status: 'EXPIRED', reason: 'NO_REPLY', expiresAt: new Date(Date.now() - MIN) } });
+    const rowOf = () => raw.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: page.id } });
+    const row = await rowOf();
+    await service.pollIntents(after(row, CHECKS_SPAN - MIN));
+    expect((await rowOf()).status).toBe('EXPIRED');
+    await service.pollIntents(after(row, CHECKS_SPAN + MIN));
+    expect([(await rowOf()).status, (await rowOf()).reason]).toEqual(['HELD', AD_NO_REPLY_UNRESOLVED]);
   });
 
   it('a failed read closes nothing: it stays unresolved and is asked again', async () => {

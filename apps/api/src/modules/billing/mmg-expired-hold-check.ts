@@ -68,6 +68,8 @@ export const NO_REPLY_CHECK_BACKOFF_MS: readonly number[] = [
 ];
 /** After this many checks, the hold is the admins' alone (as today). */
 export const NO_REPLY_CHECK_MAX_ATTEMPTS = NO_REPLY_CHECK_BACKOFF_MS.length + 1;
+/** [ADS-ON] How long all the checks take, first to last: an ad checkout MMG's records cannot be read for waits this long past its first check, then goes to a person. */
+export const NO_REPLY_CHECKS_SPAN_MS = NO_REPLY_CHECK_BACKOFF_MS.reduce((sum, ms) => sum + ms, 0);
 /** Checks per poll, and how many recent confirmed checkouts may serve as the control. */
 const CHECK_BATCH = 20;
 const SCAN = 500;
@@ -360,8 +362,10 @@ export const AD_POSSIBLE_MATCH = 'AD_POSSIBLE_MATCH_AFTER_AUTO_CLOSE';
  * until it is resolved no new page opens for its campaign: money may be at MMG, and a second page could take it
  * twice. A checkout nobody answered gets the same reading of MMG's records as the weekly fee's: MMG shows no payment
  * and the read is proven healthy, and it closes as not paid; MMG shows something that could be it, or the checks run
- * out, and it goes to a person. One that had any answer MMG never confirmed goes to a person once its late window has
- * ended. Closed as not paid, it is watched for a week (watchAutoClosedAdCheckouts). Nothing here ever credits.
+ * out, and it goes to a person. So does one MMG's records cannot be read for at all (no time zone set, or no confirmed
+ * payment to prove the read with), once the checks would have run out: those write no attempt, so nothing else would
+ * ever end them. One that had any answer MMG never confirmed goes to a person once its late window has ended. Closed
+ * as not paid, it is watched for a week (watchAutoClosedAdCheckouts). Nothing here ever credits.
  */
 export async function checkExpiredAdCheckouts(
   db: PrismaClient,
@@ -382,8 +386,6 @@ export async function checkExpiredAdCheckouts(
     await deps.holdForReview(row.id, AD_LOOKUP_NEVER_CONFIRMED, now);
     out.held += 1;
   }
-  if (!deps.zone) return out;
-  const zone = deps.zone;
   const rows = await db.mmgCheckoutIntent.findMany({
     where: { adInvoiceId: { not: null }, ...NEVER_ANSWERED, expiresAt: { lte: new Date(now.getTime() - NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS) } },
     orderBy: [{ expiresAt: 'desc' }, { id: 'asc' }], take: SCAN, select: CHECKOUT_FIELDS,
@@ -401,23 +403,33 @@ export async function checkExpiredAdCheckouts(
     const at = noReplyCheckDueAt(c, attempts, lastAt);
     if (at !== null && at > now.getTime()) continue;
     try {
-      // The checks ran out, or a reply is on record: nothing automatic may close it.
-      if (at === null || await blockerOf(db, c, now)) {
+      const toPerson = async () => {
         await deps.holdForReview(c.id, AD_NO_REPLY_UNRESOLVED, now);
         out.held += 1;
+      };
+      const unreadTooLong = now.getTime() >= firstCheckAt(c) + NO_REPLY_CHECKS_SPAN_MS;
+      // The checks ran out, or a reply is on record: nothing automatic may close it.
+      if (at === null || await blockerOf(db, c, now)) {
+        await toPerson();
+        continue;
+      }
+      if (!deps.zone) {
+        if (unreadTooLong) await toPerson();
         continue;
       }
       let control = controls.get(c.tenantId);
       if (!control) {
-        control = await proveControl(db, deps.lookup, zone, c.tenantId, now);
+        control = await proveControl(db, deps.lookup, deps.zone, c.tenantId, now);
         controls.set(c.tenantId, control);
       }
-      if (!control.ok && control.reason === 'NO_CONTROL') continue;
+      if (!control.ok && control.reason === 'NO_CONTROL') {
+        if (unreadTooLong) await toPerson();
+        continue;
+      }
       out.checked += 1;
-      const { decision } = await readNeverAnswered(db, deps, zone, { checkout: c, attempts }, control, now);
+      const { decision } = await readNeverAnswered(db, deps, deps.zone, { checkout: c, attempts }, control, now);
       if (decision === 'PAYMENT_MAY_MATCH') {
-        await deps.holdForReview(c.id, AD_NO_REPLY_UNRESOLVED, now);
-        out.held += 1;
+        await toPerson();
       } else if (decision === 'NO_PAYMENT' && control.ok) {
         const moved = await db.mmgCheckoutIntent.updateMany({
           where: { id: c.id, ...NEVER_ANSWERED },
