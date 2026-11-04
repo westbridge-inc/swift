@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { allowMoverPlanMove, fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction } from '@/lib/api';
+import { allowMoverPlanMove, fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction, deleteVerifiedRequest } from '@/lib/api';
 import { label } from '@/lib/labels';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
@@ -39,6 +39,9 @@ const STRIKE_REASON: Record<string, string> = {
 const when = (iso?: string | null, withTime = false) =>
   iso ? (withTime ? gyDateTime(iso) : gyDate(iso)) : '—';
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
+
+/** The server's rule on a verified deletion's note: six digits, however spaced, or an address, is refused. */
+const NO_ID_OR_ADDRESS = /^(?![\s\S]*@)(?![\s\S]*(?:\d[\s-]*){6})/;
 
 function Row({ label: name, children }: { label: string; children: React.ReactNode }) {
   if (children == null || children === '') return null;
@@ -134,6 +137,26 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
     success: () => `${name} is banned.`,
   }));
 
+  // [BUG-HUNT F20] A verified deletion request from someone who cannot sign in (docs/ops/verified-deletion-request.md).
+  // The server holds every rule; this offers the door only where it can work.
+  const staffAccount = (u.roles ?? []).some((role: string) => role === 'ADMIN' || role === 'SUPER_ADMIN');
+  const canDelete = u.viewer?.superAdmin === true && !staffAccount && u.status !== 'DEACTIVATED' && u.status !== 'BANNED';
+  const deleteAccount = async () => show(await dialog.run({
+    title: `Delete ${name}'s account?`,
+    body: <p>Only for a request you have verified, from someone who cannot sign in. This runs the person&apos;s own deletion: live orders or open cash refuse it, and financial and legal records are kept. It cannot be undone, and it needs approval first.</p>,
+    confirmLabel: 'Ask to delete account',
+    reason: { hint: 'Kept on the permanent record.' },
+    fields: [
+      { kind: 'choice', name: 'identityCheck', label: 'How identity was checked', options: [
+        { value: 'CODE_TO_ACCOUNT_NUMBER', label: 'A code sent to the number on the account' },
+        { value: 'OWNER_CHECKED', label: 'Another way, checked by the owner' },
+      ] },
+      { kind: 'text', name: 'identityNote', label: 'What was done', required: true, minLength: 12, maxLength: 300, hint: 'In words. Never copy from an identity document.', pattern: NO_ID_OR_ADDRESS, patternMessage: 'Say how it was checked, in words: no ID or phone numbers, no addresses.' },
+    ],
+    submit: ({ reason, values }) => deleteVerifiedRequest(id, { identityCheck: String(values['identityCheck']), identityNote: String(values['identityNote']) }, reason),
+    success: () => 'Account closed.',
+  }));
+
   return (
     <div className="mc-page">
       {back}
@@ -165,6 +188,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           {(u.roles ?? []).some((r: string) => r === 'ADMIN' || r === 'SUPER_ADMIN') ? null : <PhoneChangeAction userId={id} name={name} onResult={show} />}
           {u.rider || u.driver ? <button type="button" className="mc-btn" onClick={allowPlanMove}>Allow plan move…</button> : null}
           {u.status !== 'BANNED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={ban}>Ban…</button> : null}
+          {canDelete ? <button type="button" className="mc-btn mc-btn-danger" onClick={deleteAccount}>Delete account…</button> : null}
         </div>
       </header>
 

@@ -466,7 +466,8 @@ export default function OrderDetailPage() {
   const holdExpiryMs = holdExpiresAt ? new Date(holdExpiresAt).getTime() : 0;
   const holdActive = !stopped && !order.rider && order.status === 'PENDING' && Number.isFinite(holdExpiryMs) && holdExpiryMs > now;
   const isTaxi = order.orderType === 'TAXI';
-  const taxiCancellationUnknown = isTaxi && ['DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'].includes(order.status);
+  // [BUG-HUNT-2 G04] At the pickup the server decides (nobody aboard, 15 minutes after the arrival): it read the code, this page cannot.
+  const taxiCancellationUnknown = isTaxi && order.status === 'RIDE_IN_PROGRESS';
   const canOfferCancellation = Boolean(order.canCancel) && !stopped && !taxiCancellationUnknown;
   const bookingView = order.fulfillment === 'APPOINTMENT' ? appointmentBookingView(order) : null;
   const stages = stagesFor(order);
@@ -555,8 +556,7 @@ export default function OrderDetailPage() {
       const latest = (await getOrder(id)) as OrderDetail;
       setOrder({ ...latest, rider: latest.rider ?? order.rider });
       setLastUpdatedAt(new Date());
-      const latestTaxiCancellationUnknown = latest.orderType === 'TAXI'
-        && ['DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'].includes(latest.status);
+      const latestTaxiCancellationUnknown = latest.orderType === 'TAXI' && latest.status === 'RIDE_IN_PROGRESS';
       if (!latest.canCancel || latestTaxiCancellationUnknown || ['CANCELLED', 'REFUNDED', 'FAILED'].includes(latest.status)) {
         setConfirmingCancel(false);
         setError('This order can no longer be cancelled. Swift refreshed its current status.');

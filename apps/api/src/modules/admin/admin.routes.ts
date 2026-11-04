@@ -36,7 +36,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { lockFeeCollectionAuthority, moverFeeSourceSummary, resolveMoverFeeAuthority, resolveMoverFeeHold, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { CashRulesService, orderingRestriction, STRIKE_RESTRICTION_LIFTED } from '../cash/cash-rules.service';
 import { resolveHeldDoorCash } from '../cash/door-cash-hold';
-import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES, type CanonicalOrderTransitionInput } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
@@ -1407,7 +1407,8 @@ export async function adminRoutes(app: FastifyInstance) {
       mover ? (await withLiveDocuments(app.prisma, [{ ...mover, userId: id }], kind))[0]! : null
     );
     const [rider, driver] = await Promise.all([liveOf(user.rider, 'RIDER'), liveOf(user.driver, 'DRIVER')]);
-    return { success: true, data: maskPersonPage(sanitizeUser({ ...user, rider, driver, addresses })) };
+    // [BUG-HUNT F20] Who is looking, so the console offers the founder's door only to a founder (the route decides again).
+    return { success: true, data: { ...maskPersonPage(sanitizeUser({ ...user, rider, driver, addresses })), viewer: { superAdmin: request.user.role === 'SUPER_ADMIN' } } };
   });
 
   // [FOLLOWUPS · follows O-1] The audited door to this person's full number (person-contact.ts): a stated reason
@@ -3550,11 +3551,35 @@ export async function adminRoutes(app: FastifyInstance) {
     // The code was verified and the driver never tapped Start: the passenger is in the car, so a cancel is refused and the
     // machine has no FAILED from here. The ride walks through its own start to the same exit, in one commit.
     const neverStarted = order.status === 'DRIVER_ARRIVED' && hasTaxiPassengerCustody(order);
+    // The close, both notices and the driver going offline commit with the transition, as the job close does. It runs on
+    // the step that reaches FAILED, after that step frees the driver, so nothing writes the driver available again.
+    const closeRide: NonNullable<CanonicalOrderTransitionInput['withinTransaction']> = async (tx, locked) => {
+      noticeIds.length = 0;
+      const driver = locked.driverId ? await tx.driver.findUnique({ where: { id: locked.driverId }, select: { id: true, userId: true } }) : null;
+      const parties = [
+        { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
+        ...(driver ? [{ userId: driver.userId, body: `${closed} You are offline until you go online again. If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
+      ];
+      await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
+      if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
+        throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
+      }
+      for (const party of parties) {
+        const row = await insertNoticeFor(tx, {
+          userId: party.userId, type: 'ORDER_UPDATE', title: 'Ride closed by Swift', body: party.body,
+          data: taxiNotificationData(id, { status: 'FAILED' }, party.audience) as Prisma.InputJsonObject,
+          dedupeKey: `ride-closed:${id}:${party.userId}`,
+        });
+        noticeIds.push(row.id);
+      }
+      // A gone driver left online would be offered the next ride. A driver already on another ride is not touched.
+      if (driver) await tx.driver.updateMany({ where: { id: driver.id, currentRideId: null }, data: { isOnline: false, isAvailable: false, locationSessionId: null } });
+    };
     await orderService.transitionOrderAtomically({
       orderId: id,
       ...(neverStarted
-        ? { target: 'RIDE_IN_PROGRESS' as const, allowedFrom: ['DRIVER_ARRIVED'] as const, note: 'Passenger code verified: the driver never started the trip', continueTo: { target: 'FAILED' as const, note: closeNote, when: () => true } }
-        : { target: 'FAILED' as const, allowedFrom: ['RIDE_IN_PROGRESS'] as const, note: closeNote }),
+        ? { target: 'RIDE_IN_PROGRESS' as const, allowedFrom: ['DRIVER_ARRIVED'] as const, note: 'Passenger code verified: the driver never started the trip', continueTo: { target: 'FAILED' as const, note: closeNote, when: () => true, withinTransaction: closeRide } }
+        : { target: 'FAILED' as const, allowedFrom: ['RIDE_IN_PROGRESS'] as const, note: closeNote, withinTransaction: closeRide }),
       changedBy: request.user.userId,
       operatorAudit: {
         userId: request.user.userId,
@@ -3566,26 +3591,6 @@ export async function adminRoutes(app: FastifyInstance) {
         userAgent: request.headers['user-agent'],
       },
       invalidStatus: (current) => new AppError(409, 'RIDE_NOT_IN_PROGRESS', `This ride is not in progress (it is ${current}).`),
-      // The close, the audit row and both notices commit together, as the job close does.
-      withinTransaction: async (tx, locked) => {
-        const driver = locked.driverId ? await tx.driver.findUnique({ where: { id: locked.driverId }, select: { userId: true } }) : null;
-        const parties = [
-          { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
-          ...(driver ? [{ userId: driver.userId, body: `${closed} If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
-        ];
-        await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
-        if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
-          throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
-        }
-        for (const party of parties) {
-          const row = await insertNoticeFor(tx, {
-            userId: party.userId, type: 'ORDER_UPDATE', title: 'Ride closed by Swift', body: party.body,
-            data: taxiNotificationData(id, { status: 'FAILED' }, party.audience) as Prisma.InputJsonObject,
-            dedupeKey: `ride-closed:${id}:${party.userId}`,
-          });
-          noticeIds.push(row.id);
-        }
-      },
     });
     await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'FAILED' });
     await Promise.all(noticeIds.map((noticeId) => notifications.publishPersisted(noticeId)));
@@ -7920,6 +7925,41 @@ export async function adminRoutes(app: FastifyInstance) {
     };
     await writeTicket(closureWhere, closureData);
     return { success: true, data: { ticketId: id, outcome } };
+  });
+
+  // [BUG-HUNT F20] The public deletion page tells someone who cannot sign in to email us. Their request has no
+  // confirmation inside a session, so the route above refuses it. This is that door, for a request a person verified:
+  // the same erasure with every blocker, founder only from the first byte so an admin queues nothing, two people or the
+  // owner's solo approval (C5). The procedure is docs/ops/verified-deletion-request.md. How identity was checked is
+  // recorded in words on a permanent row, so the note takes no number long enough to be an ID or a phone and no address,
+  // and the route takes no document.
+  const verifiedDeletionSchema = z.object({
+    reason: z.string().optional(),
+    identityCheck: z.enum(['CODE_TO_ACCOUNT_NUMBER', 'OWNER_CHECKED']),
+    identityNote: z.string().trim().min(12).max(300)
+      .refine((note) => !/\d{6}|@/.test(note.replace(/[\s-]/g, '')), 'Say how it was checked, in words: no ID or phone numbers, no addresses.'),
+  }).strict();
+
+  app.post('/users/:id/verified-deletion', { onRequest: [founderGuard], preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { identityCheck, identityNote } = verifiedDeletionSchema.parse(request.body);
+    const [subject, staffGrant] = await Promise.all([
+      tenantPrisma.user.findUnique({ where: { id }, select: { roles: true, status: true } }),
+      app.prisma.admin.findUnique({ where: { userId: id }, select: { userId: true } }),
+    ]);
+    if (!subject) throw new NotFoundError('User', id);
+    if (id === request.user.userId || staffGrant || subject.roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
+      throw new ForbiddenError('A staff account is not closed from this door.');
+    }
+    if (subject.status === 'DEACTIVATED') throw new AppError(409, 'ALREADY_CLOSED', 'This account is already closed.');
+    const facts = { identityCheck, identityNote, fromStatus: subject.status, approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null };
+    // Past every blocker and with the tombstone written, in the erasure's own transaction: the row shows what changed,
+    // and a refusal leaves no record of a deletion.
+    const outcome = await new AccountService(app).deleteAccount(id, false, 'app', {
+      verifiedRequest: true,
+      onCutoff: (tx) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    });
+    return { success: true, data: { outcome } };
   });
 
   // =========================================================================

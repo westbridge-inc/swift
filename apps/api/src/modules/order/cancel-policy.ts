@@ -77,16 +77,22 @@ export const STORE_VERY_LATE_AFTER_MIN = 60;
  *  late: the customer would wait on the store forever with no way out. */
 export const STORE_FALLBACK_PROMISE_MIN = 45;
 
+/** [BUG-HUNT-2 G04 · COORD 4 Nov 2026] A ride whose driver marked arrived and nobody boarded is very late this many minutes
+ *  after the arrival: a driver who sits there or drives off leaves nobody stuck. Once the code is verified the passenger is
+ *  aboard and no cancel reaches it. */
+export const TAXI_ARRIVED_VERY_LATE_MIN = 15;
 /** [BUG-HUNT-2 G20 · COORD 4 Nov 2026] A pickup the store marked ready and nobody came for is "not collected" this many
  *  hours after it was ready (or after its slot, when that is later). From then the store can record it and the customer
  *  can cancel a cash one. Before this the order had no exit but a false "picked up". */
 export const PICKUP_NOT_COLLECTED_AFTER_HOURS = 24;
 
 /** [owner 17 Oct 2026] How long past its promised moment THIS order must be to
- *  count as very late: a store order `STORE_VERY_LATE_AFTER_MIN`, every other
- *  kind `VERY_LATE_AFTER_MIN`. The one place the number is chosen. */
-export function veryLateAfterMin(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'>): number {
-  return isStoreOrder(order) ? STORE_VERY_LATE_AFTER_MIN : VERY_LATE_AFTER_MIN;
+ *  count as very late: a store order `STORE_VERY_LATE_AFTER_MIN`, a ride at its
+ *  pickup `TAXI_ARRIVED_VERY_LATE_MIN`, every other kind `VERY_LATE_AFTER_MIN`.
+ *  The one place the number is chosen. */
+export function veryLateAfterMin(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'> & Partial<Pick<CancellationSnapshot, 'status'>>): number {
+  if (isStoreOrder(order)) return STORE_VERY_LATE_AFTER_MIN;
+  return order.orderType === 'TAXI' && order.status === 'DRIVER_ARRIVED' ? TAXI_ARRIVED_VERY_LATE_MIN : VERY_LATE_AFTER_MIN;
 }
 
 /** The fields the cancellation decision reads. Structural on purpose: the
@@ -122,6 +128,8 @@ export type CancellationSnapshot = {
   estimatedDeliveryTime?: number | null;
   /** [owner #50] When the driver took the ride (the claim writes it). */
   acceptedAt?: Date | null;
+  /** [BUG-HUNT-2 G04] When the driver arrived at the pickup. Absent: not known, so a ride at the pickup is never very late. */
+  driverArrivedAt?: Date | null;
   /** [BUG-HUNT-2 G20] When the store marked it ready. Absent: not known to be ready, so never "not collected". */
   readyAt?: Date | null;
   /** [owner ruling 14 Oct] When the driver, rider or provider took THIS job —
@@ -370,7 +378,9 @@ function freeWindowEnd(order: CancellationSnapshot): Date | null {
  *  - booking: the slot, while the provider has accepted but not completed it;
  *  - ride: the driver's acceptance, while the driver has not arrived. No
  *    pickup ETA is stored on a ride, so the quoted ETA is taken as zero: very
- *    late = thirty minutes after the driver accepted and still not there;
+ *    late = thirty minutes after the driver accepted and still not there.
+ *    [BUG-HUNT-2 G04] At the pickup: the arrival, and very late fifteen minutes
+ *    after it with nobody aboard;
  *  - parcel: placing (or the end of its hold, or its slot) + the quoted job
  *    minutes, while the rider has not reached the pickup.
  */
@@ -389,7 +399,9 @@ function promisedMoment(order: CancellationSnapshot): Date | null {
     return latest([promise, order.scheduledFor]);
   }
   if (order.orderType === 'TAXI') {
-    if (order.driverId == null || (order.status !== 'DRIVER_ASSIGNED' && order.status !== 'DRIVER_EN_ROUTE')) return null;
+    if (order.driverId == null) return null;
+    if (order.status === 'DRIVER_ARRIVED') return order.driverArrivedAt ?? null;
+    if (order.status !== 'DRIVER_ASSIGNED' && order.status !== 'DRIVER_EN_ROUTE') return null;
     return latest([order.acceptedAt ?? order.placedAt, order.scheduledFor]);
   }
   if (order.orderType === 'COURIER') {
@@ -430,6 +442,9 @@ export const APPOINTMENT_TOO_LATE_MESSAGE = 'The provider is running very late. 
 /** [owner #46/#50/#52] Whose lateness frees the cancel, in the customer's words. */
 function tooLateMessage(order: CancellationSnapshot): string {
   if (order.fulfillment === 'APPOINTMENT') return APPOINTMENT_TOO_LATE_MESSAGE;
+  if (order.orderType === 'TAXI' && order.status === 'DRIVER_ARRIVED') {
+    return `This ride is very late starting: your driver arrived over ${TAXI_ARRIVED_VERY_LATE_MIN} minutes ago and you are not aboard. You can cancel it for free.`;
+  }
   if (order.orderType === 'TAXI') return 'Your driver is running very late. You can cancel the ride for free.';
   if (order.orderType === 'COURIER') return 'Your rider is running very late. You can cancel for free.';
   return TOO_LATE_FREE_CANCEL_MESSAGE;
