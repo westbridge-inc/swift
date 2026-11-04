@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { buildApp } from '../app';
@@ -85,6 +85,7 @@ let manager: Actor;
 let removed: Actor;
 
 beforeAll(async () => {
+  vi.stubEnv('RUN_WORKERS', '0'); // requests only: the scheduler would leave recurring jobs on queues other suites read
   app = await buildApp();
   await app.ready();
   customer = await makeUser();
@@ -111,6 +112,7 @@ afterAll(async () => {
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   });
   await app?.close();
+  vi.unstubAllEnvs();
 });
 
 describe('[F03] the signed-in user says whether this account has a seat at a store', () => {
