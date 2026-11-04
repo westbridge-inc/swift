@@ -76,6 +76,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'erasure-ledger-watch': { policy: 'SAFE_REPLAY', why: 'Reads ledger counts and ages and pages through pageOps, which dedupes on an open page. It writes no business rows.' },
   'malware-scanner-watch': { policy: 'SAFE_REPLAY', why: 'Asks the scanner PING, counts consecutive failures in one Redis key and pages through pageOps, which keeps one open page per title. It writes no business rows; a replay is one more ask.' },
   'ride-overdue-watch': { policy: 'SAFE_REPLAY', why: 'Reads the rides in progress and pages through pageOps, which keeps one open page per title. It writes no business rows and closes no ride; a replay is one more read.' },
+  'fee-refund-case-sweep': { policy: 'SAFE_REPLAY', why: 'Closes a case by a compare-and-set on OPEN, only on a REVERSED reversal of its payment, and pages through pageOps, which keeps one open page per title. It moves no money; a replay finds the closed cases gone from the open set.' },
   'error-rate-watch': { policy: 'SAFE_REPLAY', why: 'Reads the hourly error tally and pages through pageOps, which keeps one open page per title and one delivered page per key window; a closed page stays closed. It writes no business rows; a replay is one more read.' },
   'upload-rescan': { policy: 'SAFE_REPLAY', why: 'Each row closes by a compare-and-set on rescannedAt IS NULL; a replay finds closed rows gone from the open set. A positive moved to quarantine is no longer open, and its page goes through pageOps (one open page per title).' },
   'backup-freshness': { policy: 'SAFE_REPLAY', why: 'Reads backup state and pages through opsPageOnce, which is explicitly deduped. It writes no business rows.' },
@@ -147,6 +148,7 @@ export type JobName =
   | 'erasure-ledger-watch'
   | 'malware-scanner-watch'
   | 'ride-overdue-watch'
+  | 'fee-refund-case-sweep'
   | 'error-rate-watch'
   | 'upload-rescan'
   | 'reaper-lag'
