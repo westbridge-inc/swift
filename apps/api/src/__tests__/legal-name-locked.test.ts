@@ -12,7 +12,8 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
+import { changeLegalName } from '../modules/user/legal-name';
 
 // ---------------------------------------------------------------------------
 // [BUG-HUNT F21 · COORD 4 Nov 2026] A verified driver could rename themselves and stay verified. Once a person has
@@ -22,6 +23,7 @@ import { testPhone } from './helpers/fixture-ids';
 const DAY = 86_400_000;
 let app: FastifyInstance;
 let adminToken: string;
+let adminId: string;
 const userIds: string[] = [];
 
 async function makeUser(papers: Array<[string, 'APPROVED' | 'PENDING' | 'REJECTED']> = []) {
@@ -60,7 +62,9 @@ beforeAll(async () => {
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  adminToken = (await loginWithOtp(app, '+5926001000')).json().data.tokens.accessToken;
+  const admin = (await loginWithOtp(app, '+5926001000')).json().data;
+  adminToken = admin.tokens.accessToken;
+  adminId = admin.user.id;
 }, 60_000);
 
 afterAll(async () => {
@@ -118,6 +122,51 @@ describe('[F21] the door the refusal points at', () => {
   it('the same name is not a change', async () => {
     const u = await makeUser();
     expect((await support(u.id, { firstName: 'Original', lastName: 'Person' })).statusCode).toBe(409);
+  });
+
+  it('a staff account is out of reach, for anyone: a founder\'s name changes only by their own sign-in', async () => {
+    const staff = await app.prisma.user.create({ data: { phone: testPhone(), firstName: 'Staff', lastName: 'Person', roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', isPhoneVerified: true } });
+    userIds.push(staff.id);
+    const res = await support(staff.id, { firstName: 'Taken', lastName: 'Over' });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error.code).toBe('STAFF_ACCOUNT');
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: staff.id } })).firstName).toBe('Staff');
+  });
+
+  it('an admin cannot use this door on their own account', async () => {
+    const res = await support(adminId, { firstName: 'My', lastName: 'Self' });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error.code).toBe('STAFF_ACCOUNT');
+  });
+
+  it('a staff role under a customer hat is staff', async () => {
+    const hat = await app.prisma.user.create({ data: { phone: testPhone(), firstName: 'Hat', lastName: 'Person', roles: ['CUSTOMER', 'ADMIN'], activeRole: 'CUSTOMER', isPhoneVerified: true } });
+    userIds.push(hat.id);
+    expect((await support(hat.id, { firstName: 'Taken', lastName: 'Over' })).statusCode).toBe(403);
+  });
+
+  it('a closed account stays closed: no name is written over an erased one', async () => {
+    const person = await makeUser();
+    const tombstone = `deleted:${person.id}`;
+    await app.prisma.user.update({ where: { id: person.id }, data: { phone: tombstone, status: 'DEACTIVATED' } });
+    const res = await support(person.id, { firstName: 'Back', lastName: 'Again' });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('ACCOUNT_CLOSED');
+    expect(await nameOf(person.id)).toBe('Original Person');
+  });
+
+  it('a reserved test name is refused for a real account', async () => {
+    const person = await makeUser();
+    await app.prisma.user.update({ where: { id: person.id }, data: { phone: `+59264${wordFreeTag(5)}` } });
+    const res = await support(person.id, { firstName: 'TEST-Person', lastName: 'Person' });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe('RESERVED_NAME');
+  });
+
+  it('the change and its trail are one commit', async () => {
+    const person = await makeUser();
+    await expect(changeLegalName(app.prisma, person.id, { firstName: 'Second', lastName: 'Name' }, async () => { throw new Error('the trail refused'); })).rejects.toThrow('the trail refused');
+    expect(await nameOf(person.id)).toBe('Original Person');
   });
 
   it('it takes a reason', async () => {

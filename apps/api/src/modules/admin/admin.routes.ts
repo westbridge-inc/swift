@@ -108,8 +108,8 @@ import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCas
 import { maskSubscription, maskUserPhone } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
-import { personForNameChange } from '../user/legal-name';
-import { assertNameNotReserved, FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
+import { changeLegalName } from '../user/legal-name';
+import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { assertNotBannedGoods, catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
@@ -1439,13 +1439,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/users/:id/name', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { firstName, lastName } = legalNameChangeSchema.parse(request.body ?? {});
-    const person = await personForNameChange(app.prisma, id);
-    if (!person) throw new NotFoundError('User', id);
-    const changed = [...(firstName !== person.firstName ? ['firstName'] : []), ...(lastName !== person.lastName ? ['lastName'] : [])];
-    if (changed.length === 0) throw new AppError(409, 'NOTHING_TO_CHANGE', 'That is already the name on this account.');
-    assertNameNotReserved(firstName, person.phone, person.firstName);
-    await app.prisma.user.update({ where: { id }, data: { firstName, lastName } });
-    await audit(request.user.userId, 'CHANGE_LEGAL_NAME', 'User', id, { changed }, request);
+    const changed = await changeLegalName(app.prisma, id, { firstName, lastName }, (tx, fields) => auditIn(tx, request.user.userId, 'CHANGE_LEGAL_NAME', 'User', id, { changed: fields }, request));
     await notifications.send({
       userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your name was changed',
       body: 'Swift support changed the name on your account after checking it. Contact Swift support if this looks wrong.',
