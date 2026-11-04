@@ -37,6 +37,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── People ─────────────────────────────────────────────────────────────
   { route: 'PUT /users/:id/suspend', helper: 'suspendUser', args: ['usr_1'] },
   { route: 'PUT /users/:id/name', helper: 'changeLegalName', args: ['usr_1', 'First', 'Last'], requiredBodyKeys: ['firstName', 'lastName'] },
+  { route: 'POST /service-jobs/:id/close', helper: 'closeServiceJob', args: ['job_1'] },
   { route: 'PUT /users/:id/unsuspend', helper: 'unsuspendUser', args: ['usr_1'] },
   // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] a person lifts a strike restriction
   { route: 'POST /users/:id/strike-restriction/lift', helper: 'liftStrikeRestriction', args: ['usr_1'] },

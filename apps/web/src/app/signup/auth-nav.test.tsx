@@ -85,6 +85,40 @@ describe('[FLOW-QA F14] the signed-in card on /login?next=/ links where it says'
   });
 });
 
+describe('[BUG-HUNT F03] branch staff, who hold no partner role, reach their store', () => {
+  it('a customer-door sign-in with next=/ goes to the dashboard', async () => {
+    mocked.verifyCustomerLogin.mockResolvedValue({ user: { id: 's1', roles: ['CUSTOMER'], storeStaff: true } });
+    await loginWithCode('next=/');
+    await waitFor(() => expect(mocked.replace).toHaveBeenCalledWith('/dashboard'));
+    expect(mocked.pro).not.toHaveBeenCalled();
+  });
+
+  it('the signed-in card links to the dashboard, never to the customer site', async () => {
+    mocked.query = 'next=/';
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 's1', phone: '+5926001234', roles: ['CUSTOMER'], storeStaff: true } });
+    render(<LoginPage />);
+    expect((await screen.findByRole('link', { name: 'Go to your dashboard' })).getAttribute('href')).toBe('/dashboard');
+  });
+
+  it('sign-up through the business door adds a business: staff own none', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 's1', roles: ['CUSTOMER'], storeStaff: true } });
+    fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByText('Add a business to your Swift account.')).toBeTruthy();
+    expect(mocked.replace).not.toHaveBeenCalled();
+  });
+
+  it('sign-up through the customer door goes to the dashboard, never the customer site', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 's1', roles: ['CUSTOMER'], storeStaff: true } });
+    fireEvent.change(await toCodeStep(/Order on Swift/), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(mocked.replace).toHaveBeenCalledWith('/dashboard'));
+    expect(mocked.pro).not.toHaveBeenCalled();
+  });
+});
+
 describe('[FLOW-QA F5b] the public header knows a signed-in partner', () => {
   it.each([
     [['VENDOR_OWNER'], 'Dashboard', '/dashboard'],
@@ -135,12 +169,23 @@ describe('[FLOW-QA F5b] the public header knows a signed-in partner', () => {
   });
 });
 
+/**
+ * The page paints a step first, then records it in effects after the paint: its own idea of the step, then the address.
+ * A step on screen is not yet the step the page knows, so a test that reads the address or fires Back gets there
+ * through here. It waits on the address, the last thing that pass writes, not on the clock.
+ */
+async function reached<T>(onScreen: Promise<T>, step: string): Promise<T> {
+  const shown = await onScreen;
+  await waitFor(() => expect(new URLSearchParams(window.location.search).get('step')).toBe(step));
+  return shown;
+}
+
 async function toCodeStep(door: RegExp) {
   render(<SignupPage />);
   fireEvent.click(await screen.findByRole('button', { name: door }));
   fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '600 1234' } });
   fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
-  return screen.findByLabelText('Verification code');
+  return reached(screen.findByLabelText('Verification code'), 'code');
 }
 
 describe('[FLOW-QA F6] sign-up survives Back and refresh', () => {
@@ -234,8 +279,7 @@ describe('[REVIEW-GMF2 S3-1] a partner page’s sign-up (?as=…) resumes its st
     render(<SignupPage />);
     fireEvent.change(await screen.findByLabelText('Phone number'), { target: { value: '600 1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send code' }));
-    await screen.findByLabelText('Verification code');
-    expect(new URLSearchParams(window.location.search).get('step')).toBe('code');
+    await reached(screen.findByLabelText('Verification code'), 'code');
     expect(new URLSearchParams(window.location.search).get('as')).toBe('rider');
     document.body.replaceChildren();
     render(<SignupPage />);
@@ -265,7 +309,7 @@ describe('[REVIEW-GMF2 S3-3] once the account exists, Back leaves sign-up instea
     mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 'u1', roles: ['MOVER'] } });
     fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    await screen.findByText('Add a business to your Swift account.');
+    await reached(screen.findByText('Add a business to your Swift account.'), 'business');
     const back = vi.spyOn(window.history, 'back').mockImplementation(() => {});
     const push = vi.spyOn(window.history, 'pushState');
     act(() => {
@@ -283,7 +327,7 @@ describe('[REVIEW-GMF2 S3-3] once the account exists, Back leaves sign-up instea
     mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 'u1', roles: ['MOVER'] } });
     fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
-    await screen.findByText('Add a business to your Swift account.');
+    await reached(screen.findByText('Add a business to your Swift account.'), 'business');
     const back = vi.spyOn(window.history, 'back').mockImplementation(() => {});
     act(() => {
       // the client-side link the person came by: the page they were on before sign-up

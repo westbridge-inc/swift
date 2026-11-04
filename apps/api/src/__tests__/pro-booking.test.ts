@@ -531,7 +531,8 @@ describe('switch on: cancel (owner B1) — free until two hours before', () => {
     const pro = await makePro('tutor');
     const c = await makeUser();
     const quote = await runWithoutTenant(() => app.prisma.serviceJob.create({
-      data: { customerId: c.userId, providerId: pro.providerId, description: 'Please quote this job', status: 'SCHEDULED', quoteAmount: new Prisma.Decimal(5000), scheduledFor: at(12) },
+      // The pro has confirmed it: until then it is free to cancel (cancel-policy.ts serviceJobCancelVerdict).
+      data: { customerId: c.userId, providerId: pro.providerId, description: 'Please quote this job', status: 'SCHEDULED', quoteAmount: new Prisma.Decimal(5000), scheduledFor: at(12), providerConfirmedAt: new Date() },
     }));
     const refused = await cancel(c.token, quote.id);
     expect([refused.statusCode, refused.json().error.code]).toEqual([409, 'SERVICE_JOB_BOOKED']);

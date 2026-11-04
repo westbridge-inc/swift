@@ -120,6 +120,39 @@ describe('the register’s red test: the obligation is one generation with the t
   });
 });
 
+describe('the drain right after staging: the app\'s clock against the database\'s', () => {
+  /** A cancelled paid campaign, its refund staged, its outbox row reading as `aheadMs` in the database's future. */
+  async function staged(aheadMs: number) {
+    const { campaign, placement, advertiser } = await scaffold({ status: 'SCHEDULED', startWeek: WK_FUTURE });
+    await book(campaign.id, placement.id, WK_FUTURE, 5000);
+    const invoice = await paidInvoice(advertiser.id, campaign.id, 5000);
+    await lifecycle.transition(campaign.id, 'cancel', 'owner', undefined, { within: async (tx) => { await refunds.stage(tx, campaign.id, 'ADVERTISER_CANCEL', 'owner', { now: NOW }); } });
+    const [intent] = await intentsFor(campaign.id);
+    await prisma.$executeRaw`UPDATE "ad_refund_outbox" SET "availableAt" = CURRENT_TIMESTAMP + (${aheadMs} * INTERVAL '1 millisecond') WHERE "refundIntentId" = ${intent!.id}`;
+    return { intent: intent!, invoice, campaign };
+  }
+
+  it('the request that staged a refund pays it at once, even when the database reads its row as a moment ahead', async () => {
+    const { intent, invoice } = await staged(5_000);
+    await refunds.executeNow(intent.id);
+    expect((await prisma.adRefundIntent.findUniqueOrThrow({ where: { id: intent.id }, include: { outbox: true } })).outbox).toMatchObject({ attempts: 1, lastError: null });
+    expect((await prisma.adRefundOutbox.findUniqueOrThrow({ where: { refundIntentId: intent.id } })).processedAt).not.toBeNull();
+    expect(Number((await prisma.adInvoice.findUniqueOrThrow({ where: { id: invoice.id } })).refundedAmount)).toBe(5000);
+  });
+
+  it('a failed attempt\'s back-off still stands for a named intent: only a row never tried skips the wait', async () => {
+    const { intent, invoice, campaign } = await staged(0);
+    refunds.observer = { beforeExecute: async () => { throw new Error('provider blip'); } };
+    expect(await refunds.drainOutbox({ intentIds: [intent.id] })).toMatchObject({ processed: 0, failed: 1 });
+    refunds.observer = {};
+    expect(await refunds.drainOutbox({ intentIds: [intent.id] })).toMatchObject({ processed: 0, failed: 0 });
+    expect((await prisma.adRefundOutbox.findUniqueOrThrow({ where: { refundIntentId: intent.id } })).attempts).toBe(1);
+    await readyNow(campaign.id);
+    expect(await refunds.drainOutbox({ intentIds: [intent.id] })).toMatchObject({ processed: 1, failed: 0 });
+    expect(Number((await prisma.adInvoice.findUniqueOrThrow({ where: { id: invoice.id } })).refundedAmount)).toBe(5000);
+  });
+});
+
 describe('[R045-ADS-02] a CREDIT is a persisted liability applied once', () => {
   it('late approval creates a unique CREDIT item; execution moves the advertiser’s credit balance once; replay is a no-op', async () => {
     const { campaign, placement, advertiser } = await scaffold({ status: 'LIVE', startWeek: WK_THIS });
