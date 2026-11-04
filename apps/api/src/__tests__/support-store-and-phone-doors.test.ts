@@ -368,7 +368,7 @@ describe('[F22] the number door: one member of staff is never enough, and staff 
     expect(await body(refused.id)).not.toContain(refused.phone);
     expect(await body(lapsed.id)).not.toContain(lapsed.phone);
     expect(await body(live.id)).toContain(live.phone);
-    expect(readFileSync(join(__dirname, '../jobs/queue.ts'), 'utf8')).toContain('await blankClosedNumberAsks(ctx.prisma);');
+    expect(readFileSync(join(__dirname, '../jobs/queue.ts'), 'utf8')).toContain('await blankClosedNumberAsks(ctx.prisma)');
   });
 
   it('a founder is refused on their own account too', async () => {

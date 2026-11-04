@@ -6,6 +6,7 @@ import { generateOtp, storeOtp, verifyOtp } from '../../utils/otp';
 import { normalizePhone } from '../../utils/phone';
 import { checkOtpDailyBudget } from '../../utils/sms-budget';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { publicLaunchCountryFromPhone } from '../auth/launch-market';
 import type { NotificationChannels } from '../../providers/notifications/channels';
 import { refuseStaffAccount } from './admin-email-change';
@@ -136,19 +137,21 @@ export async function blankApprovedNumber(prisma: PrismaClient, approvalId: stri
 }
 
 /** The daily sweep's half: an ask that was refused, withdrawn or left to lapse is never carried out. */
-export async function blankClosedNumberAsks(prisma: PrismaClient, now = new Date()): Promise<number> {
-  const rows = await prisma.privilegedApproval.findMany({
-    where: { action: ASK_ACTION, status: { not: 'APPLIED' }, OR: [{ status: { in: ['REJECTED', 'CANCELLED', 'EXPIRED'] } }, { expiresAt: { lte: now } }] },
-    select: { id: true, bodySnapshot: true },
+export function blankClosedNumberAsks(prisma: PrismaClient, now = new Date()): Promise<number> {
+  return runAsSystem('phone-change-ask-blank', async () => {
+    const rows = await prisma.privilegedApproval.findMany({
+      where: { action: ASK_ACTION, status: { not: 'APPLIED' }, OR: [{ status: { in: ['REJECTED', 'CANCELLED', 'EXPIRED'] } }, { expiresAt: { lte: now } }] },
+      select: { id: true, bodySnapshot: true },
+    });
+    let blanked = 0;
+    for (const row of rows) {
+      const snapshot = askWithoutNumber(row.bodySnapshot);
+      if (!snapshot) continue;
+      await prisma.privilegedApproval.update({ where: { id: row.id }, data: { bodySnapshot: snapshot } });
+      blanked += 1;
+    }
+    return blanked;
   });
-  let blanked = 0;
-  for (const row of rows) {
-    const snapshot = askWithoutNumber(row.bodySnapshot);
-    if (!snapshot) continue;
-    await prisma.privilegedApproval.update({ where: { id: row.id }, data: { bodySnapshot: snapshot } });
-    blanked += 1;
-  }
-  return blanked;
 }
 
 /** Best effort: a number the person lost may never read this, and the account's inbox says it too. */

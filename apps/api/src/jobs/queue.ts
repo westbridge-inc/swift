@@ -1574,14 +1574,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           { enforced: enforced.map((r) => ({ c: r.dataClass, n: r.deleted })), skipped: results.filter((r) => r.skipped).map((r) => ({ c: r.dataClass, reason: r.skipped })) },
           'retention sweep complete',
         );
-        const { blankClosedNumberAsks } = await import('../modules/admin/phone-change');
-        await blankClosedNumberAsks(ctx.prisma);
         const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
         await retryAccountErasures(ctx);
         // [R23 · research C10] Customer accounts unused for 12 months: a notice, then (30 days
         // on, still unused) the ordinary deletion pipeline. Its own retention receipt.
         const { inactivitySweep } = await import('../modules/user/inactivity');
         await inactivitySweep({ prisma: ctx.prisma, io: ctx.io, log: ctx.log });
+        // [COORD 4 Nov 2026] Last and on its own: a miss here is retried tomorrow and stops nothing above.
+        const { blankClosedNumberAsks } = await import('../modules/admin/phone-change');
+        await blankClosedNumberAsks(ctx.prisma).catch((err) => ctx.log.warn({ err }, 'closed number asks were not blanked; the next sweep retries'));
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
