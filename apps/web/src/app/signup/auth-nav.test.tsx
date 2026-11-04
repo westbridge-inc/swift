@@ -85,6 +85,40 @@ describe('[FLOW-QA F14] the signed-in card on /login?next=/ links where it says'
   });
 });
 
+describe('[BUG-HUNT F03] branch staff, who hold no partner role, reach their store', () => {
+  it('a customer-door sign-in with next=/ goes to the dashboard', async () => {
+    mocked.verifyCustomerLogin.mockResolvedValue({ user: { id: 's1', roles: ['CUSTOMER'], storeStaff: true } });
+    await loginWithCode('next=/');
+    await waitFor(() => expect(mocked.replace).toHaveBeenCalledWith('/dashboard'));
+    expect(mocked.pro).not.toHaveBeenCalled();
+  });
+
+  it('the signed-in card links to the dashboard, never to the customer site', async () => {
+    mocked.query = 'next=/';
+    mocked.sessionProbe.mockResolvedValue({ ok: true, user: { id: 's1', phone: '+5926001234', roles: ['CUSTOMER'], storeStaff: true } });
+    render(<LoginPage />);
+    expect((await screen.findByRole('link', { name: 'Go to your dashboard' })).getAttribute('href')).toBe('/dashboard');
+  });
+
+  it('sign-up through the business door adds a business: staff own none', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 's1', roles: ['CUSTOMER'], storeStaff: true } });
+    fireEvent.change(await toCodeStep(/business/i), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByText('Add a business to your Swift account.')).toBeTruthy();
+    expect(mocked.replace).not.toHaveBeenCalled();
+  });
+
+  it('sign-up through the customer door goes to the dashboard, never the customer site', async () => {
+    window.history.replaceState(null, '', '/signup');
+    mocked.verifyOtp.mockResolvedValue({ isNewUser: false, signedIn: true, user: { id: 's1', roles: ['CUSTOMER'], storeStaff: true } });
+    fireEvent.change(await toCodeStep(/Order on Swift/), { target: { value: '246810' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => expect(mocked.replace).toHaveBeenCalledWith('/dashboard'));
+    expect(mocked.pro).not.toHaveBeenCalled();
+  });
+});
+
 describe('[FLOW-QA F5b] the public header knows a signed-in partner', () => {
   it.each([
     [['VENDOR_OWNER'], 'Dashboard', '/dashboard'],

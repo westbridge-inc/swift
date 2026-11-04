@@ -256,8 +256,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
     })().catch(() => {});
     // the condition cleared: close the open page so the outbox stays truthful
     if (!workerHealth.page && beat) {
-      void resolveOpsPage(app.prisma, 'Job scheduler stalled').catch(() => {});
-      void resolveOpsPage(app.prisma, 'Job scheduler never started').catch(() => {});
+      // In order, never-started first: once the stall page reads closed, this probe has finished with both.
+      void (async () => {
+        await resolveOpsPage(app.prisma, 'Job scheduler never started').catch(() => {});
+        await resolveOpsPage(app.prisma, 'Job scheduler stalled').catch(() => {});
+      })();
     }
 
     // `starting` is the worker inside its boot grace: not a failure, and not a
