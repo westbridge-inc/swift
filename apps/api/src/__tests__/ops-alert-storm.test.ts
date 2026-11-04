@@ -75,12 +75,12 @@ async function open(mine: string[], kind: OpsAlertKind, now: Date, recipients: P
 }
 
 /** An alert as the old ladder left it: `level` escalations done, every one already re-paged and texted. */
-async function legacy(mine: string[], kind: OpsAlertKind, opts: { createdAt: Date; level: number; lastEscalatedAt: Date | null; pagedAt?: Date; recipients: Person[] }) {
+async function legacy(mine: string[], kind: OpsAlertKind, opts: { createdAt: Date; level: number; lastEscalatedAt: Date | null; pagedAt?: Date; textedAt?: Date; recipients: Person[] }) {
   const a = await runWithoutTenant(() => app.prisma.opsAlert.create({
     data: {
       tenantId: null, kind, title: `Storm legacy ${kind} ${RUN} ${nanoid(4)}`, body: 'A page left open by the old ladder.',
       createdAt: opts.createdAt, ackDeadlineAt: at(opts.createdAt, 120),
-      escalationLevel: opts.level, lastEscalatedAt: opts.lastEscalatedAt, oncallTextedLevel: opts.level, oncallTextedAt: opts.lastEscalatedAt,
+      escalationLevel: opts.level, lastEscalatedAt: opts.lastEscalatedAt, oncallTextedLevel: opts.level, oncallTextedAt: opts.textedAt ?? opts.lastEscalatedAt,
       recipients: { create: opts.recipients.map((p) => ({ tenantId: null, userId: p.userId, deliveredAt: opts.createdAt, pagedLevel: opts.level, lastPagedAt: opts.pagedAt ?? opts.lastEscalatedAt })) },
     },
   }), 'test-fixture:drill-storm');
@@ -154,7 +154,8 @@ describe('[DRILL-STORM 1] a drill nobody acknowledges is a FAILED drill, closed 
     const inWindow = await series(t0, mine, responder, 10, 890, 10);
     expect(inWindow.escalated.get(drill)).toEqual([120, 420]);
     expect(inWindow.repages).toEqual([120, 420]);
-    expect(inWindow.texts).toEqual([120, 420]);
+    // [SMS-COST] on-call TEXTS: the first page only; a reminder waits 2 hours, past the drill's window
+    expect(inWindow.texts).toEqual([]);
     expect((await alertRow(drill)).closedAt).toBeNull();
 
     // The window ends: closed as a FAILED drill, said once.
@@ -254,7 +255,7 @@ describe('[DRILL-STORM 2] a real alert keeps escalating until acknowledged — b
     // the inbox keeps ONE escalation notice for the person, holding the latest level
     const notice = await inbox(responder, 'ops_alert_escalated');
     expect(notice).toHaveLength(1);
-    expect(notice[0]!.title).toBe(`UNACKNOWLEDGED (${escalations.length}×): ${(await alertRow(page)).title}`);
+    expect(notice[0]!.title).toBe(`UNACKNOWLEDGED (${escalations.length}x): ${(await alertRow(page)).title}`);
     expect(notice[0]!.isRead).toBe(false);
     // [console] every re-page and on-call text says where a page is acknowledged
     expect(notice[0]!.body).toContain('Acknowledge it now in Mission Control > Ops alerts.');
@@ -286,7 +287,9 @@ describe('[DRILL-STORM 2] a real alert keeps escalating until acknowledged — b
     expect(maxPerHour(run.repages)).toBeLessThanOrEqual(4);
     expect(run.repages.length).toBeGreaterThanOrEqual(10);
     expect(maxPerHour(run.texts)).toBeLessThanOrEqual(4);
-    expect(run.texts.length).toBeGreaterThanOrEqual(10);
+    // [SMS-COST] on-call TEXTS: none inside 2 hours of the pages' first texts, then reminders (ops-alert-sms-cap.test)
+    expect(run.texts.filter((s) => s < 7_200)).toEqual([]);
+    expect(run.texts.length).toBeGreaterThanOrEqual(1);
     // nobody was dropped: every page's escalations kept reaching the person, in a collapsed push
     for (const id of pages) {
       expect(run.escalated.get(id)!.length).toBeGreaterThanOrEqual(6);
@@ -314,27 +317,31 @@ describe('[DRILL-STORM 2] a real alert keeps escalating until acknowledged — b
 });
 
 describe('[DRILL-STORM 2b · REVIEW-G S3-1] a new SOS reaches the on-call phones at once, whatever was just texted', () => {
-  it('a drill was just texted to on-call; a NEW SOS escalating inside the spacing is texted to on-call NOW', async () => {
+  it('a page was just texted to on-call; a NEW SOS escalating inside the spacing is texted to on-call NOW', async () => {
     const t0 = epoch(); const mine: string[] = [];
     const responder = await person();
-    const drill = await open(mine, 'DRILL', t0, [responder]);
-    const first = await sweep(at(t0, 120), mine); // the drill escalates: on-call texted at +120 s
-    expect(first.escalated).toEqual([drill]);
-    const textedForDrill = textsToOncall().length;
+    // [SMS-COST] a drill no longer texts inside its window (a reminder waits 2 hours): the text just sent
+    // to the list is a platform page's reminder, its last text 3 hours old (A); B escalates later
+    const pageA = await legacy(mine, 'PLATFORM', { createdAt: at(t0, -3 * 3_600), level: 3, lastEscalatedAt: at(t0, -1_100), textedAt: at(t0, -3 * 3_600), recipients: [responder] });
+    const pageB = await legacy(mine, 'PLATFORM', { createdAt: at(t0, -3 * 3_600), level: 3, lastEscalatedAt: at(t0, -800), textedAt: at(t0, -3 * 3_600), recipients: [responder] });
+    const first = await sweep(at(t0, 120), mine); // A escalates: on-call texted at +120 s
+    expect(first.escalated).toEqual([pageA]);
+    const textedForA = textsToOncall().length;
+    expect(textedForA).toBe(1);
     const sos = await open(mine, 'SOS', at(t0, 130), [responder]); // its own first page texts on-call too
     const opened = textsToOncall().length;
-    expect(opened).toBe(textedForDrill + 1);
-    const res = await sweep(at(t0, 260), mine); // 140 s after the drill's text: inside the 5-minute spacing
+    expect(opened).toBe(textedForA + 1);
+    const res = await sweep(at(t0, 260), mine); // 140 s after A's text: inside the 5-minute spacing
     expect(res.escalated).toEqual([sos]);
     expect(textsToOncall()).toHaveLength(opened + 1);
-    expect(textsToOncall().at(-1)!.body).toContain(`UNACKNOWLEDGED (1×): ${(await alertRow(sos)).title}`);
+    expect(textsToOncall().at(-1)!.body).toContain(`UNACKNOWLEDGED (1x): ${(await alertRow(sos)).title}`);
     expect((await alertRow(sos)).oncallTextedLevel).toBe(1);
-    // anything else still waits its turn: the drill's second escalation (+420 s) is inside the spacing of the SOS text
+    // anything else still waits its turn: B's escalation (+420 s) is inside the spacing of the SOS text
     const p = textsToOncall().length;
     const later = await sweep(at(t0, 420), mine);
-    expect(later.escalated).toEqual([drill]);
+    expect(later.escalated).toEqual([pageB]);
     expect(textsToOncall()).toHaveLength(p);
-    expect((await alertRow(drill)).oncallTextedLevel).toBe(1);
+    expect((await alertRow(pageB)).oncallTextedLevel).toBe(3);
   });
 });
 

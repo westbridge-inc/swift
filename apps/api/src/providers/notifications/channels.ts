@@ -14,6 +14,7 @@ import { sealReviewChannels } from './review-seal';
 import { guardNonProductionSms } from './sms-recipient-allowlist';
 import { SMS_REF_HANDOFF_SUPPRESSED } from './sms-outcome';
 import { expoErrorClass, httpFailureReason, recordPushFailure, recordPushFailureClasses } from './push-outcome';
+import { gsm7Sms } from '../../utils/sms-text';
 
 export type NotificationHandoff = <T>(part: string, effect: () => Promise<T>) => Promise<T | undefined>;
 export interface SmsOptions { handoff?: NotificationHandoff }
@@ -138,7 +139,8 @@ class DevSms implements SmsProvider {
   readonly supportsHandoff = true;
   async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
     if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
-    devChannelLog.push({ channel: 'sms', to, body, at: new Date() });
+    // [SMS-COST] What the log holds is what Twilio would be sent: the same GSM-7 body.
+    devChannelLog.push({ channel: 'sms', to, body: gsm7Sms(body), at: new Date() });
     return { ref: `dev_sms_${++seq}` };
   }
 }
@@ -213,8 +215,12 @@ class TwilioSmsProvider implements SmsProvider {
     if (invalidConfig) throw new Error(`${invalidConfig} for the twilio provider`);
   }
 
-  async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
-    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
+  async sendSms(to: string, rawBody: string, options?: SmsOptions): Promise<{ ref: string }> {
+    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, rawBody)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
+    // [SMS-COST · owner ruling 2 Nov 2026] Every text leaves Swift as GSM-7: one
+    // character outside it (×, an em dash, a curly quote) bills the whole message
+    // as UCS-2, 67 characters a part instead of 153. A GSM-7 body goes as written.
+    const body = gsm7Sms(rawBody);
     const auth = Buffer.from(`${this.keySid}:${this.keySecret}`).toString('base64');
     // Bound the WHOLE call, body read included: a hung Twilio must not hang
     // the login request or the ops page behind it. Abort releases the
