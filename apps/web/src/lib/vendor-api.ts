@@ -103,6 +103,8 @@ export interface VendorOrder {
   appointmentSlot?: string | null;
   /** [#2198] The server's word on "Customer didn't come" for this appointment, at the read. An older server omits it. */
   noShow?: { allowed?: unknown } | null;
+  /** [BUG-HUNT-2 G08] What this store owes back by MMG, in the server's words. Null: no refund on this order. */
+  mmgRefund?: { state: string; amount: string; line: string; canMarkSent?: boolean } | null;
   /** The server's accept deadline for a PENDING order (order/response-sla.ts); null otherwise. */
   respondBy?: string | null;
   acceptedAt?: string | null;
@@ -324,6 +326,9 @@ export const confirmPayment = (id: string, reference: string) =>
 // [STORE-DASH · O-2] With the store's pickup code off, no code: JSON drops the undefined key, so the body is {}.
 export const completePickup = (id: string, code?: string) =>
   apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify({ code }) });
+/** [BUG-HUNT-2 G08] The store's "Refund sent": its MMG reference and the amount it sent. Swift moves no money. */
+export const markRefundSent = (id: string, reference: string, amount: string) =>
+  apiFetch(`${V}/orders/${id}/mmg-refunds/send`, { method: 'POST', body: JSON.stringify({ reference, amount }) });
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });
 /** [AF-MOB-006 · U25] The store confirms returned goods are back with it (closes the return). */
 export const confirmReturnReceived = (id: string) =>

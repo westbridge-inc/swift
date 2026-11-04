@@ -187,6 +187,9 @@ const E = {
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
   // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
+  // [BUG-HUNT-2 G08] The refund rail's facts: where an obligation stands, and support's finding on a send.
+  mmgRefundObligation: { model: 'mmgRefundObligation', fields: ['status', 'amount', 'dueAt', 'missedAt', 'resolvedAt', 'resolvedById', 'resolutionNote', 'revision'] },
+  mmgRefundSend: { model: 'mmgRefundSend', fields: ['answer', 'resolution', 'resolvedById', 'resolvedAt', 'note', 'revision'] },
   // [L02 · row 34] Partial cash a rider could not hand back at the door, and its resolution.
   orderDoorCash: { model: 'order', fields: ['status', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'doorCashReturnResolvedById'] },
   moverFee: { model: 'moverFeeAuthority', routeParam: 'userId', uniqueField: 'userId', fields: ['state', 'holdReason', 'canonicalSubscriptionId', 'feeType', 'revision', 'decisionId'] },
@@ -332,6 +335,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [MMGCLOSE] Record-only: closes a store-claimed MMG order as "refund handled
   // by the store" (an OWED refund obligation, no money moves) — money class, two admins.
   'POST /orders/:id/close-store-refund': c('C4', 'order.refund.settle', E.order),
+  // [BUG-HUNT-2 G08] The MMG refund rail, record only. The queue names stores and orders (C1). A finding on a disputed
+  // refund is a decision with a reason (C3, like a payment-claim resolve); a void says nothing is owed, so two people (C4).
+  'GET /mmg-refunds': c('C1', 'order.read'),
+  'POST /mmg-refunds/sends/:id/resolve': c('C3', 'order.refund.settle', E.mmgRefundSend),
+  'POST /mmg-refunds/:id/void': c('C4', 'order.refund.settle', E.mmgRefundObligation),
   // [L02 · row 34 · review S2-1] Record-only: operations records partial cash a
   // rider could not hand back (HELD) as resolved. It claims settlement of a
   // customer's money (like refund-settled), so: money class, reason, two admins.

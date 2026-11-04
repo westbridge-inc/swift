@@ -75,6 +75,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'audit-chain-anchor': { policy: 'SAFE_REPLAY', why: 'Appends one anchor row with the current head and tells the admins. A replay appends a second anchor of the same head — harmless, and the table is append-only by design.' },
   'erasure-ledger-watch': { policy: 'SAFE_REPLAY', why: 'Reads ledger counts and ages and pages through pageOps, which dedupes on an open page. It writes no business rows.' },
   'malware-scanner-watch': { policy: 'SAFE_REPLAY', why: 'Asks the scanner PING, counts consecutive failures in one Redis key and pages through pageOps, which keeps one open page per title. It writes no business rows; a replay is one more ask.' },
+  'mmg-refund-deadlines': { policy: 'SAFE_REPLAY', why: 'Each miss is the law\'s compare-and-set under the order lock, set once. The notices carry per-row dedupe keys and the page goes through pageOps. It moves no money and closes nothing; a replay finds nothing left to mark.' },
   'error-rate-watch': { policy: 'SAFE_REPLAY', why: 'Reads the hourly error tally and pages through pageOps, which keeps one open page per title and one delivered page per key window; a closed page stays closed. It writes no business rows; a replay is one more read.' },
   'upload-rescan': { policy: 'SAFE_REPLAY', why: 'Each row closes by a compare-and-set on rescannedAt IS NULL; a replay finds closed rows gone from the open set. A positive moved to quarantine is no longer open, and its page goes through pageOps (one open page per title).' },
   'backup-freshness': { policy: 'SAFE_REPLAY', why: 'Reads backup state and pages through opsPageOnce, which is explicitly deduped. It writes no business rows.' },
@@ -145,6 +146,7 @@ export type JobName =
   | 'backup-freshness'
   | 'erasure-ledger-watch'
   | 'malware-scanner-watch'
+  | 'mmg-refund-deadlines'
   | 'error-rate-watch'
   | 'upload-rescan'
   | 'reaper-lag'

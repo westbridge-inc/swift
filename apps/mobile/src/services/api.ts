@@ -449,6 +449,9 @@ export const customerApi = {
   claimOrderPayment: (id: string, claim: { paid: boolean; reference?: string }) =>
     api.post(`/customer/orders/${id}/payment-claim`, claim.paid && claim.reference ? { paid: true, reference: claim.reference } : { paid: claim.paid })
       .then((res) => (res.data?.data ?? {}) as { orderId?: string; paymentStatus?: string; mismatch?: boolean; replayed?: boolean; mmgClaim?: unknown }),
+  // [BUG-HUNT-2 G08] The customer's word on a "Refund sent": it arrived, or it did not.
+  answerMmgRefund: (id: string, sendId: string, received: boolean) =>
+    api.post(`/customer/orders/${id}/mmg-refunds/${sendId}/answer`, { received }).then((res) => res.data?.data ?? {}),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
   redeemReferral: (code: string, token?: string) =>
@@ -1383,6 +1386,8 @@ export const vendorApi = {
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
   /** [BOOK-NS-APP · owner B3] "Customer didn't come": the server closes the started appointment and records it. */
   markNoShow: (id: string) => api.put(`/vendor/orders/${id}/no-show`),
+  /** [BUG-HUNT-2 G08] The store's "Refund sent": its MMG reference and the amount it sent. */
+  markRefundSent: (id: string, body: { reference: string; amount: string }) => api.post(`/vendor/orders/${id}/mmg-refunds/send`, body),
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),

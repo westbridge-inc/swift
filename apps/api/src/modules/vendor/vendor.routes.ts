@@ -18,8 +18,8 @@ import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
-import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
-import type { FulfillmentMode, Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
+import type { FulfillmentMode, PrismaClient } from '@prisma/client';
 import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, preparationMayStart, releaseLapsedHoldInTransaction } from '../order/order.service';
 import { STORE_ACCEPT_PATH, STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
@@ -43,6 +43,9 @@ import { INSTANT_BOOKING_OFF_MESSAGE, instantBookingSettingsForSave, mergeBookin
 import { instantBookingEnabled, NEW_BOOKABLE_LISTING_DEFAULTS } from '../booking/instant-booking';
 import { movedAppointmentFreeCancelEnd } from '../order/cancel-policy';
 import { NO_SHOW_REASON, noShowCustomerNotice, noShowRefusal, noShowView, recordNoShowInTransaction } from '../booking/appointment-no-show';
+import { assertMmgRefundAmount } from '../order/mmg-refund-law';
+import { recordMmgRefundSent, refundSentCustomerNotice, storeRefundView } from '../order/mmg-refund-rail';
+import { parseExactAmount } from '../money/evidence';
 import { bookingLimitsFor } from '../booking/booking-limits';
 import { MAX_BOOKING_CAPACITY } from '../booking/one-at-a-time';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -67,7 +70,7 @@ import { scanXlsxZip, XlsxZipGuardError, XLSX_IMPORT_ZIP_BUDGET } from '../../ut
 import { parseMenuText } from '../../utils/menu-text-parse';
 import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
-import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
+import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { vendorOperateRefusal, vendorOperateError } from './vendor-operate';
 import { ReviewDemoMoneyRefusedError, ReviewDemoRoleRefusedError, isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
@@ -2569,7 +2572,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [BOOK-FU2 · REVIEW-F S3-1 on #2201] An appointment says whether "Customer didn't come" may be recorded now
     // (booking/appointment-no-show.ts noShowView); the partner app shows the button only on noShow.allowed === true.
     const noShow = order.fulfillment === 'APPOINTMENT' ? { noShow: noShowView(order, new Date()) } : {};
-    return { success: true, data: { ...redactCustomerContact({ ...order, ...handover, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role), ...noShow }), custodyRecovery } };
+    // [BUG-HUNT-2 G08] What this store owes back by MMG, and the door. Null on an order with no refund.
+    const refundRows = order.paymentMethod === 'MOBILE_MONEY' ? await app.prisma.mmgRefundObligation.findMany({ where: { orderId: order.id }, select: { status: true, amount: true, dueAt: true, currencyCode: true, sendId: true } }) : [];
+    const mmgRefund = storeRefundView(refundRows, new Date(), canConfirmPayment(role));
+    return { success: true, data: { ...redactCustomerContact({ ...order, ...handover, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role), ...noShow, mmgRefund }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -3611,6 +3617,28 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: updated };
   });
 
+  /** POST /orders/:id/mmg-refunds/send — [BUG-HUNT-2 G08] the store's "Refund sent": the MMG reference and the exact amount.
+   *  Record only (order/mmg-refund-rail.ts): Swift moves nothing. OWNER and MANAGER only, the roles that confirm a payment. */
+  app.post<{ Params: IdParam }>('/orders/:id/mmg-refunds/send', tap, async (request) => {
+    const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
+    const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
+    if (!canConfirmPayment(role)) throw new ForbiddenError('Only the store owner or a manager can mark a refund sent.');
+    const body = z.object({ reference: z.string(), amount: z.union([z.number(), z.string()]) }).parse(request.body);
+    const stated = parseExactAmount(body.amount);
+    if (stated === null) throw new AppError(400, 'MMG_REFUND_AMOUNT_INVALID', 'Enter the amount you sent.');
+    const sent = await recordMmgRefundSent(app.prisma, {
+      orderId: order.id, actorUserId: request.user.userId, reference: body.reference, amount: assertMmgRefundAmount(new Prisma.Decimal(String(body.amount).trim())),
+    });
+    if (!sent.replayed) {
+      const storeName = (await app.prisma.vendor.findUnique({ where: { id: order.vendorId! }, select: { name: true } }))?.name ?? 'The store';
+      await notifications.send({
+        userId: sent.customerId, type: 'ORDER_UPDATE', audience: 'customer', ...refundSentCustomerNotice(sent.orderNumber, storeName, sent.amount),
+        data: { orderId: order.id, kind: 'mmg_refund_sent' }, dedupeKey: `mmg-refund-sent:${sent.sendId}`,
+      }).catch((err: unknown) => request.log.warn({ err, orderId: order.id }, 'refund-sent notice failed; the order screen still asks'));
+    }
+    return { success: true, data: { orderId: order.id, sendId: sent.sendId, status: 'SENT', replayed: sent.replayed } };
+  });
+
   /** PUT /orders/:id/delivered — [F-0026] the self-delivery terminal.
    *
    *  FUL-004b lets a vendor fulfil a DELIVERY order with its own courier: the
@@ -3679,6 +3707,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       // counts for the store once, here (the sweep can no longer reach it).
       withinTransaction: async (tx) => { await releaseLapsedHoldInTransaction(tx, order.id); },
       invalidStatus: () => new AppError(400, 'INVALID_STATUS', 'This order can no longer be rejected'),
+      // [BUG-HUNT-2 G08] The store IS the store: it is told who closes it, and what it then owes.
+      paidMmgRefusal: () => new AppError(409, 'MMG_CANCEL_UNAVAILABLE', 'This order is already paid by MMG, so it cannot be rejected in the app. Contact Swift support: they close it and record the refund you owe the customer. Swift never holds the money.'),
     });
     const updated = await app.prisma.order.findUniqueOrThrow({
       where: { id: order.id },

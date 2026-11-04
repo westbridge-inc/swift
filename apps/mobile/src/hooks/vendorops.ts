@@ -673,6 +673,19 @@ export function useMarkNoShow() {
   });
 }
 
+/** [BUG-HUNT-2 G08] "Refund sent". Its popup shows the server's own refusal, so the app-wide toast stays out. */
+export function useMarkRefundSent() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationKey: ['vendor', 'order-refund-sent'],
+    mutationFn: ({ id, reference, amount }: { id: string; reference: string; amount: string }) => unwrap(vendorApi.markRefundSent(id, { reference, amount })),
+    meta: { silent: true },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
+  });
+}
+
 /** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
 const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt', 'handedToRiderAt'] as const;
 
