@@ -95,6 +95,7 @@ vi.mock('./screens/JobHistoryScreen', () => ({ JobHistoryScreen: () => null }));
 vi.mock('./screens/MoverAccountScreen', () => ({ MoverAccountScreen: () => null }));
 vi.mock('./screens/MoverDocumentsScreen', () => ({ MoverDocumentsScreen: () => null }));
 vi.mock('./screens/MoverVehicleScreen', () => ({ MoverVehicleScreen: () => null }));
+vi.mock('./MoverNoAnswer', () => ({ MoverNoAnswer: () => 'NO ANSWER' }));
 vi.mock('./screens/MoverOnboardingScreen', () => ({ MoverOnboardingScreen: () => 'ONBOARDING' }));
 vi.mock('./screens/MoverHomeScreen', () => ({ MoverHomeScreen: () => 'HOME' }));
 

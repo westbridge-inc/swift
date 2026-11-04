@@ -51,6 +51,7 @@ vi.mock('../../../hooks', () => ({
     profile: { vehicleColor: 'Black', vehicleMake: 'Toyota', vehicleModel: 'Allion', licensePlate: 'HC1234', averageRating: 4.8, mmgPayUrl: null, ...(server.payLinkEnabled === undefined ? {} : { mmgPayLinkEnabled: server.payLinkEnabled }) },
   }),
   useMoverStanding: () => ({ data: STANDING }),
+  useActiveJobs: () => ({ legs: [] }),
   useVerificationStatus: () => ({ data: { roleVerified: true } }),
   useEarningsSummary: () => ({ data: { allTime: { total: 0 } } }),
   useMoverSubscription: () => ({ data: server.sub }),

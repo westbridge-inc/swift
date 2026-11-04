@@ -133,6 +133,8 @@ afterAll(async () => {
   await app.close();
 });
 
+const liveNotices = (userId: string) => app.prisma.notification.findMany({ where: { userId, title: 'Your store is live' }, select: { body: true } });
+
 describe('[owner #51] a store goes live only with a published contact phone', () => {
   it('documents done, no published number: the store stays pending, and the owner is told once', async () => {
     const owner = await makeOwner();
@@ -144,6 +146,9 @@ describe('[owner #51] a store goes live only with a published contact phone', ()
     const told = await notices(owner.userId);
     expect(told).toHaveLength(1);
     expect(told[0]).toMatchObject({ title: 'Add the number customers can call', data: { kind: KIND, vendorId: store.id } });
+    // [BUG-HUNT F07] Never "everything else": other steps may still come after this one.
+    expect(told[0]!.body).not.toMatch(/everything else/);
+    expect(told[0]!.body).toMatch(/next step is the phone number customers can call/);
     expect(told[0]!.body).not.toContain(store.phone); // never the account line
 
     // The daily belt runs again: still pending, still exactly one notice.
@@ -176,6 +181,12 @@ describe('[owner #51] a store goes live only with a published contact phone', ()
     expect(await storeRow(store.id)).toEqual({ status: 'ACTIVE', isVerified: true, acceptingOrders: true });
     const profile = await inject('GET', '/api/v1/vendor/profile', owner.token, store.id);
     expect(profile.json().data.vendors.find((v: { id: string }) => v.id === store.id)).toMatchObject({ goLiveMissing: [] });
+
+    // [BUG-HUNT F07] The owner hears when it is live, once.
+    expect(await liveNotices(owner.userId)).toHaveLength(1);
+    expect((await liveNotices(owner.userId))[0]!.body).toContain('is live on Swift');
+    await svc.reconcileVendorActivations();
+    expect(await liveNotices(owner.userId)).toHaveLength(1);
   });
 
   it('control — with a published number the documents put the store live as before', async () => {
@@ -185,6 +196,16 @@ describe('[owner #51] a store goes live only with a published contact phone', ()
     await svc.reconcileVendorActivations();
     expect(await storeRow(store.id)).toEqual({ status: 'ACTIVE', isVerified: true, acceptingOrders: true });
     expect(await notices(owner.userId)).toHaveLength(0);
+    expect(await liveNotices(owner.userId)).toHaveLength(1);
+  });
+
+  it('[BUG-HUNT F07] a store paused for its owner\'s closure goes live paused, and is not told customers can order', async () => {
+    const owner = await makeOwner();
+    const store = await makeStore(owner.userId, { publicPhone: PUBLISHED });
+    await app.prisma.vendor.update({ where: { id: store.id }, data: { closurePausedAt: new Date() } });
+    await approvedDocs(owner.userId);
+    await svc.reconcileVendorActivations();
+    expect(await liveNotices(owner.userId)).toHaveLength(0);
   });
 
   it('a store already live without a number is never taken down for it', async () => {
@@ -196,6 +217,19 @@ describe('[owner #51] a store goes live only with a published contact phone', ()
     expect(await notices(owner.userId)).toHaveLength(0);
     const profile = await inject('GET', '/api/v1/vendor/profile', owner.token, store.id);
     expect(profile.json().data.vendors.find((v: { id: string }) => v.id === store.id)).toMatchObject({ goLiveMissing: [] });
+  });
+
+  it('[BUG-HUNT F07] a person\'s approve button says it once: its own notice, not a second one from the projection', async () => {
+    const owner = await makeOwner();
+    const store = await makeStore(owner.userId, { publicPhone: PUBLISHED });
+    await approvedDocs(owner.userId);
+    const approved = await app.inject({
+      method: 'PUT', url: `/api/v1/admin/vendors/${store.id}/approve`,
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}` }, payload: {},
+    });
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect(await liveNotices(owner.userId)).toHaveLength(0);
+    expect(await app.prisma.notification.count({ where: { userId: owner.userId, title: 'Vendor Approved!' } })).toBe(1);
   });
 
   it('the admin approve button holds a never-live store with no published number; a store being reinstated is never held', async () => {

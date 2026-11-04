@@ -2023,7 +2023,7 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(next === 'CAN_LIFT_TO_WAITING'
         ? {
             title: 'Add the number customers can call',
-            body: `${vendor.name} is no longer suspended. Add the phone number customers can call in Account, and your store goes live.`,
+            body: `${vendor.name} is no longer suspended. The next step is the phone number customers can call: add it in Account. Swift tells you when your store is live.`,
           }
         : {
             title: next === 'CAN_REINSTATE' ? 'Your store is back on Swift' : 'Vendor Approved!',

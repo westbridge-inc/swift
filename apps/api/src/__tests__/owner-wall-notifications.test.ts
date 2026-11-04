@@ -606,7 +606,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       // + [FOOD-PERMIT] the food handlers tick notice (askForFoodHandlerTick)
       // + [RETIER PR-A] the store weekly-fee tick notice (askForStoreFeeTick)
       // - [CHECKLIST-LEGAL · owner 1 Nov 2026 (a) — a DELIBERATE change] the tier-promotion notice (promoteIfRegistered) is gone with the tier
-      'modules/verification/verification.service.ts insertNoticeFor': 6,
+      'modules/verification/verification.service.ts insertNoticeFor': 7,
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({

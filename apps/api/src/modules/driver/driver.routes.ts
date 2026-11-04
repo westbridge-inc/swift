@@ -82,6 +82,7 @@ import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-ra
 import { assertHirePlateChange } from '../verification/hire-plate';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { withCounterpartPhones } from '../calls/counterpart-phone';
+import { orderStageRefusal, STEP_GONE } from '../order/order-status-words';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -1172,7 +1173,7 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_STATUS',
         hasTaxiPassengerCustody(order)
           ? 'You cannot cancel once the trip has started — end the trip instead.'
-          : `Cannot cancel a ride in ${order.status} status`);
+          : orderStageRefusal(order.status, 'it cannot be cancelled', 'ride'));
     }
 
     // Controlled release, atomic: CAS the ride back to PENDING (unassigned) and
@@ -1257,7 +1258,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await getDriverRide(driver.id, id);
 
     if (order.status !== 'DRIVER_ASSIGNED') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, STEP_GONE, 'ride'));
     }
 
     // Compute ETA to pickup
@@ -1288,7 +1289,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await getDriverRide(driver.id, id);
 
     if (order.status !== 'DRIVER_EN_ROUTE') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, STEP_GONE, 'ride'));
     }
 
     const arrivedAt = new Date();
@@ -1423,7 +1424,7 @@ export async function driverRoutes(app: FastifyInstance) {
       });
       if (!current) throw new NotFoundError('Ride', id);
       if (current.status !== 'DRIVER_ARRIVED') {
-        throw new AppError(400, 'INVALID_STATUS', `Cannot start ride from status ${current.status}`);
+        throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(current.status, STEP_GONE, 'ride'));
       }
       if (!hasTaxiPassengerCustody(current)) {
         throw new AppError(400, 'PIN_REQUIRED', 'Ride PIN must be verified before starting the ride');
@@ -1567,7 +1568,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await getDriverRide(driver.id, id);
 
     if (order.status !== 'RIDE_IN_PROGRESS') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot complete ride from status ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, STEP_GONE, 'ride'));
     }
     // [M-29] A cash fare is earned when the money is recorded, never on this
     // tap: the fare outcome (paid / refused / left without paying) is the step
@@ -1594,7 +1595,7 @@ export async function driverRoutes(app: FastifyInstance) {
       note: 'Ride completed',
       terminalMetadata: { actualDeliveryTime: actualDuration },
       decayDriverCancellationRate: true,
-      invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${current}`),
+      invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', orderStageRefusal(current, STEP_GONE, 'ride')),
     });
 
     const finished = await finishedFare(order, 'DELIVERED', request.log);
