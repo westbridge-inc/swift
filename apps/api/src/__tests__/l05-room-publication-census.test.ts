@@ -78,7 +78,8 @@ describe('sensitive room publication census', () => {
     // + [BOOK-FU2 · owner B3] "Customer didn't come": the appointment closed by its business (vendor no-show, through the gate).
     // + [BUG-HUNT-2 G01] Support ends a ride whose driver is gone (through the gate).
     // + [BUG-HUNT-2 G03] The passenger who never came: the ride closed by its driver (through the gate).
+    // + [BUG-HUNT-2 G05] Support gives a ride a new code (through the gate).
     // + [BUG-HUNT-2 G20] "Not collected": a pickup closed by its store (vendor not-collected, through the gate).
-    expect(orderPublishers).toBe(55);
+    expect(orderPublishers).toBe(56);
   });
 });

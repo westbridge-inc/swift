@@ -1093,7 +1093,7 @@ export const tripShareGauge = new client.Gauge({
  *  A quiet counter is the normal state; a rising one is an access review. */
 export const handoverBreakGlassCounter = new client.Counter({
   name: 'swift_handover_break_glass_total',
-  help: 'Handover secret break-glass events (reveal, reveal_no_code, rotate, reset_delivery_pin)',
+  help: 'Handover secret break-glass events (reveal, reveal_no_code, rotate, reset_delivery_pin, reset_ride_pin)',
   labelNames: ['event'] as const,
   registers: [registry],
 });

@@ -233,6 +233,36 @@ describe('[G11] the proof photos', () => {
   });
 });
 
+describe('[G05] a ride stuck on wrong codes', () => {
+  const ride = (over: Record<string, unknown> = {}) => orderOf({ orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentStatus: 'PENDING', mmgClaimMismatchAt: null, customerMmgClaim: 'UNRECORDED', handover: { ridePinIssued: true, ridePinLocked: true, ridePinAttempts: 5 }, ...over });
+
+  it('asks for the code sent to the phone and a reason, then resets it; the code is never shown', async () => {
+    const paths: string[] = [];
+    const fetchMock = serveOrder(ride(), (request) => { paths.push(request.url.pathname); return { body: { success: true, data: { auditId: 'a1', rotated: true } } }; });
+    const { user } = detail();
+    await user.click(await screen.findByRole('button', { name: 'New ride code' }));
+    await waitFor(() => expect(paths).toEqual(['/api/v1/auth/step-up']));
+    const dialog = await screen.findByRole('dialog', { name: 'Give SW-2002 a new ride code?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Code sent to your phone' }), '654321');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Give a new code' }));
+    await waitFor(() => expect(paths).toEqual(['/api/v1/auth/step-up', '/api/v1/auth/step-up/verify', '/api/v1/admin/orders/ord-d-1/handover-secret/reset-ride-pin']));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'POST')[1]![1]?.body))).toEqual({ code: '654321' });
+    expect(await screen.findByText('SW-2002 has a new ride code. The passenger was told.')).toBeTruthy();
+  });
+
+  it.each([
+    ['a passenger aboard', { ridePinVerifiedAt: '2026-10-07T11:00:00.000Z' }],
+    ['a ride under way', { status: 'RIDE_IN_PROGRESS' }],
+    ['a ride with no code', { handover: { ridePinIssued: false } }],
+  ])('is not offered with %s', async (_why, over) => {
+    serveOrder(ride(over));
+    detail();
+    await screen.findByText(/SW-2002/);
+    expect(screen.queryByRole('button', { name: 'New ride code' })).toBeNull();
+  });
+});
+
 describe('[G08] a paid MMG order that cannot be fulfilled', () => {
   const paid = () => orderOf({ mmgClaimMismatchAt: null, customerMmgClaim: 'PAID', canCloseStoreRefund: true });
 

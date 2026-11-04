@@ -1415,7 +1415,8 @@ export async function driverRoutes(app: FastifyInstance) {
       // HND-004: the SAME lockout rule the pickup code uses (one handover engine).
       const { locked, remaining } = handoverAttemptState(current.ridePinAttempts);
       if (locked) {
-        throw new AppError(400, 'MAX_ATTEMPTS', 'Maximum PIN verification attempts exceeded. Please contact support.');
+        // [BUG-HUNT-2 G05] Support can do what this says: the order page has a door for a new code.
+        throw new AppError(400, 'MAX_ATTEMPTS', 'Too many wrong codes. Ask Swift support for a new ride code: the passenger sees it in their app.');
       }
       // [Row 207] Constant time, through the one handover-code comparison.
       if (!handoverCodeMatches(current.ridePin, pin)) {
