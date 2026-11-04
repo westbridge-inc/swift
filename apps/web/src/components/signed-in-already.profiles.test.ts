@@ -40,3 +40,11 @@ describe('[F29] the signed-in card asks /auth/me whether the account is a pro', 
     expect(asked).toEqual(['/api/v1/auth/me', '/api/v1/services/providers/me']);
   });
 });
+
+describe('[BUG-HUNT F03] the signed-in card sends branch staff to their store', () => {
+  it('staff: "Go to your dashboard", with no earner or provider request', async () => {
+    const asked = server(false);
+    expect(await homeFor({ id: 's1', roles: ['CUSTOMER'], storeStaff: true })).toEqual({ home: '/dashboard', label: 'Go to your dashboard' });
+    expect(asked).toEqual([]);
+  });
+});
