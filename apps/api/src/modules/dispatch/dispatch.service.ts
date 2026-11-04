@@ -151,8 +151,9 @@ export const FOOD_RESCAN_MS = 60_000;
 /** Backstop for an order that never becomes ready: no re-sweep past this many
  *  minutes from placement (the food-age cutoff normally ends it far sooner). */
 export const FOOD_SLOW_LANE_MAX_MINUTES = 180;
-/** The verticals with a food-age cutoff ride the slow lane; a parcel's sender may cancel free while nobody has it. */
-export const FOOD_SLOW_LANE_TYPES: ReadonlySet<string> = new Set(['FOOD_DELIVERY', 'GROCERY_DELIVERY']);
+/** The verticals that ride the slow lane: those with a food-age cutoff, and [BUG-HUNT-2 G21] a parcel, which the sender was
+ *  told Swift is "still looking" for: a rider who comes online later gets the offer, and rescue.ts ends it at its own limit. */
+export const FOOD_SLOW_LANE_TYPES: ReadonlySet<string> = new Set(['FOOD_DELIVERY', 'GROCERY_DELIVERY', 'COURIER']);
 
 /** Straight-line candidate cap. The geo query keeps the N movers with the
  *  smallest great-circle distance; rankCandidates then re-sorts THOSE by real
@@ -3600,7 +3601,7 @@ export async function recoverStrandedTaxiRides(
       currentRideId: { not: null },
       OR: [{ lastLocationUpdate: { lt: cutoff } }, { lastLocationUpdate: null }],
     },
-    select: { id: true, currentRideId: true },
+    select: { id: true, userId: true, currentRideId: true, lastLocationUpdate: true },
   });
   if (stale.length === 0) return { recovered: [], flagged: [] };
 
@@ -3687,8 +3688,10 @@ export async function recoverStrandedTaxiRides(
         userId: order.customerId,
         type: 'ORDER_UPDATE',
         title: 'Your driver lost signal',
-        body: 'We’ve lost your driver’s live location. Stay where you are — we’re reaching out to them. If you’re not moving, contact support.',
+        body: 'We’ve lost your driver’s live location. Swift support has been told. Stay where you are if it’s safe. If you’re not moving, contact support.',
         data: taxiNotificationData(orderId, { status: order.status }),
+        // [BUG-HUNT-2 G09] Once per loss, not every sweep: one dark stretch has one last fix, and a new loss has a new one.
+        dedupeKey: `taxi-driver-lost-signal:${orderId}:${d.lastLocationUpdate?.getTime() ?? 'never'}`,
       }).catch(() => {});
       flagged.push(orderId);
       continue;
@@ -3701,6 +3704,15 @@ export async function recoverStrandedTaxiRides(
       title: 'Finding you another driver',
       body: 'Your driver dropped off the map before pickup — we’re matching you with the nearest available driver now.',
       data: taxiNotificationData(orderId, { status: 'PENDING' }),
+    }).catch(() => {});
+    // [BUG-HUNT-2 G17] The driver lost a ride they did not give up, and arrived at the pickup to find it gone.
+    await notifications.send({
+      userId: d.userId,
+      type: 'ORDER_UPDATE',
+      title: 'Ride released',
+      body: 'We lost your signal before pickup, so the ride went to another driver. This does not count against you. Go online when your signal is back.',
+      data: taxiNotificationData(orderId, { status: 'PENDING' }, 'earner'),
+      dedupeKey: `taxi-driver-released:${orderId}:${d.id}:${d.lastLocationUpdate?.getTime() ?? 'never'}`,
     }).catch(() => {});
     await enqueue(orderId).catch(() => {});
     recovered.push(orderId);

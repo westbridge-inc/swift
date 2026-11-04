@@ -22,8 +22,9 @@ import { testPhone } from './helpers/fixture-ids';
 // [RIDER-SAFE · COORD rulings 29 Oct 2026] The delivery safeguard — the
 // dispatch side:
 //   3 the FOOD slow lane: past the fast cap a waiting food/grocery order keeps
-//     re-sweeping quietly every minute until the food-age cutoff (a parcel
-//     does not; an order that never got ready stops at the backstop);
+//     re-sweeping quietly every minute until the food-age cutoff (a parcel too,
+//     since 4 Nov, until the riderless cutoff; an order that never got ready
+//     stops at the backstop);
 //     a rider who comes online or hands over a bag wakes the oldest waiting
 //     orders near them first — and two riders doing so at the same instant
 //     still produce exactly ONE live offer (real Postgres + Redis);
@@ -180,7 +181,9 @@ describe('[RIDER-SAFE 3] the FOOD slow lane past the fast cap', () => {
     expect(row).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
   });
 
-  it('a grocery order rides it too; a parcel does not (its sender may cancel free while nobody has it)', async () => {
+  // [BUG-HUNT-2 G21 · COORD 4 Nov 2026] A parcel rides it too: its sender is told "we are still looking", and the riderless
+  // cutoff (rescue.ts, riderless-exit.test.ts) ends it honestly. Until 4 Nov a parcel stopped after three searches.
+  it('a grocery order rides it too, and so does a parcel', async () => {
     const grocery = await makeOrder(cell(1), { orderType: 'GROCERY_DELIVERY' });
     const parcel = await makeOrder(cell(1), { orderType: 'COURIER', readyAt: null, courierPayer: 'SENDER', courierPackageSize: 'SMALL', courierTrackingToken: nanoid(16) });
     for (const o of [grocery, parcel]) await app.redis.set(dispatchExhaustKey(o.id, o.fulfillmentModeVersion), String(EXHAUST_CAP));
@@ -188,7 +191,7 @@ describe('[RIDER-SAFE 3] the FOOD slow lane past the fast cap', () => {
     const dispatch = makeDispatch(redispatches);
     await sys(() => dispatch.dispatchOrder(grocery.id));
     await sys(() => dispatch.dispatchOrder(parcel.id));
-    expect(redispatches).toEqual([{ orderId: grocery.id, delayMs: FOOD_RESCAN_MS }]);
+    expect(redispatches).toEqual([{ orderId: grocery.id, delayMs: FOOD_RESCAN_MS }, { orderId: parcel.id, delayMs: FOOD_RESCAN_MS }]);
   });
 
   it(`stops at the backstop: no re-sweep for an order placed more than ${FOOD_SLOW_LANE_MAX_MINUTES} min ago`, async () => {
