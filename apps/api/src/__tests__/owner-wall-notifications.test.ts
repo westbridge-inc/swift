@@ -587,6 +587,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/admin/admin.routes.ts insertNoticeFor': 1,
       'modules/auth/auth.service.ts insertNoticeFor': 1,
       'modules/billing/fee-demand-delivery.ts upsertNoticeFor': 1,
+      'modules/cash/delivery-cash-settlement.service.ts insertNoticeFor': 1,
       'modules/cash/door-cash-hold.ts insertNoticeFor': 1,
       'modules/handover/handover-notice.ts upsertNoticeFor': 1,
       'modules/notification/notification.service.ts insertNoticeFor': 1,

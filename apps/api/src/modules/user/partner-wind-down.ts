@@ -1,4 +1,5 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { OPEN_SETTLEMENT } from '../cash/delivery-cash-settlement.service';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
@@ -180,7 +181,7 @@ export async function partnerObligations(
   }
 
   const unsettled = await tx.deliveryCashSettlement.count({
-    where: { status: { not: 'SETTLED' }, OR: [
+    where: { ...OPEN_SETTLEMENT, OR: [
       ...(rider ? [{ riderId: rider.id }] : []), { vendor: { owner: { userId } } },
     ] },
   });

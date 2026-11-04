@@ -173,6 +173,7 @@ const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIE
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
+  deliveryCashSettlement: { model: 'deliveryCashSettlement', fields: ['status', 'amount', 'closedAt', 'closedById'] },
   serviceJob: { model: 'serviceJob', fields: ['status', 'cancelledAt'] },
   vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired', 'brandListedAlone'] },
   // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
@@ -377,6 +378,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /finance/vat-tracker': c('C0', 'finance.read'),
   'GET /finance/settlements': c('C0', 'finance.read'),
   'GET /finance/cash-settlements': c('C0', 'finance.read'),
+  // Record-only, like the close of a store-claimed MMG order above: a debt between two people stops being tracked, and
+  // no money moves. It closes a claim about money, so: money class, reason, two admins.
+  'POST /finance/cash-settlements/:id/close': c('C4', 'order.refund.settle', E.deliveryCashSettlement),
   'GET /finance/payment-mix': c('C0', 'finance.read'),
   'PUT /finance/settlements/:id/process': c('C4', 'finance.settlement.process', E.settlement),
   'POST /finance/settlements/:id/adjust': c('C4', 'finance.settlement.adjust', E.settlement),
