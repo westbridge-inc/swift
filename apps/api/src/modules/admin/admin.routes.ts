@@ -18,8 +18,8 @@ import { countWaiting, type WaitingKey } from './dashboard-waiting';
 import { STORE_VAT_WAITING_WHERE, VAT_CERTIFICATE_DOC_TYPE } from '../store-vat/store-vat';
 import { z } from '../../lib/zod';
 import { isCategoryIconKey } from '../discovery/category-icon-keys';
-import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
-import { withLiveDocuments } from './live-documents';
+import { Prisma, type VehicleType, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
+import { idsByLiveDocuments, LIVE_DOCUMENTS_FILTER_CAP, withLiveDocuments } from './live-documents';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
@@ -1376,7 +1376,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // lastKnownLat / lastKnownLng never leave the API on a user object — the
     // ONE shared deny-list every auth response already uses.
     // [FOLLOWUPS · follows O-1] The person's number masked; the full one is the audited GET /users/:id/phone.
-    return { success: true, data: maskPersonPage(sanitizeUser({ ...user, addresses })) };
+    // [BUG-HUNT F06] The Profiles card answers from the verdict GO uses, as the lists do.
+    const liveOf = async <T extends { vehicleType: VehicleType; documentsVerified: boolean }>(mover: T | null, kind: 'RIDER' | 'DRIVER') => (
+      mover ? (await withLiveDocuments(app.prisma, [{ ...mover, userId: id }], kind))[0]! : null
+    );
+    const [rider, driver] = await Promise.all([liveOf(user.rider, 'RIDER'), liveOf(user.driver, 'DRIVER')]);
+    return { success: true, data: maskPersonPage(sanitizeUser({ ...user, rider, driver, addresses })) };
   });
 
   // [FOLLOWUPS · follows O-1] The audited door to this person's full number (person-contact.ts): a stated reason
@@ -2106,23 +2111,30 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(type && { riderType: type }),
       ...(status === 'online' && { isOnline: true }),
       ...(status === 'offline' && { isOnline: false }),
-      ...(status === 'verified' && { documentsVerified: true }),
-      ...(status === 'unverified' && { documentsVerified: false }),
     };
     const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
+    // [BUG-HUNT F06] The document filters read the verdict GO uses, never the old flag the Review Center does not set.
+    const newestFirst = [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
+    const matched = status === 'verified' || status === 'unverified'
+      ? await idsByLiveDocuments(app.prisma, await app.prisma.rider.findMany({
+        where, orderBy: newestFirst, take: LIVE_DOCUMENTS_FILTER_CAP,
+        select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+      }), 'RIDER', status === 'verified')
+      : null;
+    const pageIds = matched?.slice(skip, skip + limit);
+
     const [riders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.rider.findMany({
-        where,
+        where: pageIds ? { id: { in: pageIds } } : where,
         include: {
           user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true, status: true } },
           subscription: { select: { id: true, status: true, type: true } },
         },
-        skip,
-        take: limit,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        ...(pageIds ? {} : { skip, take: limit }),
+        orderBy: newestFirst,
       }),
-      app.prisma.rider.count({ where }),
+      matched ? Promise.resolve(matched.length) : app.prisma.rider.count({ where }),
       hiddenWhere ? app.prisma.rider.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
@@ -2186,9 +2198,10 @@ export async function adminRoutes(app: FastifyInstance) {
       profile.userId,
       kind === 'RIDER' ? { vehicleType: profile.vehicleType, kind: 'RIDER' } : { vehicleType: profile.vehicleType },
     );
-    const next = profile.documentsVerified ? 'VERIFIED'
-      : live.allowed ? 'CAN_VERIFY'
-        : live.reason === 'insurance' ? 'NEEDS_INSURANCE' : 'NEEDS_DOCUMENTS';
+    // [BUG-HUNT F06] GO reads the live verdict, so a mover it lets online has nothing left to verify. The old flag only
+    // keeps its one word: verified earlier, and a document has since lapsed.
+    const next = live.allowed || profile.documentsVerified ? 'VERIFIED'
+      : live.reason === 'insurance' ? 'NEEDS_INSURANCE' : 'NEEDS_DOCUMENTS';
     return {
       moverId: profile.id,
       kind,
@@ -2313,23 +2326,30 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       ...(status === 'online' && { isOnline: true }),
       ...(status === 'offline' && { isOnline: false }),
-      ...(status === 'verified' && { documentsVerified: true }),
-      ...(status === 'unverified' && { documentsVerified: false }),
     };
     const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
+    // [BUG-HUNT F06] The document filters read the verdict GO uses, never the old flag the Review Center does not set.
+    const newestFirst = [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
+    const matched = status === 'verified' || status === 'unverified'
+      ? await idsByLiveDocuments(app.prisma, await app.prisma.driver.findMany({
+        where, orderBy: newestFirst, take: LIVE_DOCUMENTS_FILTER_CAP,
+        select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+      }), 'DRIVER', status === 'verified')
+      : null;
+    const pageIds = matched?.slice(skip, skip + limit);
+
     const [drivers, total, hiddenTestRecords] = await Promise.all([
       app.prisma.driver.findMany({
-        where,
+        where: pageIds ? { id: { in: pageIds } } : where,
         include: {
           user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true, status: true } },
           subscription: { select: { id: true, status: true, type: true } },
         },
-        skip,
-        take: limit,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        ...(pageIds ? {} : { skip, take: limit }),
+        orderBy: newestFirst,
       }),
-      app.prisma.driver.count({ where }),
+      matched ? Promise.resolve(matched.length) : app.prisma.driver.count({ where }),
       hiddenWhere ? app.prisma.driver.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 

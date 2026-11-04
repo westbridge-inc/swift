@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { BarChart3, Calendar, Check, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
+import { BarChart3, Bell, Calendar, Check, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleUnreachable, useConsoleSession } from '@/components/console-session';
 import type { ShellPerson } from '@/components/customer-shell';
@@ -38,6 +38,8 @@ export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | 
     ...(role === 'OWNER' ? [{ href: '/dashboard/documents', label: 'Documents', icon: Check, exact: false, dock: false }] : []),
     // Account is the store's settings page until the app's Account screen lands (PR D).
     { href: '/dashboard/settings', label: 'Account', icon: UserRound, exact: false },
+    // [BUG-HUNT F04] A door to a person, for everyone on the team. The icon is one the shell already loads.
+    { href: '/dashboard/help', label: 'Help', icon: Bell, exact: false, dock: false },
   ];
 };
 

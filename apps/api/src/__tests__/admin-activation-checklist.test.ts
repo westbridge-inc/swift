@@ -543,7 +543,7 @@ describe('[MC-PR2] GET /vendors/:id/activation-checklist — the per-document tr
 });
 
 describe('[MC-PR2] GET /riders|drivers/:id/activation-checklist — the mover gate the Verify button obeys', () => {
-  it('a rider with documents missing reads NEEDS_DOCUMENTS; complete reads CAN_VERIFY; verified reads VERIFIED', async () => {
+  it('a rider with documents missing reads NEEDS_DOCUMENTS; complete reads VERIFIED, flag or no flag', async () => {
     const user = await makeUser('Mover');
     const rider = await app.prisma.rider.create({ data: { userId: user.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: false } });
     await doc(user.id, 'national_id', 'APPROVED');
@@ -552,7 +552,7 @@ describe('[MC-PR2] GET /riders|drivers/:id/activation-checklist — the mover ga
     expect(partial.checklist.items.map((i: { docType: string }) => i.docType).sort()).toEqual([...MOTORCYCLE_DOCS].sort());
 
     for (const t of MOTORCYCLE_DOCS.filter((t) => t !== 'national_id')) await doc(user.id, t, 'APPROVED');
-    expect((await read(`/api/v1/admin/riders/${rider.id}/activation-checklist`)).json().data).toMatchObject({ next: 'CAN_VERIFY', live: { allowed: true } });
+    expect((await read(`/api/v1/admin/riders/${rider.id}/activation-checklist`)).json().data).toMatchObject({ next: 'VERIFIED', live: { allowed: true } });
 
     await app.prisma.rider.update({ where: { id: rider.id }, data: { documentsVerified: true } });
     expect((await read(`/api/v1/admin/riders/${rider.id}/activation-checklist`)).json().data.next).toBe('VERIFIED');
