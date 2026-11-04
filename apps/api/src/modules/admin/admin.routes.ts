@@ -91,7 +91,6 @@ import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { LIVE_SOS_STATUSES } from '../safety/sos.service';
-import { taxiNotificationData } from '../rides/taxi-notification';
 import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
 import { assertMayEndRide } from '../rides/end-ride-authority';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
