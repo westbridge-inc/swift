@@ -661,6 +661,62 @@ describe('a link pause never strands paid money', () => {
   });
 });
 
+// [REVIEW-G9 B2] System work has no tenant extension and no wall, so these filters are the only thing between one
+// operator's decision and another's campaigns. A plain client, on purpose: it is what the cron runs with.
+describe('one operator\'s decision is its own', () => {
+  const other = `link-other-${nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
+  const elsewhere = (h: string) => prisma.adLinkDomain.create({ data: { tenantId: other, host: h, status: 'APPROVED' } });
+
+  it('the re-check does not accept a website only another operator approved: it pauses, and walks nothing', async () => {
+    const h = host('theirs');
+    await elsewhere(h);
+    const { campaign } = await live({ value: `https://${h}/a`, host: h, checkedDaysAgo: AD_LINK_RECHECK_DAYS + 1 });
+    const links = new AdLinkService(prisma, io);
+    links.hop = sends(page);
+    expect(await links.recheckDue(new Date(), { campaignIds: [campaign.id], houseAdIds: [] })).toEqual({ checked: 1, stopped: 1 });
+    expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: campaign.id } })).status).toBe('PAUSED');
+    expect(links.hop).not.toHaveBeenCalled();
+  });
+
+  it('a website only another operator approved never serves here', async () => {
+    const h = host('theirsserve');
+    await elsewhere(h);
+    const { placement: p } = await live({ value: `https://${h}/a`, host: h });
+    AdServingService.invalidateTenant(tenantId);
+    expect((await serve(p.key)).placements[p.key]?.items).toEqual([]);
+  });
+
+  it('refusing one website stops that website\'s campaigns and nobody else\'s', async () => {
+    const refused = host('refusedone');
+    const fine = host('stillfine');
+    const domain = await allow(refused);
+    await allow(fine);
+    const hit = await live({ value: `https://${refused}/a`, host: refused });
+    const untouched = await live({ value: `https://${fine}/a`, host: fine });
+    await new AdLinkService(prisma, io).rejectDomain(domain.id, 'admin-1', 'This website now sells a banned item');
+    expect((await prisma.adCampaign.findUniqueOrThrow({ where: { id: hit.campaign.id } })).status).toBe('PAUSED');
+    const row = await prisma.adCampaign.findUniqueOrThrow({ where: { id: untouched.campaign.id } });
+    expect([row.status, row.statusReason]).toEqual(['LIVE', null]);
+  });
+
+  it('refusing one website takes down that website\'s house ads and nobody else\'s', async () => {
+    const refused = host('refusedhouse');
+    const fine = host('finehouse');
+    const domain = await allow(refused);
+    const p = await placement();
+    const make = async (h: string) => {
+      const row = await prisma.houseAd.create({ data: { tenantId, placementId: p.id, kind: 'IMAGE', fileUrl: 'https://cdn.example/h.png', destinationType: 'URL', destinationValue: `https://${h}/`, destinationHost: h, destinationApprovedAt: new Date() } });
+      houseAdIds.push(row.id);
+      return row;
+    };
+    const hit = await make(refused);
+    const untouched = await make(fine);
+    await new AdLinkService(prisma, io).rejectDomain(domain.id, 'admin-1', 'This website now sells a banned item');
+    expect((await prisma.houseAd.findUniqueOrThrow({ where: { id: hit.id } })).active).toBe(false);
+    expect((await prisma.houseAd.findUniqueOrThrow({ where: { id: untouched.id } })).active).toBe(true);
+  });
+});
+
 describe('the way back after a link pause', () => {
   // The route builds its own service, so the network seam for this describe is the service's one walk.
   const spyOnWalk = () => vi.spyOn(AdLinkService.prototype as unknown as { walk: () => Promise<unknown> }, 'walk');

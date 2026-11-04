@@ -71,12 +71,19 @@ function isLocalOrAddress(hostname: string): boolean {
   return LOCAL_SUFFIXES.some((suffix) => host.endsWith(suffix));
 }
 
+/** The name a browser would save: the last segment with anything in it, without path parameters or the trailing
+ *  dots, spaces and NULs that a server ignores and an extension check does not. */
 function pathIsDownload(pathname: string): boolean | null {
+  let decoded: string;
   try {
-    return DOWNLOAD_EXTENSION.test(decodeURIComponent(pathname));
+    decoded = decodeURIComponent(pathname);
   } catch {
     return null;
   }
+  // eslint-disable-next-line no-control-regex
+  const bare = (segment: string) => (segment.split(';')[0] ?? '').replace(/[.\s\u0000]+$/, '');
+  const name = decoded.split('/').map(bare).filter(Boolean).pop() ?? '';
+  return DOWNLOAD_EXTENSION.test(name);
 }
 
 function classifyAppStore(parsed: URL, host: string): AdLinkVerdict {

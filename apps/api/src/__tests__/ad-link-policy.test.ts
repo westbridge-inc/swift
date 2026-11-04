@@ -58,6 +58,34 @@ describe('ad link policy: the shape of a link', () => {
     expect(classifyAdLink('URL', value)).toEqual({ ok: false, reason });
   });
 
+  // [REVIEW-G9 B1] The name a browser saves is the last segment, whatever is hung on the end of it.
+  it.each([
+    'https://example.gy/app.apk/',
+    'https://example.gy/app.apk//',
+    'https://example.gy/app.apk;v=1',
+    'https://example.gy/app.apk;v=1/',
+    'https://example.gy/app.apk%20',
+    'https://example.gy/app.apk%00',
+    'https://example.gy/app.exe.',
+    'https://example.gy/app.exe...',
+    'https://example.gy/app.exe.%20',
+    'https://example.gy/dir/Setup.MSI;x=y',
+    'https://example.gy/app%2Eapk%2F',
+  ])('a file download dressed up is still one: %s', (value) => {
+    expect(classifyAdLink('URL', value)).toEqual({ ok: false, reason: 'FILE_DOWNLOAD' });
+  });
+
+  it.each([
+    'https://example.gy/app.apk/reviews',
+    'https://example.gy/download',
+    'https://example.gy/releases.html',
+    'https://example.gy/a;v=1',
+    'https://example.gy/',
+    'https://example.gy/.',
+  ])('a page is still a page: %s', (value) => {
+    expect(classifyAdLink('URL', value)).toMatchObject({ ok: true, kind: 'EXTERNAL' });
+  });
+
   it.each([
     'https://example.gy\\@evil.example/',
     'https:\\\\evil.example/',

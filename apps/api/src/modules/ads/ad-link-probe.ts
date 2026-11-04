@@ -107,7 +107,15 @@ export function httpsHop(url: string): Promise<AdLinkHop> {
   });
 }
 
-const DOWNLOAD_TYPES = /^(application\/(octet-stream|vnd\.android\.package-archive|x-msdownload|x-msi|x-apple-diskimage|java-archive|zip|x-7z-compressed|x-rar-compressed|x-sh|x-executable))\s*(;|$)/i;
+const DOWNLOAD_TYPES = new RegExp(`^(${[
+  'binary/octet-stream',
+  ...[
+    'octet-stream', 'vnd\\.android\\.package-archive', 'java-archive',
+    'x-msdownload', 'x-msi', 'x-msdos-program', 'x-dosexec', 'vnd\\.microsoft\\.portable-executable', 'x-executable', 'x-sh',
+    'x-apple-diskimage', 'x-iso9660-image', 'x-debian-package', 'vnd\\.debian\\.binary-package', 'x-rpm',
+    'zip', 'gzip', 'x-gzip', 'x-tar', 'x-bzip2', 'x-7z-compressed', 'x-rar-compressed', 'vnd\\.rar',
+  ].map((type) => `application/${type}`),
+].join('|')})\\s*(;|$)`, 'i');
 
 function nextHop(from: string, location: string, approvedHost: string): { url: string } | { failure: AdLinkCheckFailure } {
   let absolute: string;

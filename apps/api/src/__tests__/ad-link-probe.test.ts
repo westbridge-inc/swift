@@ -1,5 +1,6 @@
+import net from 'node:net';
 import { describe, expect, it } from 'vitest';
-import { checkAdLink, isBlockedAddress, publicOnlyLookup, type AdLinkHop } from '../modules/ads/ad-link-probe';
+import { checkAdLink, httpsHop, isBlockedAddress, publicOnlyLookup, type AdLinkHop } from '../modules/ads/ad-link-probe';
 
 const hops = (table: Record<string, AdLinkHop | Error>) => {
   const seen: string[] = [];
@@ -69,6 +70,28 @@ describe('checkAdLink: following the redirects of one link', () => {
     expect(await checkAdLink('https://example.gy/a', 'example.gy', { hop })).toEqual({ ok: false, hard: true, reason: 'FILE_DOWNLOAD' });
   });
 
+  // [REVIEW-G9 B1] An extensionless path is judged by what the server says it is. S3's default type is the first row.
+  it.each([
+    'binary/octet-stream', 'BINARY/OCTET-STREAM', 'application/octet-stream; charset=binary',
+    'application/x-msdos-program', 'application/vnd.microsoft.portable-executable', 'application/x-dosexec',
+    'application/gzip', 'application/x-gzip', 'application/x-tar', 'application/x-bzip2',
+    'application/x-debian-package', 'application/vnd.debian.binary-package', 'application/x-rpm', 'application/vnd.rar', 'application/x-iso9660-image',
+  ])('/download served as %s is a file, not a page', async (contentType) => {
+    const { hop } = hops({ 'https://example.gy/download': { ...page, contentType } });
+    expect(await checkAdLink('https://example.gy/download', 'example.gy', { hop })).toEqual({ ok: false, hard: true, reason: 'FILE_DOWNLOAD' });
+  });
+
+  it.each(['text/html', 'text/html; charset=utf-8', 'application/xhtml+xml', 'TEXT/HTML'])('%s is a page', async (contentType) => {
+    const { hop } = hops({ 'https://example.gy/download': { ...page, contentType } });
+    expect(await checkAdLink('https://example.gy/download', 'example.gy', { hop })).toEqual({ ok: true, hops: 0 });
+  });
+
+  it('a redirect to a file dressed up is refused without opening it', async () => {
+    const { hop, seen } = hops({ 'https://example.gy/start': to('/app.apk;v=1') });
+    expect(await checkAdLink('https://example.gy/start', 'example.gy', { hop })).toEqual({ ok: false, hard: true, reason: 'FILE_DOWNLOAD' });
+    expect(seen).toEqual(['https://example.gy/start']);
+  });
+
   it.each([[404], [410]])('a page that is gone (%i) is a hard failure', async (status) => {
     const { hop } = hops({ 'https://example.gy/a': { ...page, status } });
     expect(await checkAdLink('https://example.gy/a', 'example.gy', { hop })).toEqual({ ok: false, hard: true, reason: 'PAGE_GONE' });
@@ -109,6 +132,11 @@ describe('the probe never reaches inside Swift\'s network', () => {
     expect(r.err?.code).toBe('AD_LINK_PRIVATE_ADDRESS');
   });
 
+  it('no answer at all is a refusal, not a crash', async () => {
+    const r = await run([], false);
+    expect(r.err?.code).toBe('AD_LINK_PRIVATE_ADDRESS');
+  });
+
   it('a public name answers in the shape the socket asked for', async () => {
     const one = await run([{ address: '8.8.8.8', family: 4 }], false);
     expect(one).toEqual({ err: null, a: '8.8.8.8', f: 4 });
@@ -116,4 +144,37 @@ describe('the probe never reaches inside Swift\'s network', () => {
     expect(all.err).toBeNull();
     expect(all.a).toEqual([{ address: '8.8.8.8', family: 4 }]);
   });
+});
+
+// [REVIEW-G9 B2] The suites above fake the hop. These two go through the real socket path: a fake can never show
+// that the guard is wired to the connection, or that a silent website is ever let go of.
+describe('the real request', () => {
+  const listening = async (onSocket: (socket: net.Socket) => void) => {
+    const server = net.createServer(onSocket);
+    await new Promise<void>((ready) => { server.listen(0, '127.0.0.1', () => ready()); });
+    return { server, port: (server.address() as net.AddressInfo).port };
+  };
+
+  it('a name that resolves to a private address never reaches a socket', async () => {
+    let connections = 0;
+    const { server, port } = await listening((socket) => { connections += 1; socket.destroy(); });
+    const answer = await httpsHop(`https://localhost:${port}/`).catch((err: Error & { code?: string }) => err.code);
+    server.close();
+    expect(answer).toBe('AD_LINK_PRIVATE_ADDRESS');
+    expect(connections).toBe(0);
+  });
+
+  it('a website that accepts the connection and then says nothing is let go of at the deadline', async () => {
+    const open: net.Socket[] = [];
+    const { server, port } = await listening((socket) => { open.push(socket); socket.on('error', () => {}); });
+    const started = Date.now();
+    const outcome = await Promise.race([
+      httpsHop(`https://127.0.0.1:${port}/`).then(() => 'answered', () => 'dropped'),
+      new Promise((resolve) => { setTimeout(() => resolve('still hanging'), 9_000); }),
+    ]);
+    for (const socket of open) socket.destroy();
+    server.close();
+    expect(outcome).toBe('dropped');
+    expect(Date.now() - started).toBeLessThan(8_000);
+  }, 15_000);
 });
