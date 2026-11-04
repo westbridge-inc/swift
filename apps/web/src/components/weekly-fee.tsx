@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
@@ -121,6 +122,8 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
         {checkoutSeller(shown) ? <p className="text-sm text-[var(--swift-muted)]" data-testid="fee-seller">{checkoutSeller(shown)}</p> : null}
       </div>;
     }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
+    {/* [Row 156] The refunds page's own promise, word for word: no new promise, and no time for MMG's part. */}
+    <p className="text-sm text-[var(--swift-muted)]">Charged twice, or by mistake? Tell support and Swift refunds the extra or mistaken charge in full, within 14 days, to the method you paid with. <Link href="/legal/refunds" className="underline">How refunds work</Link></p>
     <h2 className="text-lg font-bold">Receipts</h2>
     {/* [owner legal plan R12] Printed by the API, line by line: the same receipt support and the accountant see. */}
     {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <div key={r.receiptNumber} aria-label={`Receipt ${r.receiptNumber}`} className="space-y-1 rounded-2xl border border-black/5 bg-white p-5 text-sm">
