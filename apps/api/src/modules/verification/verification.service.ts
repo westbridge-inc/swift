@@ -3558,6 +3558,39 @@ export class VerificationService {
       }
     }
 
+    await this.moverFeeTail(userId);
+    return true;
+  }
+
+  /**
+   * A mover's weekly fee is owed the moment they hold BOTH a mover profile and approved documents, whichever came
+   * second. An approval reaches this through afterApproval. A saved vehicle (POST /partner/become, PUT /partner/vehicle)
+   * reaches it here, after its commit: papers approved before the vehicle owe the fee then, with no later approval to
+   * collect it. Same law as an approval (one fee, one trial, the deletion write barrier). A failure never undoes the
+   * saved vehicle: it is logged, and GO collects what is owed (settleMissingMoverFee). True when the tail ran.
+   */
+  async settleMoverFee(userId: string): Promise<boolean> {
+    try {
+      if (!await this.openForOwedWork(userId)) return false;
+      await this.moverFeeTail(userId);
+      return true;
+    } catch (err) {
+      log().error({ err, userId }, 'the weekly fee owed to a mover was not born; go-online collects it');
+      return false;
+    }
+  }
+
+  /** Go-online's door: a mover past the document gate with no fee row of their own is collected here, before the fee
+   *  gate reads the row, so nobody works without a fee and nobody is refused one they are owed. A mover who holds a row
+   *  pays one read. */
+  async settleMissingMoverFee(userId: string): Promise<void> {
+    const held = await this.prisma.subscription.findFirst({
+      where: { OR: [{ rider: { userId } }, { driver: { userId } }] }, select: { id: true },
+    });
+    if (!held) await this.settleMoverFee(userId);
+  }
+
+  private async moverFeeTail(userId: string): Promise<void> {
     const [driver, rider] = await Promise.all([
       this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true } }),
       this.prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
@@ -3578,7 +3611,6 @@ export class VerificationService {
       if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
       if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
-    return true;
   }
 
   /**

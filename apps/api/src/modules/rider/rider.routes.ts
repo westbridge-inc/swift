@@ -80,7 +80,7 @@ import {
   RIDER_PICKUP_FROM,
 } from '../order/order-status';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
-import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
+import { ReviewDemoMoneyRefusedError, weeklyFeeMissingRowPolicy } from '../review/demo-policy';
 import { withCounterpartPhones } from '../calls/counterpart-phone';
 import { kickWaitingOrdersNear, type KickEnqueue } from '../dispatch/supply-kick';
 const updateRiderProfileSchema = z.object({
@@ -676,15 +676,19 @@ export async function riderRoutes(app: FastifyInstance) {
       throw goOnlineRefusal('DOCUMENTS', 'RIDER');
     }
 
-    // THE canOperate rule (operate-gate.ts, G-BILL-03) — a missing row is
-    // grandfathered (legacy accounts pre-dating birth-on-verification); the
-    // verdict maps onto this route's historical codes.
+    // THE canOperate rule (operate-gate.ts, G-BILL-03); the verdict maps onto this route's historical codes. A fee this
+    // rider is owed is born first. A missing row after that operates only for what the clause exists for: the legacy
+    // `documentsVerified` grant (accounts pre-dating birth-on-verification; since then the flag is written only with a
+    // fee, admin verify-documents) and the store-review fiction. Anyone else does not work without a fee.
+    if (request.tenantKind !== 'REVIEW') await verification.settleMissingMoverFee(request.user.userId);
     const feePayer = await moverFeePayer(app.prisma, request.user.userId);
-    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: 'GRANDFATHER' });
+    const missingRow = weeklyFeeMissingRowPolicy(request.tenantKind, rider.documentsVerified ? 'GRANDFATHER' : 'BLOCK');
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
         throw goOnlineRefusal('FEE_GRACE_LAPSED', 'RIDER');
       }
+      if (operability.why === 'MISSING') throw goOnlineRefusal('FEE_MISSING', 'RIDER');
       // [NO-DEAD-ENDS] Never "top up": the fee is paid under Weekly fee (go-online-refusals.ts).
       throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
     }
@@ -715,7 +719,7 @@ export async function riderRoutes(app: FastifyInstance) {
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'RIDER');
       await lockMoverSources(tx, feePayer);
-      if (!(await moverFeeOperability(tx, feePayer, { missingRow: 'GRANDFATHER' })).operable) {
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow })).operable) {
         throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
       }
 

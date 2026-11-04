@@ -422,7 +422,8 @@ export async function driverRoutes(app: FastifyInstance) {
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — drivers require a
     // subscription row; the verdict maps onto this route's historical codes.
     // [REVIEW-PARTNER] Except in the store-review fiction, which has no money
-    // rail and therefore never holds one (review/demo-policy.ts).
+    // rail and therefore never holds one (review/demo-policy.ts). A fee this driver is owed is born first.
+    if (request.tenantKind !== 'REVIEW') await verification.settleMissingMoverFee(request.user.userId);
     const feePayer = await moverFeePayer(app.prisma, request.user.userId);
     const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') });
     if (!operability.operable) {
