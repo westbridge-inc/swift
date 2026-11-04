@@ -171,6 +171,19 @@ describe('a ride open far past its estimate', () => {
     expect(row!.closedAt).not.toBeNull();
   }, 60_000);
 
+  it('a second overdue ride after the page closed pages at once, not six hours later', async () => {
+    const first = await ride(5 * HOUR, 20);
+    await run();
+    await sys(() => app.prisma.order.update({ where: { id: first }, data: { status: 'FAILED' } }));
+    await run();
+    expect((await pages())[0]!.closedAt).not.toBeNull();
+    await ride(5 * HOUR, 20);
+    await run();
+    const rows = (await pages()).filter((row) => row.closedAt === null);
+    expect(rows).toHaveLength(1);
+    expect(texts()).toHaveLength(2);
+  }, 60_000);
+
   it('only a ride: a delivery on the same status never pages', async () => {
     const late = await ride(5 * HOUR, 20);
     await sys(() => app.prisma.order.update({ where: { id: late }, data: { orderType: 'FOOD_DELIVERY' } }));

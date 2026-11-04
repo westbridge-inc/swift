@@ -319,4 +319,73 @@ describe('support ends a ride whose driver is gone', () => {
     const narrow = await staff(['order.ride.end']);
     expect((await end((await ride()).orderId, narrow.token)).statusCode).toBe(200);
   });
+
+  // [COORD follow-up] One rule with the refund rail: who is linked is the whole person, and an identity under review says
+  // nobody can tell who is linked.
+  const linked = async (accounts: string[], review = false) => {
+    const cluster = await app.prisma.identityCluster.create({ data: { authorityReviewRequired: review } });
+    await app.prisma.identityClusterMember.createMany({ data: accounts.map((accountId) => ({ accountId, clusterId: cluster.id, linkedVia: [] })) });
+    return async () => {
+      await app.prisma.identityClusterMember.deleteMany({ where: { clusterId: cluster.id } });
+      await app.prisma.identityCluster.delete({ where: { id: cluster.id } });
+    };
+  };
+
+  it.each(['passenger', 'driver'] as const)('an identity under review on the %s side refuses everyone: nobody can say who is linked', async (side) => {
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    const party = side === 'passenger' ? r.customerId : r.driverUser;
+    const undo = await linked([party], true);
+    try {
+      const res = await end(r.orderId, owner.token);
+      expect(res.statusCode, res.payload).toBe(409);
+      expect(res.json().error.code).toBe('IDENTITY_REVIEW_REQUIRED');
+      expect(await app.prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })).toMatchObject({ status: 'RIDE_IN_PROGRESS' });
+    } finally {
+      await undo();
+    }
+  });
+
+  it.each(['passenger', 'driver'] as const)('a staff account linked to the %s is staff on the ride: a SUPER_ADMIN not on it ends it', async (side) => {
+    const colleague = await staff(['*']);
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    const undo = await linked([side === 'passenger' ? r.customerId : r.driverUser, colleague.id]);
+    try {
+      await refused(r.orderId, admin.token, 'STAFF_ON_RIDE');
+      expect((await end(r.orderId, owner.token)).statusCode).toBe(200);
+    } finally {
+      await undo();
+    }
+  });
+
+  const online = (driverId: string) => app.prisma.driver.update({ where: { id: driverId }, data: { isOnline: true, isAvailable: true, locationSessionId: `loc-${nanoid(6)}` } });
+  const OFFLINE = { isOnline: false, isAvailable: false, locationSessionId: null, currentRideId: null };
+
+  it('a gone driver comes out of the close offline, not available, and is told', async () => {
+    const r = await ride();
+    await online(r.driverId);
+    expect((await end(r.orderId)).statusCode).toBe(200);
+    expect(await app.prisma.driver.findUniqueOrThrow({ where: { id: r.driverId } })).toMatchObject(OFFLINE);
+    expect((await inbox(r.driverUser))[0]!.body).toContain('You are offline until you go online again.');
+    expect((await inbox(r.customerId))[0]!.body).not.toContain('offline');
+  });
+
+  it('the same from a verified code with no Start', async () => {
+    const r = await ride('DRIVER_ARRIVED', { ridePinVerified: true, ridePinVerifiedAt: new Date() });
+    await online(r.driverId);
+    expect((await end(r.orderId)).statusCode).toBe(200);
+    expect(await app.prisma.driver.findUniqueOrThrow({ where: { id: r.driverId } })).toMatchObject(OFFLINE);
+    expect(await app.prisma.auditLog.count({ where: { action: 'END_STUCK_RIDE', entityId: r.orderId } })).toBe(1);
+    expect(await inbox(r.driverUser)).toHaveLength(1);
+  });
+
+  it('a driver the ride no longer holds, already on another, stays online', async () => {
+    const r = await ride();
+    const other = await ride();
+    await online(r.driverId);
+    await app.prisma.driver.update({ where: { id: r.driverId }, data: { currentRideId: other.orderId } });
+    expect((await end(r.orderId)).statusCode).toBe(200);
+    expect(await app.prisma.driver.findUniqueOrThrow({ where: { id: r.driverId } })).toMatchObject({ isOnline: true, currentRideId: other.orderId });
+  });
 });

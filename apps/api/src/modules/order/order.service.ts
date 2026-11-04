@@ -777,6 +777,8 @@ export interface CanonicalOrderTransitionInput {
     target: OrderStatus;
     note?: string;
     when: (row: Order) => boolean;
+    /** Runs on the hop, after the hop's own release of the mover. */
+    withinTransaction?: CanonicalOrderTransitionInput['withinTransaction'];
   };
   /** [O-3] The instant this transition stamps. Set only by a walk's next hop. */
   at?: Date;
@@ -2743,6 +2745,7 @@ export class OrderService {
           changedBy: input.changedBy,
           note: next.note,
           at: now,
+          ...(next.withinTransaction ? { withinTransaction: next.withinTransaction } : {}),
         });
         if ('handoverFailure' in hop) throw new AppError(hop.handoverFailure.statusCode, hop.handoverFailure.code, hop.handoverFailure.message);
       }
