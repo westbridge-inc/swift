@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchRevenue,
   fetchCashSettlements,
+  closeCashSettlement,
   fetchPaymentMix,
   fetchSettlements,
   processSettlement,
@@ -66,11 +67,24 @@ const LEDGER_FILTERS = ['ALL', 'OWED', 'RIDER_CONFIRMED', 'STORE_CONFIRMED', 'SE
 /** MMG-vs-cash mix + the store⇄rider delivery-fee cash ledger. Visibility
  *  only — Swift records these debts, it never moves the money. */
 function MmgSection() {
+  const qc = useQueryClient();
+  const actions = useActionRunner(() => qc.invalidateQueries({ queryKey: ['cash-settlements'] }));
   const [filter, setFilter] = useState<(typeof LEDGER_FILTERS)[number]>('ALL');
   const mixQ = useQuery({ queryKey: ['payment-mix'], queryFn: fetchPaymentMix });
   const ledgerQ = useQuery({
     queryKey: ['cash-settlements', filter],
     queryFn: () => fetchCashSettlements(filter === 'ALL' ? 'limit=50' : `limit=50&status=${filter}`),
+  });
+
+  /** A record neither side can close: a store that never confirms, or has left Swift. */
+  const closeRecord = (r: CashSettlementRow) => void actions.run({
+    title: 'Close this delivery pay record?',
+    body: <p>Use this when the store cannot confirm the handover. The record keeps what it says, and it stops blocking either person. Both sides are told. Swift moves no money.</p>,
+    confirmLabel: 'Close record',
+    dismissLabel: 'Keep it open',
+    reason: { hint: 'Kept on the permanent record, not shown to either side. A second admin must agree.' },
+    submit: ({ reason }) => closeCashSettlement(r.id, reason),
+    success: () => 'The record is closed and both sides are told.',
   });
 
   const mix = mixQ.data?.data;
@@ -139,6 +153,7 @@ function MmgSection() {
           On MMG orders the customer pays the store (fee included), so the store hands the rider their
           delivery fee in cash. Swift tracks the debt until both sides confirm — it never moves the money.
         </p>
+        {actions.banner}
         {ledgerQ.isLoading ? (
           <p className="mc-muted text-sm">Loading…</p>
         ) : ledgerQ.isError ? (
@@ -158,6 +173,8 @@ function MmgSection() {
                   {LEDGER_STATUS[r.status].label}
                 </span>
                 <span className="mc-muted text-xs shrink-0">{gyDate(r.createdAt)}</span>
+                {r.closedAt ? <span className="mc-badge shrink-0">Closed by Swift</span> : null}
+                {!r.closedAt && r.status !== 'SETTLED' ? <button type="button" className="mc-btn shrink-0" onClick={() => closeRecord(r)}>Close record…</button> : null}
               </div>
             ))}
           </div>
