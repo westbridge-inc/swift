@@ -158,7 +158,7 @@ describe('[F29] GET /auth/me names the partner profiles this person holds', () =
     const data = await me(everything.token);
     expect(Object.keys(data.profiles as object).sort()).toEqual(['driver', 'provider', 'rider']);
     for (const value of Object.values(data.profiles as object)) expect(typeof value).toBe('boolean');
-    expect(Object.keys(data.user).sort()).toEqual(['activeRole', 'firstName', 'id', 'lastName', 'phone', 'roles', 'status', 'tenant']);
+    expect(Object.keys(data.user).sort()).toEqual(['activeRole', 'firstName', 'id', 'lastName', 'phone', 'roles', 'status', 'storeStaff', 'tenant']);
     expect(data.user['id']).toBe(everything.userId);
   });
 
