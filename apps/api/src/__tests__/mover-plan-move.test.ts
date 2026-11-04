@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
+import type { VehicleType } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -15,7 +16,7 @@ import { grantStepUp } from './helpers/step-up';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { lockMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
-import { partnerRateFor, subscriptionTiersIn } from '../modules/country/country-config.service';
+import { CountryConfigService, partnerRateFor, subscriptionTiersIn } from '../modules/country/country-config.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 
 // ---------------------------------------------------------------------------
@@ -85,6 +86,16 @@ async function riderOnAFee() {
   const riderId: string = made.json().data.id;
   const sub = await feeOn({ riderId }, u.userId, 'DELIVERY_RIDER', 6000);
   return { ...u, riderId, sub };
+}
+
+/** The papers a vehicle's list asks for, filed the way the review pipeline leaves them: the real gate reads them. */
+async function approvePapers(userId: string, vehicleType: VehicleType) {
+  for (const docType of await system(() => new CountryConfigService(app.prisma).getMoverChecklist('GY', vehicleType))) {
+    await system(() => app.prisma.verificationDocument.create({ data: {
+      userId, role: 'MOVER', docType, fileUrl: `/uploads/verification/plan/${docType}-${nanoid(4)}.enc`, status: 'APPROVED', reviewedBy: 'plan-test',
+      reviewedAt: new Date(), expiresAt: new Date(Date.now() + 200 * DAY),
+    } }));
+  }
 }
 
 const billing = (subscriptionId: string) => system(() => app.prisma.billingEvent.findMany({ where: { subscriptionId, type: 'TIER_CHANGE' } }));
@@ -157,6 +168,15 @@ describe('[F05] the door', () => {
     expect(back.statusCode, back.body).toBe(200);
   });
 
+  it('the permit runs seven days', async () => {
+    const r = await riderOnAFee();
+    const before = Date.now();
+    await allow(r.userId);
+    const until = (await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: r.userId } }))).moverPlanMoveUntil!.getTime();
+    expect(until).toBeGreaterThanOrEqual(before + 7 * DAY);
+    expect(until).toBeLessThanOrEqual(Date.now() + 7 * DAY);
+  });
+
   it('it lapses after a week', async () => {
     const r = await riderOnAFee();
     await allow(r.userId);
@@ -196,6 +216,38 @@ describe('[F05] the fee follows the existing rule', () => {
     expect(Number(after.weeklyRate)).toBe(card);
     expect((await authorityOf(d.userId))!.feeType).toBe('DELIVERY_RIDER');
     expect(await billing(d.sub.id)).toHaveLength(1);
+  });
+
+  it('a fee already below the card stays where it is: a higher rate never applies at once', async () => {
+    const d = await taxiDriverOnAFee({ weeklyRate: 2000 });
+    await allow(d.userId);
+    await grantStepUp(app, d.token);
+    expect((await change(d.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(200);
+    expect(Number((await system(() => app.prisma.subscription.findUniqueOrThrow({ where: { id: d.sub.id } }))).weeklyRate)).toBe(2000);
+    expect(await billing(d.sub.id)).toHaveLength(0);
+    expect((await authorityOf(d.userId))!.feeType).toBe('DELIVERY_RIDER');
+  });
+
+  it('taxi to delivery with the new vehicle\'s papers complete: the fee stays a delivery fee, and a later activation leaves it', async () => {
+    const d = await taxiDriverOnAFee();
+    await approvePapers(d.userId, 'BICYCLE');
+    await allow(d.userId);
+    await grantStepUp(app, d.token);
+    const moved = await change(d.token, { vehicleType: 'BICYCLE' });
+    expect(moved.statusCode, moved.body).toBe(200);
+    const riderId: string = moved.json().data.id;
+    const tiers = await system(() => subscriptionTiersIn(app.prisma, 'GY'));
+    const card = partnerRateFor(tiers, { kind: 'RIDER', vehicleType: 'BICYCLE' }).rate;
+    const check = async () => {
+      expect(Number((await system(() => app.prisma.subscription.findUniqueOrThrow({ where: { id: d.sub.id } }))).weeklyRate)).toBe(card);
+      expect((await authorityOf(d.userId))!.feeType).toBe('DELIVERY_RIDER');
+      expect(await billing(d.sub.id)).toHaveLength(1);
+    };
+    await check();
+    // What a later approval runs, and a repeat save.
+    await system(() => new SubscriptionService(app.prisma).startTrialForRider(riderId));
+    expect((await change(d.token, { vehicleType: 'BICYCLE' })).statusCode).toBe(200);
+    await check();
   });
 
   it('a negotiated rate is left alone', async () => {

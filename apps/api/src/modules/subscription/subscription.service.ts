@@ -281,7 +281,9 @@ export class SubscriptionService {
     activation: ActivationPricing, tx: Prisma.TransactionClient,
   ): Promise<Subscription> {
     if (activation.existing) {
-      const authority = await activateMoverFeeType(tx, payer, 'driverId' in entity ? 'TAXI_DRIVER' : activation.existing.type);
+      // [BUG-HUNT F05] The row keeps the type it was born with; the authority holds the truth. A rider profile reads it
+      // and never raises it, or a fee support moved to delivery work would turn back into a taxi fee.
+      const authority = 'driverId' in entity ? await activateMoverFeeType(tx, payer, 'TAXI_DRIVER') : await lockMoverFeeAuthority(tx, payer);
       let sub = activation.existing;
       if (authority?.feeType === 'TAXI_DRIVER' && sub.customRate === null && !sub.feeWaived) {
         const tariff = await moverFeeTariffSubject(tx, authority);
