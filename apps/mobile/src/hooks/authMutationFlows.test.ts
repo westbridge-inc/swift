@@ -18,7 +18,6 @@ const mocks = vi.hoisted(() => ({
   uploadVerification: vi.fn(),
   submitDocument: vi.fn(),
   withdrawPoliceClearance: vi.fn(),
-  submitIdentity: vi.fn(),
   becomePartner: vi.fn(),
   changeVehicle: vi.fn(),
   signOwnName: vi.fn(),
@@ -100,7 +99,6 @@ vi.mock('../services/api', () => ({
   verificationApi: {
     upload: mocks.uploadVerification,
     submitDocument: mocks.submitDocument,
-    submitIdentity: mocks.submitIdentity,
     withdrawPoliceClearance: mocks.withdrawPoliceClearance,
   },
   partnerApi: { become: mocks.becomePartner, changeVehicle: mocks.changeVehicle },

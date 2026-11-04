@@ -762,6 +762,9 @@ export const suspendUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const unsuspendUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/unsuspend`, { method: 'PUT', body: JSON.stringify({}), reason });
+// [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] A person lifts a strike restriction (no customer ID lifts it any more).
+export const liftStrikeRestriction = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/strike-restriction/lift`, { method: 'POST', body: JSON.stringify({}), reason });
 export const updateConfig = (key: string, value: unknown, reason: string) =>
   apiFetch(`/api/v1/admin/config/${key}`, { method: 'PUT', body: JSON.stringify({ value }), reason });
 

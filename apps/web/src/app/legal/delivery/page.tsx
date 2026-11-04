@@ -97,8 +97,9 @@ export default function DeliveryPage() {
           rider&apos;s location at your address; never on the rider&apos;s word alone.
         </li>
         <li>
-          Strikes count for 90 days. After repeated failed deliveries you must verify your identity before ordering
-          again; after more, ordering is switched off until you contact support.
+          Strikes count for 90 days. After repeated failed deliveries, ordering on your account is paused until those
+          strikes are 90 days old, or sooner if a person at Swift reviews it with you (contact support); after more,
+          ordering is switched off until you contact support.
         </li>
       </ul>
 

@@ -428,18 +428,20 @@ describe('high-value promo gate [SWIFT-162]', () => {
     await app.prisma.category.delete({ where: { id: s.cat.id } }).catch(() => {});
   }
 
-  it('an L1 account cannot redeem a high-value promo without ID verification', async () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change to this pin] Swift keeps no customer ID, so the
+  // SWIFT-162 promo-value gate is gone with it: an L1 account redeems a high-value promo like anyone else (the code's own
+  // limits still apply, and no Swift-funded platform code is created until there is a payout path for one).
+  it('an L1 account redeems a high-value promo with no ID (the promo-value ID gate is gone)', async () => {
     const s = await bigPromoSetup('L1Big');
     try {
       const c = await makeCustomer(); // trustLevel L1 by default
       await inject('POST', '/api/v1/customer/cart/items', { vendorId, itemId: s.item.id, quantity: 1 }, c.token);
       await inject('PUT', '/api/v1/customer/cart/address', { addressId: c.addressId }, c.token);
-      // PICKUP: the CASH-delivery promo law [SPS-F-0022] would otherwise 409
-      // before this test's subject (the SWIFT-162 promo-value ID gate).
+      // PICKUP: the CASH-delivery promo law [SPS-F-0022] would otherwise 409 first.
       const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', promoCode: s.code, fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
-      expect(res.statusCode).toBe(403);
-      expect(res.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-      expect(res.json().error.message).toMatch(/promo/i); // the promo-value gate, not the order-total gate
+      expect(res.body).not.toContain('ID_VERIFICATION_REQUIRED');
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().data.order.discount).toBe(100000);
     } finally {
       await cleanup(s);
     }

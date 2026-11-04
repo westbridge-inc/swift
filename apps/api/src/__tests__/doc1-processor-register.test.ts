@@ -154,9 +154,12 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
     expect(coverageOfHost('notmymmg.gy')).toBeNull();
   });
 
-  it('the live verification path calls the gate at both send sites (doc submission and the L1→L2 identity check)', () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change] the L1→L2 customer-ID check is removed with
+  // the customer ID, so document submission is the one send site left, and it still calls the gate.
+  it('the live verification path calls the gate at its send site (document submission; the customer-ID check is gone)', () => {
     const svc = readFileSync(join(SRC, 'modules/verification/verification.service.ts'), 'utf8');
-    expect(svc.match(/assertExternalProcessingPermitted\(/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(svc.match(/assertExternalProcessingPermitted\(/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
+    expect(svc).not.toMatch(/async submitIdentity\(/);
     for (const call of svc.matchAll(/assertExternalProcessingPermitted\([^\n]*/g)) expect(call[0]).toMatch(/this\.kyc\.engine/);
   });
 });

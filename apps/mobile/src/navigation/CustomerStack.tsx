@@ -51,7 +51,6 @@ import { ServiceProviderScreen } from '../modules/services/screens/ServiceProvid
 import { ProviderWeeklyFeeScreen } from '../modules/services/screens/ProviderWeeklyFeeScreen';
 import { ProBookingScreen } from '../modules/services/screens/ProBookingScreen';
 import { ProBookableScreen } from '../modules/services/screens/ProBookableScreen';
-import { IdentityVerificationScreen } from '../modules/account/screens/IdentityVerificationScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -189,7 +188,6 @@ export function CustomerStack() {
       <Stack.Screen name="ProviderWeeklyFee" component={ProviderWeeklyFeeScreen} />
       <Stack.Screen name="ProBooking" component={ProBookingScreen} />
       <Stack.Screen name="ProBookable" component={ProBookableScreen} />
-      <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
     </Stack.Navigator>
   );
 }

@@ -1,4 +1,4 @@
-import { discardUnusedCustomerSelfie } from '../user/upload-erasure';
+import { discardUnusedCustomerUpload } from '../user/upload-erasure';
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
 import { documentScanState, uploadScanRefusal, recordUnscannedUpload } from '../../lib/upload-scan-debt';
@@ -84,14 +84,11 @@ const submitDocumentSchema = z.object({
   consentVia: z.enum(UPLOAD_CONSENT_VIAS).optional(),
 });
 
-// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match. [ROLE-DOCS · owner 21 Oct 2026] No selfie
-// either: store build 9 still sends `selfieUrl`; the schema no longer names it, so zod's default
-// (strip) DROPS it here and the old app keeps working — it never reaches the intake. The upload it
-// names is erased after the intake when it is the caller's own (below). A newer app sends the ID alone.
-const submitIdentitySchema = z.object({
-  idDocumentUrl: z.string().min(5).max(2048),
-  ...consentFields,
-});
+/** [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] What a shipped app that still sends a customer ID is told. Builds 9-12
+ *  and vc7/vc8 show their own fixed line on any error ("Couldn't submit. Please try again."), never these words; a
+ *  newer app or the website shows them. Answering 200 would make those builds say "ID sent", which is untrue. */
+export const CUSTOMER_ID_NOT_NEEDED_WORDS =
+  'Swift no longer asks for your ID, so there is nothing to send. The photo you chose has not been kept. You can order and ride without it.';
 
 export async function verificationRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
@@ -416,33 +413,23 @@ export async function verificationRoutes(app: FastifyInstance) {
     return reply.send(plaintext);
   });
 
-  /** POST /identity — the customer's ID (L2). [Owner ruling 8 Oct 2026] On file at once unless an
-   *  automatic check holds it for a person. `idCheck` (additive) says which, in words an app can
-   *  repeat truthfully: ON_FILE (on file now, no person reviewed it), WAITING (a person looks
-   *  first), NOT_ACCEPTED. */
-  app.post('/identity', auth, async (request, reply) => {
-    const body = submitIdentitySchema.parse(request.body);
-    // v1 = the words build 12 shows; v2 = the current app's (owner ruling 24 Oct 2026: no unlock promised).
-    if (body.consentTick && body.consentTick !== 'customer_id_v1' && body.consentTick !== 'customer_id_v2') {
-      throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to an ID upload.');
-    }
-    const doc = await verification.submitIdentity(
-      request.user.userId,
-      body.idDocumentUrl,
-      body.privacyNoticeVersion,
-    );
-    // [R17 · in-app ¶15] the customer's tick to keep the ID photo
-    if (body.consentTick) {
-      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: 'customer', surface: consentSurfaceOf(request), ip: request.ip, docType: 'customer_id' });
-    }
-    // [ROLE-DOCS · REVIEW-F #2001 S3-1] Build 9 uploaded a selfie before calling here; nothing reads it, so the face
-    // is erased now (only the caller's own, unclaimed, unheld upload: user/upload-erasure discardUnusedCustomerSelfie).
-    const selfieUrl = (request.body as { selfieUrl?: unknown } | null | undefined)?.selfieUrl;
-    if (typeof selfieUrl === 'string' && selfieUrl.length > 0 && selfieUrl.length <= 2048 && selfieUrl !== body.idDocumentUrl) {
-      await discardUnusedCustomerSelfie(app.prisma, getStorageProvider(), request.user.userId, selfieUrl, request.log);
-    }
-    reply.code(201);
-    const idCheck = doc.status === 'APPROVED' ? 'ON_FILE' : doc.status === 'REJECTED' ? 'NOT_ACCEPTED' : 'WAITING';
-    return { success: true, data: { ...doc, idCheck } };
+  /**
+   * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] POST /identity — the customer's ID is REMOVED: Swift no longer takes,
+   * keeps or reads a customer's ID (the stored ones are withdrawn and deleted by the daily sweep: VerificationService.retireCustomerIds).
+   * A shipped app (builds 9-12, vc7/vc8) still offers "Your ID" and uploads the picture first (POST /verification/upload),
+   * then calls here: the answer is 410 CUSTOMER_ID_NOT_NEEDED in polite words, nothing is recorded (no document, no
+   * consent row), and the picture it just uploaded is erased NOW (only the caller's own, unclaimed, unheld upload:
+   * user/upload-erasure discardUnusedCustomerUpload), as is the selfie builds 9-10 send beside it. The body is read
+   * leniently (never a validation error first), so every build gets the same answer.
+   */
+  app.post('/identity', auth, async (request) => {
+    const body = (request.body ?? {}) as { idDocumentUrl?: unknown; selfieUrl?: unknown };
+    const storage = getStorageProvider();
+    const sent = (value: unknown) => (typeof value === 'string' && value.length >= 5 && value.length <= 2048 ? value : null);
+    const idUpload = sent(body.idDocumentUrl);
+    const selfieUpload = sent(body.selfieUrl);
+    if (idUpload) await discardUnusedCustomerUpload(app.prisma, storage, request.user.userId, idUpload, 'customer-id', request.log);
+    if (selfieUpload && selfieUpload !== idUpload) await discardUnusedCustomerUpload(app.prisma, storage, request.user.userId, selfieUpload, 'customer-selfie', request.log);
+    throw new AppError(410, 'CUSTOMER_ID_NOT_NEEDED', CUSTOMER_ID_NOT_NEEDED_WORDS);
   });
 }

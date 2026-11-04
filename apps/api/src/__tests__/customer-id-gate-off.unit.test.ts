@@ -9,11 +9,10 @@ import { describe, expect, it } from 'vitest';
 // 403 ID_VERIFICATION_REQUIRED (no client compares a total with the threshold), so the server is the
 // whole switch: this census pins where that code may still come from.
 //
-// What stays, by design (and is NOT the owner's two gates):
-//   - SWIFT-162: an L1 account claiming a promo DISCOUNT worth at least the threshold (anti-abuse);
-//   - STRIKE_RESTRICTED: an L1 account after repeated failed deliveries/payments (its own code).
-// The threshold itself stays configured (it sizes those, the store's call-to-confirm flag and the
-// rider guarantee cap): it is never set to 0, which would mean "always", not "never".
+// [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] Swift keeps no customer ID at all now: the SWIFT-162 promo gate
+// is gone too, and STRIKE_RESTRICTED (its own code, at every level) is lifted by time or by a person, never an ID.
+// The threshold itself stays configured (it sizes the store's call-to-confirm flag and the rider guarantee cap):
+// it is never set to 0, which would mean "always", not "never".
 // ---------------------------------------------------------------------------
 
 const SRC = join(__dirname, '..');
@@ -29,17 +28,17 @@ function sourceFiles(dir: string): string[] {
 const read = (rel: string) => readFileSync(join(SRC, rel), 'utf8');
 
 describe('the customer ID gate census (owner 24 Oct 2026)', () => {
-  it('ID_VERIFICATION_REQUIRED is thrown at exactly one place: the high-value promo gate', () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change to this pin] The last site (the SWIFT-162
+  // high-value promo gate) is gone with the customer ID: nothing answers ID_VERIFICATION_REQUIRED any more, so no
+  // shipped app ever opens its "Add your ID" door from the server.
+  it('ID_VERIFICATION_REQUIRED is thrown nowhere', () => {
     const sites = sourceFiles(SRC).flatMap((file) => {
       const text = readFileSync(file, 'utf8');
       const count = text.split("'ID_VERIFICATION_REQUIRED'").length - 1;
       return count > 0 ? [{ file: relative(SRC, file), count }] : [];
     });
-    expect(sites).toEqual([{ file: 'modules/order/order.service.ts', count: 1 }]);
-    const order = read('modules/order/order.service.ts');
-    const at = order.indexOf("'ID_VERIFICATION_REQUIRED'");
-    expect(order.slice(at - 200, at)).toMatch(/user\.trustLevel === 'L1' && discount >= gateLocal/);
-    expect(order.slice(at, at + 200)).toMatch(/This promo needs your ID on file/);
+    expect(sites).toEqual([]);
+    expect(read('modules/order/order.service.ts')).not.toMatch(/This promo needs your ID on file/);
   });
 
   it('checkout never refuses an order for its size: no total is compared with the threshold for an L1 account', () => {

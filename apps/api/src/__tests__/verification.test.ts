@@ -426,46 +426,24 @@ describe('Provider auto-decisions (swappable interface)', () => {
   });
 });
 
-describe('L2 identity — permanent customer verification', () => {
-  it('auto-approval promotes to L2 immediately', async () => {
+// [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change] Swift no longer takes a customer's ID: the route
+// answers 410 whatever it is sent, and nothing promotes the account (customer-id-removed.test.ts proves the rest).
+describe('L2 identity — retired (owner 1 Nov 2026)', () => {
+  it('an ID sent the old ways is refused as not needed, and the account stays L1', async () => {
     const customer = await signup(L2_AUTO_PHONE, 'CUSTOMER');
-    const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'auto-approve-id'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie'),
-      consent: true,
-      privacyNoticeVersion: 'v1',
-    }, customer.tokens.accessToken);
-    expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
-
+    for (const marker of ['auto-approve-id', 'id']) {
+      const res = await inject('POST', '/api/v1/verification/identity', {
+        idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, marker),
+        selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, `${marker}-selfie`),
+        consent: true,
+        privacyNoticeVersion: 'v1',
+      }, customer.tokens.accessToken);
+      expect(res.statusCode, res.body).toBe(410);
+      expect(res.json().error.code).toBe('CUSTOMER_ID_NOT_NEEDED');
+    }
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_AUTO_PHONE } });
-    expect(user.trustLevel).toBe('L2');
-
-    // Already verified — no second submission
-    const again = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id2'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie2'),
-      consent: true,
-      privacyNoticeVersion: 'v1',
-    }, customer.tokens.accessToken);
-    expect(again.statusCode).toBe(409);
-  });
-
-  it('manual path: pending review, then admin approval promotes to L2', async () => {
-    const customer = await signup(L2_MANUAL_PHONE, 'CUSTOMER');
-    const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie'),
-      consent: true,
-      privacyNoticeVersion: 'v1',
-    }, customer.tokens.accessToken);
-    expect(res.json().data.status).toBe('PENDING');
-
-    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, reviewerTyped('identity_l2', res.json().data.id), adminToken);
-    expect(approve.statusCode).toBe(200);
-
-    const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_MANUAL_PHONE } });
-    expect(user.trustLevel).toBe('L2');
+    expect(user.trustLevel).toBe('L1');
+    expect(await app.prisma.verificationDocument.count({ where: { userId: customer.user.id, docType: 'identity_l2' } })).toBe(0);
   });
 });
 
@@ -1218,46 +1196,19 @@ describe('[R17] upload consent ticks are recorded in the consent ledger', () => 
     expect(doc.renderedText).toBe('I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.');
   });
 
-  it('a customer ID sent with the tick writes a customer_id_consent row (the in-app ¶15 words)', async () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change] A customer ID is not taken any more, so its
+  // tick records nothing: build 12 (customer_id_v1) and the later app (customer_id_v2) are answered 410, and no
+  // customer_id_consent row is written.
+  it('a customer ID sent with either tick is refused as not needed and writes no consent row', async () => {
     const customer = await signup(CONSENT_ID_PHONE, 'CUSTOMER');
-    const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id'),
-      consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v1',
-    }, customer.tokens.accessToken);
-    expect(res.statusCode, res.body).toBe(201);
-    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([
-      expect.objectContaining({ documentVersion: 'v1', action: 'granted', subjectType: 'customer' }),
-    ]);
-    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
-      where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v1', locale: 'en-GY' } },
-    });
-    expect(doc.renderedText).toBe('I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.');
-  });
-
-  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] An ID no longer unlocks taxi rides or larger orders, so
-  // the current app shows new words under their own version (v2); builds that show the v1 words keep sending v1
-  // (the case above), and each tick stays anchored to the words its app showed.
-  it('a customer ID sent with the v2 tick writes a v2 customer_id_consent row whose words promise no unlock', async () => {
-    const customer = await signup(CONSENT_ID2_PHONE, 'CUSTOMER');
-    const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id-v2'),
-      consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v2',
-    }, customer.tokens.accessToken);
-    expect(res.statusCode, res.body).toBe(201);
-    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([
-      expect.objectContaining({ documentVersion: 'v2', action: 'granted', subjectType: 'customer' }),
-    ]);
-    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
-      where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v2', locale: 'en-GY' } },
-    });
-    expect(doc.renderedText).toBe('I agree Swift may keep this ID photo with my account, as the Privacy Policy explains.');
-    expect(doc.renderedText).not.toMatch(/unlock|taxi|larger orders/i);
-    // A document tick is still not a customer-ID tick, and a customer-ID tick is not a document tick.
-    const wrong = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id-v2-wrong'),
-      consent: true, privacyNoticeVersion: 'v1', consentTick: 'document_v1',
-    }, customer.tokens.accessToken);
-    expect(wrong.statusCode).toBe(400);
-    expect(wrong.json().error.code).toBe('CONSENT_TICK_MISMATCH');
+    for (const consentTick of ['customer_id_v1', 'customer_id_v2', 'document_v1']) {
+      const res = await inject('POST', '/api/v1/verification/identity', {
+        idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, `r17-${consentTick}`),
+        consent: true, privacyNoticeVersion: 'v1', consentTick,
+      }, customer.tokens.accessToken);
+      expect(res.statusCode, res.body).toBe(410);
+      expect(res.json().error.code).toBe('CUSTOMER_ID_NOT_NEEDED');
+    }
+    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([]);
   });
 });
