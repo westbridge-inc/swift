@@ -85,10 +85,11 @@ const CLOSED = new Set(['COMPLETED', 'CANCELLED']);
 /**
  * What one job card offers. The CUSTOMER of a list-booked job reads the server's appointment view (B1/B2:
  * free cancel and move until two hours before; null view = the switch is off, so the quote-job rule). The
- * PRO cancels a live job and moves a list-booked one at any time (B2), as the server allows. Everything
- * else keeps the quote-job rule (serviceJobPresentation).
+ * PRO cancels a live job and moves a list-booked one at any time (B2), as the server allows. A booked quote
+ * job reads the server's own cancel answer (`customerCancel`). Everything else keeps the quote-job rule
+ * (serviceJobPresentation).
  */
-export function serviceJobControls(job: { status: string; offeringId?: unknown; scheduledFor?: unknown; appointment?: unknown }, isCustomer: boolean): JobControls {
+export function serviceJobControls(job: { status: string; offeringId?: unknown; scheduledFor?: unknown; appointment?: unknown; customerCancel?: unknown }, isCustomer: boolean): JobControls {
   const none: JobControls = { canCancel: false, contactWords: null, freeCancelUntil: null, cancelNote: null, canMove: false, moveWords: null };
   if (CLOSED.has(job.status)) return none;
   const listBooked = isListBookedJob(job);
@@ -96,7 +97,13 @@ export function serviceJobControls(job: { status: string; offeringId?: unknown; 
   const quoteRule = serviceJobCancelView(job.status, isCustomer);
   if (!isCustomer) return { ...none, canCancel: quoteRule.canCancel, canMove: listBooked && job.status === 'SCHEDULED' };
   const view = listBooked ? readAppointmentView(job.appointment) : null;
-  if (!view) return { ...none, canCancel: quoteRule.canCancel, contactWords: quoteRule.contactWords };
+  if (!view) {
+    // A booked quote job: the cancel verdict the server applies, when it sends one (free until the pro confirms, free
+    // again once the pro is very late). A server that sends none keeps the quote-job rule.
+    const cancel = job.customerCancel && typeof job.customerCancel === 'object' ? readAppointmentView({ ...job.customerCancel, canReschedule: false }) : null;
+    if (!cancel) return { ...none, canCancel: quoteRule.canCancel, contactWords: quoteRule.contactWords };
+    return { ...none, canCancel: cancel.canCancel, contactWords: cancel.canCancel ? null : cancel.cancelUnavailable?.message ?? quoteRule.contactWords, cancelNote: cancel.canCancel ? cancel.cancellationMessage : null };
+  }
   return {
     canCancel: view.canCancel,
     contactWords: view.canCancel ? null : view.cancelUnavailable?.message ?? null,
