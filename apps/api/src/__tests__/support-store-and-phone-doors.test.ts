@@ -117,6 +117,8 @@ afterAll(async () => {
   await app.prisma.subscription.deleteMany({ where: { vendor: { owner: { userId: { in: userIds } } } } }).catch(() => undefined);
   await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: userIds } } } }).catch(() => undefined);
   await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } }).catch(() => undefined);
+  await app.prisma.enforcementAction.deleteMany({ where: { accountId: { in: userIds } } }).catch(() => undefined);
+  await app.prisma.incidentCase.deleteMany({ where: { subjectUserId: { in: userIds } } }).catch(() => undefined);
   await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => undefined);
@@ -476,6 +478,52 @@ describe('[F22] the number door: one member of staff is never enough, and staff 
     await app.prisma.user.update({ where: { id: late.id }, data: { status: 'BANNED' } });
     expect((await confirm(late.id, code)).statusCode).toBe(409);
     expect(await phoneOf(late.id)).toBe(late.phone);
+  });
+
+  // [COORD 4 Nov 2026] A suspended account that moved its number freed the old one for a fresh account: the suspension
+  // walked away from itself. The test is the staff deletion door's, so there is one rule.
+  const enforced = (accountId: string) => app.prisma.enforcementAction.create({ data: { accountId, level: 'REVIEW_FIRST', reasonCode: 'SYNTHETIC', signalsFired: [], decidedBy: 'SYSTEM' } as never });
+  const safety = (subjectUserId: string) => app.prisma.incidentCase.create({ data: {
+    caseNumber: `INC-${nanoid(8).toUpperCase()}`, status: 'CLOSED', severity: 'S1', category: 'SAFETY_ASSAULT', intake: 'OPS_CREATED', subjectUserId, summary: 'synthetic', slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'SUSPENDED_PENDING_REVIEW',
+  } as never });
+
+  it.each([
+    ['enforcement', enforced],
+    ['safety', safety],
+  ])('an account suspended by %s keeps its number, at either step', async (_name, mark) => {
+    const asked = await makeUser('Marked');
+    await mark(asked.id);
+    await app.prisma.user.update({ where: { id: asked.id }, data: { status: 'SUSPENDED' } });
+    const refused = await twoPeople(adminToken, asked.id, testPhone());
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('SUSPENDED_BY_ENFORCEMENT');
+
+    const late = await makeUser('MarkedLate');
+    await mark(late.id);
+    const code = await startMove(late.id, testPhone());
+    await app.prisma.user.update({ where: { id: late.id }, data: { status: 'SUSPENDED' } });
+    const answer = await confirm(late.id, code);
+    expect(answer.statusCode, answer.body).toBe(409);
+    expect(answer.json().error.code).toBe('SUSPENDED_BY_ENFORCEMENT');
+    expect(await phoneOf(late.id)).toBe(late.phone);
+  });
+
+  it('an account suspended by a person for anything else still moves: the words are the suspension, not the mark', async () => {
+    const person = await makeUser('Plain');
+    await app.prisma.user.update({ where: { id: person.id }, data: { status: 'SUSPENDED' } });
+    const next = testPhone();
+    const code = await startMove(person.id, next);
+    expect((await confirm(person.id, code)).statusCode).toBe(200);
+    expect(await phoneOf(person.id)).toBe(next);
+  });
+
+  it('a mark on an active account does not hold its number: the rule reads the suspension', async () => {
+    const person = await makeUser('Active');
+    await enforced(person.id);
+    const next = testPhone();
+    const code = await startMove(person.id, next);
+    expect((await confirm(person.id, code)).statusCode).toBe(200);
+    expect(await phoneOf(person.id)).toBe(next);
   });
 
   it('a real sign-in on the new number reaches the same account, and the old session is gone', async () => {
