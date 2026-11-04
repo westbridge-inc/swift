@@ -673,6 +673,23 @@ export function useMarkNoShow() {
   });
 }
 
+/** [BUG-HUNT-2 G20] "Not collected" on a ready pickup. Its popup (NotCollectedConfirm) shows the server's own refusal or
+ *  its answer, so the app-wide toast stays out; the order is read again whatever the outcome. */
+export function useMarkNotCollected() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationKey: ['vendor', 'order-not-collected'],
+    mutationFn: (id: string) => unwrap(vendorApi.markNotCollected(id)),
+    meta: { silent: true },
+    onSuccess: (answer, id) => {
+      applyConfirmedOrder(qc, id, answer);
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
+  });
+}
+
 /** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
 const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt', 'handedToRiderAt'] as const;
 
