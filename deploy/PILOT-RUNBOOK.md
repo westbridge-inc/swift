@@ -1560,6 +1560,31 @@ line `upload malware scanner ready: … EICAR refused`); if either is missing,
 (uploads fail closed until it is healthy) and rerun pilot-up with the same SHA
 for the proof.
 
+### Ordering day: approve partners, then open ordering
+
+Owner rule: partners are approved in a batch on the same day ordering is switched
+on, and each free trial starts the day its partner is approved. Until then
+`PARTNER_APPROVALS_OPEN` stays empty in production, and reviewers check documents
+as they arrive. The last paper a partner needs cannot be approved: the Review
+Center says so, the paper stays waiting, and it is marked **Held for ordering day**
+so nobody checks it twice. Nothing machine-approves, no free trial starts and no
+store goes live.
+
+In this order, on the owner's go:
+
+1. In deploy/.env set `PARTNER_APPROVALS_OPEN=1` (exactly that; pilot-up refuses a
+   near miss, and anything but 1 reads as closed). Recreate the API and the worker,
+   so both read it: `docker compose up -d api worker`, or redeploy as usual.
+2. In the Review Center, tick **Held for ordering day** and approve the batch. Each
+   approval needs what the document type asks the reviewer to type, and no second
+   check of the paper. Each approval starts that partner's free trial.
+3. Check that the partners are live and each has a weekly fee on record.
+4. Only then open ordering (`WEB_ORDERING=live`, section 3c). Preflight warns if
+   ordering is open while approvals are closed.
+
+To brake again, empty the setting and recreate both services. Approved partners
+stay approved and their trials keep running; only new partners wait.
+
 ## 13. The least-privilege database logins (TA-S0-003)
 
 The API and worker can run on two runtime logins instead of the database
