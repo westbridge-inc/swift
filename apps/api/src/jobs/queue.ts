@@ -1522,6 +1522,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (result.state === 'down') ctx.log.warn({ ...result }, 'malware scanner not answering');
         return;
       }
+      if (job.name === 'ride-overdue-watch') {
+        // [BUG-HUNT-2 G01] A ride still in progress far past its estimate: one platform page, closed when none is left.
+        const { watchOverdueRides } = await import('../modules/rides/ride-overdue-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const result = await watchOverdueRides({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (result.overdue > 0) ctx.log.warn({ ...result }, 'taxi rides open far past their estimate');
+        return;
+      }
       if (job.name === 'pickup-not-collected-watch') {
         const result = await pickupNotCollectedWatchJob(ctx);
         if (result.overTwoDays > 0) ctx.log.warn({ ...result }, 'pickup orders not collected for over two days');
@@ -3077,6 +3085,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // failed ask in a row pages ops. Nothing is dialled while MALWARE_SCAN is dark.
   await queues.verificationQueue.add('malware-scanner-watch', {}, {
     repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [BUG-HUNT-2 G01] Every ten minutes: no silent three-day ride.
+  await queues.verificationQueue.add('ride-overdue-watch', {}, {
+    repeat: { every: 10 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });
