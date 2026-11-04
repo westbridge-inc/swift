@@ -4,6 +4,7 @@ import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState, NOT_RETIRED_DOC } from './doc-state';
+import { holdsValidDocument } from './category-gate';
 import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { approveRegistrantLink, linkedAccountIds, normalizeRegistrationMark, plateClassOf, resolveSubject, rootSubjectId } from './subjects';
@@ -2882,6 +2883,9 @@ export class VerificationService {
         }
         // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
         await this.propagateVehicleLapse(doc, 'expired');
+        // [FIXES-4] A legacy copy bound to no subject is one the trigger could not supersede. Beside a valid
+        // new copy it expires quietly: "has expired, upload a new one" would be false.
+        if (doc.subjectId === null && await holdsValidDocument(this.prisma, doc.userId, doc.docType, now, doc.id)) continue;
         // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
         // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
         const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
@@ -2938,8 +2942,10 @@ export class VerificationService {
     const due = await dueRenewalNotices(this.prisma, now);
     let sent = 0;
     for (const n of due) {
-      const doc = await this.prisma.verificationDocument.findUnique({ where: { id: n.documentId }, select: { docType: true, role: true } });
+      const doc = await this.prisma.verificationDocument.findUnique({ where: { id: n.documentId }, select: { docType: true, role: true, subjectId: true } });
       if (!doc) continue;
+      // [FIXES-4] A legacy copy beside a valid new one needs no renewing. Not marked as sent, so it speaks again if that copy goes.
+      if (doc.subjectId === null && await holdsValidDocument(this.prisma, n.subjectId, doc.docType, now, n.documentId)) continue;
       // [VERIFY-DOCS] Never threaten a suspension over a document nobody requires.
       const optional = await this.isOptionalMoverDocument(n.subjectId, doc.role, doc.docType);
       await this.notifications.send({
