@@ -59,11 +59,11 @@ export function ServiceJobsCard({ userId, onResult }: { userId: string; onResult
           rowKey={(job) => job.id}
           empty={list.isLoading ? 'Loading…' : 'No service jobs.'}
           columns={[
-            { key: 'job', header: 'Job', width: '34%', primary: true, cell: (job) => <Truncate text={job.description} /> },
-            { key: 'with', header: 'With', width: '22%', cell: (job) => { const other = otherSide(job, userId); return <Link href={`/users/${other.id}`}>{other.name}</Link>; } },
-            { key: 'when', header: 'Time', width: '18%', cell: (job) => (job.scheduledFor ? gyDateTime(job.scheduledFor) : 'Not set') },
-            { key: 'status', header: 'Status', width: '14%', cell: (job) => <span className="mc-badge">{statusWords(job)}</span> },
-            { key: 'close', header: '', width: '12%', align: 'right', cell: (job) => (CLOSED.has(job.status) ? null : <button type="button" className="mc-btn" onClick={() => void close(job)}>Close job…</button>) },
+            { key: 'job', header: 'Job', width: '28%', primary: true, cell: (job) => <Truncate text={job.description} /> },
+            { key: 'with', header: 'With', width: '18%', cell: (job) => { const other = otherSide(job, userId); return <Link href={`/users/${other.id}`}>{other.name}</Link>; } },
+            { key: 'when', header: 'Time', width: '16%', cell: (job) => (job.scheduledFor ? gyDateTime(job.scheduledFor) : 'Not set') },
+            { key: 'status', header: 'Status', width: '22%', cell: (job) => <span className="mc-badge">{statusWords(job)}</span> },
+            { key: 'close', header: '', width: '16%', align: 'right', cell: (job) => (CLOSED.has(job.status) ? null : <button type="button" className="mc-btn" onClick={() => void close(job)}>Close job…</button>) },
           ]}
         />
       )}
