@@ -23,7 +23,7 @@ export const metadata: Metadata = {
     default: 'Swift — food, groceries, shops, couriers and rides',
     template: '%s — Swift',
   },
-  description: `One app for food and grocery delivery, local shops, taxi rides, parcels and trades in ${launch.markets[0]}. Businesses and movers keep 100% of what they earn — one flat weekly fee, no commission.`,
+  description: `One app for food and grocery delivery, local shops, taxi rides, parcels and trades in ${launch.markets[0]}. Businesses, riders and drivers keep 100% of what they earn — one flat weekly fee, no commission.`,
   applicationName: 'Swift',
   alternates: { canonical: SITE_ORIGIN },
   openGraph: {

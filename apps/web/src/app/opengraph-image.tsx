@@ -72,7 +72,7 @@ export default function OpengraphImage() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
           <span style={{ fontSize: 26, color: BLUSH }}>swiftgy.com</span>
           <span style={{ fontSize: 26, color: BLUSH }}>
-            Businesses and movers keep 100%
+            Businesses, riders and drivers keep 100%
           </span>
         </div>
       </div>
