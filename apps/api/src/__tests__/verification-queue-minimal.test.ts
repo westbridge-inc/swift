@@ -39,7 +39,7 @@ const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'verification-q
 
 /** Every field a queue row may carry, and nothing else. */
 const ROW_FIELDS = [
-  'consentAt', 'createdAt', 'docType', 'expiresAt', 'id', 'previousDecision', 'privacyNoticeVersion',
+  'approvalHeldAt', 'approvalHeldBy', 'consentAt', 'createdAt', 'docType', 'expiresAt', 'id', 'previousDecision', 'privacyNoticeVersion',
   'reviewedBy', 'reviewerTypes', 'role', 'status', 'user', 'userId',
 ].sort();
 const USER_FIELDS = ['countryCode', 'driver', 'firstName', 'id', 'lastName', 'phone'].sort();

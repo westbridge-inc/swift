@@ -26,6 +26,8 @@ export interface ReviewDocument {
   reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind' | 'ownNameConfirmed'>;
   /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
   reviewedBy?: string | null;
+  /** [BUG-HUNT F23] A reviewer checked this paper and it waits for ordering day: nobody needs to check it again. */
+  approvalHeldAt?: string | null;
   user?: {
     /** `phone` arrives masked (its last 4 digits only) [DOC-SECURITY G3]: the full number is the person page's audited reveal. */
     id: string; firstName?: string; lastName?: string; phone?: string; countryCode?: string;
@@ -234,6 +236,13 @@ export function resubmissionLabel(doc: Pick<ReviewDocument, 'previousDecision'>)
   return prev.kind === 'RESUBMITTED_AFTER_REJECTION' ? 'Re-submitted after rejection' : 'Renewal';
 }
 const shortDay = (iso: string | null) => (iso ? gyDate(iso) : null);
+/** [BUG-HUNT F23] The queue's marker for a paper held for ordering day. */
+export const HELD_FOR_ORDERING_DAY = 'Held for ordering day';
+/** [BUG-HUNT F23] What a held paper means, in one sentence; null for any other paper. */
+export function heldForOrderingDayLine(doc: Pick<ReviewDocument, 'approvalHeldAt'>): string | null {
+  if (!doc.approvalHeldAt) return null;
+  return `Checked ${gyDate(doc.approvalHeldAt)}. This is the last paper this partner needs, and approving it starts their free trial. Approve it on ordering day; it needs no second check.`;
+}
 /** [MC-AD1] What the earlier decision was, in one sentence (the reviewer's note is quoted separately). */
 export function previousDecisionLine(prev: PreviousDecision): string {
   const when = shortDay(prev.decidedAt);
