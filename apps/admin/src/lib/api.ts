@@ -270,6 +270,9 @@ export interface AdminUser {
   isPhoneVerified: boolean;
   createdAt: string;
   lastActiveAt: string | null;
+  /** Which mover profile exists. Absent on a row from an API that did not say. */
+  rider?: { id: string } | null;
+  driver?: { id: string } | null;
 }
 
 export interface Promo {
