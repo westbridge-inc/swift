@@ -33,6 +33,7 @@ let app: FastifyInstance;
 let service: VerificationService;
 let riderRate = 0;
 const users: string[] = [];
+const fictions: string[] = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'mover-trial-every-door');
 const plate = () => `HAA${String(Date.now()).slice(-4)}${nanoid(3).replace(/[^A-Za-z0-9]/g, 'X').toUpperCase()}`;
 
@@ -129,6 +130,8 @@ afterAll(async () => {
     await app.prisma.customer.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+    await app.prisma.reviewSession.deleteMany({ where: { tenantId: { in: fictions } } });
+    await app.prisma.tenant.deleteMany({ where: { id: { in: fictions } } });
   });
   await app.close();
 });
@@ -472,6 +475,7 @@ describe('GO is the last door: no fee row, no free pass', () => {
   it.each(['RIDER', 'DRIVER'] as const)('the store-review fiction (%s) holds no fee and is not asked for one: GO stands, nothing is written', async (kind) => {
     const tenantId = `review-door-${nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, '0')}`;
     await system(() => app.prisma.tenant.create({ data: { id: tenantId, name: 'Door fiction', slug: tenantId, kind: 'REVIEW' } }));
+    fictions.push(tenantId);
     await system(() => app.prisma.reviewSession.create({ data: { tenantId, expiresAt: new Date(Date.now() + DAY) } }));
     const mover = await stranded(kind, tenantId);
     const settle = vi.spyOn(VerificationService.prototype, 'settleMoverFee');
