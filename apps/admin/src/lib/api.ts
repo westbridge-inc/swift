@@ -390,6 +390,10 @@ export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: stri
   apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+/** [BUG-HUNT F20] A verified deletion request from someone who cannot sign in. Founder only, answers 202
+ *  APPROVAL_REQUIRED, and runs the person's own deletion with every blocker once approved. */
+export const deleteVerifiedRequest = (id: string, check: { identityCheck: string; identityNote: string }, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/verified-deletion`, { method: 'POST', body: JSON.stringify({ ...check, reason }), reason });
 export const suspendVendor = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/vendors/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const featureVendor = (id: string, featured: boolean) =>

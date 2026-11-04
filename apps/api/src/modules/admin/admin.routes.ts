@@ -1376,7 +1376,8 @@ export async function adminRoutes(app: FastifyInstance) {
     // lastKnownLat / lastKnownLng never leave the API on a user object — the
     // ONE shared deny-list every auth response already uses.
     // [FOLLOWUPS · follows O-1] The person's number masked; the full one is the audited GET /users/:id/phone.
-    return { success: true, data: maskPersonPage(sanitizeUser({ ...user, addresses })) };
+    // [BUG-HUNT F20] Who is looking, so the console offers the founder's door only to a founder (the route decides again).
+    return { success: true, data: { ...maskPersonPage(sanitizeUser({ ...user, addresses })), viewer: { superAdmin: request.user.role === 'SUPER_ADMIN' } } };
   });
 
   // [FOLLOWUPS · follows O-1] The audited door to this person's full number (person-contact.ts): a stated reason
@@ -7569,6 +7570,45 @@ export async function adminRoutes(app: FastifyInstance) {
     };
     await writeTicket(closureWhere, closureData);
     return { success: true, data: { ticketId: id, outcome } };
+  });
+
+  // [BUG-HUNT F20] The public deletion page tells someone who cannot sign in to email us. Their request has no
+  // confirmation inside a session, so the route above refuses it. This is that door, for a request a person verified:
+  // the same erasure with every blocker, founder only from the first byte so an admin queues nothing, two people or the
+  // owner's solo approval (C5). The procedure is docs/ops/verified-deletion-request.md. How identity was checked is
+  // recorded in words on a permanent row, so the note takes no number long enough to be an ID or a phone and no address,
+  // and the route takes no document.
+  const verifiedDeletionSchema = z.object({
+    reason: z.string().optional(),
+    identityCheck: z.enum(['CODE_TO_ACCOUNT_NUMBER', 'OWNER_CHECKED']),
+    identityNote: z.string().trim().min(12).max(300)
+      .refine((note) => !/\d{6}|@/.test(note.replace(/[\s-]/g, '')), 'Say how it was checked, in words: no ID or phone numbers, no addresses.'),
+  }).strict();
+
+  app.post('/users/:id/verified-deletion', { onRequest: [founderGuard], preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { identityCheck, identityNote } = verifiedDeletionSchema.parse(request.body);
+    const [subject, staffGrant] = await Promise.all([
+      tenantPrisma.user.findUnique({ where: { id }, select: { roles: true, status: true } }),
+      app.prisma.admin.findUnique({ where: { userId: id }, select: { userId: true } }),
+    ]);
+    if (!subject) throw new NotFoundError('User', id);
+    if (id === request.user.userId || staffGrant || subject.roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
+      throw new ForbiddenError('A staff account is not closed from this door.');
+    }
+    if (subject.status === 'DEACTIVATED') throw new AppError(409, 'ALREADY_CLOSED', 'This account is already closed.');
+    const facts = {
+      reason: reasonOf(request.body, request.headers) ?? '', identityCheck, identityNote,
+      approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null,
+    };
+    // In the erasure's own first transaction, so a blocker that refuses it leaves no record of a deletion.
+    const outcome = await new AccountService(app).deleteAccount(id, false, 'app', {
+      claimClosure: async (tx) => {
+        await auditIn(tx, request.user.userId, 'CLOSE_ACCOUNT_VERIFIED_REQUEST', 'User', id, facts, request);
+        return true;
+      },
+    });
+    return { success: true, data: { outcome } };
   });
 
   // =========================================================================

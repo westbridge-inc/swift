@@ -599,6 +599,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [DELETION-INTEGRITY] Completes an in-app closure request: the account is
   // closed and de-identified. Consequential and irreversible, so a reason is owed.
   'POST /support/:id/complete-account-closure': c('C3', 'user.close', E.supportTicket),
+  // [BUG-HUNT F20] A verified deletion request from someone who cannot sign in. Irreversible, with no
+  // confirmation from the person inside a session, so it takes two people like a platform act.
+  // SUPER_ADMIN only (founderGuard on the route).
+  'POST /users/:id/verified-deletion': c('C5', 'user.close.verified', E.user),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),
