@@ -189,6 +189,7 @@ const SCOPE: Record<string, Entry> = {
   [`${ADMIN}|POST|/billing/settlement-batches/:id/confirm-deposit`]: approval('payout'),
   [`${ADMIN}|POST|/billing/settlement-batches/:id/adjust-deposit`]: approval('payout'),
   // Weekly-fee checkouts and fee money.
+  'modules/ads/ads.routes.ts|POST|/invoices/:id/mmg-checkout': { kind: 'ad-spend', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createAdCheckout', 'const replay = await this.answerForKey(who, now);']] },
   'modules/billing/mmg-checkout.routes.ts|POST|/subscription/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createCheckout', 'const replay = await this.answerForKey(who, now);']] },
   // [ENTERPRISE E1] "Pay all my branches": the same key rule (a key that answered keeps its answer), one open per owner.
   'modules/billing/mmg-checkout.routes.ts|POST|/subscription/chain-fees/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createChainCheckout', 'const replay = await this.answerForKey(who, now);']] },
@@ -201,7 +202,6 @@ const SCOPE: Record<string, Entry> = {
   [`${ADMIN}|POST|/billing/agent-payments`]: approval('fee-checkout'),
   [`${ADMIN}|POST|/billing/agent-payments/:id/attach`]: approval('fee-checkout'),
   [`${ADMIN}|POST|/billing/settlement-import`]: approval('fee-checkout'),
-  [`${ADMIN}|PUT|/ads/invoices/:id/mark-paid`]: approval('fee-checkout'),
   // Ad spend (ads are OFF at launch; the routes still guard).
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/reserve': { kind: 'ad-spend', guard: 'state', pins: [['modules/ads/booking.service.ts', 'reserveAndHold', 'FOR UPDATE']] },
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/checkout': { kind: 'ad-spend', guard: 'state', pins: [['modules/ads/checkout.service.ts', 'checkout', 'if (open) { invoice = open; return; }']] },
@@ -243,6 +243,8 @@ const SCOPE: Record<string, Entry> = {
 
 /** Verb-matched routes that create none of the eight things (reviewed). */
 const OUT: Record<string, string> = {
+  // [BUG-HUNT-2 G08] A finding on one send: decided once under the order lock, compare-and-set on its revision. Moves no money.
+  'modules/admin/admin.routes.ts|POST|/mmg-refunds/sends/:id/resolve': 'A support finding on a refund already recorded: a repeat is refused, it creates none of the eight.',
   // [Row 156] A note that a clock started, not one of the eight: it moves no money, and checkoutId is unique, so a retry is 409.
   [`${ADMIN}|POST|/billing/mmg-checkouts/:id/refund-case`]: 'records a partner\'s ask on one payment: unique per payment (a retry is REFUND_CASE_EXISTS), and it moves no money',
   // [WEB-DELETE · owner ruling 1 Nov 2026]

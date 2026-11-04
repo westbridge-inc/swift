@@ -20,7 +20,7 @@ import { z } from '../../lib/zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import type { PrismaClient } from '@prisma/client';
 import { OrderService } from '../order/order.service';
-import { earningsWindow } from '../order/earnings-window';
+import { earningsWindow, jobsIn } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
@@ -1881,22 +1881,18 @@ export async function driverRoutes(app: FastifyInstance) {
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: today } },
           _sum: { amount: true },
-          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: weekStart } },
           _sum: { amount: true },
-          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: monthStart } },
           _sum: { amount: true },
-          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id },
           _sum: { amount: true },
-          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, status: 'AVAILABLE' },
@@ -1910,16 +1906,22 @@ export async function driverRoutes(app: FastifyInstance) {
         }),
       ]);
 
+    const mine = { driverId: driver.id };
+    const [todayJobs, weekJobs, monthJobs, allJobs] = await Promise.all([
+      jobsIn(app.prisma, { ...mine, createdAt: { gte: today } }), jobsIn(app.prisma, { ...mine, createdAt: { gte: weekStart } }),
+      jobsIn(app.prisma, { ...mine, createdAt: { gte: monthStart } }), jobsIn(app.prisma, mine),
+    ]);
+
     return {
       success: true,
       data: {
         // SWIFT-080: each window is { total, count } — the SAME shape the rider
         // route returns and the mover EarningsScreen/MoverAccountScreen read.
         // Was a bare Number(), so a driver's tiles silently showed $0.
-        today: earningsWindow(todayEarnings),
-        thisWeek: earningsWindow(weekEarnings),
-        thisMonth: earningsWindow(monthEarnings),
-        allTime: earningsWindow(allTimeEarnings),
+        today: earningsWindow(todayEarnings, todayJobs),
+        thisWeek: earningsWindow(weekEarnings, weekJobs),
+        thisMonth: earningsWindow(monthEarnings, monthJobs),
+        allTime: earningsWindow(allTimeEarnings, allJobs),
         // [board 13a] Cash kept from completed CASH jobs, per window (dispatch/cash-in-hand.ts). Additive.
         cashInHand: await cashInHandWindows(app.prisma, { driverId: driver.id }),
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),

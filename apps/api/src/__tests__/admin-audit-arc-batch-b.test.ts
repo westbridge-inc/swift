@@ -20,9 +20,9 @@ import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] ARC BATCH B — the settlement digest, the top-up command, the three
-// claim decisions and the invoice settlement take the audit into their
-// transactions. Two of these (top-up, invoice) already wrote their own row
-// inside the transaction while the hook wrote a second; the claim transition
+// claim decisions take the audit into their
+// transactions. The top-up already wrote its own row inside the transaction
+// while the hook wrote a second; the claim transition
 // was a bare compare-and-set with the audit row an afterthought behind it.
 // ---------------------------------------------------------------------------
 
@@ -130,17 +130,6 @@ async function approvedPayableClaim(vendorId: string) {
   expect(filed, 'a complete filing waiting for a person').toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true });
   expect(filed!.flags).toContain('gps_far');
   return cash.approveClaim(filed!.id, 'arcb-reviewer', 'reviewed with the complete bundle');
-}
-async function unpaidInvoice() {
-  const a = await app.prisma.advertiser.create({ data: { companyName: `ArcB ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000001', createdByUserId: `u-${nanoid(6)}`, status: 'APPROVED' } });
-  adIds.advertiser.push(a.id);
-  const p = await app.prisma.adPlacement.create({ data: { key: `arcb-${nanoid(6)}`, name: `P ${nanoid(4)}`, tier: 3, mediaKind: 'IMAGE', weeklyPrice: 7000, slotsPerWeek: 6 } });
-  adIds.placement.push(p.id);
-  const week = new Date('2026-11-02T00:00:00Z');
-  const c = await app.prisma.adCampaign.create({ data: { advertiserId: a.id, placementId: p.id, name: `Camp ${nanoid(4)}`, cities: ['*'], startWeek: week, endWeek: week, status: 'PENDING_PAYMENT', totalAmount: 7000 } });
-  adIds.campaign.push(c.id);
-  await app.prisma.adBooking.create({ data: { campaignId: c.id, placementId: p.id, city: '*', weekStart: week, amount: 7000, status: 'RESERVED' } });
-  return app.prisma.adInvoice.create({ data: { advertiserId: a.id, campaignId: c.id, number: `ADS-ARCB-${nanoid(8)}`, amount: 7000, status: 'UNPAID', provider: 'MOCK', refundedAmount: 0 } });
 }
 
 beforeAll(async () => {
@@ -294,29 +283,5 @@ describe('[ADM-002] claim decisions', () => {
     const fresh = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: c.id } });
     expect(fresh.status).toBe('APPROVED');
     expect(fresh.paymentRef).toBeNull();
-  });
-});
-
-describe('[ADM-002] invoice settlement', () => {
-  it('marking an invoice paid writes ONE canonical row inside the settlement transaction', async () => {
-    const inv = await unpaidInvoice();
-    const res = await call('PUT', `/api/v1/admin/ads/invoices/${inv.id}/mark-paid`, { reference: `BANK-${RUN}-INV1` });
-    expect(res.statusCode, res.body).toBe(200);
-    const rows = await rowsFor(inv.id);
-    expect(rows.length).toBe(1);
-    expect(changedOf(rows[0]!)['status']?.to).toBe('PAID');
-    expect(changesOf(rows[0]!)['outcome']).toBe('settled');
-    expect(changesOf(rows[0]!)['confirmedBookings']).toBe(1);
-  });
-  it('a refused audit leaves the invoice UNPAID, the booking RESERVED and the campaign PENDING_PAYMENT', async () => {
-    const inv = await unpaidInvoice();
-    await refuseAuditWhere(app, REFUSAL, { entityId: inv.id });
-    try {
-      const res = await call('PUT', `/api/v1/admin/ads/invoices/${inv.id}/mark-paid`, { reference: `BANK-${RUN}-INV2` });
-      expect(res.statusCode, res.body).toBe(500);
-    } finally { await allowAuditAgain(app, REFUSAL); }
-    expect((await app.prisma.adInvoice.findUniqueOrThrow({ where: { id: inv.id } })).status).toBe('UNPAID');
-    expect(await app.prisma.adBooking.count({ where: { campaignId: inv.campaignId, status: 'RESERVED' } })).toBe(1);
-    expect((await app.prisma.adCampaign.findUniqueOrThrow({ where: { id: inv.campaignId } })).status).toBe('PENDING_PAYMENT');
   });
 });

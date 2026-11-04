@@ -2,7 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import { z } from '../../lib/zod';
 import { AdvertiserService, assertAdvertiserApprovedWithin, assertCapabilityWithin } from './advertiser.service';
 import { BookingService, MAX_AVAILABILITY_WEEKS } from './booking.service';
-import { AdCheckoutService } from './checkout.service';
+import { adCheckoutKilled, adMmgLive, AdCheckoutService } from './checkout.service';
+import { MMG_CHECKOUT_START_RATE, mmgCheckoutRuntimeOf } from '../billing/mmg-checkout.routes';
+import { unresolvedAdPayments } from '../billing/mmg-checkout.service';
+import { clientPlatform } from '../billing/fee-pay-actions';
 import { AdLinkService } from './ad-link.service';
 import { CreativeService } from './creative.service';
 import { AdsLifecycleService } from './lifecycle.service';
@@ -171,10 +174,8 @@ export async function adsRoutes(app: FastifyInstance) {
     return { success: true, data: result };
   });
 
-  /** POST /campaigns/:id/checkout — issue the invoice for the held slots
-   *  (spec §8.1). Reserves first if still DRAFT. Provider MMG/POWERTRANZ hosted
-   *  URLs need live acquirer creds (founder-gated); MOCK works in dev. The
-   *  audited mark-paid path settles it either way. */
+  /** POST /campaigns/:id/checkout — issue the invoice for the held slots (spec §8.1). Reserves first if still DRAFT.
+   *  [ADS-ON] In production the server decides how it is paid: MMG, and refused while that switch is off. */
   const checkout = new AdCheckoutService(app.prisma, app.io);
   app.post<{ Params: { id: string } }>('/campaigns/:id/checkout', auth, async (request) => {
     const { provider } = z.object({ provider: z.enum(['MOCK', 'MMG', 'POWERTRANZ', 'MANUAL']).default('MANUAL') }).parse(request.body ?? {});
@@ -192,6 +193,40 @@ export async function adsRoutes(app: FastifyInstance) {
       success: true,
       data: { invoiceId: invoice.id, number: invoice.number, amount: Number(invoice.amount), currency: invoice.currency, status: invoice.status, paymentUrl: invoice.paymentUrl, reservedUntil },
     };
+  });
+
+  // ── [ADS-ON · owner ruling 3 Nov] Paying an invoice on MMG's page. Paid only after MMG's own lookup confirms:
+  //    the reply is a pointer, and these routes hand out the page and read the state, nothing else. ─────────────
+  let mmgRuntime: ReturnType<typeof mmgCheckoutRuntimeOf> | null = null;
+  const mmg = () => (mmgRuntime ??= mmgCheckoutRuntimeOf(app));
+
+  /** POST /invoices/:id/mmg-checkout — start one, or hand back the one already open. The OWNER's alone. */
+  app.post<{ Params: { id: string } }>('/invoices/:id/mmg-checkout', { ...auth, config: { rateLimit: { ...MMG_CHECKOUT_START_RATE } } }, async (request, reply) => {
+    const invoice = await app.prisma.adInvoice.findUnique({ where: { id: request.params.id }, select: { id: true, advertiserId: true, tenantId: true } });
+    if (!invoice) throw new NotFoundError('AdInvoice', request.params.id);
+    await advertisers.assertCapability(invoice.advertiserId, request.user.userId, 'finance');
+    if (!adMmgLive()) throw new AppError(409, 'PAY_ACTION_OFF', 'Paying for ads with MMG is not open yet.');
+    // [R045-ADS-04] Rollback makes checkout unavailable on every door, this one too.
+    if (adCheckoutKilled()) throw new AppError(503, 'ADS_CHECKOUT_UNAVAILABLE', 'Ad checkout is paused — try again shortly.');
+    // [store review] A demo tenant is fiction with no money rail: it never opens a real MMG page.
+    const tenant = await app.prisma.tenant.findUnique({ where: { id: invoice.tenantId }, select: { kind: true } });
+    if (tenant?.kind !== 'PRODUCTION') throw new AppError(409, 'PAY_ACTION_OFF', 'Paying for ads with MMG is not open here.');
+    const { created, checkout: started } = await mmg().service.createAdCheckout({
+      invoiceId: invoice.id, userId: request.user.userId, platform: clientPlatform(request.headers), clientKey: request.headers['idempotency-key'],
+      authorize: async (tx) => {
+        await assertCapabilityWithin(tx, invoice.advertiserId, request.user.userId, 'finance');
+        await assertAdvertiserApprovedWithin(tx, invoice.advertiserId);
+      },
+    });
+    return reply.status(created ? 201 : 200).send({ success: true, data: started });
+  });
+
+  /** GET /invoices/:id/mmg-checkout/:ref — follow one. The server's own state, never a redirect's. */
+  app.get<{ Params: { id: string; ref: string } }>('/invoices/:id/mmg-checkout/:ref', auth, async (request) => {
+    const invoice = await app.prisma.adInvoice.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
+    if (!invoice) throw new NotFoundError('AdInvoice', request.params.id);
+    await advertisers.assertCapability(invoice.advertiserId, request.user.userId, 'read');
+    return { success: true, data: await mmg().service.getAdCheckout({ ref: request.params.ref, invoiceId: request.params.id }) };
   });
 
   // ── Creatives (spec §9) — direct multipart upload, member-gated ───────────
@@ -308,18 +343,33 @@ export async function adsRoutes(app: FastifyInstance) {
 
   /** §14.2 home — the advertiser's campaigns with placement + invoice status. */
   app.get<{ Params: { id: string } }>('/advertiser/:id/campaigns', auth, async (request) => {
-    await advertisers.assertCapability(request.params.id, request.user.userId, 'read');
+    const member = await advertisers.assertCapability(request.params.id, request.user.userId, 'read');
+    const advertiser = await app.prisma.advertiser.findUniqueOrThrow({ where: { id: request.params.id }, select: { status: true } });
+    const canPay = member.role === 'OWNER' && adMmgLive() && advertiser.status === 'APPROVED';
     const campaigns = await app.prisma.adCampaign.findMany({
       where: { advertiserId: request.params.id },
       include: {
         placement: { select: { key: true, name: true, tier: true, mediaKind: true } },
-        invoices: { select: { id: true, number: true, status: true, amount: true, paymentUrl: true } },
+        invoices: { select: { id: true, number: true, status: true, amount: true, paymentUrl: true, mmgCheckouts: { where: { status: 'OPEN' }, select: { id: true } } } },
         creatives: { select: { id: true, status: true, transcodeStatus: true } },
         bookings: { select: { weekStart: true, city: true, status: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
+    // [ADS-ON] The same answer a tap gets: an open page of the invoice's own can be handed back, any other unresolved
+    // payment on the campaign stops it.
+    const payable = new Set<string>();
+    const confirming = new Set<string>();
+    if (canPay) {
+      for (const c of campaigns) {
+        if (c.status !== 'PENDING_PAYMENT') continue;
+        for (const i of c.invoices) {
+          if (i.status !== 'UNPAID') continue;
+          (await unresolvedAdPayments(app.prisma, c.id, i.mmgCheckouts[0]?.id) === 0 ? payable : confirming).add(i.id);
+        }
+      }
+    }
     return {
       success: true,
       data: campaigns.map((c) => ({
@@ -327,7 +377,7 @@ export async function adsRoutes(app: FastifyInstance) {
         placement: { key: c.placement.key, name: c.placement.name, tier: c.placement.tier, mediaKind: c.placement.mediaKind },
         cities: c.cities, startWeek: c.startWeek, endWeek: c.endWeek,
         totalAmount: c.totalAmount ? Number(c.totalAmount) : null, currency: c.currency,
-        invoices: c.invoices.map((i) => ({ id: i.id, number: i.number, status: i.status, amount: Number(i.amount), paymentUrl: i.paymentUrl })),
+        invoices: c.invoices.map((i) => ({ id: i.id, number: i.number, status: i.status, amount: Number(i.amount), paymentUrl: i.paymentUrl, payable: payable.has(i.id), paymentConfirming: confirming.has(i.id) })),
         creatives: c.creatives,
         bookings: c.bookings,
         createdAt: c.createdAt,

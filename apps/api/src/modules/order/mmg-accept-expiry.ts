@@ -179,6 +179,14 @@ export async function closeStoreSilentMmgCase(
   return count;
 }
 
+/** [BUG-HUNT-2 G14c] The customer who said they paid, told at the same moment: nobody else was going to. */
+export function mmgStoreSilentCustomerPush(orderNumber: string, noun: MmgOrderNoun = 'order'): { title: string; body: string } {
+  return {
+    title: 'Swift support is checking your MMG payment',
+    body: `The store has not confirmed your MMG payment for ${noun} ${orderNumber}. Swift support is checking with them. Keep your MMG message.`,
+  };
+}
+
 /** The support case the same moment opens (one per order). */
 export function mmgStoreSilentTicketMessage(orderNumber: string, minutes = MMG_ACCEPTED_PAY_WINDOW_MINUTES): string {
   // Filed under the customer (it is their payment report), so it reads to them as well as to support.
@@ -187,7 +195,8 @@ export function mmgStoreSilentTicketMessage(orderNumber: string, minutes = MMG_A
 
 /** What the customer is told when it cancels (push + the order card). */
 export function mmgAcceptExpiryCustomerCopy(orderNumber: string, storeName: string, noun: MmgOrderNoun = 'order'): { title: string; body: string; notice: string } {
-  const notice = `${storeName} didn't mark your MMG payment as received within ${MMG_ACCEPTED_PAY_WINDOW_MINUTES} minutes of accepting, so this ${noun} was cancelled automatically. If you already sent the MMG payment, ${storeName} refunds you directly.`;
+  // [BUG-HUNT-2 G14b] Most people here never paid, so it blames nobody: no payment was confirmed. That is true either way.
+  const notice = `No MMG payment was confirmed within ${MMG_ACCEPTED_PAY_WINDOW_MINUTES} minutes of ${storeName} accepting, so this ${noun} was cancelled automatically. If you did send the MMG payment, ${storeName} refunds you directly. If it does not, contact Swift support.`;
   return {
     title: `${cap(noun)} cancelled — MMG payment not confirmed`,
     body: `${cap(noun)} ${orderNumber}: ${notice}`,

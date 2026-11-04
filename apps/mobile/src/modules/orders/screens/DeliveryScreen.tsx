@@ -37,6 +37,9 @@ import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { orderPrepFacts, orderStepState, orderTimelineIndex } from '../timeline-states';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { MmgRefundCard } from '../MmgRefundCard';
+import { MMG_REFUND_WORDS, parseMmgRefundView } from '../mmgRefund';
+import { errorMessage } from '../../../lib/apiError';
 import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
@@ -346,6 +349,12 @@ export function DeliveryScreen() {
   // a cancel is free or refused, so no amount is ever shown.
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
   const qc = useQueryClient();
+  // [BUG-HUNT-2 G08] "It arrived", or it did not. The order is read again whatever the answer: the server's words follow.
+  const refundAnswer = useMutation<unknown, unknown, { sendId: string; received: boolean }>({
+    mutationFn: ({ sendId, received }) => customerApi.answerMmgRefund(orderId, sendId, received),
+    meta: { silent: true },
+    onSettled: () => { void qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }); },
+  });
   const cancelOrder = useMutation<any, any, { targetOrderId: string; orderType: string }>({
     mutationFn: ({ targetOrderId, orderType }: { targetOrderId: string; orderType: string }) =>
       orderType === 'COURIER' ? courierApi.cancel(targetOrderId) : customerApi.cancelOrder(targetOrderId),
@@ -710,6 +719,7 @@ export function DeliveryScreen() {
 
   const cancelled = o.status === 'CANCELLED' || o.status === 'REFUNDED';
   const failed = o.status === 'FAILED';
+  const mmgRefund = parseMmgRefundView(o.mmgRefund);
   const complete = ['DELIVERED', 'COMPLETED'].includes(o.status)
     || (o.fulfillment === 'PICKUP' && o.status === 'PICKED_UP');
   // [E17 · DS231 F3] A parcel returned to its sender is over: no live-rider
@@ -1559,6 +1569,16 @@ export function DeliveryScreen() {
           {/* [AF-MOB-006] After pickup, a delivery problem is an owned case:
               the server's sentence says who is handling it and what happens. */}
           {partyCaseWorthShowing(custodyRecovery) ? <CustodyRecoveryNotice view={custodyRecovery} /> : null}
+
+          {/* [BUG-HUNT-2 G08] A closed order can still owe a refund: this one is on the cancelled screen too. */}
+          {mmgRefund ? (
+            <MmgRefundCard
+              view={mmgRefund}
+              pending={refundAnswer.isPending}
+              error={refundAnswer.isError ? errorMessage(refundAnswer.error, MMG_REFUND_WORDS.fallback) : null}
+              onAnswer={(sendId, received) => refundAnswer.mutate({ sendId, received })}
+            />
+          ) : null}
 
           {mmgClaim && !cancelled && !failed ? (
             <MmgPaymentClaimCard

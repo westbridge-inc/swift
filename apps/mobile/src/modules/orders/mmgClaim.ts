@@ -26,6 +26,8 @@ export interface MmgClaimView {
   attemptRejected: boolean;
   revision: number;
   canClaim: boolean;
+  /** [G14c] They said they paid and the store is silent past its 30 minutes. Absent on an older server: false. */
+  storeSilent?: boolean;
 }
 
 const CLAIMS: readonly string[] = ['UNRECORDED', 'PAID', 'NOT_PAID'];
@@ -55,6 +57,7 @@ export function parseMmgClaimView(raw: unknown): MmgClaimView | null {
     attemptRejected: r['attemptRejected'] as boolean,
     revision,
     canClaim: r['canClaim'] as boolean,
+    storeSilent: r['storeSilent'] === true,
   };
 }
 
@@ -161,6 +164,9 @@ export function mmgClaimPresentation(v: MmgClaimView): MmgClaimPresentation {
       body: 'The store says your MMG payment arrived. Swift doesn’t hold or check this money — if you didn’t pay, tell us.',
       actions,
     };
+  }
+  if (v.customerClaim === 'PAID' && v.storeSilent === true) {
+    return { tone: 'warning', title: 'Swift support is checking', body: 'You told us you paid, and the store has not confirmed it. Swift support is checking with the store. Keep your MMG message.', actions };
   }
   if (v.customerClaim === 'PAID') {
     return { tone: 'neutral', title: 'Waiting for the store', body: 'You told us you paid. The store confirms once the money shows in its MMG account.', actions };

@@ -36,6 +36,7 @@ export interface ReasonCaller {
 export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── People ─────────────────────────────────────────────────────────────
   { route: 'PUT /users/:id/suspend', helper: 'suspendUser', args: ['usr_1'] },
+  { route: 'PUT /users/:id/name', helper: 'changeLegalName', args: ['usr_1', 'First', 'Last'], requiredBodyKeys: ['firstName', 'lastName'] },
   { route: 'POST /users/:id/phone-change', helper: 'startPhoneChange', args: ['usr_1', '+5926001234'], requiredBodyKeys: ['phone'] },
   { route: 'POST /users/:id/phone-change/confirm', helper: 'confirmPhoneChange', args: ['usr_1', '123456'], requiredBodyKeys: ['code'] },
   { route: 'POST /users/:id/mover-plan/allow-move', helper: 'allowMoverPlanMove', args: ['usr_1'] },
@@ -62,6 +63,9 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
   { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
     requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },
+  { route: 'POST /orders/:id/close-store-refund', helper: 'closeStoreRefund', args: ['ord_1', 2], requiredBodyKeys: ['expectedClaimRevision'], reply: { orderId: 'ord_1', status: 'CANCELLED' } },
+  { route: 'POST /mmg-refunds/sends/:id/resolve', helper: 'resolveMmgRefund', args: ['snd_1', true, 'Checked the statement'], requiredBodyKeys: ['received', 'note'], reply: { sendId: 'snd_1', received: true } },
+  { route: 'POST /mmg-refunds/:id/void', helper: 'voidMmgRefund', args: ['obl_1', 'Settled in cash'], requiredBodyKeys: ['note'], reply: { id: 'obl_1', status: 'VOIDED' } },
   { route: 'POST /orders/:id/door-cash-return/resolve', helper: 'resolveHeldDoorCash', args: ['ord_1'], reply: { orderId: 'ord_1', doorCashReturn: { status: 'RESOLVED' } } },
 
   // ── Moderation ─────────────────────────────────────────────────────────

@@ -81,8 +81,14 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_unattested_cancellation', 'supply_returned',
     // [owner 18 Oct 2026] the customer says they paid; the store is asked to check its MMG (standard, like its MMG peers)
     'mmg_customer_says_paid',
+    // [BUG-HUNT-2 G14c] the same moment, the customer: Swift support is checking (standard, like its MMG peers)
+    'mmg_store_silent',
+    // [BUG-HUNT-2 G22] the rider at the door: the payment is disputed, keep the order (standard, like pickup_overdue)
+    'mmg_dispute_hold',
     // [O-4] the customer answered an out-of-stock question asked before acceptance; the store may accept now
     'vendor_customer_answered',
+    // [BUG-HUNT-2 G08] the MMG refund rail, each side told once per step (standard, like its MMG peers)
+    'mmg_refund_sent', 'mmg_refund_confirmed', 'mmg_refund_disputed', 'mmg_refund_overdue', 'mmg_refund_resolved',
     // [BUG-HUNT-2 G20] the store, once: a pickup has been ready for a day and nobody came
     'pickup_not_collected',
     // Rides
@@ -139,7 +145,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'low_stock', 'staff_added', 'staff_invite', 'staff_joined', 'ad_team_invite', 'review_response', 'rating_removed', 'category_request_resolved',
     'category_backfill_review', 'vendor_needs_public_phone', 'vendor_needs_food_handler_tick', 'vendor_needs_weekly_fee_tick', 'support_update', 'store_pin_moved',
     'ad_campaign_paused', 'ad_campaign_cancelled', 'ad_campaign_killed', 'ad_campaign_auto_cancelled',
-    'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture',
+    'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture', 'ad_mmg_checkout',
     // Operations pages (admins)
     'support_ticket', 'sos_active', 'sos_marked_safe', 'guardian_deescalation',
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',
@@ -149,7 +155,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // [R19] a child-safety (CSAE) report: an ops page, as loud as an SOS page
     'csae_report',
     'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_riders_short', 'ops_food_too_old', 'ops_rider_no_show', 'ops_rider_waiting', 'ops_rider_waiting_long',
-    'ops_taxi_driver_dropped', 'ops_ride_overdue', 'ops_pickup_uncollected', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_error_sustained', 'ops_collusion_affinity', 'ops_billing_failures',
+    'ops_taxi_driver_dropped', 'ops_mmg_refund_overdue', 'ops_ride_overdue', 'ops_pickup_uncollected', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_error_sustained', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_malware_scan_bypass', 'ops_evidence_unscanned', 'ops_evidence_held', 'ops_upload_quarantined', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     // [PLACES-LOUD] address search (Google) failing: customers cannot search a place

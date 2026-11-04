@@ -66,10 +66,12 @@ function facts(over: Partial<MmgClaimFacts> = {}): MmgClaimFacts {
     orderNumber: 'SW-1001',
     customerId: 'customer-1',
     vendorId: 'vendor-1',
+    riderId: null,
     orderType: 'FOOD_DELIVERY',
     status: 'ACCEPTED',
     paymentMethod: 'MOBILE_MONEY',
     paymentStatus: 'PENDING',
+    acceptedAt: null,
     customerMmgClaim: 'UNRECORDED',
     customerMmgClaimAt: null,
     customerClaimedPaidAt: null,
@@ -854,7 +856,7 @@ describe('projection and dispatch visibility', () => {
     const view = mmgClaimView(facts({ paymentStatus: 'CLAIMED', mmgAttestedRef: REF_A, customerMmgClaim: 'NOT_PAID', customerMmgClaimAt: T0, mmgClaimMismatchAt: T1, mmgClaimRevision: 2 }));
     expect(view).toEqual({
       customerClaim: 'NOT_PAID', customerClaimAt: T0.toISOString(), storeClaimed: true, providerCaptured: false,
-      disputed: true, disputedAt: T1.toISOString(), resolution: null, resolvedAt: null, attemptRejected: false, revision: 2, canClaim: true,
+      disputed: true, disputedAt: T1.toISOString(), resolution: null, resolvedAt: null, attemptRejected: false, revision: 2, canClaim: true, storeSilent: false,
     });
     expect(mmgClaimView(facts({ paymentMethod: 'CASH' }))).toBeNull();
     expect(mmgClaimView(facts({ orderType: 'TAXI', vendorId: null }))).toBeNull();

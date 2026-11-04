@@ -1,3 +1,4 @@
+import { AdCheckoutService } from '../ads/checkout.service';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { MmgCheckoutIntent, Prisma, PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
 import { z } from '../../lib/zod';
@@ -120,7 +121,8 @@ export function mmgCheckoutRuntimeOf(app: FastifyInstance): MmgCheckoutRuntime {
   const notifications = new NotificationService(app.prisma, app.io);
   const checkout = () => getMmgCheckoutProvider();
   const billing = new BillingService(app.prisma, notifications, getPaymentProvider());
-  return { service: new MmgCheckoutService(app.prisma, billing, notifications, { checkout }), checkout, notifications };
+  const adSettlement = () => new AdCheckoutService(app.prisma, app.io);
+  return { service: new MmgCheckoutService(app.prisma, billing, notifications, { checkout, adSettlement }), checkout, notifications };
 }
 
 // ---------------------------------------------------------------------------
@@ -436,8 +438,8 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
       return { success: true, data: { state: 'UNKNOWN' satisfies ReturnState } };
     }
     try {
-      const state = await observeReply(app, rt(), { source: 'RETURN', outcome: body.outcome, params: body.params, from: request.ip });
-      return { success: true, data: { state } };
+      const { state, reply: opened } = await observeReply(app, rt(), { source: 'RETURN', outcome: body.outcome, params: body.params, from: request.ip });
+      return { success: true, data: { state, ...(await returnAudience(app, opened)) } };
     } catch (err) {
       if (!(err instanceof ReplyGateBusyError)) throw err;
       // [SEC-DOS F8] Too many replies waiting to be opened: retryable, and says nothing about the payment.
@@ -476,6 +478,18 @@ export async function mmgCheckoutPublicRoutes(app: FastifyInstance): Promise<voi
 }
 
 /**
+ * [ADS-ON] MMG sends every payment back to the one set of registered pages, so the page learns from the checkout's
+ * own record who it is talking to, and only that: an advertiser reads about their ad, not a weekly fee. The fee's
+ * answer stays exactly what it was. Read from the reply already opened: a reply is opened once.
+ */
+async function returnAudience(app: FastifyInstance, reply: Record<string, unknown> | null): Promise<{ audience?: 'ADVERTISER' }> {
+  const named = reply?.['merchantTransactionId'];
+  if (typeof named !== 'string' || !MERCHANT_TRANSACTION_ID_SHAPE.test(named.trim())) return {};
+  const intent = await runAsSystem('mmg-checkout-reply', () => app.prisma.mmgCheckoutIntent.findUnique({ where: { merchantTransactionId: named.trim() }, select: { adInvoiceId: true } }));
+  return intent?.adInvoiceId ? { audience: 'ADVERTISER' } : {};
+}
+
+/**
  * One reply, from either door. Opened with the same provider the service
  * verifies with, read for MMG's result code, then:
  *   - 3, 4, 5: MMG refused OUR request (secret key, merchant id, token). An
@@ -491,7 +505,7 @@ async function observeReply(
   app: FastifyInstance,
   runtime: MmgCheckoutRuntime,
   input: { source: 'RETURN' | 'NOTIFY'; outcome: string; params: unknown; from: string },
-): Promise<ReturnState> {
+): Promise<{ state: ReturnState; reply: Record<string, unknown> | null }> {
   let provider: MmgCheckoutProvider | null = null;
   try {
     provider = runtime.checkout();
@@ -504,9 +518,9 @@ async function observeReply(
   const code = reply ? resultCodeOf(reply) : null;
   if (reply && replyCodeClass(code) === 'ALERT') {
     await alertOnRefusedRequest(app, runtime, { source: input.source, outcome: input.outcome, reply, code: code as string });
-    return 'UNKNOWN';
+    return { state: 'UNKNOWN', reply: null };
   }
-  return runtime.service.observeReply({ source: input.source, outcome: input.outcome, params: input.params, opened: { reply } });
+  return { state: await runtime.service.observeReply({ source: input.source, outcome: input.outcome, params: input.params, opened: { reply } }), reply };
 }
 
 /** [I9] Written down first, under the checkout's own tenant when the reply names one of ours; then the page. */

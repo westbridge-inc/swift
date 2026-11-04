@@ -205,6 +205,8 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // job; ActiveJob is where they pick it up or hand it back. Its orderId would
   // otherwise send it down the generic branch to the CUSTOMER Delivery screen.
   if (kind === 'pickup_overdue') return { screen: 'ActiveJob' };
+  // [BUG-HUNT-2 G22] The rider at the door: the job screen holds the hold and the way to support.
+  if (kind === 'mmg_dispute_hold') return { screen: 'ActiveJob' };
   // [AF-MOB-006] Custody recovery. The holder's live job carries the handoff
   // code; the relay rider's task waits on their dashboard until custody is theirs.
   if (kind === 'custody_handoff_code') return { screen: 'ActiveJob' };

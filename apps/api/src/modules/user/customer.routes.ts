@@ -36,7 +36,8 @@ import { cartVatByVendor } from '../store-vat/order-vat';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
 import { MAX_DELIVERY_RADIUS_KM, brandBranchesFor, brandFactsFor, collapseBrands, oneDishPerBrand } from '../vendor/brand';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
+import { customerCancelView, mmgPaidCancelMessage, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE } from '../order/cancel-policy';
+import { answerMmgRefund, customerMmgRefund, tellStoreOfRefundAnswer } from '../order/mmg-refund-rail';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { ORDER_TRANSITIONS } from '../order/order-status';
 import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
@@ -2973,7 +2974,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // one rail where it matters most.
     const refusal = cancelView?.cancelUnavailable
       ?? (cancellableStage && mmgPaidToStore && order.vendorId
-        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: MMG_PAID_STORE_CANCELS_MESSAGE }
+        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: mmgPaidCancelMessage(order) }
         : null);
     const cancelUnavailable = refusal
       ? {
@@ -3094,6 +3095,8 @@ export async function customerRoutes(app: FastifyInstance) {
         promise: promiseView(order),
         // [AF-MOB-006] After pickup, a delivery problem is an owned case: the
         // customer sees its state and a plain sentence, never only "call support".
+        // [BUG-HUNT-2 G08] Who owes this customer what by MMG, and "Did it arrive?". Null on an order with no refund.
+        mmgRefund: order.paymentMethod === 'MOBILE_MONEY' ? await customerMmgRefund(app.prisma, order.id, order.vendor?.name ?? 'The store', previewNow) : null,
         custodyRecovery: mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'CUSTOMER', order) : null,
         rider: order.rider ? {
           firstName: order.rider.user?.firstName,
@@ -3472,6 +3475,16 @@ export async function customerRoutes(app: FastifyInstance) {
         mmgClaim: mmgClaimView(facts),
       },
     };
+  });
+
+  /** POST /orders/:id/mmg-refunds/:sendId/answer — [BUG-HUNT-2 G08] "It arrived", or it did not, and then a support case opens.
+   *  Record only: Swift moves nothing, and the store is told. */
+  app.post('/orders/:id/mmg-refunds/:sendId/answer', async (request: AuthRequest) => {
+    const { id, sendId } = request.params as { id: string; sendId: string };
+    const { received } = z.object({ received: z.boolean() }).parse(request.body);
+    const outcome = await answerMmgRefund(app.prisma, { orderId: id, sendId, customerId: request.user.userId, received });
+    if (!outcome.replayed) await tellStoreOfRefundAnswer(app.prisma, notificationService, id, outcome);
+    return { success: true, data: { orderId: id, sendId, received, replayed: outcome.replayed } };
   });
 
   app.post('/orders/:id/cancel', async (request: AuthRequest) => {

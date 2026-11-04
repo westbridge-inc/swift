@@ -407,6 +407,9 @@ export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<Ven
   apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
 export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
   apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
+/** [BUG-HUNT F21] A checked legal name changes only through a person. */
+export const changeLegalName = (id: string, firstName: string, lastName: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/name`, { method: 'PUT', body: JSON.stringify({ firstName, lastName }), reason });
 /** [BUG-HUNT F05] "Contact support to move it": allows one move between delivery and taxi work, for a week. */
 export const allowMoverPlanMove = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/mover-plan/allow-move`, { method: 'POST', body: JSON.stringify({}), reason });
@@ -578,6 +581,18 @@ export const confirmCustodyReturn = (id: string, reason: string) =>
 /** [BUG-HUNT-2 G05] A new ride code for a ride stuck at the pickup. The passenger reads it in their app; nobody here sees it. */
 export const resetRideCode = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/orders/${id}/handover-secret/reset-ride-pin`, { method: 'POST', body: JSON.stringify({ reason }), reason });
+/** [BUG-HUNT-2 G08] What stores owe customers back by MMG. Swift holds none of it: these are records. */
+export const fetchMmgRefunds = (filter: 'open' | 'overdue' | 'disputed') =>
+  apiFetch(`/api/v1/admin/mmg-refunds?limit=50&filter=${filter}`);
+/** Support's finding on a disputed refund. */
+export const resolveMmgRefund = (sendId: string, received: boolean, note: string, reason: string) =>
+  apiFetch(`/api/v1/admin/mmg-refunds/sends/${sendId}/resolve`, { method: 'POST', body: JSON.stringify({ received, note }), reason });
+/** Nothing is owed on this record any more. Two people; the record stays. */
+export const voidMmgRefund = (id: string, note: string, reason: string) =>
+  apiFetch(`/api/v1/admin/mmg-refunds/${id}/void`, { method: 'POST', body: JSON.stringify({ note }), reason });
+/** Close a store-claimed MMG order as "refund handled by the store". Two people, bound to the claim revision on screen. */
+export const closeStoreRefund = (id: string, expectedClaimRevision: number, reason: string) =>
+  apiFetch(`/api/v1/admin/orders/${id}/close-store-refund`, { method: 'POST', body: JSON.stringify({ expectedClaimRevision }), reason });
 
 export const fetchReturns = (status?: string) =>
   apiFetch(`/api/v1/admin/returns?limit=50${status ? `&status=${status}` : ''}`);

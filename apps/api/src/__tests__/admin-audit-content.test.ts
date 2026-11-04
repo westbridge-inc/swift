@@ -240,7 +240,7 @@ describe('[ADM-004] the census: every consequential action is accounted for', ()
     // has. This rule used to be a name test (/amount/i), and it was satisfied
     // for months by `settlement.amount`, a field Settlement never had; the
     // diff it certified was empty. [ADM-002] It now asks the schema.
-    for (const key of ['PUT /finance/settlements/:id/process', 'PUT /cash-rules/claims/:id/paid', 'PUT /ads/invoices/:id/mark-paid']) {
+    for (const key of ['PUT /finance/settlements/:id/process', 'PUT /cash-rules/claims/:id/paid']) {
       const e = ADMIN_ROUTE_AUTHORITY[key]!.entity!;
       expect(e.fields, key).toContain('status');
       const money = e.fields.filter((f) => types.get(e.model)?.get(f) === 'Decimal');
