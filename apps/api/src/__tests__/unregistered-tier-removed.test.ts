@@ -216,6 +216,16 @@ describe('[CHECKLIST-LEGAL (a)] the route, the seller status and a store row fro
     }
   });
 
+  // [REVIEW-F S4-1] The kept Seller status screen must not tell an own-name trader a registration is still owed.
+  it('GET /vendor/tier says whether the store trades under its owner\'s own name', async () => {
+    const o = await owner('REGISTERED');
+    expect((await call('GET', '/api/v1/vendor/tier', o)).json().data.tradesUnderOwnName).toBe(false);
+    await system(() => app.prisma.vendor.update({ where: { id: o.vendorId }, data: { tradesUnderOwnName: true } }));
+    const data = (await call('GET', '/api/v1/vendor/tier', o)).json().data;
+    expect(data.tradesUnderOwnName).toBe(true);
+    expect(data.registration).toEqual({ onFile: false, submission: null });
+  });
+
   it('a store row still marked UNREGISTERED reads the standard checklist: its business registration is asked for', async () => {
     const o = await owner('UNREGISTERED');
     const res = await call('GET', '/api/v1/verification/status?role=RESTAURANT', o);

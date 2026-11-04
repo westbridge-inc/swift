@@ -2,7 +2,8 @@ import { apiFetch } from './auth';
 
 // ---------------------------------------------------------------------------
 // [WEB-SETTINGS PR-B · owner 31 Oct 2026] The rest of the phone's store Account on the website: promotions (the
-// phone's PromosSection), seller status (VendorTierScreen) and "Review your categories" (VendorCategoryReviewScreen).
+// phone's PromosSection) and "Review your categories" (VendorCategoryReviewScreen). [CHECKLIST-LEGAL · owner 1 Nov 2026
+// (a)] No seller status any more: the self-declared tier and its limits are removed.
 // The same routes the phone calls (apps/mobile/src/services/api.ts), all manager and owner on the server. Kept out of
 // lib/vendor-api so only these pages load them.
 // ---------------------------------------------------------------------------
@@ -35,7 +36,6 @@ export const setPromoActive = (id: string, isActive: boolean) =>
   apiFetch(`${V}/promos/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ isActive }) });
 export const deletePromo = (id: string) => apiFetch(`${V}/promos/${encodeURIComponent(id)}`, { method: 'DELETE' });
 
-export const getTier = () => apiFetch(`${V}/tier`).then((r) => r.data as unknown);
 
 export type CategoryGroup = {
   itemId: string;

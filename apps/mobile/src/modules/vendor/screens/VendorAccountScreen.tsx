@@ -250,7 +250,8 @@ export function VendorAccountScreen() {
         {isManager && store && !samplePreview ? <StorePhotosCard store={store} /> : null}
 
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
-          <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
+          {/* [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] No "Seller status" row: the self-declared tier and its limits
+              are removed, so there is no tier to show (the screen stays only for notices sent before). */}
           {/* [CHAINS PR2] Every branch at a glance, several at once, and (owner) adding one. */}
           {isManager ? (
             <SettingsRow icon="git-branch" label="Branches" sub={isOwner ? 'All your branches, and add a branch' : 'Your branches at a glance'} onPress={() => navigation.navigate('VendorBranches')} />
