@@ -874,7 +874,7 @@ describe('A8: the week after an automatic close', () => {
   });
 
   it('a record dated before the close, that MMG shows only after it, is found too', async () => {
-    const f = await closed();
+    const f = await closed(later(new Date(), 2 * DAY));
     history.holds(tx('BACKDATED'), AMOUNT, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(new Date(f.page.row.createdAt.getTime() + MIN)) });
     await service.pollIntents(later(f.closedAt, DAY));
     expect((await intentOf(f.page.ref)).reason).toBe(AD_LATE_PAYMENT_LIKELY);
