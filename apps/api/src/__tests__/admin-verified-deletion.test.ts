@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
+import { randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { Prisma, type UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
@@ -10,6 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
+import { AccountService } from '../modules/user/account.service';
 import { testPhone } from './helpers/fixture-ids';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 
@@ -173,6 +175,82 @@ describe('once approved', () => {
     expect(applied.statusCode, applied.payload).toBe(409);
     expect(await app.prisma.user.findUniqueOrThrow({ where: { id: owner } })).toMatchObject({ status: 'ACTIVE' });
     expect(await auditRows(owner)).toEqual([]);
+  });
+
+  it.each(['SUSPENDED', 'BANNED'] as const)('a %s account cannot sign in, so this door closes it, and the row says where it started', async (status) => {
+    const subject = await person();
+    await app.prisma.user.update({ where: { id: subject }, data: { status } });
+    const { applied } = await askApproveApply(subject);
+    expect(applied.statusCode, applied.payload).toBe(200);
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status: 'DEACTIVATED', phone: `deleted:${subject}` });
+    const [row] = await auditRows(subject);
+    expect((row!.changes as { changed: unknown }).changed).toMatchObject({ status: { from: status, to: 'DEACTIVATED' } });
+    expect(row!.changes).toMatchObject({ fromStatus: status });
+  });
+
+  it('only this door: the person\'s own deletion and every other caller still refuse a suspended or banned account', async () => {
+    for (const status of ['SUSPENDED', 'BANNED'] as const) {
+      const subject = await person();
+      await app.prisma.user.update({ where: { id: subject }, data: { status } });
+      await expect(new AccountService(app).deleteAccount(subject, true, 'app')).rejects.toMatchObject({ code: 'ACCOUNT_INACTIVE' });
+      await expect(new AccountService(app).deleteAccount(subject)).rejects.toMatchObject({ code: 'ACCOUNT_INACTIVE' });
+      expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status });
+    }
+  });
+
+  it('a blocker still holds for a banned account: an open order refuses it', async () => {
+    const owner = await person(['VENDOR_OWNER', 'CUSTOMER']);
+    const vendorOwner = await app.prisma.vendorOwner.create({ data: { userId: owner } });
+    const vendor = await app.prisma.vendor.create({ data: {
+      ownerId: vendorOwner.id, name: 'Synthetic store', slug: `vd-${nanoid(12)}`, vendorType: 'RESTAURANT', phone: 'synthetic', addressLine1: 'Synthetic', city: 'Synthetic', region: 'Synthetic',
+      latitude: 0, longitude: 0, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true,
+    } });
+    vendorIds.push(vendor.id);
+    const customer = await person();
+    const order = await app.prisma.order.create({ data: {
+      orderNumber: `VD-${nanoid(10).toUpperCase()}`, customerId: customer, vendorId: vendor.id, orderType: 'FOOD_DELIVERY', status: 'PREPARING', deliveryAddress: '1 Test St', deliveryLat: 6.8055, deliveryLng: -58.1553,
+      subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
+    } });
+    orderIds.push(order.id);
+    await app.prisma.user.update({ where: { id: owner }, data: { status: 'BANNED' } });
+    const { applied } = await askApproveApply(owner);
+    expect(applied.statusCode, applied.payload).toBe(409);
+    expect(await app.prisma.user.findUniqueOrThrow({ where: { id: owner } })).toMatchObject({ status: 'BANNED' });
+    expect(await auditRows(owner)).toEqual([]);
+  });
+
+  describe.each(['ACTIVE', 'BANNED'] as const)('with an open case on a %s account nothing is deleted', (status) => {
+    const refused = async (subject: string) => {
+      await app.prisma.user.update({ where: { id: subject }, data: { status } });
+      const { applied } = await askApproveApply(subject);
+      expect(applied.statusCode, applied.payload).toBe(409);
+      expect(applied.json().error.message).toMatch(/open safety or fraud case, or a legal hold/);
+      expect(await app.prisma.user.findUniqueOrThrow({ where: { id: subject } })).toMatchObject({ status });
+      expect(await auditRows(subject)).toEqual([]);
+    };
+    const incident = (subject: string, caseStatus: 'OPEN' | 'CLOSED' = 'OPEN') => app.prisma.incidentCase.create({ data: {
+      caseNumber: `INC-${nanoid(8).toUpperCase()}`, status: caseStatus, severity: 'S1', category: 'SAFETY_ASSAULT', intake: 'OPS_CREATED', subjectUserId: subject, summary: 'synthetic', slaAckBy: new Date(), slaDecideBy: new Date(),
+    } as never });
+
+    it('a safety case', async () => {
+      const subject = await person();
+      await incident(subject);
+      await refused(subject);
+    });
+
+    it('a legal hold', async () => {
+      const subject = await person();
+      const kase = await incident(subject, 'CLOSED');
+      await app.prisma.evidenceBundle.create({ data: { bundleNumber: `EB-${nanoid(8)}`, caseId: kase.id, subjectUserId: subject, legalHold: true } as never });
+      await refused(subject);
+    });
+
+    it('a fraud case: its hold on the person\'s documents is not released', async () => {
+      const subject = await person();
+      const hold = await app.prisma.docLegalHold.create({ data: { subjectUserId: subject, reason: 'synthetic', ownerId: requester.id, reviewBy: new Date(Date.now() + 86_400_000), placedBy: requester.id } });
+      await app.prisma.fraudCase.create({ data: { subjectUserId: subject, submissionId: 'sub-f', caseId: randomUUID(), reasonCode: 'DOC_FORGED', confirmedBy: requester.id, legalHoldId: hold.id, linkedAccountIds: [] } });
+      await refused(subject);
+    });
   });
 
   it('a staff account is never closed here', async () => {

@@ -252,6 +252,9 @@ export class AccountService {
       claimClosure?: (tx: Prisma.TransactionClient) => Promise<boolean>;
       /** Runs once the tombstone is written, past every blocker, in the same transaction: an audit row here shows the effect, and a refusal leaves none. */
       onCutoff?: (tx: Prisma.TransactionClient) => Promise<void>;
+      /** [BUG-HUNT F20] The founder's door for a verified request from someone who cannot sign in, and no other caller:
+       *  a suspended or banned account may close, and an open case or a legal hold refuses instead of being escrowed. */
+      verifiedRequest?: boolean;
     } = {},
   ) {
     const prisma = this.app.prisma;
@@ -328,7 +331,8 @@ export class AccountService {
         await revokeAccessBeforeCleanup();
         return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
-      if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
+      const closedForThem = opts.verifiedRequest === true && (user.status === 'SUSPENDED' || user.status === 'BANNED');
+      if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED' && !closedForThem) {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
       }
 
@@ -381,6 +385,11 @@ export class AccountService {
       // the wrong extremes. The deletion proceeds in full and only the minimum
       // response authority is escrowed, encrypted, with a purge deadline.
       const holds = await enumerateSafetyHolds(tx, userId);
+      // [BUG-HUNT F20] The escrow above is for a person deleting their own account. Staff acting for someone are not
+      // that person: an open case or a legal hold, a fraud case's included, stops here and goes to the owner.
+      if (opts.verifiedRequest && (holds.reasons.length > 0 || await tx.docLegalHold.count({ where: { subjectUserId: userId, releasedAt: null } }) > 0)) {
+        throw new AppError(409, 'OPEN_CASE', 'This account has an open safety or fraud case, or a legal hold. Nothing was deleted. This one goes to the owner.');
+      }
       const hold = holds.reasons.length > 0 ? await openSafetyDeletionHold(tx, userId, holds) : null;
 
       // Cut public/action authority before any fallible retention work. The
