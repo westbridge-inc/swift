@@ -330,8 +330,8 @@ describe('GET/POST /auth/legal-acceptance', () => {
     const v251 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-25.1')!.summary;
     const v27 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-27')!.summary;
     const v281 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-28.1')!.summary;
-    // [CHECKLIST-LEGAL] served now under 2026-11-01.1 (the customer ID removal: non-material, same day)
-    expect(LEGAL_VERSION).toBe('2026-11-01.1');
+    // served now under 2026-11-04 (the waiting charge cap: non-material)
+    expect(LEGAL_VERSION).toBe('2026-11-04');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');
     for (const [accepted, summary] of [
       ['2026-10-17', [...v21, ...v251, ...v27, ...v281]], ['2026-10-18', [...v21, ...v251, ...v27, ...v281]], ['2026-10-21', [...v251, ...v27, ...v281]], ['2026-10-25', [...v251, ...v27, ...v281]],
