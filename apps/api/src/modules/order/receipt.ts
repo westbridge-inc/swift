@@ -58,9 +58,7 @@ type ReceiptOrder = {
   /** [TAXI multi-stop 8/8] A ride's stops in order (absent for a ride without them). */
   stops?: Array<{ sequence: number; address: string; skipped: boolean }> | null;
   /** [BUG-HUNT-2 G16] A ride's or a parcel's own facts. A store order leaves them out and its receipt does not change. */
-  orderType?: string | null;
   pickupAddress?: string | null;
-  deliveryAddress?: string | null;
   driver?: { firstName: string | null; vehicle: string | null; licensePlate: string | null } | null;
   /** [L02 · row 34] The cash the rider stated at the door, and how far short a
    *  handover was made (the rider bore the difference). */
