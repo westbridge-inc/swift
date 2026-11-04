@@ -76,7 +76,7 @@ type Db = Pick<PrismaClient, 'rider' | 'driver' | 'vendorOwner' | 'serviceProvid
  */
 export const OPEN_CASE_CENSUS = [
   'fraud_case', 'identity_review_case', 'enforcement_appeal', 'incident_case', 'sos_alert', 'safety_deletion_hold',
-  'doc_legal_hold', 'compliance_review_case', 'compliance_violation', 'review_case', 'rectification_request',
+  'evidence_legal_hold', 'doc_legal_hold', 'compliance_review_case', 'compliance_violation', 'review_case', 'rectification_request',
   'custody_recovery_case', 'content_report', 'rating_report', 'reimbursement_claim', 'support_ticket', 'payment_confirmation_hold',
 ] as const;
 export type OpenCaseKind = (typeof OPEN_CASE_CENSUS)[number];
@@ -112,6 +112,8 @@ export async function openCasesOf(db: PrismaClient, userId: string): Promise<Ope
       OR: [{ actorUserId: userId }, { counterpartyUserId: userId }], status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] },
     } }),
     safety_deletion_hold: () => db.safetyDeletionHold.count({ where: { userId, status: 'PENDING' } }),
+    // A legal hold on a bundle binds whatever became of its case: it is the lawful basis that outlives it (safety/deletion-hold.ts).
+    evidence_legal_hold: () => db.evidenceBundle.count({ where: { subjectUserId: userId, legalHold: true } }),
     doc_legal_hold: () => db.docLegalHold.count({ where: { OR: [{ subjectUserId: userId }, { ownerId: userId }], releasedAt: null } }),
     compliance_review_case: () => db.complianceReviewCase.count({ where: { userId, status: 'OPEN' } }),
     compliance_violation: () => db.complianceViolation.count({ where: { userId, resolvedAt: null } }),

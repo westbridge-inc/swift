@@ -9,7 +9,7 @@ Swift refunds a weekly fee only when a partner paid twice or paid by mistake. Th
 3. **Return the payment** with Return this payment on the same page. MMG returns the whole payment, to the account it came from. It takes a reason and a second admin, or the owner's solo approval.
 4. **Tell the partner** when it is done.
 
-The request closes by itself when MMG's records prove the return. Nobody closes it by hand, and no typed number can close it.
+The request closes by itself when MMG's records prove the return. That includes a return closed as "returned, not booked": MMG proved the money went back, and that week's fee is owed again. Nobody closes it by hand, and no typed number can close it. A request is never deleted.
 
 ## The 3 business days
 
