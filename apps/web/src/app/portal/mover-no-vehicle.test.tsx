@@ -58,7 +58,7 @@ describe.each([
 
 describe('while the role is still being read', () => {
   it('neither sentence shows: a mover never sees the old dead end first', async () => {
-    let answer: ((mover: boolean) => void) | undefined;
+    let answer: ((_mover: boolean) => void) | undefined;
     vi.mocked(holdsMoverRole).mockImplementationOnce(() => new Promise<boolean>((resolve) => { answer = resolve; }));
     mockApi(account(['CUSTOMER', 'MOVER']));
     renderWithQuery(<PortalHistory />);
