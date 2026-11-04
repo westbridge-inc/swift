@@ -1289,6 +1289,9 @@ export async function adminRoutes(app: FastifyInstance) {
           isPhoneVerified: true,
           createdAt: true,
           lastActiveAt: true,
+          // Which mover profile exists, and nothing else about it: MOVER is one role for rider and driver.
+          rider: { select: { id: true } },
+          driver: { select: { id: true } },
         },
         skip,
         take: limit,

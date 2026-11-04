@@ -215,7 +215,12 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
               {u.serviceProvider ? (
                 <li className="mc-row min-h-11"><span>Service provider: {u.serviceProvider.trade}</span><span className={`mc-badge${u.serviceProvider.isVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.serviceProvider.isVerified ? 'Documents approved' : 'Documents not approved'}</span></li>
               ) : null}
-              {!u.rider && !u.driver && !u.serviceProvider && (u.vendorOwner?.vendors ?? []).length === 0 ? <li className="mc-muted">Customer only.</li> : null}
+              {/* A MOVER who stopped before the vehicle step has neither profile: not a customer, and which kind is not known yet. */}
+              {!u.rider && !u.driver && (u.roles ?? []).includes('MOVER') ? (
+                <li className="mc-muted">Signed up as a rider or driver and has not added a vehicle yet, so which one is not known.</li>
+              ) : !u.rider && !u.driver && !u.serviceProvider && (u.vendorOwner?.vendors ?? []).length === 0 ? (
+                <li className="mc-muted">Customer only.</li>
+              ) : null}
             </ul>
           </section>
 

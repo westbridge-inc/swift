@@ -152,7 +152,11 @@ describe('GET /customer/orders/:id/receipt', () => {
         method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
         headers: { authorization: `Bearer ${token}` },
       });
-      expect(res.body).toContain('Cash due at the store');
+      // [FIXES-4] A receipt is only issued once the order is complete, so an uncaptured pickup has been
+      // collected: the store took the cash and Swift recorded nothing. Neither "due" nor "paid".
+      expect(res.body).toContain('Cash to the store, not recorded by Swift');
+      expect(res.body).not.toContain('Cash due');
+      expect(res.body).not.toContain('Paid in cash');
       await app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
       res = await app.inject({
         method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
@@ -165,7 +169,9 @@ describe('GET /customer/orders/:id/receipt', () => {
         method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
         headers: { authorization: `Bearer ${token}` },
       });
-      expect(res.body).toContain('Due at the appointment');
+      expect(res.body).toContain('Cash to the business, not recorded by Swift');
+      expect(res.body).not.toContain('Due at the appointment');
+      expect(res.body).not.toContain('Paid at the appointment');
       await app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
       res = await app.inject({
         method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
@@ -174,6 +180,27 @@ describe('GET /customer/orders/:id/receipt', () => {
       expect(res.body).toContain('Paid at the appointment');
     } finally {
       await app.prisma.order.update({ where: { id: orderId }, data: { fulfillment: 'DELIVERY', paymentStatus: 'PENDING' } });
+    }
+  });
+
+  it('[FIXES-4] a store\'s own delivery is neither due nor paid; a Swift rider\'s stays due until the handover records it', async () => {
+    await app.prisma.order.update({ where: { id: orderId }, data: { fulfillmentMode: 'VENDOR_DELIVERY' } });
+    try {
+      const res = await app.inject({
+        method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(res.body).toContain('Cash to the store, not recorded by Swift');
+      expect(res.body).not.toContain('Cash due on delivery');
+      expect(res.body).not.toContain('Paid in cash');
+      await app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
+      const paid = await app.inject({
+        method: 'GET', url: `/api/v1/customer/orders/${orderId}/receipt`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(paid.body).toContain('Paid in cash on delivery');
+    } finally {
+      await app.prisma.order.update({ where: { id: orderId }, data: { fulfillmentMode: null, paymentStatus: 'PENDING' } });
     }
   });
 
