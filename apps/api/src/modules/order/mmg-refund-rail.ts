@@ -8,7 +8,7 @@ import { assertClearOfParties } from '../integrity/party-authority';
 import { normaliseReference } from '../money/evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import {
-  decideMmgRefundObligation, MMG_REFUND_OPEN_STATUSES, mmgRefundOwed, mmgRefundPolicy, sendMatchesOwed, type MmgRefundCommand,
+  decideMmgRefundObligation, MMG_REFUND_OPEN_STATUSES, mmgRefundOwed, mmgRefundPolicy, mmgRefundRemainder, openMmgRefundObligation, sendMatchesOwed, type MmgRefundCommand,
 } from './mmg-refund-law';
 
 // ---------------------------------------------------------------------------
@@ -207,6 +207,38 @@ export async function markMmgRefundMissed(prisma: PrismaClient, obligationId: st
   });
 }
 
+/**
+ * [BUG-HUNT-2 G22 · COORD 4 Nov 2026] A paid MMG order whose goods came back. The customer has no goods and the store has the
+ * money: that is owed, and until now nothing said so. Called on the locked row, in the commit that closes the return, or in
+ * the commit of support's finding when a dispute held it. An open dispute records nothing yet: support's finding decides.
+ * What it records is what the store attested, less what is already owed on the order; one per order, by its cause key.
+ * Record only, like the rest of the rail: the order's payment and total stay as they are.
+ */
+export async function openMmgRefundOnReturn(tx: Tx, orderId: string, actorId: string | null, now: Date): Promise<ReturnRefund | null> {
+  const order = await tx.order.findUniqueOrThrow({
+    where: { id: orderId },
+    select: { id: true, orderNumber: true, tenantId: true, vendorId: true, customerId: true, paymentMethod: true, paymentStatus: true, mmgAttestedAmount: true, mmgClaimMismatchAt: true },
+  });
+  const paid = order.paymentStatus === 'CLAIMED' || order.paymentStatus === 'CAPTURED';
+  if (order.paymentMethod !== 'MOBILE_MONEY' || !order.vendorId || !paid || order.mmgClaimMismatchAt) return null;
+  const held = await tx.mmgRefundObligation.findMany({ where: { orderId }, select: { kind: true, status: true, amount: true } });
+  if (held.some((row) => row.kind === 'CANCELLATION')) return null;
+  const amount = mmgRefundRemainder(order.mmgAttestedAmount, held);
+  if (!amount.gt(0)) return null;
+  const obligation = await tx.mmgRefundObligation.create({
+    data: openMmgRefundObligation({
+      kind: 'CANCELLATION', tenantId: order.tenantId, orderId, vendorId: order.vendorId, customerId: order.customerId, amount, currencyCode: 'GYD',
+      basis: 'ATTESTED_REMAINDER', reason: MMG_RETURN_REFUND_REASON, createdById: actorId,
+    }, await mmgRefundPolicy(tx), now),
+    select: { id: true, dueAt: true },
+  });
+  return { obligationId: obligation.id, orderId, orderNumber: order.orderNumber, customerId: order.customerId, vendorId: order.vendorId, amount, dueAt: obligation.dueAt };
+}
+
+export const MMG_RETURN_REFUND_REASON = 'The order came back to the store after the customer paid by MMG.';
+
+export type ReturnRefund = { obligationId: string; orderId: string; orderNumber: string; customerId: string; vendorId: string; amount: Prisma.Decimal; dueAt: Date };
+
 // ─── The words ──────────────────────────────────────────────────────────────
 
 const gyd = (amount: Prisma.Decimal | number): string => `GY$${Number(amount).toLocaleString('en-US')}`;
@@ -310,6 +342,25 @@ export async function customerMmgRefund(prisma: PrismaClient, orderId: string, s
   if (rows.length === 0) return null;
   const sends = await prisma.mmgRefundSend.findMany({ where: { orderId }, select: { id: true, mmgRefundRef: true, amount: true, answer: true } });
   return customerRefundView(rows, sends, storeName, now);
+}
+
+/** [BUG-HUNT-2 G22] Both sides read what the return left owing, once each, after the commit. The order screens say it too. */
+export async function tellOfReturnRefund(prisma: PrismaClient, notifications: NotificationService, refund: ReturnRefund): Promise<void> {
+  const store = await prisma.vendor.findUnique({ where: { id: refund.vendorId }, select: { name: true, owner: { select: { userId: true } } } });
+  const storeName = store?.name ?? 'The store';
+  await notifications.send({
+    userId: refund.customerId, type: 'ORDER_UPDATE', audience: 'customer',
+    title: 'Order returned: the store refunds you',
+    body: `Your order ${refund.orderNumber} went back to ${storeName}. Swift does not hold your money. ${storeName} received ${gyd(refund.amount)} by MMG and must refund it to you by ${when(refund.dueAt)}. If it does not, contact Swift support from the order screen.`,
+    data: { orderId: refund.orderId, kind: 'mmg_refund_owed' }, dedupeKey: `mmg-refund-owed:customer:${refund.obligationId}`,
+  });
+  if (!store) return;
+  await notifications.send({
+    userId: store.owner.userId, type: 'ORDER_UPDATE', audience: 'business',
+    title: 'Order returned: refund the customer',
+    body: `Order ${refund.orderNumber} came back to you. The customer paid your store by MMG: send them ${gyd(refund.amount)} from your MMG by ${when(refund.dueAt)}, then tap Refund sent on the order.`,
+    data: { orderId: refund.orderId, kind: 'mmg_refund_owed_store' }, dedupeKey: `mmg-refund-owed:store:${refund.obligationId}`,
+  });
 }
 
 /** The store is told the answer after the commit, once; a "no" pages support on its case. */

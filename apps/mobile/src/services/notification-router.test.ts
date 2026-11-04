@@ -371,6 +371,8 @@ const CENSUS: Case[] = [
   { k: 'mmg_store_silent', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [G14c] the store has not confirmed the payment they reported; their order screen says support is checking' },
   { k: 'mmg_dispute_hold', d: { ...O, audience: 'earner' }, to: { screen: 'ActiveJob' }, why: 'RIDER — [G22] the customer disputes the payment at the door; the job screen holds the hold and support. Was no notice at all' },
   { k: 'mmg_refund_sent', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [G08] the store says it sent a refund; the order screen asks whether it arrived' },
+  { k: 'mmg_refund_owed', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [G22] a paid order came back; the order screen says who owes what' },
+  { k: 'mmg_refund_owed_store', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G22] a paid order came back; the order desk holds Refund sent [audience rule]' },
   { k: 'mmg_refund_confirmed', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] the customer confirmed the refund arrived [audience rule]' },
   { k: 'mmg_refund_disputed', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] the customer says the refund did not arrive [audience rule]' },
   { k: 'mmg_refund_overdue', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] a refund is past its deadline; the order desk holds Refund sent [audience rule]' },

@@ -98,6 +98,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await sys(async () => {
+    await app.prisma.mmgRefundObligation.deleteMany({ where: { orderId: { in: orderIds } } });
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
     await app.prisma.rider.deleteMany({ where: { id: riderId } });
     await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
@@ -189,7 +190,7 @@ describe('[G22] after the goods came back', () => {
     const [toCustomer] = await finished(customer.id, o.id);
     expect(toCustomer!.body).toBe(`Swift support found that your MMG payment for order #${o.orderNumber} reached the store. The order went back to the store, so the store refunds you directly. If the store does not answer, contact Swift support.`);
     const [toStore] = await finished(owner.id, o.id);
-    expect(toStore!.body).toBe(`Swift support found that the customer's MMG payment for order #${o.orderNumber} reached you. The order came back to you, so you owe the customer that money back.`);
+    expect(toStore!.body).toBe(`Swift support found that the customer's MMG payment for order #${o.orderNumber} reached you. The order came back to you, so you owe the customer that money back. Send it from your MMG, then tap Refund sent on the order.`);
   });
 
   it('and not paid means nothing more to do, on either side', async () => {

@@ -673,7 +673,7 @@ function claimDecisionWords(orderNumber: string, upheld: boolean, returned: bool
     return upheld
       ? {
         customer: `Swift support found that your MMG payment for order #${orderNumber} reached the store. The order went back to the store, so the store refunds you directly. If the store does not answer, contact Swift support.`,
-        store: `Swift support found that the customer's MMG payment for order #${orderNumber} reached you. The order came back to you, so you owe the customer that money back.`,
+        store: `Swift support found that the customer's MMG payment for order #${orderNumber} reached you. The order came back to you, so you owe the customer that money back. Send it from your MMG, then tap Refund sent on the order.`,
       }
       : {
         customer: `Swift support found that no MMG payment for order #${orderNumber} reached the store. The order went back to the store, so you have nothing to pay and nothing more to do.`,

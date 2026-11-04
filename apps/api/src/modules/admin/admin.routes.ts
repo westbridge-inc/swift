@@ -56,7 +56,7 @@ import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { cancelChainDealChange, chainOf, changeChainDeal, setChainDeal } from '../vendor/chain-deal';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
-import { assertMayDecideRefund, openRefundWhere, refundResolvedNotice, refundVoidedNotice, resolveMmgRefundDispute, tellBothOfRefund, voidMmgRefundObligation } from '../order/mmg-refund-rail';
+import { assertMayDecideRefund, openMmgRefundOnReturn, openRefundWhere, refundResolvedNotice, refundVoidedNotice, resolveMmgRefundDispute, tellBothOfRefund, voidMmgRefundObligation } from '../order/mmg-refund-rail';
 import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -7017,15 +7017,22 @@ export async function adminRoutes(app: FastifyInstance) {
       expectedClaimRevision: z.number().int().min(0),
     }).parse(request.body);
     const tenantId = requireTenantId();
-    const outcome = await app.prisma.$transaction((tx) => resolveMmgClaimDisagreement(tx, {
-      orderId: id,
-      tenantId,
-      resolution: body.resolution,
-      expectedClaimRevision: body.expectedClaimRevision,
-      note: body.note,
-      actorId: request.user.userId,
-      audit: (auditTx, facts) => auditWithin(auditTx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
-    }));
+    const outcome = await app.prisma.$transaction(async (tx) => {
+      const decided = await resolveMmgClaimDisagreement(tx, {
+        orderId: id,
+        tenantId,
+        resolution: body.resolution,
+        expectedClaimRevision: body.expectedClaimRevision,
+        note: body.note,
+        actorId: request.user.userId,
+        audit: (auditTx, facts) => auditWithin(auditTx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+      });
+      // [BUG-HUNT-2 G22] Support found the customer paid and the goods are already back: owed, in the finding's commit.
+      if (!decided.replayed && decided.facts.status === 'RETURNED' && body.resolution === 'CUSTOMER_PAID') {
+        await openMmgRefundOnReturn(tx, id, request.user.userId, new Date());
+      }
+      return decided;
+    });
     const facts = outcome.facts;
     if (outcome.replayed) {
       // [R5] A replay changed nothing and wrote no row. The decision it repeats
