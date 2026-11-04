@@ -30,6 +30,7 @@ import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, IdentityReviewRequiredError } from '../integrity/identity-review';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { moverRoleMayGo } from '../mover-role-rule';
 import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
@@ -3594,31 +3595,34 @@ export class VerificationService {
    *  is refused one they are owed, and a taxi never works on a delivery fee (a rider's papers for a car activate nothing
    *  until the car is in use). A mover who already holds the right fee pays these reads. */
   async settleMoverFeeAtGo(userId: string, kind: 'RIDER' | 'DRIVER'): Promise<void> {
-    const [sources, authority] = await Promise.all([
+    const [user, sources, authority] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true } }),
       this.prisma.subscription.findMany({ where: { OR: [{ rider: { userId } }, { driver: { userId } }] }, select: { type: true } }),
       this.prisma.moverFeeAuthority.findUnique({ where: { userId }, select: { feeType: true } }),
     ]);
+    // A GO its own role check will refuse moves nothing: this profile is not in use.
+    if (!user || !moverRoleMayGo(user.activeRole, kind)) return;
     const onTaxiFee = (authority?.feeType ?? sources.find((s) => s.type === 'TAXI_DRIVER')?.type) === 'TAXI_DRIVER';
     if (sources.length === 0 || (kind === 'DRIVER' && !onTaxiFee)) await this.settleMoverFee(userId, kind);
   }
 
-  /** The fee of the profile in use, on that vehicle's own list. A profile not in use activates nothing: a car with no
-   *  papers, or one the mover has left, never prices the motorbike they ride. `inUse` names it when the caller knows
-   *  (GO for that profile); otherwise the account's own pointer does. */
+  /** The fee of the profile in use, on the verdict GO asks of that vehicle, so no clock starts on papers GO refuses. A
+   *  profile not in use activates nothing: a car with no papers, or one the mover has left, never prices the motorbike
+   *  they ride. `inUse` names it when the caller knows (GO for that profile); otherwise the account's own pointer does. */
   private async moverFeeTail(userId: string, inUse?: 'RIDER' | 'DRIVER'): Promise<void> {
     const [user, driver, rider] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true, activeRole: true, lastMoverRole: true, roles: true } }),
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
       this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true, vehicleType: true } }),
       this.prisma.rider.findUnique({ where: { userId }, select: { id: true, vehicleType: true } }),
     ]);
     const kind = inUse ?? moverProfileInUse(user, rider, driver);
     const vehicleType = kind === 'DRIVER' ? driver?.vehicleType : kind === 'RIDER' ? rider?.vehicleType : null;
-    if (!user || !vehicleType) return;
-    if (await this.isVerifiedForList(userId, await this.checklistFor(userId, user.countryCode, 'MOVER', vehicleType))) {
+    if (!kind || !vehicleType) return;
+    if ((await this.getLiveOperationStatus(userId, { vehicleType, kind })).allowed) {
       // PLATE capture (identity integrity §2.1 — HARD) AWAITED here so the
       // link exists before the trial decision runs; capture failures are
       // swallowed inside the service and never block activation.
-      if (driver?.licensePlate) {
+      if (kind === 'DRIVER' && driver?.licensePlate) {
         const { IdentityService } = await import('../integrity/identity.service');
         const { normalizePlate } = await import('../integrity/normalize');
         await new IdentityService(this.prisma).capture({

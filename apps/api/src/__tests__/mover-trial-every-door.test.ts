@@ -361,6 +361,40 @@ describe('the fee follows the vehicle in use, on that vehicle\'s own list', () =
     expect((await subscriptionsOf(mover.userId)).map((s) => s.type)).toEqual(['TAXI_DRIVER']);
   });
 
+  it('a driver GO the role check refuses moves nothing: the rider stays on the rider\'s fee', async () => {
+    const mover = await signedUpMover();
+    await approvePapers(mover.userId, 'MOTORCYCLE');
+    expect((await become(mover.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(201);
+    expect((await become(mover.token, taxi())).statusCode).toBe(201);
+    await switchTo(mover, 'RIDER');
+    await approvePapers(mover.userId, 'CAR');
+    const refused = await driverGo(mover.token);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('MOVER_ROLE_INACTIVE');
+    await expectDeliveryFee(mover.userId);
+    expect(await tierChanges(mover.userId)).toBe(0);
+  });
+
+  it('papers about another plate start no clock: GO would refuse them, so no fee is born on them', async () => {
+    const mover = await signedUpMover();
+    await approvePapers(mover.userId, 'CAR');
+    const otherCar = await system(() => app.prisma.subject.create({ data: { kind: 'VEHICLE', countryCode: 'GY', createdById: mover.userId, tenantId: 'swift-default' } }));
+    await system(() => app.prisma.verificationDocument.updateMany({ where: { userId: mover.userId, docType: 'vehicle_insurance' }, data: { subjectId: otherCar.id } }));
+    expect((await become(mover.token, taxi())).statusCode).toBe(201);
+    expect((await driverGo(mover.token)).json().error?.code).toBe('VERIFICATION_REQUIRED');
+    expect(await subscriptionsOf(mover.userId)).toHaveLength(0);
+    expect(await trialGrantsOf(mover.userId)).toBe(0);
+  });
+
+  it('a car left behind leaves no plate key on a bicycle rider', async () => {
+    const mover = await signedUpMover();
+    await approvePapers(mover.userId, 'BICYCLE');
+    expect((await become(mover.token, taxi())).statusCode).toBe(201);
+    expect((await change(mover.token, { vehicleType: 'BICYCLE' })).statusCode).toBe(200);
+    await expectDeliveryFee(mover.userId);
+    expect(await system(() => app.prisma.identityKey.count({ where: { accountId: mover.userId, type: 'PLATE' } }))).toBe(0);
+  });
+
   it('a driver already on the taxi fee is not re-activated by GO', async () => {
     const mover = await signedUpMover();
     await approvePapers(mover.userId, 'CAR');
