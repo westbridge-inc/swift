@@ -403,6 +403,9 @@ async function closeUnpaid(db: PrismaClient, holdId: string, checkoutId: string,
 // - MMG is read in one-hour slices from where the last clean read ended, so no
 //   answer cut at the row limit is taken as clean; a failed or partial read is
 //   read again; a watch behind (a slow worker) reads again at once.
+// - Every read also goes back over the page's own time, opening to close, before
+//   anything else: how soon MMG's history shows a payment is unconfirmed, and a
+//   record made there and shown after the close is dated behind every slice.
 // - Any row in which our reference appears counts (a person looks; nothing is
 //   credited, so the wide match only ever errs toward review). Each is parsed
 //   (historyRowFrom): our reference exactly as external_id, MMG's paid status
@@ -443,7 +446,7 @@ type WatchDeps = {
   holdForReview: (checkoutId: string, reason: string, at: Date) => Promise<void>;
   pageAdmins: (input: { tenantId: string | null; title: string; body: string; data: Record<string, unknown>; dedupeKey: string }) => Promise<unknown>;
 };
-type Watched = { id: string; tenantId: string; merchantTransactionId: string; amount: Prisma.Decimal; currencyCode: string };
+type Watched = { id: string; tenantId: string; merchantTransactionId: string; amount: Prisma.Decimal; currencyCode: string; createdAt: Date };
 
 /** One pass, from the checkout poll (as the system). Returns how many
  *  automatically closed checkouts were read and how many were held. */
@@ -460,7 +463,7 @@ export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps
   const endedIds = [...new Set(ended.map((o) => o.intentId).filter((id): id is string => !!id))];
   // No age limit: every automatic close stays watched until it ends (oldest first).
   // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] A pay-all checkout closed this way is watched too, once (its branches hold through parts).
-  const watchedFields = { id: true, tenantId: true, merchantTransactionId: true, amount: true, currencyCode: true } as const;
+  const watchedFields = { id: true, tenantId: true, merchantTransactionId: true, amount: true, currencyCode: true, createdAt: true } as const;
   const closedRows = await db.paymentConfirmationHold.findMany({
     where: { status: 'PROVEN_UNPAID', resolvedBy: NO_REPLY_CHECK_ACTOR, OR: [
       { ...(endedIds.length ? { checkoutId: { notIn: endedIds } } : {}), checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } },
@@ -496,7 +499,7 @@ export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps
     if (due > now.getTime()) continue;
     reads += 1;
     try {
-      if (await watchOne(db, deps, zone, c, { covered, end: closedAt + AUTO_CLOSE_WATCH_MS, lastDecision }, now)) out.held += 1;
+      if (await watchOne(db, deps, zone, c, { closedAt, covered, end: closedAt + AUTO_CLOSE_WATCH_MS, lastDecision }, now)) out.held += 1;
       out.read += 1;
     } catch (err) {
       log().error({ err, checkoutId: c.id }, '[MMG checkout] the watch after an automatic close failed; it is read again later');
@@ -517,38 +520,42 @@ function namedRecord(row: Record<string, unknown>, c: Watched, paidStatuses: rea
 
 async function watchOne(
   db: PrismaClient, deps: WatchDeps, zone: MmgCreationZone, c: Watched,
-  state: { covered: number; end: number; lastDecision: WatchDecision | null }, now: Date,
+  state: { closedAt: number; covered: number; end: number; lastDecision: WatchDecision | null }, now: Date,
 ): Promise<boolean> {
   const ours = c.merchantTransactionId;
   const limit = Math.min(state.end, now.getTime() - NO_REPLY_SETTLE_MARGIN_MS);
   const slices: Array<{ fromdate: string; todate: string; rowsReturned: number | null }> = [];
   let covered = state.covered;
-  let decision: WatchDecision = 'WATCH_CLEAR';
   let records: ReturnType<typeof namedRecord>[] = [];
-  let i = 0;
-  for (; i < WATCH_SLICES_PER_CHECK && covered < limit; i += 1) {
-    const to = Math.min(covered + WATCH_SLICE_MS, limit);
-    const query: MmgHistoryQuery = { fromdate: mmgStampOf(covered - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(to, zone, 'ceil'), rows: MMG_HISTORY_ROWS };
+  /** One read of MMG, noted in `reads`: null when it is clean, otherwise what stops this pass. */
+  const read = async (query: MmgHistoryQuery, reads: Array<{ fromdate: string; todate: string; rowsReturned: number | null }>): Promise<WatchDecision | null> => {
     const answer = await deps.lookup.transactionHistoryRows(query);
     mmgCheckoutLookupsCounter.labels(`history_${answer.outcome}`).inc();
     if (answer.outcome !== 'rows') {
-      slices.push({ fromdate: query.fromdate, todate: query.todate, rowsReturned: null });
-      decision = 'WATCH_READ_FAILED';
-      break;
+      reads.push({ fromdate: query.fromdate, todate: query.todate, rowsReturned: null });
+      return 'WATCH_READ_FAILED';
     }
-    slices.push({ fromdate: query.fromdate, todate: query.todate, rowsReturned: answer.rows.length });
+    reads.push({ fromdate: query.fromdate, todate: query.todate, rowsReturned: answer.rows.length });
     // Any row in which our reference appears; others' payments are never read further or stored.
     const naming = answer.rows.filter((row) => leaves(row).some((v) => v.includes(ours)));
-    if (naming.length > 0) { records = naming.map((row) => namedRecord(row, c, deps.paidStatuses)); decision = 'LATE_RECORD'; break; }
-    if (mmgHistoryTruncated(answer.rows.length, query)) { decision = 'WATCH_INCOMPLETE'; break; }
-    covered = to;
+    if (naming.length > 0) { records = naming.map((row) => namedRecord(row, c, deps.paidStatuses)); return 'LATE_RECORD'; }
+    return mmgHistoryTruncated(answer.rows.length, query) ? 'WATCH_INCOMPLETE' : null;
+  };
+  // The page's own time, every pass: MMG may show a payment made there only after the close read it.
+  const pageWindow: typeof slices = [];
+  let decision: WatchDecision = await read({ fromdate: mmgStampOf(c.createdAt.getTime() - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(state.closedAt, zone, 'ceil'), rows: MMG_HISTORY_ROWS }, pageWindow) ?? 'WATCH_CLEAR';
+  for (let i = 0; decision === 'WATCH_CLEAR' && i < WATCH_SLICES_PER_CHECK && covered < limit; i += 1) {
+    const to = Math.min(covered + WATCH_SLICE_MS, limit);
+    const stop = await read({ fromdate: mmgStampOf(covered - WATCH_OVERLAP_MS, zone), todate: mmgStampOf(to, zone, 'ceil'), rows: MMG_HISTORY_ROWS }, slices);
+    if (stop) decision = stop;
+    else covered = to;
   }
   if (decision === 'WATCH_CLEAR') decision = covered >= state.end ? 'WATCH_DONE' : covered < limit ? 'WATCH_BEHIND' : 'WATCH_CLEAR';
   // The week (and its grace day) is over and a read keeps failing: a person looks, once.
   if ((decision === 'WATCH_READ_FAILED' || decision === 'WATCH_INCOMPLETE') && now.getTime() >= state.end + WATCH_GRACE_MS) decision = 'WATCH_ENDED_INCOMPLETE';
   const write = (d: WatchDecision) => db.mmgCheckoutObservation.create({ data: {
     tenantId: c.tenantId, intentId: c.id, source: 'HISTORY', detail: null, createdAt: now,
-    body: deps.redact({ purpose: AUTO_CLOSE_WATCH_PURPOSE, decision: d, slices, coveredUntilMs: covered, records }),
+    body: deps.redact({ purpose: AUTO_CLOSE_WATCH_PURPOSE, decision: d, pageWindow: pageWindow[0] ?? null, slices, coveredUntilMs: covered, records }),
     failure: d === 'LATE_RECORD' || d === 'LATE_RECORD_UNHELD' ? null : d === 'WATCH_READ_FAILED' || d === 'WATCH_INCOMPLETE' || d === 'WATCH_ENDED_INCOMPLETE' ? 'HISTORY_FAILED' : 'HISTORY_NOT_FOUND',
   } });
   // [I9] Written down before anything is decided on it.

@@ -666,6 +666,58 @@ describe('[REVIEW-M S3-1 (b)] a week of watching MMG after an automatic close: a
     expect(await watchesOf(row.id)).toHaveLength(2);
   });
 
+  it('MMG shows a payment only after the close, dated before it: found on the next read, held for a person, nothing credited', async () => {
+    const { s, row, closedAt } = await autoClosed();
+    const wallet = await walletOf(s.subId);
+    await service.pollIntents(later(closedAt, 31 * MIN));
+    expect(bodyOf((await watchesOf(row.id))[0]!)).toMatchObject({ decision: 'WATCH_CLEAR', records: [] });
+    // Paid five minutes after the page opened, no reply, and not in MMG's records when the close read them.
+    history.holds(tx('BACKDATED'), Number(row.amount), { external_id: row.merchantTransactionId, modificationDate: mmgTimeOf(later(row.createdAt, 5 * MIN)) });
+    await service.pollIntents(later(closedAt, 31 * MIN + 6 * 60 * MIN + MIN));
+    expect(bodyOf((await watchesOf(row.id))[1]!)).toMatchObject({ decision: 'LATE_RECORD' });
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'LATE_PAYMENT_LIKELY_AFTER_AUTO_CLOSE', providerPaymentId: null });
+    expect(await holdOf(row.id)).toMatchObject({ status: 'ACTIVE', reason: 'LATE_POSITIVE_REVIEW' });
+    expect(await readFeePaymentDecision(app.prisma, s.subId)).toEqual({ allowed: false, reason: 'PAYMENT_CONFIRMING' });
+    expect(await topups(s.subId)).toBe(0);
+    expect(await walletOf(s.subId)).toBe(wallet);
+  });
+
+  it('every read of the week goes back over the page: a record dated before the close is found on the last day too', async () => {
+    const { row, closedAt } = await autoClosed();
+    let when = later(closedAt, 31 * MIN);
+    while (when.getTime() < closedAt.getTime() + 6 * DAY) {
+      await service.pollIntents(when);
+      when = later(when, 6 * 60 * MIN + MIN);
+    }
+    expect((await watchesOf(row.id)).map((w) => bodyOf(w)['decision'])).not.toContain('WATCH_DONE');
+    history.holds(tx('LASTDAY'), Number(row.amount), { external_id: row.merchantTransactionId, modificationDate: mmgTimeOf(later(closedAt, -20 * MIN)) });
+    await service.pollIntents(when);
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD', reason: 'LATE_PAYMENT_LIKELY_AFTER_AUTO_CLOSE' });
+    const body = bodyOf((await watchesOf(row.id)).at(-1)!);
+    const page = body['pageWindow'] as { fromdate: string; todate: string };
+    expect(mmgCreationInstant(page.fromdate, 'GUYANA_WALL_CLOCK')!).toBeLessThan(row.createdAt.getTime());
+    expect(mmgCreationInstant(page.todate, 'GUYANA_WALL_CLOCK')!).toBeGreaterThanOrEqual(closedAt.getTime());
+  });
+
+  it('a read of the page\'s window that fails, or is cut at the row limit, ends no week clean: coverage stays, and it is read again', async () => {
+    const failed = await autoClosed();
+    const overPage = (query: MmgHistoryQuery, row: { createdAt: Date }) => mmgCreationInstant(query.fromdate, 'GUYANA_WALL_CLOCK')! < row.createdAt.getTime();
+    historyFault = (query) => (overPage(query, failed.row) ? { outcome: 'error', reason: 'MMG history HTTP 503' } : null);
+    await service.pollIntents(later(failed.closedAt, 31 * MIN));
+    expect(bodyOf((await watchesOf(failed.row.id)).at(-1)!)).toMatchObject({ decision: 'WATCH_READ_FAILED', coveredUntilMs: failed.closedAt.getTime() - 2 * MIN });
+
+    historyFault = null;
+    const cut = await autoClosed();
+    const filler = mmgHistoryRow(tx('FILLERPAGE'), 2100, { external_id: '991234567890123456' });
+    historyFault = (query) => (overPage(query, cut.row) ? { outcome: 'rows', rows: Array.from({ length: query.rows }, () => filler) } : null);
+    await service.pollIntents(later(cut.closedAt, 31 * MIN));
+    expect(bodyOf((await watchesOf(cut.row.id)).at(-1)!)).toMatchObject({ decision: 'WATCH_INCOMPLETE', coveredUntilMs: cut.closedAt.getTime() - 2 * MIN });
+
+    // The week over, and the page's window still not read: a person looks, and nothing reads as clean.
+    await service.pollIntents(later(cut.closedAt, 8 * DAY + MIN));
+    expect(bodyOf((await watchesOf(cut.row.id)).at(-1)!)).toMatchObject({ decision: 'WATCH_ENDED_INCOMPLETE' });
+  });
+
   it('only a record naming the checkout counts; MMG is read in slices from where the last clean read ended', async () => {
     const { row, closedAt } = await autoClosed();
     const stranger = tx('NOTOURS');
