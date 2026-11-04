@@ -22,6 +22,7 @@ import {
 import { positiveDurationMs, withTimeout } from '../utils/async-lifecycle';
 import { disconnectUserSockets } from '../utils/socket-revocation';
 import { consoleRoleOf } from './auth/console-role';
+import { moverRoleMayGo } from './mover-role-rule';
 
 /**
  * Serialize every server-side role-authority transition on the User row.
@@ -78,8 +79,7 @@ export function assertMoverRoleAuthority(
   activeRole: UserRole,
   kind: 'DRIVER' | 'RIDER',
 ): void {
-  const allowed = activeRole === 'MOVER' || activeRole === kind;
-  if (!allowed) {
+  if (!moverRoleMayGo(activeRole, kind)) {
     throw new AppError(
       409,
       'MOVER_ROLE_INACTIVE',

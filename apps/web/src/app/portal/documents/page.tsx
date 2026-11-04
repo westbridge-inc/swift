@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { Suspense, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, ShieldCheck, AlertTriangle } from 'lucide-react';
@@ -67,6 +68,10 @@ export default function DocumentsPage() {
 
   const d = status.data;
   const next = moverNextStep(d);
+  // Documents can be approved before a vehicle is saved: the server names no vehicle (null) until a rider or driver
+  // profile exists, and that account is not cleared to work whatever its papers say.
+  const noVehicle = !!d?.roleVerified && d.vehicleType === null;
+  const cleared = !!d?.roleVerified && !noVehicle;
   // [POLICE-CLEARANCE CONSENT · owner 31 Oct 2026] A TAXI driver may add a police clearance (optional; an approved,
   // current one records the account as police-cleared; it never gates), on the phone's card with its OWN consent in the
   // API's words — never under the privacy-notice tick below. A delivery rider is never offered one, whatever a list says
@@ -97,18 +102,20 @@ export default function DocumentsPage() {
       )}
 
       {d && (
-        <div className={`flex items-center gap-3 rounded-2xl p-4 ${d.roleVerified ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
-          {d.roleVerified ? <ShieldCheck className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
+        <div className={`flex items-center gap-3 rounded-2xl p-4 ${cleared ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
+          {cleared ? <ShieldCheck className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
           <p className="text-sm font-semibold">
-            {d.roleVerified
+            {cleared
               ? 'You are fully verified and cleared to work.'
-              // [WEB-ONBOARDING · FLOW-QA F17] what is left to SEND (a copy in review is Swift's turn, not the mover's)
-              : next?.kind === 'send' ? moverNextWords(next)
-                : next?.kind === 'review' ? 'In review — nothing more needed from you.'
-                  : `${d.missing.length} document${d.missing.length === 1 ? '' : 's'} still needed before you can go online.`}
+              : noVehicle ? 'Your documents are approved. You still need to choose rider or driver and add your vehicle.'
+                // [WEB-ONBOARDING · FLOW-QA F17] what is left to SEND (a copy in review is Swift's turn, not the mover's)
+                : next?.kind === 'send' ? moverNextWords(next)
+                  : next?.kind === 'review' ? 'In review — nothing more needed from you.'
+                    : `${d.missing.length} document${d.missing.length === 1 ? '' : 's'} still needed before you can go online.`}
           </p>
         </div>
       )}
+      {noVehicle && <Link href="/signup?resume=mover" className="sw-btn sw-btn-md">Choose rider or driver</Link>}
 
       <div className="space-y-3">
         {status.isLoading && <p className="text-sm text-[var(--swift-muted)]">Loading…</p>}

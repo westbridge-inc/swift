@@ -31,6 +31,7 @@ import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, IdentityReviewRequiredError } from '../integrity/identity-review';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { moverRoleMayGo } from '../mover-role-rule';
 import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
@@ -156,22 +157,32 @@ export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClien
   return (await approvedEvidenceFor(db, userId, [POLICE_CLEARANCE_DOC_TYPE], now)).length > 0;
 }
 
-/** A mover's saved vehicle from rows already read: the side they use now, else the side they
+/** The mover profile in use, from rows already read: the side they use now, else the side they
  *  last chose (while they still hold that role), else the Rider-first fallback of legacy
- *  profiles. The one rule for getMoverVehicleType and getStatus. */
+ *  profiles. The one rule for getMoverVehicleType, getStatus and the weekly fee. */
+function moverProfileInUse<R, D>(
+  user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
+  rider: R | null,
+  driver: D | null,
+): 'RIDER' | 'DRIVER' | null {
+  if (user?.activeRole === 'RIDER' && rider) return 'RIDER';
+  if (user?.activeRole === 'DRIVER' && driver) return 'DRIVER';
+  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+    if (user.lastMoverRole === 'RIDER' && rider) return 'RIDER';
+    if (user.lastMoverRole === 'DRIVER' && driver) return 'DRIVER';
+  }
+  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+  return rider ? 'RIDER' : driver ? 'DRIVER' : null;
+}
+
+/** A mover's saved vehicle: the vehicle of the profile in use. */
 function moverVehicleFrom(
   user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
   rider: { vehicleType: VehicleType } | null,
   driver: { vehicleType: VehicleType } | null,
 ): VehicleType | null {
-  if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
-  if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
-  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
-    if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
-    if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
-  }
-  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
-  return rider?.vehicleType ?? driver?.vehicleType ?? null;
+  const inUse = moverProfileInUse(user, rider, driver);
+  return inUse === 'RIDER' ? rider!.vehicleType : inUse === 'DRIVER' ? driver!.vehicleType : null;
 }
 
 /** A read started before it is known to be needed: marked handled at once, so a failure while an
@@ -3564,15 +3575,60 @@ export class VerificationService {
       }
     }
 
-    const [driver, rider] = await Promise.all([
-      this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true } }),
-      this.prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
+    await this.moverFeeTail(userId);
+    return true;
+  }
+
+  /**
+   * A mover's weekly fee is owed the moment they hold BOTH a mover profile and approved documents, whichever came
+   * second. An approval reaches this through afterApproval. A saved vehicle (POST /partner/become, PUT /partner/vehicle)
+   * reaches it here, after its commit: papers approved before the vehicle owe the fee then, with no later approval to
+   * collect it. Same law as an approval (one fee, one trial, the deletion write barrier). A failure never undoes the
+   * saved vehicle: it is logged, and GO collects what is owed (settleMoverFeeAtGo). True when the tail ran.
+   */
+  async settleMoverFee(userId: string, inUse?: 'RIDER' | 'DRIVER'): Promise<boolean> {
+    try {
+      if (!await this.openForOwedWork(userId)) return false;
+      await this.moverFeeTail(userId, inUse);
+      return true;
+    } catch (err) {
+      log().error({ err, userId }, 'the weekly fee owed to a mover was not born; go-online collects it');
+      return false;
+    }
+  }
+
+  /** Go-online's door, past the document gate and before the fee gate reads the row: nobody works without a fee, nobody
+   *  is refused one they are owed, and a taxi never works on a delivery fee (a rider's papers for a car activate nothing
+   *  until the car is in use). A mover who already holds the right fee pays these reads. */
+  async settleMoverFeeAtGo(userId: string, kind: 'RIDER' | 'DRIVER'): Promise<void> {
+    const [user, sources, authority] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true } }),
+      this.prisma.subscription.findMany({ where: { OR: [{ rider: { userId } }, { driver: { userId } }] }, select: { type: true } }),
+      this.prisma.moverFeeAuthority.findUnique({ where: { userId }, select: { feeType: true } }),
     ]);
-    if ((driver || rider) && (await this.isRoleVerified(userId, 'MOVER'))) {
+    // A GO its own role check will refuse moves nothing: this profile is not in use.
+    if (!user || !moverRoleMayGo(user.activeRole, kind)) return;
+    const onTaxiFee = (authority?.feeType ?? sources.find((s) => s.type === 'TAXI_DRIVER')?.type) === 'TAXI_DRIVER';
+    if (sources.length === 0 || (kind === 'DRIVER' && !onTaxiFee)) await this.settleMoverFee(userId, kind);
+  }
+
+  /** The fee of the profile in use, on the verdict GO asks of that vehicle, so no clock starts on papers GO refuses. A
+   *  profile not in use activates nothing: a car with no papers, or one the mover has left, never prices the motorbike
+   *  they ride. `inUse` names it when the caller knows (GO for that profile); otherwise the account's own pointer does. */
+  private async moverFeeTail(userId: string, inUse?: 'RIDER' | 'DRIVER'): Promise<void> {
+    const [user, driver, rider] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true, vehicleType: true } }),
+      this.prisma.rider.findUnique({ where: { userId }, select: { id: true, vehicleType: true } }),
+    ]);
+    const kind = inUse ?? moverProfileInUse(user, rider, driver);
+    const vehicleType = kind === 'DRIVER' ? driver?.vehicleType : kind === 'RIDER' ? rider?.vehicleType : null;
+    if (!kind || !vehicleType) return;
+    if ((await this.getLiveOperationStatus(userId, { vehicleType, kind })).allowed) {
       // PLATE capture (identity integrity §2.1 — HARD) AWAITED here so the
       // link exists before the trial decision runs; capture failures are
       // swallowed inside the service and never block activation.
-      if (driver?.licensePlate) {
+      if (kind === 'DRIVER' && driver?.licensePlate) {
         const { IdentityService } = await import('../integrity/identity.service');
         const { normalizePlate } = await import('../integrity/normalize');
         await new IdentityService(this.prisma).capture({
@@ -3581,10 +3637,9 @@ export class VerificationService {
         });
       }
       // [REVIEW-PARTNER] The fiction's partners are never billed: no trial is born (createRow would refuse it).
-      if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
-      if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
+      if (kind === 'DRIVER' && driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
+      if (kind === 'RIDER' && rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
-    return true;
   }
 
   /**
