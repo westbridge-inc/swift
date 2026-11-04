@@ -407,6 +407,9 @@ export const fetchVendorActivationChecklist = (id: string): Promise<Envelope<Ven
   apiFetch(`/api/v1/admin/vendors/${id}/activation-checklist`);
 export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: string): Promise<Envelope<MoverActivationChecklist>> =>
   apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
+/** [BUG-HUNT F21] A checked legal name changes only through a person. */
+export const changeLegalName = (id: string, firstName: string, lastName: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/name`, { method: 'PUT', body: JSON.stringify({ firstName, lastName }), reason });
 /** [BUG-HUNT F05] "Contact support to move it": allows one move between delivery and taxi work, for a week. */
 export const allowMoverPlanMove = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/mover-plan/allow-move`, { method: 'POST', body: JSON.stringify({}), reason });

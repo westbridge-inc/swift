@@ -78,6 +78,7 @@ const LEDGER: Record<string, { count: number; why: string }> = {
   'modules/user/account-erasure-retry.ts': { count: 1, why: INTERNAL },
   'modules/user/account.service.ts': { count: 1, why: INTERNAL },
   'modules/user/inactivity.ts': { count: 1, why: INTERNAL },
+  'modules/user/legal-name.ts': { count: 1, why: `${INTERNAL} (the reserved-name rule on support's name door)` },
   'modules/user/mover-object-erasure.ts': { count: 1, why: INTERNAL },
   'modules/user/profile-update.ts': { count: 1, why: OWN },
   'modules/user/upload-erasure.ts': { count: 2, why: INTERNAL },

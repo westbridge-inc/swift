@@ -36,6 +36,7 @@ export interface ReasonCaller {
 export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── People ─────────────────────────────────────────────────────────────
   { route: 'PUT /users/:id/suspend', helper: 'suspendUser', args: ['usr_1'] },
+  { route: 'PUT /users/:id/name', helper: 'changeLegalName', args: ['usr_1', 'First', 'Last'], requiredBodyKeys: ['firstName', 'lastName'] },
   { route: 'POST /users/:id/phone-change', helper: 'startPhoneChange', args: ['usr_1', '+5926001234'], requiredBodyKeys: ['phone'] },
   { route: 'POST /users/:id/phone-change/confirm', helper: 'confirmPhoneChange', args: ['usr_1', '123456'], requiredBodyKeys: ['code'] },
   { route: 'POST /users/:id/mover-plan/allow-move', helper: 'allowMoverPlanMove', args: ['usr_1'] },
