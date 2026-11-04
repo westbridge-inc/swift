@@ -270,7 +270,8 @@ export function VendorStack() {
         {/* [MKT G3] Where the backfill's "review your categories" push lands.
             Accepting a suggestion is what writes the tag the Market feed reads. */}
         <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
-        {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
+        {/* [DOC-1 §3.6] Seller status. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No tier any more: kept only so a notice sent
+            before still opens somewhere true (no limits; where the registration stands). */}
         <Stack.Screen name="VendorTier" component={VendorTierScreen} />
         {/* [CHAINS PR2] One owner, many branches: every branch at a glance, and adding one. */}
         <Stack.Screen name="VendorBranches" component={VendorBranchesScreen} />

@@ -32,8 +32,10 @@ import { GUTTER } from '../shared';
 // (lib/vehicleOffer): canters and box trucks stay listed here for the day they
 // are offered.
 export const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
-  { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Small deliveries' },
-  { key: 'MOTORCYCLE', label: 'Motorbike', icon: 'moped', hint: 'Deliveries' },
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] A bicycle is a pedal bike; any bike with a motor (an e-bike or an
+  // e-scooter) signs up as a motorbike, with a motorbike's documents.
+  { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Pedal bike, no motor · small deliveries' },
+  { key: 'MOTORCYCLE', label: 'Motorbike', icon: 'moped', hint: 'Deliveries · e-bikes and e-scooters too' },
   { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi + delivery' },
   { key: 'WAGON_CAR', label: 'Wagon Car', icon: 'car-estate', hint: 'Taxi + larger loads' },
   { key: 'BUS_9', label: 'Bus (9-seater)', icon: 'van-passenger', hint: 'Groups & tours' },

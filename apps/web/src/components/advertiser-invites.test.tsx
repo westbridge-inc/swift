@@ -7,7 +7,7 @@ import AdvertiserPage from '@/app/advertiser/page';
 // The screen says what the notice said (the company and the role), nothing is granted until Accept, and
 // Decline removes the invitation. The server has held all of that since #1995; this is its only door.
 
-const invite = { advertiserId: 'a 1', companyName: 'Roti Shop', role: 'MANAGER', invitedAt: '2026-11-01T00:00:00.000Z' };
+const invite = { advertiserId: 'a/1', companyName: 'Roti Shop', role: 'MANAGER', invitedAt: '2026-11-01T00:00:00.000Z' };
 
 function api(state: { invites: unknown[]; memberships?: unknown[] }, onAnswer?: (_path: string) => { status?: number; body?: unknown } | undefined) {
   return mockApi(({ url, method }) => {
@@ -47,12 +47,12 @@ describe('a team invitation on the website', () => {
     const state = { invites: [invite] as unknown[], memberships: [] as unknown[] };
     const fetchMock = api(state, () => {
       state.invites = [];
-      state.memberships = [{ id: 'a 1', companyName: 'Roti Shop', status: 'APPROVED', memberRole: 'MANAGER' }];
+      state.memberships = [{ id: 'a/1', companyName: 'Roti Shop', status: 'APPROVED', memberRole: 'MANAGER' }];
       return {};
     });
     const { user } = renderWithQuery(<AdvertiserPage />);
     await user.click(await screen.findByRole('button', { name: 'Accept' }));
-    await waitFor(() => expect(posts(fetchMock)).toEqual(['/api/v1/ads/advertiser/a%201/members/accept']));
+    await waitFor(() => expect(posts(fetchMock)).toEqual(['/api/v1/ads/advertiser/a%2F1/members/accept']));
     await waitFor(() => expect(screen.queryByRole('group', { name: /Team invitation/ })).toBeNull());
     expect(await screen.findByRole('heading', { name: 'Roti Shop' })).toBeTruthy();
   });
@@ -62,7 +62,7 @@ describe('a team invitation on the website', () => {
     const fetchMock = api(state, () => { state.invites = []; return {}; });
     const { user } = renderWithQuery(<AdvertiserPage />);
     await user.click(await screen.findByRole('button', { name: 'Decline' }));
-    await waitFor(() => expect(posts(fetchMock)).toEqual(['/api/v1/ads/advertiser/a%201/members/decline']));
+    await waitFor(() => expect(posts(fetchMock)).toEqual(['/api/v1/ads/advertiser/a%2F1/members/decline']));
     await waitFor(() => expect(screen.queryByRole('group', { name: /Team invitation/ })).toBeNull());
     expect(screen.queryByRole('heading', { name: 'Roti Shop' })).toBeNull();
   });

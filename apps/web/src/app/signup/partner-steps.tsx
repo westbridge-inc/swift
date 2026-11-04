@@ -15,6 +15,7 @@ import { becomePartner, signOwnName } from '@/lib/customer-account';
 import { ownNameStoreType } from '@/lib/own-name-store-type';
 import { AGREEMENT, agreementAsk, businessAsk, EXAMPLE, LIMIT, taxiAsk } from '@/lib/signup-fields';
 import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT, type MoverRole } from '@/lib/signup-roles';
+import { BIKE_WITH_A_MOTOR } from '@/lib/bike-with-a-motor';
 import type { StoreLocationPicker as StoreLocationPickerComponent } from '@/components/store-location-picker';
 import { loadStorePicker } from './store-picker-loader';
 import { readBusinessDraft, saveBusinessDraft } from './business-draft';
@@ -287,7 +288,10 @@ export function VehicleStep({ shell, mover, draft, onDraft, note = null }: { she
             {/* [Owner ruling 11 Oct 2026 — H-PLATE] said where the plate is typed; the server refuses a non-H taxi plate too */}
             <p id="vehicle-plate-rule" className={taxiPlateWrong ? styles.error : styles.smallCopy} role={taxiPlateWrong ? 'alert' : undefined}>{taxiPlateWrong ? TAXI_PLATE_ERROR : TAXI_PLATE_HINT}</p></div>
         </>
-      ) : null}
+      ) : (
+        // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] a bicycle is pedal only; a bike with a motor is a motorbike
+        <p className={styles.smallCopy}>{BIKE_WITH_A_MOTOR}</p>
+      )}
       {terms.feeBlock('MOVER', veh.vehicleType)}
       <PartnerAgreement name={AGREEMENT.mover} doc="driver-agreement" agree={agree} onChange={setAgree} />
       {mover === 'DRIVER' ? (

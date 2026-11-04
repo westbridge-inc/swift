@@ -87,14 +87,16 @@ describe('dashboard settings: the store card', () => {
   });
 
   // [WEB-SETTINGS PR-B] The phone's Account > Promotions, Seller status and Review your categories (manager and owner).
-  it('owners and managers find promotions, seller status and categories; staff do not', async () => {
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a) — a DELIBERATE change] no Seller status link: the tier is removed
+  it('owners and managers find promotions and categories (no seller status any more); staff do not', async () => {
     for (const role of ['OWNER', 'MANAGER', 'STAFF']) {
       stubReads();
       vi.spyOn(vendorApi, 'getProfile').mockResolvedValue({ ...profile, myRole: role } as never);
       setSelectedStore('store-1');
       const view = renderWithQuery(<SettingsPage />);
       expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
-      const links = { Promotions: '/dashboard/promotions', 'Seller status': '/dashboard/seller-status', Categories: '/dashboard/categories' };
+      const links = { Promotions: '/dashboard/promotions', Categories: '/dashboard/categories' };
+      expect(screen.queryByRole('link', { name: 'Seller status' }), role).toBeNull();
       for (const [name, href] of Object.entries(links)) {
         const link = screen.queryByRole('link', { name });
         if (role === 'STAFF') expect(link, `${role} ${name}`).toBeNull();

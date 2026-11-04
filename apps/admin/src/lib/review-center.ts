@@ -36,7 +36,7 @@ export interface Applicant { id: string; name: string; phone: string; documents:
 // Shared vocabulary for the queue, facts, dialogs and custody timeline.
 const LABELS: Record<string, string> = {
   national_id: 'National ID', owner_national_id: 'National ID', passport: 'Passport', identity_l2: 'Customer ID',
-  drivers_licence: "Driver's licence", gra_restaurant_licence: 'GRA restaurant licence',
+  drivers_licence: "Driver's licence", gra_restaurant_licence: 'GRA Food Restaurant Licence',
   business_registration: 'Business registration', police_clearance: 'Police clearance',
   // [STORE-VAT · owner O-5] Decided in Store VAT, never here (the server refuses it at this door).
   vat_registration_certificate: 'VAT registration certificate',
@@ -78,7 +78,9 @@ export const docLabel = (type: string) => LABELS[type] ?? 'Document';
  * Supersedes the 8 Oct "licence must include the hire-car class" wording.
  */
 const REVIEWER_HINTS: Record<string, string> = {
-  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] the licence must cover the vehicle: motorcycles for a motorbike rider
+  // (an e-bike or e-scooter rider signs up as one), motor cars for a taxi driver. No certificate of fitness for a motorbike.
+  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry, and that it covers the vehicle: a motorbike rider's licence must cover motorcycles (an e-bike or e-scooter counts as a motorbike); a taxi driver's must cover motor cars. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
   hire_car_driver_licence: "Hire Car Driver's Licence (GRA, its own document): same name as the driver's licence, and a current date (usually 3 years).",
   hire_car_vehicle_licence: "The car's yearly hire licence: the plate matches the registration, and the date is current.",
   vehicle_registration: 'For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234) and match the plate the driver gave.',
@@ -101,7 +103,8 @@ const REVIEW_NOTES: Record<string, string> = {
   food_handler_cert: 'Food handler’s certificate for this year, with the issuing office (for a chef or caterer: the Mayor and City Council of Georgetown). Never a medical certificate. Type the year it is for.',
   gei_electrical_licence: 'Government Electrical Inspectorate licence in this person’s name. Type the year it is for; it is checked again every January.',
   // [owner 16 Oct 2026] a store's yearly licences: the same January re-check as a business name
-  gra_restaurant_licence: 'GRA restaurant licence for this store. Type the year it is for; it is checked again every January.',
+  // [CHECKLIST-LEGAL · COORD 1 Nov 2026 (d), delegated] the GRA's own name for it, and its provisional licence is accepted
+  gra_restaurant_licence: 'GRA Food Restaurant Licence for this store. A GRA Provisional Licence is accepted too. Type the year it is for; it is checked again every January.',
   sanitary_certificate: 'Sanitary certificate for this store’s premises. Type the year it is for; it is checked again every January.',
   trade_licence: 'Trade licence for this store. Type the year it is for; it is checked again every January.',
 };

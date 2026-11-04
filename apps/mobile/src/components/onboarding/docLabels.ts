@@ -26,7 +26,8 @@ const DOC_LABELS: Record<string, string> = {
   owner_national_id: 'Owner National ID or Digital ID card',
   business_registration: 'Business Registration',
   tin_certificate: 'TIN Certificate',
-  gra_restaurant_licence: 'GRA Restaurant Licence',
+  // [CHECKLIST-LEGAL · COORD 1 Nov 2026 (d)] the GRA's own name for the licence
+  gra_restaurant_licence: 'GRA Food Restaurant Licence',
   food_handler_cert: "Food Handler's Certificate",
   storefront_photo: 'Storefront Photo',
   // [ROLE-DOCS · owner 21 Oct 2026] signed in the app in place of a business registration (own name, BNA s.3)
