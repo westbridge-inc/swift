@@ -10,6 +10,8 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { AccountService } from '../modules/user/account.service';
+import { assertClearOfParties } from '../modules/integrity/party-authority';
+import { AppError } from '../utils/errors';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { ACTIVE_TAXI_STATUSES } from '../modules/rides/rides.service';
@@ -331,19 +333,66 @@ describe('support ends a ride whose driver is gone', () => {
     };
   };
 
-  it.each(['passenger', 'driver'] as const)('an identity under review on the %s side refuses everyone: nobody can say who is linked', async (side) => {
+  // [COORD ruling on REVIEW-G11's note] Nobody is stuck: a review must not hold a ride open for ever. For ride end only, a
+  // SUPER_ADMIN who is not on the ride ends it, and the audit row says the review was open.
+  const closedRow = (orderId: string) => app.prisma.auditLog.findFirst({ where: { action: 'END_STUCK_RIDE', entityId: orderId } });
+
+  it.each(['passenger', 'driver'] as const)('an identity under review on the %s side: an ADMIN is refused, and a SUPER_ADMIN not on the ride ends it, on the record', async (side) => {
     const owner = await staff(['*'], 'SUPER_ADMIN');
     const r = await ride();
-    const party = side === 'passenger' ? r.customerId : r.driverUser;
-    const undo = await linked([party], true);
+    const undo = await linked([side === 'passenger' ? r.customerId : r.driverUser], true);
     try {
-      const res = await end(r.orderId, owner.token);
+      const res = await end(r.orderId);
       expect(res.statusCode, res.payload).toBe(409);
       expect(res.json().error.code).toBe('IDENTITY_REVIEW_REQUIRED');
       expect(await app.prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })).toMatchObject({ status: 'RIDE_IN_PROGRESS' });
+      expect(await closedRow(r.orderId)).toBeNull();
+
+      expect((await end(r.orderId, owner.token)).statusCode).toBe(200);
+      expect((await closedRow(r.orderId))!.changes).toMatchObject({ reason: TEST_ADMIN_REASON, previousStatus: 'RIDE_IN_PROGRESS', identityUnderReview: true });
     } finally {
       await undo();
     }
+  });
+
+  it('with no review open the record says nothing of one', async () => {
+    const r = await ride();
+    await end(r.orderId);
+    expect((await closedRow(r.orderId))!.changes).not.toHaveProperty('identityUnderReview');
+  });
+
+  it('a review opens no door to your own ride: a SUPER_ADMIN on it, or listed as linked to it, is refused', async () => {
+    const onIt = await staff(['*'], 'SUPER_ADMIN');
+    const own = await ride('RIDE_IN_PROGRESS', {}, { passenger: onIt.id });
+    const undoOwn = await linked([onIt.id], true);
+    const listed = await staff(['*'], 'SUPER_ADMIN');
+    const other = await ride();
+    const undoListed = await linked([other.customerId, listed.id], true);
+    try {
+      await refused(own.orderId, onIt.token, 'OWN_RIDE');
+      await refused(other.orderId, listed.token, 'OWN_RIDE');
+    } finally {
+      await undoOwn();
+      await undoListed();
+    }
+  });
+
+  it('the shared rule stays closed for every other door: a review refuses a SUPER_ADMIN there', async () => {
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    const undo = await linked([r.customerId], true);
+    const words = { own: new AppError(403, 'OWN', 'x'), staff: new AppError(403, 'STAFF', 'x') };
+    try {
+      await expect(app.prisma.$transaction((tx) => assertClearOfParties(tx, owner.id, [r.customerId], words))).rejects.toMatchObject({ code: 'IDENTITY_REVIEW_REQUIRED' });
+    } finally {
+      await undo();
+    }
+  });
+
+  it('a ride with the verified code and no Start records where it was, under review or not', async () => {
+    const r = await ride('DRIVER_ARRIVED', { ridePinVerified: true, ridePinVerifiedAt: new Date() });
+    await end(r.orderId);
+    expect((await closedRow(r.orderId))!.changes).toMatchObject({ reason: TEST_ADMIN_REASON, previousStatus: 'DRIVER_ARRIVED' });
   });
 
   it.each(['passenger', 'driver'] as const)('a staff account linked to the %s is staff on the ride: a SUPER_ADMIN not on it ends it', async (side) => {
