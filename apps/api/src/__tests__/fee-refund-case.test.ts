@@ -19,7 +19,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
 import { MmgFeeReversalService, MMG_FEE_REVERSAL_SWITCH } from '../modules/billing/mmg-fee-reversal';
-import { businessDaysDue, FEE_REFUND_OVERDUE_KEY, FEE_REFUND_OVERDUE_TITLE, sweepFeeRefundCases } from '../modules/billing/fee-refund-case';
+import { businessDaysDue, FEE_REFUND_OVERDUE_KEY, FEE_REFUND_OVERDUE_TITLE, feeRefundCaseOf, listFeeRefundCases, openFeeRefundCase, sweepFeeRefundCases } from '../modules/billing/fee-refund-case';
 import { JOB_RECOVERY } from '../jobs/recovery-policy';
 import { alertClassOf } from '../providers/notifications/alert-class';
 import { devChannelLog, getChannels, resetDevChannelLog } from '../providers/notifications/channels';
@@ -79,6 +79,7 @@ const RUN = nanoid(6).toUpperCase().replace(/[^A-Z0-9]/g, 'Q');
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const subIds: string[] = [];
+const chainIntentIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_648_000_000 + Math.floor(Math.random() * 900_000);
 const REASON = 'Partner paid this week twice by mistake and asked for the second payment back';
@@ -183,6 +184,10 @@ afterAll(async () => {
     await app.prisma.opsAlert.deleteMany({ where: { title: FEE_REFUND_OVERDUE_TITLE } }).catch(() => {});
     await removeCases({ subscriptionId: { in: subIds } });
     await app.prisma.mmgFeeReversal.deleteMany({ where: { subscriptionId: { in: subIds } } });
+    await app.prisma.$transaction(async (tx) => {
+      await tx.mmgCheckoutPart.deleteMany({ where: { checkoutId: { in: chainIntentIds } } });
+      await tx.mmgCheckoutIntent.deleteMany({ where: { id: { in: chainIntentIds } } });
+    });
     const intents = await app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
     await app.prisma.mmgCheckoutObservation.deleteMany({ where: { intentId: { in: intents.map((i) => i.id) } } });
     await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -325,6 +330,34 @@ describe('[Row 156 2] recording the ask', () => {
     expect((await app.inject({ method: 'GET', url: ROUTE(none.checkoutId), headers: read })).json().data).toBeNull();
     const [empty] = await rowsOf('REFUND_CASE');
     expect(empty!.changes).toMatchObject({ checkoutId: none.checkoutId, matchedIds: '', matchedCount: 0 });
+  });
+
+  it('a pay-all payment has no single payer: refused by name', async () => {
+    const s = await makeSub();
+    const owner = await app.prisma.vendorOwner.findUniqueOrThrow({ where: { userId: s.userId } });
+    const intent = await app.prisma.$transaction(async (tx) => {
+      const made = await tx.mmgCheckoutIntent.create({ data: {
+        tenantId: 'swift-default', chainOwnerId: owner.id, merchantTransactionId: `${Date.now()}${String(Math.floor(Math.random() * 1e5)).padStart(5, '0')}`.padEnd(18, '0').slice(0, 18), amount: FEE, currencyCode: 'GYD',
+        createdByUserId: s.userId, platform: 'ios', checkoutUrlSealed: new Uint8Array(40).fill(1), checkoutUrlDek: new Uint8Array(40).fill(1), expiresAt: new Date(Date.now() + 600_000),
+      } as never });
+      await tx.mmgCheckoutPart.create({ data: { tenantId: made.tenantId, checkoutId: made.id, subscriptionId: s.subId, amount: FEE, currencyCode: 'GYD' } });
+      return made;
+    });
+    chainIntentIds.push(intent.id);
+    const res = await open(intent.id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('CHAIN_CHECKOUT');
+  });
+
+  it('another market reaches neither a payment nor a case', async () => {
+    const held = await paidCheckout();
+    await open(held.checkoutId);
+    const free = await paidCheckout();
+    const elsewhere = 'another-market';
+    await expect(runWithoutTenant(() => openFeeRefundCase(app.prisma, { tenantId: elsewhere, checkoutId: free.checkoutId, kind: 'DUPLICATE', reason: REASON, actorId: admin.userId }, async () => {}), 'test:fee-refund-case'))
+      .rejects.toMatchObject({ statusCode: 404 });
+    expect(await runWithoutTenant(() => feeRefundCaseOf(app.prisma, { tenantId: elsewhere, checkoutId: held.checkoutId }), 'test-read:fee-refund-case')).toBeNull();
+    expect(await runWithoutTenant(() => listFeeRefundCases(app.prisma, { tenantId: elsewhere }), 'test-read:fee-refund-case')).toEqual([]);
   });
 
   it('one case per payment, even at the same moment', async () => {

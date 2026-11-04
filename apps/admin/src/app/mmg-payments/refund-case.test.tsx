@@ -96,6 +96,24 @@ describe('recording a request on a payment', () => {
     expect(await within(panel).findByText(/Due by/)).toBeTruthy();
   });
 
+  it('a reason alone is not enough: it must say which kind', async () => {
+    const { user } = await openPayment();
+    const panel = await screen.findByRole('region', { name: 'Refund request' });
+    await user.type(within(panel).getByRole('textbox', { name: 'What the partner said' }), REASON);
+    expect((within(panel).getByRole('button', { name: 'Record the request' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('a recorded request reaches the list of what is waiting', async () => {
+    const { fetchMock, user } = await openPayment();
+    const reads = () => requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).includes('/fee-refund-cases')).length;
+    const panel = await screen.findByRole('region', { name: 'Refund request' });
+    await waitFor(() => expect(reads()).toBe(1));
+    await user.click(within(panel).getByRole('radio', { name: 'Paid twice' }));
+    await user.type(within(panel).getByRole('textbox', { name: 'What the partner said' }), REASON);
+    await user.click(within(panel).getByRole('button', { name: 'Record the request' }));
+    await waitFor(() => expect(reads()).toBe(2));
+  });
+
   it('says what it does not do: it moves no money', async () => {
     await openPayment();
     const panel = await screen.findByRole('region', { name: 'Refund request' });
