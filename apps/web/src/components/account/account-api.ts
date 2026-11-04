@@ -3,7 +3,7 @@ import { ApiRequestError, apiFetch } from '@/lib/auth';
 // Curated errors from the customer routes and their shared error handler.
 const customerErrorCodes = new Set([
   'VALIDATION_ERROR', 'NOT_FOUND', 'FORBIDDEN', 'EMAIL_TAKEN',
-  'ACCOUNT_INACTIVE', 'MAX_ADDRESSES', 'NOT_YOUR_ORDER',
+  'ACCOUNT_INACTIVE', 'MAX_ADDRESSES', 'NOT_YOUR_ORDER', 'NAME_LOCKED',
 ]);
 
 export interface Favourite { id: string; name: string; slug?: string }

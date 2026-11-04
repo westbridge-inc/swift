@@ -157,7 +157,7 @@ describe('[G07] Swift suspends a store with live orders', () => {
 
   it('the store owner reads what happened, not a label', async () => {
     const told = await notices(owner.id);
-    expect(told.some((notice) => notice.title === 'Your store is suspended' && notice.body.includes('Food safety complaint under review'))).toBe(true);
+    expect(told.some((notice) => notice.title === 'Store suspended' && notice.body.includes('Food safety complaint under review'))).toBe(true);
     expect(told.some((notice) => notice.title === 'Vendor Suspended')).toBe(false);
   });
 

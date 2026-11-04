@@ -26,10 +26,11 @@
     "/portal/documents/page": 149,
     "/portal/weekly-fee/page": 154,
     "/portal/account/page": 146,
-    "/advertiser/page": 144,
+    "/advertiser/page": 145,
     "/(marketing)/launching-soon/page": 113
   },
   "raisedBecause": {
+    "/advertiser/page": "[ADS-ON #2325 · 4 Nov] 144 -> 145 kB (CI measured 144.4): the Pay with MMG button and its checkout call on the campaign page.",
     "/(app)/store/[slug]/page": "[FLOW-QA F15 F16 · 2 Nov] 167 -> 168 kB: the shared sign-in module (lib/auth, on every page) now tells a refresh refused for too many checks from a carrier address (\"Sign in again\", never a sign-out) and carries a refused code's status for plain words (measured 167.1 kB). Before: [BOOK-S6b 29 Oct] +1 kB: web customer booking (owner C3). The sheet, time picker and held time load on tap; what stays is the Book button, its sign-in path and the lazy loader (measured 166.6 kB; main 165.7).",
     "/(app)/cart/page": "[BOOK-S6b 29 Oct] +1 kB: the one checkout books an appointment (owner C3). Its panels, words and held time load on demand; what stays is the one-booking checks and the phone payment-copy module the success words share (measured 157.9 kB; main 156.1).",
     "/(app)/checkout/page": "[BOOK-S6b 29 Oct] +1 kB: as /(app)/cart/page (the same checkout).",

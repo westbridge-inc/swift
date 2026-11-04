@@ -436,7 +436,7 @@ describe('GOLD-5 · ADMIN-05 — suspend, ban and reinstate', () => {
     const vendor = await sys(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: store.vendorId } }));
     expect({ status: vendor.status, accepting: vendor.acceptingOrders, source: vendor.suspensionSource }).toEqual({ status: 'SUSPENDED', accepting: false, source: 'ADMIN' });
     expect((await sys(() => app.prisma.auditLog.findMany({ where: { entityId: store.vendorId, action: 'SUSPEND_VENDOR' } }))).map((t) => ({ by: t.userId, reason: (t.changes as Record<string, unknown>)['reason'] }))).toEqual([{ by: ops.userId, reason }]);
-    const toldOwner = await sys(() => app.prisma.notification.findMany({ where: { userId: store.owner.userId, title: 'Your store is suspended' } }));
+    const toldOwner = await sys(() => app.prisma.notification.findMany({ where: { userId: store.owner.userId, title: 'Store suspended' } }));
     expect(toldOwner).toHaveLength(1);
     expect(toldOwner[0]!.body).toContain(`Reason: ${reason}`);
 

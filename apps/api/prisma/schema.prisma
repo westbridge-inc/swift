@@ -4020,6 +4020,10 @@ model MmgCheckoutIntent {
   /// subscriptionId and chainOwnerId). One OPEN or CONFIRMING per owner (a partial unique in the migration).
   chainOwnerId          String?
   chainOwner            VendorOwner? @relation(fields: [chainOwnerId], references: [id], onDelete: Restrict)
+  /// [ADS-ON] The advertising invoice this checkout pays. A third payer beside the two above (CHECK: exactly
+  /// one of the three). One OPEN or CONFIRMING per invoice (a partial unique in the migration).
+  adInvoiceId           String?
+  adInvoice             AdInvoice? @relation(fields: [adInvoiceId], references: [id], onDelete: Restrict)
   /// Ours, sent to MMG: 18 digits (providers/mmg newMerchantTransactionId).
   merchantTransactionId String    @unique
   /// Exactly what MMG was asked for, in whole GYD [I1].
@@ -4067,6 +4071,7 @@ model MmgCheckoutIntent {
   @@index([tenantId])
   @@index([subscriptionId, createdAt])
   @@index([chainOwnerId, createdAt])
+  @@index([adInvoiceId, createdAt])
   @@index([status, nextCheckAt])
   // [MMG support lookup] Support finds a checkout by a transaction a reply named (candidates @> {id}).
   @@index([candidates], type: Gin)
@@ -6829,6 +6834,7 @@ model AdInvoice {
   advertiser     Advertiser      @relation(fields: [advertiserId], references: [id])
   campaign       AdCampaign      @relation(fields: [campaignId], references: [id])
   refundIntents  AdRefundIntent[]
+  mmgCheckouts   MmgCheckoutIntent[]
 
   @@unique([id, tenantId, campaignId, currency], map: "ad_invoices_id_tenantId_campaignId_currency_key")
   @@index([tenantId, status])

@@ -211,7 +211,6 @@ const E = {
   advertiser: { model: 'advertiser', fields: ['status'] },
   adCampaign: { model: 'adCampaign', fields: ['status'] },
   adLinkDomain: { model: 'adLinkDomain', fields: ['status'] },
-  adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
   adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'payoutRail', 'manualPayoutRef', 'providerRefundRef', 'completedAt'] },
   paymentConfirmation: { model: 'paymentConfirmationHold', fields: ['status', 'resolvedAt', 'resolvedBy', 'resolutionEvidence'] },
   // [PT-4] A held card payment's resolution: what finance decided and the provider actions it took.
@@ -277,6 +276,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [BOOK-FU2 · owner B3] Repeat "Customer didn't come" records for a person to review: counts and dates, numbers masked.
   'GET /missed-appointments': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
+  // [BUG-HUNT F21] A checked legal name changes only through a person: the door the refusal points at.
+  'PUT /users/:id/name': c('C3', 'user.name.change', E.user),
   // [BUG-HUNT F22] A person's number is their sign-in: its own capability, never in a support grant. The code goes to the new number.
   // [BUG-HUNT F22] The number is the sign-in, so asking takes two people. The read-back then takes the code.
   'POST /users/:id/phone-change': c('C5', 'user.phone.change', E.user),
@@ -454,7 +455,6 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /ads/campaigns/:id/kill': c('C3', 'ads.campaign.kill', E.adCampaign),
   'POST /ads/refund-intents/:id/settle': c('C4', 'ads.refund.settle', E.adRefundIntent),
   'POST /ads/refund-intents/backfill': c('C4', 'ads.refund.backfill'),
-  'PUT /ads/invoices/:id/mark-paid': c('C4', 'ads.invoice.pay', E.adInvoice),
   'POST /ads/placements/seed': c('C2', 'ads.placement.write'),
   'PUT /ads/placements/:id': c('C2', 'ads.placement.write'),
   'PUT /ads/settings': c('C5', 'ads.settings.write'),

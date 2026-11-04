@@ -10,6 +10,7 @@ import { log } from '../../utils/logger';
 import { formatMoney, fromMajor } from '../../utils/currency-amount';
 import {
   MERCHANT_TRANSACTION_ID_SHAPE,
+  MMG_AD_PRODUCT_DESCRIPTION,
   describeShape,
   getMmgCheckoutProvider,
   newMerchantTransactionId,
@@ -36,7 +37,10 @@ import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './
 import { partnerReceiptIds } from './mmg-checkout-receipt';
 import { openReply, type OpenedReply } from './mmg-checkout-reply';
 import { FEE_SELLER, type FeeSeller } from './fee-seller';
-import { AUTO_CLOSE_LATE_PAYMENT_LIKELY, AUTO_CLOSE_POSSIBLE_MATCH, checkExpiredNoReplyHolds, watchAutoClosedCheckouts } from './mmg-expired-hold-check';
+import { AD_LATE_PAYMENT_LIKELY, AD_POSSIBLE_MATCH, AUTO_CLOSE_LATE_PAYMENT_LIKELY, AUTO_CLOSE_POSSIBLE_MATCH, adWatchesUnfinished, checkExpiredAdCheckouts, checkExpiredNoReplyHolds, watchAutoClosedAdCheckouts, watchAutoClosedCheckouts } from './mmg-expired-hold-check';
+import { adPaymentConfirmManualOnly, type AdSettlement } from '../ads/checkout.service';
+import { lockCampaign } from '../ads/booking.service';
+import { notifyAdvertiserOwners } from '../ads/ads-notify';
 import { chainFeeQuote, coveredFees, lockCheckoutAuthority, type ChainFeeQuote } from './chain-checkout';
 
 // ---------------------------------------------------------------------------
@@ -171,7 +175,11 @@ export interface ChainCheckoutView extends Omit<CheckoutView, 'subscriptionStatu
 }
 
 /** Who a Pay tap's Idempotency-Key belongs to: one subscription, or an owner's chain checkout. */
-type KeyOwner = { userId: string; clientKey: string; subscriptionId: string | null; chainOwnerId: string | null };
+type KeyOwner = {
+  userId: string; clientKey: string; subscriptionId: string | null; chainOwnerId: string | null; adInvoiceId?: string | null;
+  /** [ADS-ON] Under the checkout's lock, before this open page goes out: throws when it may not. */
+  mayHandOut?: (tx: Prisma.TransactionClient, checkoutId: string) => Promise<unknown>;
+};
 
 export interface StartedCheckout {
   ref: string;
@@ -572,6 +580,13 @@ export function judge(
 /** [DS632 · 7 Oct] What operators need besides the reason code when the cause
  *  is MMG's time for the payment. */
 const HOLD_GUIDANCE: Readonly<Record<string, string>> = {
+  // [ADS-ON] An ad payment has no credit path but MMG's lookup, and no hold to resolve: the person reconciles it with MMG.
+  AD_INVOICE_ALREADY_PAID: ' MMG took a second payment for an ad invoice another payment had settled. The advertiser may have paid twice. Check the MMG statement and contact them.',
+  AD_INVOICE_NOT_PAYABLE: ' MMG took a payment for an ad invoice that can no longer accept one. Check the MMG statement and contact the advertiser.',
+  AD_NO_REPLY_UNRESOLVED: ' An ad checkout ran out with no answer from MMG, and MMG’s records could not show that nothing was paid. Check the MMG statement and contact the advertiser.',
+  AD_LOOKUP_NEVER_CONFIRMED: ' An ad checkout had an answer from MMG that MMG’s lookup never confirmed. Check the MMG statement and contact the advertiser.',
+  [AD_LATE_PAYMENT_LIKELY]: ' LATE PAYMENT LIKELY. Swift closed this ad checkout as not paid when MMG’s transaction history showed no payment for it and no reply ever came, but MMG’s history now shows a paid record naming exactly this checkout, for exactly its amount. Nothing was settled. Check the MMG statement and contact the advertiser.',
+  [AD_POSSIBLE_MATCH]: ' Possible match, check MMG. Swift closed this ad checkout as not paid when MMG’s transaction history showed no payment for it and no reply ever came, but MMG’s history now shows a record in which this checkout’s reference appears (not a paid record of exactly this checkout and amount). Nothing was settled. Check the MMG statement before doing anything.',
   CREATION_ZONE_UNVERIFIED: ' MMG_CHECKOUT_CREATION_ZONE is not set to GUYANA_WALL_CLOCK or UTC, so the time MMG gives for the payment cannot be checked against the checkout, and no MMG payment is confirmed automatically. Set it to GUYANA_WALL_CLOCK (MMG writes Guyana time; owner ruling, 4 Oct).',
   PAYMENT_TIME_NOT_IN_HISTORY: ' MMG’s lookup says the payment succeeded, but MMG’s transaction history did not show it for the checkout’s time while Swift kept checking. If every MMG payment is held like this, check MMG_CHECKOUT_CREATION_ZONE against how MMG writes its times. Check the payment against the MMG statement before confirming it.',
   PAYMENT_TIME_UNAVAILABLE: ' MMG’s transaction history could not be read in full, so the time of this payment could not be checked. Check the payment against the MMG statement before confirming it.',
@@ -594,6 +609,23 @@ const HOLD_REASON: Record<ProviderIdentityCode, string> = {
   PROVIDER_TXN_TENANT_CONFLICT: 'TENANT_CONFLICT_ON_RECORD',
 };
 
+/** [ADS-ON] What the checkout needs of the ads side: to settle inside its own transaction, then send the notices. */
+export interface AdInvoiceSettlement {
+  settleInTx(tx: Prisma.TransactionClient, invoiceId: string, opts: { providerRef: string; actor?: string }): Promise<AdSettlement>;
+  afterSettled(invoiceId: string, outcome: AdSettlement): Promise<void>;
+}
+
+/** [ADS-ON] Slots stay held this long past a checkout's own deadline: MMG's page may outlive ours (U8). */
+export const AD_HOLD_PAST_CHECKOUT_MS = 30 * 60_000;
+
+/** [ADS-ON] Every earlier payment on this campaign that could still be real money: an open page, one being
+ *  checked, one with a person, one that ran out with no answer, or one closed on MMG's records whose week is not
+ *  over. Until each is resolved, no new page opens. */
+export async function unresolvedAdPayments(db: Pick<Prisma.TransactionClient, 'mmgCheckoutIntent' | 'mmgCheckoutObservation'>, campaignId: string, besides?: string): Promise<number> {
+  const live = await db.mmgCheckoutIntent.count({ where: { adInvoice: { campaignId }, status: { in: ['OPEN', 'CONFIRMING', 'HELD', 'EXPIRED'] }, ...(besides ? { id: { not: besides } } : {}) } });
+  return live + await adWatchesUnfinished(db, campaignId);
+}
+
 export class MmgCheckoutService {
   private readonly checkout: () => MmgCheckoutProvider;
   private readonly lookup: () => MmgCheckoutLookupClient;
@@ -603,18 +635,129 @@ export class MmgCheckoutService {
     private readonly billing: BillingService,
     private readonly notifications: NotificationService,
     /** Injectable for tests; the defaults follow MMG_DRIVER. */
-    deps: { checkout?: () => MmgCheckoutProvider; lookup?: () => MmgCheckoutLookupClient; reversal?: () => MmgReversalClient } = {},
+    deps: { checkout?: () => MmgCheckoutProvider; lookup?: () => MmgCheckoutLookupClient; reversal?: () => MmgReversalClient; adSettlement?: () => AdInvoiceSettlement } = {},
   ) {
     this.checkout = deps.checkout ?? (() => getMmgCheckoutProvider());
     this.lookup = deps.lookup ?? (() => getMmgLookupProvider());
     this.reversal = deps.reversal;
+    this.adSettlement = deps.adSettlement;
   }
 
   private readonly reversal: (() => MmgReversalClient) | undefined;
+  /** [ADS-ON] Who settles an ad invoice. Without it no ad payment ever confirms: it waits, nothing is lost. */
+  private readonly adSettlement: (() => AdInvoiceSettlement) | undefined;
 
   /** THE rule (fee-pay-actions.ts), with this service's checkout provider. */
   async isLiveFor(sub: Pick<Subscription, 'status' | 'feeWaived' | 'currencyCode' | 'weeklyRate' | 'customRate'>, platform: ClientPlatform): Promise<boolean> {
     return mmgCheckoutLive(this.prisma, sub, platform, this.checkout);
+  }
+
+  /**
+   * [ADS-ON · owner ruling 3 Nov] An advertiser pays one invoice on MMG's page. The same checkout as the weekly fee
+   * from here on: reply, lookup, the six conditions, the provider identity. What differs is who is paid for: an
+   * invoice, so the amount is the invoice's own, no fee clock is held, and the campaign lock serializes it against
+   * the expiry sweep. Re-read under that lock before anything is written. `authorize` is the caller's own check,
+   * inside the transaction.
+   */
+  async createAdCheckout(input: {
+    invoiceId: string; userId: string; platform: ClientPlatform; clientKey: unknown;
+    authorize: (tx: Prisma.TransactionClient) => Promise<void>; now?: Date;
+  }): Promise<{ created: boolean; checkout: StartedCheckout }> {
+    const clientKey = typeof input.clientKey === 'string' && CLIENT_KEY.test(input.clientKey) ? input.clientKey : null;
+    if (!clientKey) {
+      throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Starting a checkout needs an Idempotency-Key header of 8-128 letters, digits, - or _. The same key on a retry never opens a second checkout.');
+    }
+    const now = input.now ?? new Date();
+    const unpayable = () => new AppError(409, 'INVOICE_NOT_PAYABLE', 'This invoice can no longer be paid.');
+    const unresolved = () => new AppError(409, 'PAYMENT_CONFIRMING', 'An earlier payment for this campaign is being confirmed. Do not pay again.');
+    // [ADS-ON] THE rule for a page, new or already open, read under the campaign lock: the caller may pay, the invoice
+    // can still take the payment, and no other payment on the campaign is unresolved. A page already in a browser
+    // stays payable; that is what a hold is for. Swift just never hands one out again.
+    const payable = async (tx: Prisma.TransactionClient, page?: string) => {
+      await input.authorize(tx);
+      const fresh = await tx.adInvoice.findUniqueOrThrow({ where: { id: input.invoiceId } });
+      const campaign = await tx.adCampaign.findUniqueOrThrow({ where: { id: fresh.campaignId }, select: { status: true } });
+      const held = await tx.adBooking.count({ where: { campaignId: fresh.campaignId, status: 'RESERVED' } });
+      if (fresh.status !== 'UNPAID' || campaign.status !== 'PENDING_PAYMENT' || held === 0) throw unpayable();
+      if (await unresolvedAdPayments(tx, fresh.campaignId, page) > 0) throw unresolved();
+      return fresh;
+    };
+    const who: KeyOwner = { userId: input.userId, subscriptionId: null, chainOwnerId: null, adInvoiceId: input.invoiceId, clientKey, mayHandOut: payable };
+    const replay = await this.answerForKey(who, now);
+    if (replay) return replay;
+
+    for (let attempt = 0; attempt < CREATE_ATTEMPTS; attempt += 1) {
+      const invoice = await this.prisma.adInvoice.findUnique({ where: { id: input.invoiceId } });
+      if (!invoice) throw new NotFoundError('AdInvoice', input.invoiceId);
+      // [I4] One open checkout per invoice, read again after any expiry or lost race.
+      const open = await this.prisma.mmgCheckoutIntent.findFirst({ where: { adInvoiceId: invoice.id, status: { in: ['OPEN', 'CONFIRMING'] } } });
+      if (open?.status === 'CONFIRMING') {
+        const bound = await this.bindKey(who, open, now);
+        if (bound.intentId !== open.id) return bound.answer();
+        throw new AppError(409, 'CHECKOUT_CONFIRMING', 'An earlier MMG payment is being confirmed. Do not pay again.', { ref: open.id });
+      }
+      if (open && open.expiresAt > now) return (await this.bindKey(who, open, now)).answer();
+      if (open) {
+        await this.expireUnanswered(open.id, now);
+        continue;
+      }
+      if (invoice.status !== 'UNPAID') throw unpayable();
+      if (await unresolvedAdPayments(this.prisma, invoice.campaignId) > 0) throw unresolved();
+      // MMG takes whole dollars (CHECKOUT-CONTRACT D1): an invoice with cents is refused, never rounded.
+      if (!invoice.amount.isInteger() || invoice.currency !== 'GYD' || invoice.amount.lte(0)) {
+        throw new AppError(409, 'INVOICE_NOT_PAYABLE', 'This invoice cannot be paid with MMG.');
+      }
+      const merchantTransactionId = newMerchantTransactionId(now);
+      let checkoutUrl: string;
+      try {
+        checkoutUrl = this.checkout().createCheckout({
+          amount: fromMajor(String(invoice.amount), 'GYD'), merchantTransactionId, now, productDescription: MMG_AD_PRODUCT_DESCRIPTION,
+        }).checkoutUrl;
+      } catch (err) {
+        log().error({ err, invoiceId: invoice.id }, '[MMG checkout] the ad checkout could not be built');
+        throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
+      }
+      // [F6] Sealed before it is written down.
+      const sealed = await sealCheckoutUrl(checkoutUrl);
+      try {
+        // Persisted, with the key that asked for it, BEFORE the page leaves the server [F3].
+        const created = await this.prisma.$transaction(async (tx) => {
+          await lockCampaign(tx, invoice.campaignId);
+          // A tap at the same instant got here first: its page is this tap's answer, never a refusal.
+          if (await tx.mmgCheckoutIntent.count({ where: { adInvoiceId: input.invoiceId, status: { in: ['OPEN', 'CONFIRMING'] } } }) > 0) return null;
+          const fresh = await payable(tx);
+          const expiresAt = new Date(now.getTime() + MMG_CHECKOUT_TTL_MS);
+          const intent = await tx.mmgCheckoutIntent.create({
+            data: {
+              tenantId: fresh.tenantId, adInvoiceId: fresh.id, merchantTransactionId, amount: fresh.amount, currencyCode: fresh.currency,
+              createdByUserId: input.userId, platform: input.platform, ...sealed, expiresAt,
+            },
+          });
+          await tx.mmgCheckoutKey.create({ data: { tenantId: fresh.tenantId, createdByUserId: input.userId, clientKey, intentId: intent.id } });
+          // The slots outlast the page, so a payment made in time never lands on released inventory.
+          await tx.adBooking.updateMany({
+            where: { campaignId: invoice.campaignId, status: 'RESERVED' },
+            data: { reservedUntil: new Date(expiresAt.getTime() + AD_HOLD_PAST_CHECKOUT_MS) },
+          });
+          return intent;
+        });
+        if (!created) continue;
+        mmgCheckoutEventsCounter.labels('created').inc();
+        return { created: true, checkout: await this.started(created, input.userId) };
+      } catch (err) {
+        if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+        const again = await this.answerForKey(who, now);
+        if (again) return again;
+      }
+    }
+    throw new AppError(503, 'MMG_CHECKOUT_UNAVAILABLE', 'The MMG checkout could not be started right now. Try again in a minute.');
+  }
+
+  /** [ADS-ON] One ad checkout, read by its invoice: an unknown ref and another invoice's are the same 404. */
+  async getAdCheckout(input: { ref: string; invoiceId: string }): Promise<Omit<CheckoutView, 'subscriptionStatus' | 'seller'>> {
+    const intent = await this.prisma.mmgCheckoutIntent.findFirst({ where: { id: input.ref, adInvoiceId: input.invoiceId } });
+    if (!intent) throw new AppError(404, 'CHECKOUT_NOT_FOUND', 'There is no such checkout.');
+    return { ref: intent.id, status: intent.status as CheckoutStatus, amountGyd: Number(intent.amount), currencyCode: 'GYD', createdAt: intent.createdAt.toISOString(), expiresAt: intent.expiresAt.toISOString(), confirmedAt: intent.confirmedAt ? intent.confirmedAt.toISOString() : null, ...partnerReceiptIds(intent) };
   }
 
   /** Start a checkout, or hand back the one already open [I4]. `created`
@@ -1165,22 +1308,37 @@ export class MmgCheckoutService {
       // it (mmg-expired-hold-check.ts); anything less leaves it to the admins.
       try {
         await checkExpiredNoReplyHolds(this.prisma, { lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()), redact: redactedObject }, clock());
+        // [ADS-ON] An ad checkout has no hold to carry this: the same reading of MMG's records, on the checkout itself.
+        await checkExpiredAdCheckouts(this.prisma, {
+          lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()), redact: redactedObject,
+          holdForReview: async (checkoutId, reason, at) => {
+            const intent = await this.prisma.mmgCheckoutIntent.findUnique({ where: { id: checkoutId } });
+            if (intent) await this.hold(intent, reason, at);
+          },
+        }, clock());
       } catch (err) {
         log().error({ err }, '[MMG checkout] the expired-checkout check failed; it is retried on the next poll');
       }
       // [REVIEW-M #2098 S3-1 (b)] For a week after such a close, a record MMG
       // shows naming the checkout puts it in front of a person (never credited).
+      const watch = () => ({
+        lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()), redact: redactedObject, paidStatuses: MMG_HISTORY_SUCCESS,
+        holdForReview: async (checkoutId: string, reason: string, at: Date) => {
+          const intent = await this.prisma.mmgCheckoutIntent.findUnique({ where: { id: checkoutId } });
+          if (intent) await this.hold(intent, reason, at);
+        },
+        pageAdmins: (input: Parameters<typeof notifyAdmins>[2]) => notifyAdmins(this.prisma, this.notifications, input),
+      });
       try {
-        await watchAutoClosedCheckouts(this.prisma, {
-          lookup: this.lookup(), zone: creationZoneInUse(() => this.checkout()), redact: redactedObject, paidStatuses: MMG_HISTORY_SUCCESS,
-          holdForReview: async (checkoutId, reason, at) => {
-            const intent = await this.prisma.mmgCheckoutIntent.findUnique({ where: { id: checkoutId } });
-            if (intent) await this.hold(intent, reason, at);
-          },
-          pageAdmins: (input) => notifyAdmins(this.prisma, this.notifications, input),
-        }, clock());
+        await watchAutoClosedCheckouts(this.prisma, watch(), clock());
       } catch (err) {
         log().error({ err }, '[MMG checkout] the watch after automatic closes failed; it is retried on the next poll');
+      }
+      // [ADS-ON · REVIEW-G9 #2325] An ad checkout has no hold to be found through: the same week, on the checkout itself.
+      try {
+        await watchAutoClosedAdCheckouts(this.prisma, watch(), clock());
+      } catch (err) {
+        log().error({ err }, '[MMG checkout] the watch after automatic ad closes failed; it is retried on the next poll');
       }
       try {
         await this.reconcileUnappliedPages(clock());
@@ -1337,7 +1495,8 @@ export class MmgCheckoutService {
     });
     if (!binding) return null;
     // [ENTERPRISE E1] A key answered for one subscription never answers for another, nor for a chain checkout (or back).
-    if (binding.intent.subscriptionId !== (who.subscriptionId ?? null) || binding.intent.chainOwnerId !== (who.chainOwnerId ?? null)) {
+    if (binding.intent.subscriptionId !== (who.subscriptionId ?? null) || binding.intent.chainOwnerId !== (who.chainOwnerId ?? null)
+      || binding.intent.adInvoiceId !== (who.adInvoiceId ?? null)) {
       throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'That Idempotency-Key was used for a different checkout. A new tap needs a new key.');
     }
     let intent = binding.intent;
@@ -1346,7 +1505,7 @@ export class MmgCheckoutService {
       await this.expireUnanswered(intent.id, now);
       intent = await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } });
     }
-    return { created: false, checkout: await this.started(intent, who.userId) };
+    return { created: false, checkout: await this.started(intent, who.userId, who.mayHandOut) };
   }
 
   /** [F3] Bind this key to the checkout it is being answered with. When the key
@@ -1365,7 +1524,7 @@ export class MmgCheckoutService {
       // and a page is only ever handed out while the checkout is still OPEN.
       return {
         intentId: intent.id,
-        answer: async () => ({ created: false, checkout: await this.started(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), who.userId) }),
+        answer: async () => ({ created: false, checkout: await this.started(await this.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: intent.id } }), who.userId, who.mayHandOut) }),
       };
     } catch (err) {
       if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
@@ -1434,6 +1593,8 @@ export class MmgCheckoutService {
       // [F2] Checkout crediting stays off until every earlier credit carries
       // its provider identity; the confirmation waits, nothing is lost.
       if (!(await providerIdentityBackfillDone(this.prisma))) return this.reschedule(intent, now, 'IDENTITY_BACKFILL_PENDING');
+      // [ADS-ON] Settlement paused, or nothing here can settle an invoice: MMG's payment waits, nothing is lost.
+      if (intent.adInvoiceId && (!this.adSettlement || adPaymentConfirmManualOnly())) return this.reschedule(intent, now, 'AD_SETTLEMENT_PAUSED');
       return this.confirm(intent, confirmed.txnId, confirmed.ledgerReference, now);
     }
     const decisive = verdicts.find((v): v is Hold => v.verdict === 'HOLD' && v.decisive);
@@ -1533,6 +1694,7 @@ export class MmgCheckoutService {
     const numbers = [...new Set([key, ledgerReference])];
     const amount = Number(intent.amount);
     let outcome: 'credited' | 'already' | 'held';
+    let adOutcome: AdSettlement | null = null;
     try {
       outcome = await this.prisma.$transaction(async (tx) => {
         // Serialize every verifier of this checkout: return, notify and poll may race.
@@ -1588,6 +1750,8 @@ export class MmgCheckoutService {
             });
           }
         }
+        // [ADS-ON] The invoice settles here or not at all: MMG's confirmation and the settlement are one commit.
+        if (current.adInvoiceId) adOutcome = await this.adSettlement!().settleInTx(tx, current.adInvoiceId, { providerRef: key, actor: `mmg-checkout:${current.id}` });
         await tx.mmgCheckoutIntent.update({
           where: { id: current.id },
           data: { status: 'CONFIRMED', mmgTransactionId: key, providerPaymentId: identity.id, confirmedAt: now, nextCheckAt: null, reason: null },
@@ -1598,6 +1762,9 @@ export class MmgCheckoutService {
     } catch (err) {
       if (err instanceof ProviderIdentityError) return this.hold(intent, HOLD_REASON[err.identityCode]);
       if (isDuplicateOn(err, 'mmgTransactionId')) return this.hold(intent, 'ALREADY_CREDITED');
+      // [ADS-ON] MMG took this money and the invoice cannot take it: a second payment on a settled invoice, a
+      // reference that settled another one. Real money must reach a person, never an idempotent "already paid".
+      if (intent.adInvoiceId && err instanceof AppError) return this.hold(intent, err.code === 'AD_INVOICE_ALREADY_PAID' ? 'AD_INVOICE_ALREADY_PAID' : 'AD_INVOICE_NOT_PAYABLE');
       throw err;
     }
     if (outcome === 'held') return 'HELD';
@@ -1608,6 +1775,11 @@ export class MmgCheckoutService {
     }
 
     mmgCheckoutEventsCounter.labels('confirmed').inc();
+    if (intent.adInvoiceId && adOutcome) {
+      await this.adSettlement!().afterSettled(intent.adInvoiceId, adOutcome).catch((err) => {
+        log().error({ err, checkoutId: intent.id }, '[MMG checkout] the invoice settled; its notices could not be sent');
+      });
+    }
     // [Sol · delta2] This verifier read MMG's answers before its lookups. A
     // success answer naming another transaction may have been written down
     // since: its reply then found the checkout still CONFIRMING and had
@@ -1814,6 +1986,11 @@ export class MmgCheckoutService {
    *  No pay-action promise: the notice says what happened, not what to tap. */
   private async tellPartner(intent: MmgCheckoutIntent, status: 'CONFIRMED' | 'NOT_PAID' | 'HELD'): Promise<void> {
     try {
+      // [ADS-ON] A settled invoice sends its own receipt; only the other two come from here.
+      if (intent.adInvoiceId) {
+        if (status !== 'CONFIRMED') await this.tellAdvertiser(intent, intent.adInvoiceId, status);
+        return;
+      }
       if (!intent.subscriptionId) {
         await this.tellChainOwner(intent, status);
         return;
@@ -1847,6 +2024,17 @@ export class MmgCheckoutService {
     } catch (err) {
       log().warn({ err, checkoutId: intent.id, status }, '[MMG checkout] the partner notice failed; the app still polls the truth');
     }
+  }
+
+  /** [ADS-ON] The advertiser's owners hear what the partner hears: what happened, never what to tap. */
+  private async tellAdvertiser(intent: MmgCheckoutIntent, invoiceId: string, status: 'NOT_PAID' | 'HELD'): Promise<void> {
+    const invoice = await this.prisma.adInvoice.findUnique({ where: { id: invoiceId }, select: { advertiserId: true, campaignId: true, number: true } });
+    if (!invoice) return;
+    const amount = formatMoney(Number(intent.amount), 'GYD', { whole: true });
+    const copy = status === 'NOT_PAID'
+      ? { title: 'MMG payment not completed', body: `MMG did not complete your ${amount} payment for invoice ${invoice.number}.` }
+      : { title: 'We are checking your MMG payment', body: `We are checking your ${amount} payment for invoice ${invoice.number} by hand. Please do not pay again. Support will contact you.` };
+    await notifyAdvertiserOwners(this.prisma, this.notifications, invoice.advertiserId, { ...copy, kind: 'ad_mmg_checkout', data: { ref: intent.id, status, campaignId: invoice.campaignId } });
   }
 
   /** [ENTERPRISE E1] A chain checkout's owner hears once, for every branch it paid. Like the single notice, it
@@ -1903,12 +2091,14 @@ export class MmgCheckoutService {
     });
   }
 
-  private async started(intent: MmgCheckoutIntent, userId: string): Promise<StartedCheckout> {
+  private async started(intent: MmgCheckoutIntent, userId: string, mayHandOut?: KeyOwner['mayHandOut']): Promise<StartedCheckout> {
     // Unsealing can await while another rail or authority changes. The final
     // locked decision is after that await, for both first handoff and replay.
     const opened = intent.status === 'OPEN' ? await openCheckoutUrl(intent) : null;
     const result = await this.prisma.$transaction(async (tx) => {
       const { covered, payer } = await lockCheckoutAuthority(tx, intent);
+      // [ADS-ON] Two owners can share an advertiser, but a page belongs to the one who opened it.
+      if (payer.userId !== userId && intent.adInvoiceId) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Another owner has a payment open for this invoice. Do not pay again.');
       if (payer.userId !== userId) throw new NotFoundError('Subscription', intent.subscriptionId ?? intent.id);
       const now = new Date();
       // [ENTERPRISE E1] The page goes out only while EVERY subscription it pays allows it (its own hold, nothing else).
@@ -1925,6 +2115,7 @@ export class MmgCheckoutService {
             ? new Date(now.getTime() + LATE_CHECK_MS) : null,
         } });
       }
+      if (current.status === 'OPEN') await mayHandOut?.(tx, current.id);
       return { current, blocked: current.status === 'OPEN' && !allowed };
     });
     if (result.blocked) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Weekly-fee collection is paused while payment information is confirmed.', { ref: result.current.id });

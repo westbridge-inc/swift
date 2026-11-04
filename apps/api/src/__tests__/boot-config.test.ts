@@ -901,6 +901,8 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
   it('a misspelled switch refuses to start, in production and outside it', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: 'true' })).toThrow(/MMG_CHECKOUT_ENABLED must be exactly 0 or 1/);
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_ENABLED: 'yes' })).toThrow(/MMG_CHECKOUT_ENABLED must be exactly 0 or 1/);
+    expect(() => assertSafeBootConfig({ ...good, ADS_MMG_CHECKOUT: 'true' })).toThrow(/ADS_MMG_CHECKOUT must be exactly 0 or 1/);
+    for (const value of [undefined, '', '0', '1']) expect(() => assertSafeBootConfig({ ...good, ADS_MMG_CHECKOUT: value })).not.toThrow();
   });
 
   it('enabled on the live driver without its configuration refuses to start — development (staging) included', () => {

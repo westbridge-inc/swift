@@ -837,3 +837,9 @@ export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['trade_licence', 'sa
 
 /** [L06 · #1551] The vehicle's registration — the document a vehicle subject is resolved from. Registry text (DOC-INV-2). */
 export const VEHICLE_REGISTRATION_DOC_TYPE = 'vehicle_registration';
+
+/** [BUG-HUNT F21] The papers that carry a person's legal name: once a person approves one, the name has been checked. */
+export const NAME_CHECKED_DOC_TYPES: readonly string[] = [
+  'national_id', 'owner_national_id', 'drivers_licence', 'hire_car_driver_licence', 'own_name_declaration', 'police_clearance',
+  'food_handler_cert', 'gei_electrical_licence', 'pest_control_operator_licence', 'pesticide_applicator_certificate', 'digital_id',
+];

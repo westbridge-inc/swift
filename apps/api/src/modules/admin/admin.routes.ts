@@ -120,6 +120,7 @@ import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCas
 import { maskSubscription, maskUserPhone } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
+import { changeLegalName } from '../user/legal-name';
 import { assertNameNotReserved, FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
@@ -188,6 +189,7 @@ const vendorsQuerySchema = z.object({
 });
 
 // Riders/drivers list filters use UI keywords, not DB enums
+const legalNameChangeSchema = z.object({ firstName: z.string().trim().min(1).max(80), lastName: z.string().trim().min(1).max(80) });
 const storeTypeChangeSchema = z.object({ vendorType: z.nativeEnum(VendorType) });
 const storeNameChangeSchema = z.object({ name: z.string().trim().min(2).max(100) });
 const phoneChangeSchema = z.object({ phone: z.string().trim().min(7).max(20) });
@@ -1455,6 +1457,21 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await riskScoreFor(app.prisma, id) };
   });
 
+  /**
+   * [BUG-HUNT F21] An approved partner's name is locked in the apps: "verified" must keep meaning a person checked it.
+   * This is the person. The trail names what changed, never the names: an audit row is never erased, a name must be.
+   */
+  app.put('/users/:id/name', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { firstName, lastName } = legalNameChangeSchema.parse(request.body ?? {});
+    const changed = await changeLegalName(app.prisma, id, { firstName, lastName }, (tx, fields) => auditIn(tx, request.user.userId, 'CHANGE_LEGAL_NAME', 'User', id, { changed: fields }, request));
+    await notifications.send({
+      userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your name was changed',
+      body: 'Swift support changed the name on your account after checking it. Contact Swift support if this looks wrong.',
+    });
+    return { success: true, data: { changed } };
+  });
+
   /** [BUG-HUNT F22] Move an account to a new number: the code goes to the new number (admin/phone-change.ts). */
   app.post('/users/:id/phone-change', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
@@ -2136,7 +2153,7 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Your store is suspended',
+      title: 'Store suspended',
       body: `Swift suspended ${vendor.name}.${reason ? ` Reason: ${reason}` : ''} Ask Swift support through Get Help what will restore it.`,
       data: { vendorId: id },
     });
@@ -5297,19 +5314,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const result = await backfillAdRefundIntents(app.prisma, { dryRun: body.dryRun, tenantId: body.tenantId, limit: body.limit, actor: request.user.userId });
     if (!body.dryRun) await audit(request.user.userId, 'BACKFILL_AD_REFUNDS', 'AdRefundIntent', 'backfill', { created: result.created, tenantId: body.tenantId ?? null }, request);
     return { success: true, data: result };
-  });
-
-  /** §8.2 admin "mark invoice paid" — the Caribbean reality path (bank
-   *  transfer / MMG sent outside checkout). Requires a reference note; audited;
-   *  idempotent. Confirms bookings + moves the campaign into creative review. */
-  app.put('/ads/invoices/:id/mark-paid', { preHandler: [adminGuard] }, async (request) => {
-    const { id } = request.params as { id: string };
-    const { reference } = z.object({ reference: z.string().trim().min(3).max(200) }).parse(request.body ?? {});
-    const { AdCheckoutService } = await import('../ads/checkout.service');
-    // [ADM-002] The settlement transaction writes the canonical audit row.
-    const invoice = await new AdCheckoutService(tenantPrisma, app.io).markPaid(id, { adminUserId: request.user.userId, manualReference: reference,
-      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }) });
-    return { success: true, data: { id: invoice.id, number: invoice.number, status: invoice.status, paidAt: invoice.paidAt } };
   });
 
   /** Seed the three home placements + AdsSettings for the tenant (ads §2).

@@ -37,7 +37,7 @@ No credential value from any source (merchant id, MSISDN, key, secret, client id
 | D1 | The amount is whole major units as digits, e.g. `"1500"`. Cents are refused, never rounded | `formatCheckoutAmount` | Digits only is confirmed (C10). Whether the digits are MAJOR units is U4 |
 | D2 | `merchantTransactionId` is 18 digits: 13-digit unix milliseconds, then 5 random digits | `newMerchantTransactionId`, `MERCHANT_TRANSACTION_ID_SHAPE` | The demo sends a numeric string, and 18 digits fit a signed 64-bit column. Uniqueness is PR 2's unique index |
 | D3 | The page is `MMG_CHECKOUT_URL`. The UAT page is the default outside production only. Production needs an explicit https, non-UAT value, and there is no live default of any kind | `checkoutPageUrl` | U7 |
-| D4 | `productDescription` is `Swift weekly fee`. `merchantName` is `MMG_CHECKOUT_MERCHANT_NAME`, the name registered with MMG | `MMG_CHECKOUT_PRODUCT_DESCRIPTION` | Short printable ASCII |
+| D4 | `productDescription` is `Swift weekly fee`, or `Swift ad payment` for an advertiser's invoice. MMG's page shows it; the docs describe it as set by the merchant, and name no registration. `merchantName` is `MMG_CHECKOUT_MERCHANT_NAME`, the name registered with MMG | `MMG_CHECKOUT_PRODUCT_DESCRIPTION`, `MMG_AD_PRODUCT_DESCRIPTION` | Short printable ASCII |
 
 ## Official decrypted response
 
@@ -72,6 +72,9 @@ Unknown/malformed result fields do not change a checkout. A success requires tra
 - **U7** The live page host.
 - **U8** How long a checkout session lives.
 - **U9** Whether one merchant can register separate staging and production return URLs.
+- **U11** Whether one merchant account may sell a second product (advertising) on the same id and keys. The docs are silent.
+- **U12** Any limit per checkout or per day. The docs are silent.
+- **U13** Whether an ad payment can be reversed, and until when. The API collection has a reversal call; the docs give no rule for it. Swift promises no window, and refuses a reversal of an ad checkout.
 - **U10 resolved (owner ruling, 4 Oct):** MMG production writes the lookup's `creationDate` in Guyana time labelled `Z`, as UAT does (1 Oct). Staging and production set `MMG_CHECKOUT_CREATION_ZONE=GUYANA_WALL_CLOCK`. **7 Oct:** MMG said the lookup's `creationDate` is the time of the lookup, and that Transaction History's `modificationDate` is when the payment was made; UAT history writes it, and reads its query dates, the same way. Condition 5 now reads the payment's time from history alone. If a real payment ever reads otherwise, it is held (`PAYMENT_TIME_AFTER_REPLY`, or `PAYMENT_TIME_NOT_IN_HISTORY` when history, asked in the wrong zone, has no record of it) and operators are told.
 
 ## Security posture
