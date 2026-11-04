@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, endStuckRide, settleOrderRefund, revealOrderPartyPhone, type OrderContactParty } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, endStuckRide, settleOrderRefund, revealOrderPartyPhone, openOrderProofPhoto, type OrderContactParty, type OrderProofPhoto } from '@/lib/api';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -95,6 +95,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const [refundCloseQueued, setRefundCloseQueued] = useState(false);
   // [O-1] Full numbers read through the audited door, for this page view only.
   const [revealed, setRevealed] = useState<Partial<Record<OrderContactParty, string>>>({});
+  const [proofLinks, setProofLinks] = useState<Partial<Record<OrderProofPhoto, string>>>({});
   const o: any = data?.data;
   // [TAXI waiting charge] The ride's frozen breakdown, when the server sends one.
   const waiting: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null =
@@ -131,6 +132,18 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
     success: (result) => {
       setRevealed((now) => ({ ...now, [party]: result.data.phone }));
       return `The ${who}'s number is shown. The read is recorded.`;
+    },
+  });
+
+  // [BUG-HUNT-2 G11] The stored value is an opaque key, never a link: the server signs one, for this page view, on a reason.
+  const openProof = (photo: OrderProofPhoto, name: string) => () => void actions.run({
+    title: `Open the ${name.toLowerCase()} for order ${o.orderNumber}?`,
+    body: <p>Your reason and this read are recorded in the audit log before the photo opens.</p>,
+    confirmLabel: 'Open photo',
+    submit: ({ reason }) => openOrderProofPhoto(id, photo, reason),
+    success: (result) => {
+      setProofLinks((now) => ({ ...now, [photo]: result.data.url }));
+      return `The ${name.toLowerCase()} is ready for ${Math.round(result.data.expiresInSeconds / 60)} minutes. The read is recorded.`;
     },
   });
 
@@ -456,10 +469,14 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 </div>
               )}
               {/* [BUG-HUNT-2 G11] "Proof photo captured", and nobody could open one. These are what support checks. */}
-              {[['Pickup photo', o.courierPickupProofPhotoUrl], ['Door photo', o.courierProofPhotoUrl], ['Return photo', o.courierReturnProofPhotoUrl]].map(([name, url]) => (url ? (
-                <div key={name} className="flex justify-between gap-4">
+              {([['pickup', 'Pickup photo', o.courierPickupProofPhotoUrl], ['door', 'Door photo', o.courierProofPhotoUrl], ['return', 'Return photo', o.courierReturnProofPhotoUrl]] as const).map(([photo, name, stored]) => (stored ? (
+                <div key={photo} className="flex justify-between gap-4">
                   <span className="mc-muted shrink-0">{name}</span>
-                  <a href={url} target="_blank" rel="noreferrer" className="text-[var(--mc-accent)] font-semibold">Open</a>
+                  {proofLinks[photo] ? (
+                    <a href={proofLinks[photo]} target="_blank" rel="noreferrer" className="text-[var(--mc-accent)] font-semibold">Open photo</a>
+                  ) : (
+                    <button type="button" onClick={openProof(photo, name)} className="mc-link-button text-xs">Open</button>
+                  )}
                 </div>
               ) : null))}
               {o.deliveryAddress && !isRide && (

@@ -204,13 +204,32 @@ describe('[MC-AD5] an MMG payment dispute', () => {
 });
 
 describe('[G11] the proof photos', () => {
-  it('support can open each one there is, and is shown no empty line', async () => {
-    serveOrder(orderOf({ orderType: 'COURIER', mmgClaimMismatchAt: null, courierProofPhotoUrl: 'https://cdn.example/door.jpg', courierReturnProofPhotoUrl: null, courierPickupProofPhotoUrl: 'https://cdn.example/pickup.jpg' }));
-    detail();
-    await screen.findByText('Door photo');
-    expect(screen.getByText('Pickup photo').parentElement!.querySelector('a')!.getAttribute('href')).toBe('https://cdn.example/pickup.jpg');
-    expect(screen.getByText('Door photo').parentElement!.querySelector('a')!.getAttribute('href')).toBe('https://cdn.example/door.jpg');
+  const stored = { orderType: 'COURIER', mmgClaimMismatchAt: null, courierProofPhotoUrl: 'courier-proof/rider-1/opaque.jpg', courierReturnProofPhotoUrl: null, courierPickupProofPhotoUrl: 'courier-proof/rider-1/pickup.jpg' };
+  const REASON = 'The sender says the parcel never reached the door';
+
+  it('a stored key is never a link: each photo opens through the audited door, on a reason, and shows no empty line', async () => {
+    const seen: ApiRequest[] = [];
+    const signed = 'https://files.example/signed/opaque.jpg?sig=abc';
+    const fetchMock = mockApi((r) => {
+      if (r.method === 'GET' && r.url.pathname === '/api/v1/admin/orders/ord-d-1') return { body: { success: true, data: orderOf(stored) } };
+      if (r.method === 'GET' && r.url.pathname === '/api/v1/admin/orders/ord-d-1/proof-photo') { seen.push(r); return { body: { success: true, data: { url: signed, expiresInSeconds: 300, auditId: 'a1' } } }; }
+      throw new Error(`Unexpected request: ${r.method} ${r.url}`);
+    });
+    const { user } = detail();
+    const door = (await screen.findByText('Door photo')).parentElement!;
+    expect(screen.getByText('Pickup photo')).toBeTruthy();
     expect(screen.queryByText('Return photo')).toBeNull();
+    expect(door.querySelector('a')).toBeNull();
+    await user.click(within(door).getByRole('button', { name: 'Open' }));
+    const panel = await screen.findByRole('dialog');
+    await user.type(within(panel).getByRole('textbox'), REASON);
+    await user.click(within(panel).getByRole('button', { name: 'Open photo' }));
+    const link = await screen.findByRole('link', { name: 'Open photo' });
+    expect(link.getAttribute('href')).toBe(signed);
+    expect(seen[0]!.url.searchParams.get('photo')).toBe('door');
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes('proof-photo'))!;
+    expect(new Headers(call[1]?.headers).get('x-swift-reason')).toBe(REASON);
+    expect(document.querySelector('a[href*="courier-proof"]')).toBeNull();
   });
 });
 

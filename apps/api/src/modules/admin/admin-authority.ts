@@ -334,6 +334,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /orders/:id/payment-claim/resolve': c('C3', 'order.dispatch', E.order),
   'POST /orders/:id/food-age-hold/release': c('C2', 'order.hold.release'),
   'GET /orders/:id/party-phone': c('C1', 'order.contact.read'),
+  // [BUG-HUNT-2 G11] A proof photo: a short signed link, a stated reason, the read recorded first.
+  'GET /orders/:id/proof-photo': c('C1', 'order.proof.read'),
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),
   'POST /orders/:id/handover-secret/reset-delivery-pin': c('C2', 'order.handover.rotate'),

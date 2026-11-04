@@ -82,10 +82,10 @@ export interface OrderContactResult {
 }
 
 /** The reveal's reason rule (x-swift-reason, 12-500 characters). Shared with the person pages' reveal (person-contact.ts). */
-export function assertReason(reason: string | null): string {
+export function assertReason(reason: string | null, what = 'this phone number'): string {
   const trimmed = (reason ?? '').trim();
   if (trimmed.length < ADMIN_REASON_MIN) {
-    throw new AppError(400, 'REASON_REQUIRED', 'Say why you need this phone number, in a sentence. The audit trail records it.');
+    throw new AppError(400, 'REASON_REQUIRED', `Say why you need ${what}, in a sentence. The audit trail records it.`);
   }
   if (trimmed.length > ADMIN_REASON_MAX) {
     throw new AppError(400, 'REASON_TOO_LONG', `Keep the reason under ${ADMIN_REASON_MAX} characters.`);
