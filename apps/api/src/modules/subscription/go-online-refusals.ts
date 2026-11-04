@@ -11,7 +11,7 @@ import { AppError } from '../../utils/errors';
  * that fixes it. Codes and statuses are unchanged, so every app branches as
  * before; newer apps also offer the screen as a button (by code).
  */
-export type GoOnlineRefusal = 'DOCUMENTS' | 'FEE_GRACE_LAPSED' | 'FEE_INACTIVE';
+export type GoOnlineRefusal = 'DOCUMENTS' | 'FEE_GRACE_LAPSED' | 'FEE_INACTIVE' | 'FEE_MISSING';
 
 const DOCUMENTS = 'Your documents must be verified before you can go online. Open Documents in your account to see which one needs attention.';
 const GRACE = 'Your grace period has ended — pay this week’s fee to go back online. Open Weekly fee in your account to pay it.';
@@ -26,10 +26,12 @@ export function goOnlineRefusal(kind: GoOnlineRefusal, route: 'RIDER' | 'DRIVER'
     case 'FEE_GRACE_LAPSED':
       return new AppError(403, 'SUBSCRIPTION_PAST_DUE', GRACE, { nextStep: 'OPEN_WEEKLY_FEE' });
     case 'FEE_INACTIVE':
+    case 'FEE_MISSING':
     default:
-      // Each route keeps the status and code it has always answered.
+      // Each route keeps the status and code it has always answered. With no fee on the account nothing is unpaid, so
+      // a rider is never told it is.
       return route === 'RIDER'
-        ? new AppError(403, 'SUBSCRIPTION_SUSPENDED', UNPAID, { nextStep: 'OPEN_WEEKLY_FEE' })
+        ? new AppError(403, 'SUBSCRIPTION_SUSPENDED', kind === 'FEE_MISSING' ? NOT_ACTIVE : UNPAID, { nextStep: 'OPEN_WEEKLY_FEE' })
         : new AppError(400, 'SUBSCRIPTION_REQUIRED', NOT_ACTIVE, { nextStep: 'OPEN_WEEKLY_FEE' });
   }
 }

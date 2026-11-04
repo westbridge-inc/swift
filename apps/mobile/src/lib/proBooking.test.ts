@@ -144,3 +144,32 @@ describe('the screens ask the server, and the stack can open them', () => {
     expect(stack).toMatch(/name="ProBookable" component=\{ProBookableScreen\}/);
   });
 });
+
+describe('a quote job shows the cancel the server allows', () => {
+  const booked = (customerCancel?: unknown) => ({ status: 'SCHEDULED', scheduledFor: '2026-11-10T15:00:00.000Z', ...(customerCancel === undefined ? {} : { customerCancel }) });
+  const free = { canCancel: true, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: null };
+
+  it('the pro has not confirmed: a Cancel button, no words about contacting anyone', () => {
+    expect(serviceJobControls(booked(free), true)).toMatchObject({ canCancel: true, contactWords: null, cancelNote: null, canMove: false });
+  });
+
+  it('the pro is very late: a Cancel button, with the server\'s note', () => {
+    expect(serviceJobControls(booked({ ...free, cancellationMessage: 'The provider is running very late. You can cancel the booking for free.' }), true))
+      .toMatchObject({ canCancel: true, contactWords: null, cancelNote: 'The provider is running very late. You can cancel the booking for free.' });
+  });
+
+  it('confirmed and not late: no button, the server\'s words', () => {
+    const refused = { ...free, canCancel: false, cancelUnavailable: { code: 'SERVICE_JOB_BOOKED', message: 'Contact your provider.' } };
+    expect(serviceJobControls(booked(refused), true)).toMatchObject({ canCancel: false, contactWords: 'Contact your provider.', cancelNote: null });
+  });
+
+  it('a server that sends nothing, or nonsense, keeps the quote-job rule', () => {
+    for (const job of [booked(), booked('nonsense'), booked({ canCancel: 'yes' })]) {
+      expect(serviceJobControls(job, true)).toMatchObject({ canCancel: false, contactWords: SERVICE_JOB_BOOKED_CANCEL_WORDS });
+    }
+  });
+
+  it('the pro\'s own controls do not read it', () => {
+    expect(serviceJobControls(booked({ ...free, canCancel: false }), false)).toMatchObject({ canCancel: true, contactWords: null });
+  });
+});

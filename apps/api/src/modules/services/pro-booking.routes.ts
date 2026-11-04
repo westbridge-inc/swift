@@ -582,6 +582,14 @@ export async function proBookableFromListOf(
   return new Set(agreed.filter((id): id is string => id != null));
 }
 
+/** What the customer of a booked job on the quote rule reads: the same verdict the cancel route applies, so a card
+ *  never offers a cancel the route refuses, or hides one it allows. Null for the pro, for a menu appointment (it carries
+ *  its own view) and for any other state (the app's own rule). */
+export function serviceJobCustomerCancelFor(job: ServiceJob, viewerId: string, now = new Date()) {
+  if (job.status !== 'SCHEDULED' || job.customerId !== viewerId || serviceAppointmentViewFor(job, viewerId, now)) return null;
+  return serviceAppointmentCancelView(job, now);
+}
+
 /** [BOOK-P2] The appointment rules the customer reads on a job booked from a menu (the booking,
  *  the move, GET /jobs and /jobs/:id): cancel and move, from the same verdicts the routes apply.
  *  Null for the pro, a quote job, or the switch off. */

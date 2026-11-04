@@ -11,7 +11,7 @@ export async function headerAccount(): Promise<{ href: string; label: string } |
   const session = await sessionProbe();
   if (!session.ok || !session.user) return null;
   const { kind } = roleHome(session.user);
-  if (kind === 'business') return { href: '/dashboard', label: 'Dashboard' };
+  if (kind === 'business' || kind === 'staff') return { href: '/dashboard', label: 'Dashboard' };
   if (kind === 'earner') return { href: '/portal', label: 'My portal' };
   return (await isProvider()) ? { href: '/portal/weekly-fee', label: 'My weekly fee' } : null;
 }
