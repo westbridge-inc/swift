@@ -325,6 +325,26 @@ describe('opening the page', () => {
     expect((await start(f.invoice.id, f.owner.token)).json().error.code).toBe('INVOICE_NOT_PAYABLE');
   });
 
+  it('opening a page and the expiry sweep serialize on the campaign: the sweep waits, and finds the page', async () => {
+    const f = await invoiced();
+    await app.prisma.adBooking.updateMany({ where: { campaignId: f.campaign.id }, data: { reservedUntil: new Date(Date.now() - MIN) } });
+    let sweep: Promise<unknown> = Promise.resolve();
+    const { created } = await service.createAdCheckout({
+      invoiceId: f.invoice.id, userId: f.owner.userId, platform: 'web', clientKey: key(),
+      // Inside the page's transaction, under its lock: the sweep starts here and must wait for this commit.
+      authorize: async () => {
+        sweep = new BookingService(app.prisma).releaseExpired();
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      },
+    });
+    await sweep;
+    expect(created).toBe(true);
+    expect((await campaignOf(f.campaign.id)).status).toBe('PENDING_PAYMENT');
+    expect((await invoiceOf(f.invoice.id)).status).toBe('UNPAID');
+    expect(await app.prisma.adBooking.count({ where: { campaignId: f.campaign.id, status: 'RESERVED' } })).toBe(1);
+    await app.prisma.adBooking.updateMany({ where: { campaignId: f.campaign.id }, data: { reservedUntil: new Date(Date.now() + DAY) } });
+  });
+
   it('the slots outlast the page, and the sweep leaves them while a page is open', async () => {
     const f = await invoiced();
     const page = await open(f);
@@ -641,7 +661,8 @@ describe('A6: a page nobody answered', () => {
     await ret({ token: replyOf(control.row, '0', txn) });
     history.answer = async () => ({ outcome: 'error', reason: 'MMG is down' });
     await service.pollIntents(after(await intentOf(page.ref), NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + MIN));
-    expect((await intentOf(page.ref)).status).toBe('EXPIRED');
+    const row = await intentOf(page.ref);
+    expect([row.status, row.reason]).toEqual(['EXPIRED', 'NO_REPLY']);
   });
 });
 
