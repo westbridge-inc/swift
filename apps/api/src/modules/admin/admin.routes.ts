@@ -70,6 +70,7 @@ import { maskPhone } from '../auth/step-up';
 import { maskOwnPhone } from './person-contact';
 import { consoleRoleOf } from '../auth/console-role';
 import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
+import { feeRefundCaseOf, listFeeRefundCases, openFeeRefundCase } from '../billing/fee-refund-case';
 import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
 import {
   approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
@@ -6121,6 +6122,47 @@ export async function adminRoutes(app: FastifyInstance) {
       (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
     );
     return { success: true, data: reversalOut(row as never) };
+  });
+
+  // ── [Row 156] A partner asked for a weekly-fee payment back ─────────────
+  //
+  // The ask and its 3 business days (billing/fee-refund-case.ts). It moves no
+  // money and takes no MMG reference; only a REVERSED reversal closes it.
+  app.get('/billing/fee-refund-cases', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { state } = z.object({ state: z.enum(['OPEN', 'REFUNDED']).optional() }).parse(request.query);
+    const rows = await listFeeRefundCases(app.prisma, { tenantId, ...(state ? { state } : {}) });
+    // A partner's payment and what they said, as the payment detail is: every read recorded, ids only, never the words.
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: { queryType: 'REFUND_CASES', matchedIds: rows.map((row) => row.id).join(','), matchedCount: rows.length, stateFilter: state ?? null },
+    });
+    return { success: true, data: rows };
+  });
+
+  app.get('/billing/mmg-checkouts/:id/refund-case', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const row = await feeRefundCaseOf(app.prisma, { tenantId, checkoutId: id });
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: { queryType: 'REFUND_CASE', checkoutId: id, matchedIds: row?.id ?? '', matchedCount: row ? 1 : 0 },
+    });
+    return { success: true, data: row };
+  });
+
+  app.post('/billing/mmg-checkouts/:id/refund-case', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      kind: z.enum(['DUPLICATE', 'MISTAKEN']),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers as never) ?? body.reason ?? '';
+    const row = await openFeeRefundCase(
+      app.prisma,
+      { tenantId, checkoutId: id, kind: body.kind, reason, actorId: request.user.userId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: row };
   });
 
   // "Check with MMG": MMG's lookup settles an open return (proof debits the

@@ -502,6 +502,7 @@ const CENSUS: Case[] = [
 
   // ── Admin / ops pages. null is CORRECT: there is no mobile admin app.
   { k: 'ops_error_spike', to: null, why: 'admins' },
+  { k: 'ops_fee_refund_overdue', to: null, why: 'admins' },
   { k: 'ops_error_sustained', to: null, why: 'admins' },
   { k: 'ops_collusion_affinity', to: null, why: 'admins' },
   { k: 'ops_billing_failures', to: null, why: 'admins' },
