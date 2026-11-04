@@ -433,9 +433,9 @@ describe('[#1879 S3-3 · REVIEW-G R1] no activation write for an erased account'
     const standing = vi.spyOn(app.prisma.verificationDocument, 'findUnique').mockImplementationOnce((async () => ({ state: 'COMMITTED' })) as never);
     let erased: unknown;
     // The tail's last read before its writes: the erasure commits here, after the tail's barrier check.
-    const verified = spyOnPrivate(VerificationService.prototype, 'isRoleVerified').mockImplementationOnce((async () => {
+    const verified = spyOnPrivate(VerificationService.prototype, 'getLiveOperationStatus').mockImplementationOnce((async () => {
       erased = await erase(u);
-      return true;
+      return { allowed: true, reason: 'ok' };
     }) as never);
     try { await svc.processDecisionOutbox({ documentId, now: new Date(Date.now() + 1000) }); } finally { standing.mockRestore(); verified.mockRestore(); }
     expect(erased).toMatchObject({ deleted: true });

@@ -111,7 +111,7 @@ describe('user suspension mutation', () => {
     expect(screen.getByText('Active')).toBeTruthy();
     expect((suspendButton as HTMLButtonElement).disabled).toBe(false);
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
-    expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(1);
+    expect(requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).endsWith('/users/user-1'))).toHaveLength(1);
   });
 
   it('[MC-PR3] a failed load says so with a Retry — not "User not found"', async () => {
@@ -138,5 +138,71 @@ describe('user suspension mutation', () => {
     expect(within(list as HTMLElement).getByText('Cash order: nobody at the door')).toBeTruthy();
     expect(within(list as HTMLElement).getByText('Strike')).toBeTruthy();
     expect(list.textContent).not.toMatch(/failed payment|something new|_/i);
+  });
+});
+
+describe('a person who is a service provider, and their jobs', () => {
+  const job = (over: Record<string, unknown> = {}) => ({
+    id: 'job-1', status: 'IN_PROGRESS', description: 'Fix a cupboard door', quoteAmount: '8000.00', scheduledFor: '2026-11-03T14:00:00.000Z',
+    providerConfirmedAt: '2026-11-02T14:00:00.000Z', createdAt: '2026-11-01T14:00:00.000Z',
+    customer: { id: 'user-2', firstName: 'Asha', lastName: 'Customer' },
+    provider: { userId: 'user-1', trade: 'carpenter', user: { firstName: 'Test', lastName: 'User' } },
+    ...over,
+  });
+  const pro = { ...userRecord, serviceProvider: { id: 'prov-1', trade: 'carpenter', isVerified: true } };
+  const world = (person: unknown, jobs: unknown[], mutation?: (_request: ApiRequest) => { body: unknown; status?: number }) => (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/users/user-1') return { body: { success: true, data: person } };
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/users/user-1/service-jobs') return { body: { success: true, data: jobs } };
+    return mutation ? mutation(request) : { status: 404, body: { success: false } };
+  };
+
+  it('Profiles names the provider, never "Customer only."', async () => {
+    mockApi(world(pro, []));
+    renderWithQuery(<UserDetailPage params={fulfilledParams({ id: 'user-1' })} />);
+    expect(await screen.findByText('Service provider: carpenter')).toBeTruthy();
+    expect(screen.getByText('Documents approved')).toBeTruthy();
+    expect(screen.queryByText('Customer only.')).toBeNull();
+  });
+
+  it('a person with neither reads "Customer only." and an empty job list', async () => {
+    mockApi(world(userRecord, []));
+    renderWithQuery(<UserDetailPage params={fulfilledParams({ id: 'user-1' })} />);
+    expect(await screen.findByText('Customer only.')).toBeTruthy();
+    expect(await screen.findByText('No service jobs.')).toBeTruthy();
+  });
+
+  it('lists each job with its people, and Close job sends the reason', async () => {
+    const fetchMock = mockApi(world(pro, [job()], (request) => {
+      if (request.method === 'POST' && request.url.pathname === '/api/v1/admin/service-jobs/job-1/close') {
+        return { body: { success: true, data: { id: 'job-1', status: 'CANCELLED' } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    }));
+    const { user } = renderWithQuery(<UserDetailPage params={fulfilledParams({ id: 'user-1' })} />);
+    expect(await screen.findByText('Fix a cupboard door')).toBeTruthy();
+    expect(screen.getByText('Started')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Asha Customer' }).getAttribute('href')).toBe('/users/user-2');
+    await user.click(screen.getByRole('button', { name: 'Close job…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Close this job?' });
+    expect(dialog.textContent).toContain('Both sides are told. Swift moves no money.');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Close job' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/service-jobs/job-1/close`);
+    expect(new Headers(init?.headers).get('x-swift-reason')).toBe(REASON);
+  });
+
+  it('a closed job offers no close', async () => {
+    mockApi(world(pro, [job({ status: 'CANCELLED' }), job({ id: 'job-2', status: 'COMPLETED' })]));
+    renderWithQuery(<UserDetailPage params={fulfilledParams({ id: 'user-1' })} />);
+    expect(await screen.findByText('Cancelled')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Close job…' })).toBeNull();
+  });
+
+  it('a job waiting on the pro says so', async () => {
+    mockApi(world(pro, [job({ status: 'SCHEDULED', providerConfirmedAt: null })]));
+    renderWithQuery(<UserDetailPage params={fulfilledParams({ id: 'user-1' })} />);
+    expect(await screen.findByText('Waiting for the pro')).toBeTruthy();
   });
 });
