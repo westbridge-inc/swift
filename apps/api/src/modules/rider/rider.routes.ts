@@ -680,7 +680,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // rider is owed is born first. A missing row after that operates only for what the clause exists for: the legacy
     // `documentsVerified` grant (accounts pre-dating birth-on-verification; since then the flag is written only with a
     // fee, admin verify-documents) and the store-review fiction. Anyone else does not work without a fee.
-    if (request.tenantKind !== 'REVIEW') await verification.settleMissingMoverFee(request.user.userId);
+    if (request.tenantKind !== 'REVIEW') await verification.settleMoverFeeAtGo(request.user.userId, 'RIDER');
     const feePayer = await moverFeePayer(app.prisma, request.user.userId);
     const missingRow = weeklyFeeMissingRowPolicy(request.tenantKind, rider.documentsVerified ? 'GRANDFATHER' : 'BLOCK');
     const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow });

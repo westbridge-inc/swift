@@ -155,22 +155,32 @@ export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClien
   return (await approvedEvidenceFor(db, userId, [POLICE_CLEARANCE_DOC_TYPE], now)).length > 0;
 }
 
-/** A mover's saved vehicle from rows already read: the side they use now, else the side they
+/** The mover profile in use, from rows already read: the side they use now, else the side they
  *  last chose (while they still hold that role), else the Rider-first fallback of legacy
- *  profiles. The one rule for getMoverVehicleType and getStatus. */
+ *  profiles. The one rule for getMoverVehicleType, getStatus and the weekly fee. */
+function moverProfileInUse<R, D>(
+  user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
+  rider: R | null,
+  driver: D | null,
+): 'RIDER' | 'DRIVER' | null {
+  if (user?.activeRole === 'RIDER' && rider) return 'RIDER';
+  if (user?.activeRole === 'DRIVER' && driver) return 'DRIVER';
+  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+    if (user.lastMoverRole === 'RIDER' && rider) return 'RIDER';
+    if (user.lastMoverRole === 'DRIVER' && driver) return 'DRIVER';
+  }
+  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+  return rider ? 'RIDER' : driver ? 'DRIVER' : null;
+}
+
+/** A mover's saved vehicle: the vehicle of the profile in use. */
 function moverVehicleFrom(
   user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
   rider: { vehicleType: VehicleType } | null,
   driver: { vehicleType: VehicleType } | null,
 ): VehicleType | null {
-  if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
-  if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
-  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
-    if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
-    if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
-  }
-  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
-  return rider?.vehicleType ?? driver?.vehicleType ?? null;
+  const inUse = moverProfileInUse(user, rider, driver);
+  return inUse === 'RIDER' ? rider!.vehicleType : inUse === 'DRIVER' ? driver!.vehicleType : null;
 }
 
 /** A read started before it is known to be needed: marked handled at once, so a failure while an
@@ -3567,12 +3577,12 @@ export class VerificationService {
    * second. An approval reaches this through afterApproval. A saved vehicle (POST /partner/become, PUT /partner/vehicle)
    * reaches it here, after its commit: papers approved before the vehicle owe the fee then, with no later approval to
    * collect it. Same law as an approval (one fee, one trial, the deletion write barrier). A failure never undoes the
-   * saved vehicle: it is logged, and GO collects what is owed (settleMissingMoverFee). True when the tail ran.
+   * saved vehicle: it is logged, and GO collects what is owed (settleMoverFeeAtGo). True when the tail ran.
    */
-  async settleMoverFee(userId: string): Promise<boolean> {
+  async settleMoverFee(userId: string, inUse?: 'RIDER' | 'DRIVER'): Promise<boolean> {
     try {
       if (!await this.openForOwedWork(userId)) return false;
-      await this.moverFeeTail(userId);
+      await this.moverFeeTail(userId, inUse);
       return true;
     } catch (err) {
       log().error({ err, userId }, 'the weekly fee owed to a mover was not born; go-online collects it');
@@ -3580,22 +3590,31 @@ export class VerificationService {
     }
   }
 
-  /** Go-online's door: a mover past the document gate with no fee row of their own is collected here, before the fee
-   *  gate reads the row, so nobody works without a fee and nobody is refused one they are owed. A mover who holds a row
-   *  pays one read. */
-  async settleMissingMoverFee(userId: string): Promise<void> {
-    const held = await this.prisma.subscription.findFirst({
-      where: { OR: [{ rider: { userId } }, { driver: { userId } }] }, select: { id: true },
-    });
-    if (!held) await this.settleMoverFee(userId);
+  /** Go-online's door, past the document gate and before the fee gate reads the row: nobody works without a fee, nobody
+   *  is refused one they are owed, and a taxi never works on a delivery fee (a rider's papers for a car activate nothing
+   *  until the car is in use). A mover who already holds the right fee pays these reads. */
+  async settleMoverFeeAtGo(userId: string, kind: 'RIDER' | 'DRIVER'): Promise<void> {
+    const [sources, authority] = await Promise.all([
+      this.prisma.subscription.findMany({ where: { OR: [{ rider: { userId } }, { driver: { userId } }] }, select: { type: true } }),
+      this.prisma.moverFeeAuthority.findUnique({ where: { userId }, select: { feeType: true } }),
+    ]);
+    const onTaxiFee = (authority?.feeType ?? sources.find((s) => s.type === 'TAXI_DRIVER')?.type) === 'TAXI_DRIVER';
+    if (sources.length === 0 || (kind === 'DRIVER' && !onTaxiFee)) await this.settleMoverFee(userId, kind);
   }
 
-  private async moverFeeTail(userId: string): Promise<void> {
-    const [driver, rider] = await Promise.all([
-      this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true } }),
-      this.prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
+  /** The fee of the profile in use, on that vehicle's own list. A profile not in use activates nothing: a car with no
+   *  papers, or one the mover has left, never prices the motorbike they ride. `inUse` names it when the caller knows
+   *  (GO for that profile); otherwise the account's own pointer does. */
+  private async moverFeeTail(userId: string, inUse?: 'RIDER' | 'DRIVER'): Promise<void> {
+    const [user, driver, rider] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true, activeRole: true, lastMoverRole: true, roles: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true, vehicleType: true } }),
+      this.prisma.rider.findUnique({ where: { userId }, select: { id: true, vehicleType: true } }),
     ]);
-    if ((driver || rider) && (await this.isRoleVerified(userId, 'MOVER'))) {
+    const kind = inUse ?? moverProfileInUse(user, rider, driver);
+    const vehicleType = kind === 'DRIVER' ? driver?.vehicleType : kind === 'RIDER' ? rider?.vehicleType : null;
+    if (!user || !vehicleType) return;
+    if (await this.isVerifiedForList(userId, await this.checklistFor(userId, user.countryCode, 'MOVER', vehicleType))) {
       // PLATE capture (identity integrity §2.1 — HARD) AWAITED here so the
       // link exists before the trial decision runs; capture failures are
       // swallowed inside the service and never block activation.
@@ -3608,8 +3627,8 @@ export class VerificationService {
         });
       }
       // [REVIEW-PARTNER] The fiction's partners are never billed: no trial is born (createRow would refuse it).
-      if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
-      if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
+      if (kind === 'DRIVER' && driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
+      if (kind === 'RIDER' && rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
   }
 

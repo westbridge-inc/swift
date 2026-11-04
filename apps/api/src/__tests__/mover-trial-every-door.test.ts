@@ -12,8 +12,9 @@ import { partnerRoutes } from '../modules/partner/partner.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
+import { customerRoutes } from '../modules/user/customer.routes';
 import { runWithoutTenant } from '../plugins/tenant-context';
-import { CountryConfigService } from '../modules/country/country-config.service';
+import { CountryConfigService, partnerRateFor } from '../modules/country/country-config.service';
 import * as feeAuthority from '../modules/subscription/mover-fee-authority';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { VerificationService } from '../modules/verification/verification.service';
@@ -30,6 +31,7 @@ import { testPhone } from './helpers/fixture-ids';
 const DAY = 86_400_000;
 let app: FastifyInstance;
 let service: VerificationService;
+let riderRate = 0;
 const users: string[] = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'mover-trial-every-door');
 const plate = () => `HAA${String(Date.now()).slice(-4)}${nanoid(3).replace(/[^A-Za-z0-9]/g, 'X').toUpperCase()}`;
@@ -64,8 +66,8 @@ const approvedPaper = (userId: string, docType: string) => system(() => app.pris
   reviewedAt: new Date(), expiresAt: new Date(Date.now() + 200 * DAY),
   ...(docType === 'vehicle_insurance' ? { coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } : {}),
 } }));
-async function approvePapers(userId: string, vehicleType: VehicleType) {
-  for (const docType of await checklistOf(vehicleType)) await approvedPaper(userId, docType);
+async function approvePapers(userId: string, vehicleType: VehicleType, except?: string) {
+  for (const docType of await checklistOf(vehicleType)) if (docType !== except) await approvedPaper(userId, docType);
 }
 
 const subscriptionsOf = (userId: string) => system(() => app.prisma.subscription.findMany({ where: { OR: [{ rider: { userId } }, { driver: { userId } }] } }));
@@ -82,6 +84,17 @@ function expectTrial(sub: { status: string; isTrialActive: boolean; trialEndDate
   expect(days).toBeLessThanOrEqual(14);
 }
 
+/** One fee, on the rider's own type and rate: what a mover with no taxi in use pays. */
+async function expectDeliveryFee(userId: string) {
+  const subs = await subscriptionsOf(userId);
+  expect(subs).toHaveLength(1);
+  expect(subs[0]!.type).toBe('DELIVERY_RIDER');
+  expect(Number(subs[0]!.weeklyRate)).toBe(riderRate);
+  expect(subs[0]!.driverId).toBeNull();
+  const authority = await system(() => app.prisma.moverFeeAuthority.findUnique({ where: { userId } }));
+  if (authority) expect(authority.feeType).toBe('DELIVERY_RIDER');
+}
+
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   app = Fastify({ logger: false });
@@ -95,8 +108,11 @@ beforeAll(async () => {
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
+  await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.ready();
   service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new ManualReviewKycProvider());
+  const tiers = await system(() => new CountryConfigService(app.prisma).getSubscriptionTiers('GY'));
+  riderRate = partnerRateFor(tiers, { kind: 'RIDER', vehicleType: 'MOTORCYCLE' }).rate;
 });
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -243,7 +259,7 @@ describe('the ordinary order is unchanged', () => {
 });
 
 describe('changing the vehicle', () => {
-  it('a driver with no fee moves to a vehicle whose papers are complete: the trial is born there', async () => {
+  it('a driver with no fee moves to a vehicle whose papers are complete: the rider\'s trial is born there, at the rider\'s rate', async () => {
     const mover = await signedUpMover();
     await approvePapers(mover.userId, 'BICYCLE');
     expect((await become(mover.token, taxi())).statusCode).toBe(201);
@@ -256,7 +272,99 @@ describe('changing the vehicle', () => {
     const subs = await subscriptionsOf(mover.userId);
     expect(subs).toHaveLength(1);
     expectTrial(subs[0]);
+    expect(subs[0]!.riderId).toBe((await riderOf(mover.userId))!.id);
+    await expectDeliveryFee(mover.userId);
     expect((await riderGo(mover.token)).statusCode).toBe(200);
+  });
+});
+
+describe('the fee follows the vehicle in use, on that vehicle\'s own list', () => {
+  const tierChanges = async (userId: string) => {
+    const ids = (await subscriptionsOf(userId)).map((s) => s.id);
+    return system(() => app.prisma.billingEvent.count({ where: { subscriptionId: { in: ids }, type: 'TIER_CHANGE' } }));
+  };
+  const switchTo = async (mover: { token: string }, role: 'RIDER' | 'DRIVER') => {
+    const res = await send('POST', '/api/v1/customer/switch-role', mover.token, { role });
+    expect(res.statusCode, res.body).toBe(200);
+  };
+
+  it('a rider on a trial who added a car with no car papers saves the motorbike again: the fee does not move', async () => {
+    const mover = await signedUpMover();
+    await approvePapers(mover.userId, 'MOTORCYCLE');
+    expect((await become(mover.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(201);
+    expect((await become(mover.token, taxi())).statusCode).toBe(201);
+    expect((await become(mover.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(200);
+    await expectDeliveryFee(mover.userId);
+    expect(await tierChanges(mover.userId)).toBe(0);
+    expect((await riderGo(mover.token)).statusCode).toBe(200);
+    await expectDeliveryFee(mover.userId);
+  });
+
+  it('GO collects for the vehicle moved to, not the one left behind', async () => {
+    const mover = await signedUpMover();
+    expect((await become(mover.token, taxi())).statusCode).toBe(201);
+    expect((await change(mover.token, { vehicleType: 'BICYCLE' })).statusCode).toBe(200);
+    expect(await subscriptionsOf(mover.userId)).toHaveLength(0);
+    await approvePapers(mover.userId, 'BICYCLE');
+    expect((await riderGo(mover.token)).statusCode).toBe(200);
+    await expectDeliveryFee(mover.userId);
+  });
+
+  it('the last approval of a rider who holds a complete car list but rides the bike leaves the rider\'s fee alone', async () => {
+    const mover = await signedUpMover();
+    await approvePapers(mover.userId, 'MOTORCYCLE');
+    expect((await become(mover.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(201);
+    expect((await become(mover.token, taxi())).statusCode).toBe(201);
+    await switchTo(mover, 'RIDER');
+    await approvePapers(mover.userId, 'CAR', 'hire_car_driver_licence');
+    const reviewer = (await signedUpMover()).userId;
+    const doc = await system(() => app.prisma.verificationDocument.create({ data: {
+      userId: mover.userId, role: 'MOVER', docType: 'hire_car_driver_licence', fileUrl: `/uploads/verification/door/hire-${nanoid(4)}.enc`, status: 'PENDING',
+    } }));
+    await system(() => app.prisma.reviewCase.create({ data: { submissionId: doc.id, slaDueAt: new Date(Date.now() + DAY) } }));
+    await system(() => service.approveDocument(doc.id, reviewer, new Date(Date.now() + 200 * DAY)));
+    await expectDeliveryFee(mover.userId);
+    expect(await tierChanges(mover.userId)).toBe(0);
+  });
+
+  it('that rider switches to the car and presses GO: the taxi fee, once, on the one row', async () => {
+    const mover = await signedUpMover();
+    await approvePapers(mover.userId, 'MOTORCYCLE');
+    expect((await become(mover.token, { vehicleType: 'MOTORCYCLE' })).statusCode).toBe(201);
+    expect((await become(mover.token, taxi())).statusCode).toBe(201);
+    await switchTo(mover, 'RIDER');
+    await approvePapers(mover.userId, 'CAR');
+    await expectDeliveryFee(mover.userId);
+    await switchTo(mover, 'DRIVER');
+    expect((await driverGo(mover.token)).statusCode).toBe(200);
+    const subs = await subscriptionsOf(mover.userId);
+    expect(subs).toHaveLength(1);
+    expect((await system(() => app.prisma.moverFeeAuthority.findUnique({ where: { userId: mover.userId } })))?.feeType).toBe('TAXI_DRIVER');
+    expect(await trialGrantsOf(mover.userId)).toBe(1);
+  });
+
+  it('GO names its own profile: a driver whose pointer still says rider is judged on the car\'s list and pays the taxi fee', async () => {
+    const mover = await signedUpMover();
+    const car = taxi();
+    await system(() => app.prisma.driver.create({ data: {
+      userId: mover.userId, rideClass: 'ECONOMY', vehicleCapacity: 4, vehicleType: 'CAR', vehicleMake: car.vehicle.make, vehicleModel: car.vehicle.model,
+      vehicleYear: car.vehicle.year, vehicleColor: car.vehicle.color, licensePlate: car.vehicle.licensePlate, driverLicenseUrl: '', vehicleInsuranceUrl: '',
+    } }));
+    await system(() => app.prisma.rider.create({ data: { userId: mover.userId, riderType: 'BOTH', vehicleType: 'BICYCLE' } }));
+    await system(() => app.prisma.user.update({ where: { id: mover.userId }, data: { roles: ['MOVER', 'CUSTOMER', 'RIDER', 'DRIVER'], activeRole: 'MOVER', lastMoverRole: 'RIDER' } }));
+    await approvePapers(mover.userId, 'CAR');
+    const go = await driverGo(mover.token);
+    expect(go.statusCode, go.body).toBe(200);
+    expect((await subscriptionsOf(mover.userId)).map((s) => s.type)).toEqual(['TAXI_DRIVER']);
+  });
+
+  it('a driver already on the taxi fee is not re-activated by GO', async () => {
+    const mover = await signedUpMover();
+    await approvePapers(mover.userId, 'CAR');
+    expect((await become(mover.token, taxi())).statusCode).toBe(201);
+    const start = vi.spyOn(SubscriptionService.prototype, 'startTrialForDriver');
+    expect((await driverGo(mover.token)).statusCode).toBe(200);
+    expect(start).not.toHaveBeenCalled();
   });
 });
 
