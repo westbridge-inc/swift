@@ -11,6 +11,7 @@ import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer
 import { storeTeam, ringRecipients } from '../notification/store-team';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 import { recomputeOrderVat } from '../store-vat/order-vat';
+import { orderStageRefusal } from './order-status-words';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -164,7 +165,7 @@ export class PickingService {
     });
     if (!line) throw new NotFoundError('Order line', lineId);
     if (!PICKABLE_STATES.includes(line.order.status)) {
-      throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${line.order.status}`);
+      throw new AppError(409, 'NOT_PICKABLE', orderStageRefusal(line.order.status, 'the pick list is closed'));
     }
     return line;
   }
@@ -230,7 +231,7 @@ export class PickingService {
     if (!order) throw new NotFoundError('Order', orderId);
     await mmgClaimLockObserver.afterLock?.({ orderId, actor: 'PICK' });
     if (!PICKABLE_STATES.includes(order.status)) {
-      throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${order.status}`);
+      throw new AppError(409, 'NOT_PICKABLE', orderStageRefusal(order.status, 'the pick list is closed'));
     }
     return order;
   }
@@ -515,7 +516,7 @@ export class PickingService {
       });
       if (!order) throw new NotFoundError('Order', orderId);
       if (!PICKABLE_STATES.includes(order.status)) {
-        throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${order.status}`);
+        throw new AppError(409, 'NOT_PICKABLE', orderStageRefusal(order.status, 'the pick list is closed'));
       }
       assertMmgFulfilmentAllowed(order, questionGateTarget(order.status));
 
@@ -668,7 +669,7 @@ export class PickingService {
         },
       });
       if (!PICKABLE_STATES.includes(ord.status)) {
-        throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${ord.status}`);
+        throw new AppError(409, 'NOT_PICKABLE', orderStageRefusal(ord.status, 'the pick list is closed'));
       }
       assertMmgMoneyAdjustable(ord);
       // [O-4 · REVIEW-F S3-1] On a waiting order a customer's answer never empties it: the only

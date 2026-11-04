@@ -919,10 +919,10 @@ describe('The offer cascade', () => {
     await dispatch.handleOfferTimeout(order.id, b.riderId, secondTimeout.attemptId);
 
     const customerNote = await app.prisma.notification.findFirst({
-      where: { userId: customerId, title: 'No movers available right now' },
+      where: { userId: customerId, title: 'No riders available right now' },
     });
     const vendorNote = await app.prisma.notification.findFirst({
-      where: { userId: vendorOwnerUserId, title: 'No movers available' },
+      where: { userId: vendorOwnerUserId, title: 'No riders available' },
     });
     expect(customerNote).not.toBeNull();
     expect(vendorNote).not.toBeNull();

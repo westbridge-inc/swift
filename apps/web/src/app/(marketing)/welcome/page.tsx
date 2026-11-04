@@ -63,7 +63,7 @@ const PROMISES = [
     // [Legal research A12 · Terms ¶11 · GUARDRAILS §8] Only what the Terms say: a flat weekly fee and no commission on
     // orders. No forever promise and no "no introductory rate" (new partners get a free trial; a fee change is announced first).
     title: 'No commission on orders',
-    body: 'Businesses and movers pay one flat weekly fee and keep 100% of every sale, fare and tip. Swift takes no percentage.',
+    body: 'Businesses, riders and drivers pay one flat weekly fee and keep 100% of every sale, fare and tip. Swift takes no percentage.',
   },
   {
     icon: Banknote,

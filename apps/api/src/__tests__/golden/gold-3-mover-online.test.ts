@@ -395,7 +395,7 @@ describe('GOLD-3 · RIDE-01 — go online + live location', () => {
     const waiting = await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: orderId } }));
     expect({ status: waiting.status, rider: waiting.riderId }).toEqual({ status: 'READY_FOR_PICKUP', rider: null });
     const told = await sys(() => app.prisma.notification.findMany({ where: { userId: sender.userId }, select: { title: true, data: true } }));
-    expect(told.map((n) => n.title)).toEqual(['Still looking for a mover']);
+    expect(told.map((n) => n.title)).toEqual(['Still looking for a rider']);
 
     // Neither stale mover holds a card, and neither can take one.
     for (const m of [stale, mover]) {

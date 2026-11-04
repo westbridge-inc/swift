@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, LabeledInput, LinkText, PillButton, T, useLogoutConfirm } from '../../../kit';
@@ -10,7 +11,9 @@ import { DocumentChecklist } from '../../../components/onboarding/DocumentCheckl
 import { TAXI_TWO_LICENCES } from '../../../components/onboarding/taxiDocumentCopy';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
-import { useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
+import { useActiveJobs, useMoverKind, useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
+import { moverLogoutBody } from '../../../lib/moverLogoutWords';
+import { MoverWorkDoors, useMoverPastSignUp } from '../MoverWorkDoors';
 import { useStepUp, type MutationGuard } from '../../../hooks/useStepUp';
 import { StepUpDismissed } from '../../../lib/stepUp';
 import { VEHICLE_COPY, vehicleOffered } from '../../../lib/vehicleOffer';
@@ -36,8 +39,9 @@ export const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof Mater
   // e-scooter) signs up as a motorbike, with a motorbike's documents.
   { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Pedal bike, no motor · small deliveries' },
   { key: 'MOTORCYCLE', label: 'Motorbike', icon: 'moped', hint: 'Deliveries · e-bikes and e-scooters too' },
-  { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi + delivery' },
-  { key: 'WAGON_CAR', label: 'Wagon Car', icon: 'car-estate', hint: 'Taxi + larger loads' },
+  // [BUG-HUNT F25 · owner ruling 15 Oct 2026] A taxi car carries passengers only: an H plate, the taxi papers, no goods.
+  { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi · passengers only · H plate' },
+  { key: 'WAGON_CAR', label: 'Wagon Car', icon: 'car-estate', hint: 'Taxi · passengers only · H plate' },
   { key: 'BUS_9', label: 'Bus (9-seater)', icon: 'van-passenger', hint: 'Groups & tours' },
   { key: 'BUS_15', label: 'Bus (15-seater)', icon: 'bus', hint: 'Groups & airport runs' },
   { key: 'CANTER_SHORT', label: 'Short-Base Canter (Open Back)', icon: 'truck-flatbed', hint: 'Open cargo' },
@@ -260,11 +264,15 @@ export function VehicleSetup({
 
 export function MoverOnboardingScreen({ status }: { status: any }) {
   const { moverPreset } = useAuthStore();
+  const navigation = useNavigation<any>();
+  // [BUG-HUNT F10] Someone Swift approved before reads about their documents, never a sales pitch.
+  const { approvedBefore } = useMoverPastSignUp();
+  const { legs } = useActiveJobs(useMoverKind().kind);
   // Signing up is mostly already on the server: the vehicle is saved by its
   // button and every document uploads the moment it is picked. The only thing
   // held on this device is a vehicle form not yet saved.
   const { requestLogout, logoutDialog } = useLogoutConfirm({
-    body: 'Anything you’ve saved or uploaded stays with your account. Vehicle details you haven’t saved yet are cleared.',
+    body: legs.length > 0 ? moverLogoutBody(legs) : 'Anything you’ve saved or uploaded stays with your account. Vehicle details you haven’t saved yet are cleared.',
   });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // [Owner, 1 Oct] Never a one-way door: "‹ Swift", Android's back and the iOS
@@ -300,11 +308,15 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
       </View>
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title" style={{ marginTop: space.sm }}>
-          Start earning with Swift
+          {approvedBefore ? 'Your documents need attention' : 'Start earning with Swift'}
         </T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-          Set up your vehicle and documents — we review them Monday to Saturday, 8:00–16:00 Guyana time, then you go online and start earning.
+          {approvedBefore
+            ? 'You can’t go online until the documents below are sorted — we review them Monday to Saturday, 8:00–16:00 Guyana time.'
+            : 'Set up your vehicle and documents — we review them Monday to Saturday, 8:00–16:00 Guyana time, then you go online and start earning.'}
         </T>
+        <MoverWorkDoors />
+        {approvedBefore ? null : <>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg }}>
           <ValuePill icon="check-decagram" label="Keep 100%" />
           {/* "Cash in hand", never "Cash payouts". A payout is money Swift
@@ -324,6 +336,7 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
         <View style={{ marginTop: space.lg }}>
           <PricingCard kind="mover" vehicleType={vt} />
         </View>
+        </>}
 
         <View style={{ marginTop: space.xl }}>
           {!vehicleSaved ? (
@@ -367,6 +380,10 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
             isError={!checklistStatus && statusError}
             onRetry={refetchStatus}
           />
+        </View>
+
+        <View style={{ marginTop: space.xl, alignItems: 'center' }}>
+          <LinkText label="Get help" onPress={() => navigation.navigate('GetHelp')} />
         </View>
       </ScrollView>
 
