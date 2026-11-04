@@ -238,6 +238,8 @@ describe('[row 622] pinned: nothing between the tombstone and its old place read
     expect(next).toEqual([
       'await revokeAccessBeforeCleanup();',
       'await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: \'User\', entityId: userId } });',
+      // [BUG-HUNT F20] The staff door's own row, last, so it shows the effect: no other caller passes it.
+      'await opts.onCutoff?.(tx);',
     ]);
     const resweep = bodyOf(account, 'if (user.phone === `deleted:${userId}`) {', '\n      }\n');
     expect(awaited(resweep)).toContain('revokeAccessBeforeCleanup');

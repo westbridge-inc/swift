@@ -519,7 +519,7 @@ describe('the waiting charge at booking (Rev 2 §8.2)', () => {
     fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, waiting: WAITING_TERMS });
     await mount();
     await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
-    expect(byTestId('taxi-waiting-terms')?.textContent).toBe('Waiting: 300 per 10 minutes after your driver arrives');
+    expect(byTestId('taxi-waiting-terms')?.textContent).toBe('Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride');
     snap('rider-booking-waiting-terms');
   });
 

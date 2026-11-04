@@ -338,6 +338,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /orders/:id/handover-secret/reset-delivery-pin': c('C2', 'order.handover.rotate'),
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
+  // [BUG-HUNT-2 G01] A ride in progress whose driver is gone: its only exits were the driver's own handover.
+  'POST /orders/:id/end-ride': c('C3', 'order.ride.end', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
   // [MMGCLOSE] Record-only: closes a store-claimed MMG order as "refund handled
   // by the store" (an OWED refund obligation, no money moves) — money class, two admins.
@@ -622,6 +624,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [DELETION-INTEGRITY] Completes an in-app closure request: the account is
   // closed and de-identified. Consequential and irreversible, so a reason is owed.
   'POST /support/:id/complete-account-closure': c('C3', 'user.close', E.supportTicket),
+  // [BUG-HUNT F20] A verified deletion request from someone who cannot sign in. Irreversible, with no
+  // confirmation from the person inside a session, so it takes two people like a platform act.
+  // SUPER_ADMIN only (founderGuard on the route).
+  'POST /users/:id/verified-deletion': c('C5', 'user.close.verified', E.user),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),

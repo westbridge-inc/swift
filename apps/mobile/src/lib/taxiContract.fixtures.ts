@@ -134,7 +134,7 @@ export function driverRideWithStops(overrides: Record<string, unknown> = {}) {
 /** §8.2 — the waiting terms on the estimate, the capabilities read and the request answer. */
 export const WAITING_TERMS = {
   chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD',
-  text: 'Waiting: 300 per 10 minutes after your driver arrives',
+  text: 'Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride',
 } as const;
 
 /** §8.3 — the live waiting object (from the driver's arrival on). */

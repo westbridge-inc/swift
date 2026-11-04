@@ -57,6 +57,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
 
   // ── Orders ─────────────────────────────────────────────────────────────
   { route: 'PUT /orders/:id/cancel', helper: 'cancelOrder', args: ['ord_1', { refund: false }] },
+  { route: 'POST /orders/:id/end-ride', helper: 'endStuckRide', args: ['ord_1'] },
   { route: 'POST /finance/cash-settlements/:id/close', helper: 'closeCashSettlement', args: ['cs_1'] },
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
   { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
@@ -110,6 +111,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /vendor-owners/:id/deal-rate', helper: 'setChainDeal', args: ['own_1', 14000], requiredBodyKeys: ['weeklyRate', 'reason'] },
   { route: 'PUT /vendor-owners/:id/brand', helper: 'setChainBrand', args: ['own_1', 'Royal Castle'], requiredBodyKeys: ['brandName', 'reason'] },
   { route: 'PUT /vendors/:id/brand-listing', helper: 'setBranchListedAlone', args: ['ven_1', true], requiredBodyKeys: ['alone', 'reason'] },
+  { route: 'POST /users/:id/verified-deletion', helper: 'deleteVerifiedRequest', args: ['usr_1', { identityCheck: 'OWNER_CHECKED', identityNote: 'Owner spoke to the person' }], requiredBodyKeys: ['identityCheck', 'identityNote', 'reason'] },
   { route: 'POST /vendor-owners/:id/deal-change', helper: 'changeChainDeal', args: ['own_1', { kind: 'RAISE', weeklyRate: 17000 }], requiredBodyKeys: ['kind', 'reason'] },
   { route: 'DELETE /vendor-owners/:id/deal-change', helper: 'withdrawChainDealChange', args: ['own_1'] },
   { route: 'POST /subscriptions/:id/topup', helper: 'topUpSubscription', args: ['sub_1', 1000, 'REF-1', 'idem-1'], requiredBodyKeys: ['amount', 'reference'] },

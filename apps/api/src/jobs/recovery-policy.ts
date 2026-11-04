@@ -75,6 +75,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'audit-chain-anchor': { policy: 'SAFE_REPLAY', why: 'Appends one anchor row with the current head and tells the admins. A replay appends a second anchor of the same head — harmless, and the table is append-only by design.' },
   'erasure-ledger-watch': { policy: 'SAFE_REPLAY', why: 'Reads ledger counts and ages and pages through pageOps, which dedupes on an open page. It writes no business rows.' },
   'malware-scanner-watch': { policy: 'SAFE_REPLAY', why: 'Asks the scanner PING, counts consecutive failures in one Redis key and pages through pageOps, which keeps one open page per title. It writes no business rows; a replay is one more ask.' },
+  'ride-overdue-watch': { policy: 'SAFE_REPLAY', why: 'Reads the rides in progress and pages through pageOps, which keeps one open page per title. It writes no business rows and closes no ride; a replay is one more read.' },
   'pickup-not-collected-watch': { policy: 'SAFE_REPLAY', why: 'Reads the ready pickups past 24 hours. Each store notice carries a per-order dedupe key and the support page goes through pageOps, which keeps one open page per title. It closes no order; a replay is one more read.' },
   'fee-refund-case-sweep': { policy: 'SAFE_REPLAY', why: 'Closes a case by a compare-and-set on OPEN, only on a REVERSED reversal of its payment, and pages through pageOps, which keeps one open page per title. It moves no money; a replay finds the closed cases gone from the open set.' },
   'error-rate-watch': { policy: 'SAFE_REPLAY', why: 'Reads the hourly error tally and pages through pageOps, which keeps one open page per title and one delivered page per key window; a closed page stays closed. It writes no business rows; a replay is one more read.' },
@@ -147,6 +148,7 @@ export type JobName =
   | 'backup-freshness'
   | 'erasure-ledger-watch'
   | 'malware-scanner-watch'
+  | 'ride-overdue-watch'
   | 'pickup-not-collected-watch'
   | 'fee-refund-case-sweep'
   | 'error-rate-watch'
