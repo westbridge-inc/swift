@@ -104,6 +104,7 @@ import { classifyCategory, classifyText } from '../compliance/prohibited-items';
 import { counterpartPhone } from '../calls/counterpart-phone';
 import { ownRiderNotice } from '../order/own-rider-notice';
 import { customerPickupCode, saysPickupHandover } from '../order/pickup-code-view';
+import { orderStageRefusal } from '../order/order-status-words';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -3308,7 +3309,7 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A rider already has this order — it is on its way.');
     }
     if (!['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot switch a ${order.status} order to pickup.`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot switch to pickup'));
     }
 
     const pickupCode = String(randomInt(100000, 1000000));
@@ -3334,7 +3335,7 @@ export async function customerRoutes(app: FastifyInstance) {
         throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'This order can no longer switch to pickup.');
       }
       if (!['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(locked.status)) {
-        throw new AppError(400, 'INVALID_STATUS', `Cannot switch a ${locked.status} order to pickup.`);
+        throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(locked.status, 'it cannot switch to pickup'));
       }
       const lockedFee = Number(locked.deliveryFee ?? 0);
       const lockedTip = Number(locked.tipAmount ?? 0);

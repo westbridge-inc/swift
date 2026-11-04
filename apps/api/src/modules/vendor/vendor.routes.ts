@@ -125,6 +125,7 @@ import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-ra
 import { storeBacklogSentence, storeRiderBacklog } from '../dispatch/delivery-capacity';
 import { deliveryPausedAt } from '../dispatch/delivery-pause';
 import { CLOSURE_PAUSE_REFUSAL, CLOSURE_PAUSE_REFUSAL_TEAM } from '../user/closure-pause';
+import { orderStageRefusal } from '../order/order-status-words';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2594,7 +2595,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
     await assertVendorCanOperate(order.vendorId!);
     if (order.status !== 'PENDING') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot accept order in ${order.status} status`);
+      // [BUG-HUNT F12] Double-tap safe: the second tap after a lost reply gets the answer the first one lost.
+      if (!isTerminalOrderStatus(order.status)) return { success: true, data: order };
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be accepted'));
     }
     // [SPS-F-0016] Payment-first: an MMG order is accepted only after the store
     // confirmed the payment landed (its Confirm-payment action stays available
@@ -2803,7 +2806,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       const updated = await recordPrepProgress(order, 'PREPARING', request.user.userId);
       return { success: true, data: updated };
     }
-    throw new AppError(400, 'INVALID_STATUS', `Cannot mark as preparing from ${order.status} status`);
+    throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be marked as being prepared'));
   });
 
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
@@ -2862,7 +2865,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       const updated = await recordPrepProgress(order, 'READY', request.user.userId);
       return { success: true, data: updated };
     }
-    throw new AppError(400, 'INVALID_STATUS', `Cannot mark as ready from ${order.status} status`);
+    if (order.status === 'READY_FOR_PICKUP') return { success: true, data: order }; // [BUG-HUNT F12] double-tap safe
+    throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be marked ready'));
   });
 
   /** PUT /orders/:id/fulfillment-mode — FUL-004d: the vendor's one-tap choice of
@@ -3451,16 +3455,16 @@ export async function vendorRoutes(app: FastifyInstance) {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id, request);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'DELIVERY') {
-      throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders are dispatched to movers');
+      throw new AppError(400, 'NOT_DELIVERY', 'Only delivery orders go to a rider');
     }
     if (order.riderId) {
-      throw new AppError(409, 'ALREADY_ASSIGNED', 'A mover already has this order');
+      throw new AppError(409, 'ALREADY_ASSIGNED', 'A rider already has this order');
     }
     if (resolveDeliveryMode(order.fulfillmentMode, order.vendor?.selfDeliveryEnabled ?? false) === 'VENDOR_DELIVERY') {
       throw new AppError(409, 'VENDOR_DELIVERY_SELECTED', 'Choose “Get a Swift rider” before retrying dispatch');
     }
     if (!['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot search for a mover while the order is ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'Swift cannot search for a rider'));
     }
     const result = await dispatch.retryDispatch(order.id);
     return { success: true, data: { orderId: order.id, searching: !!result.offered, exhausted: !!result.exhausted } };
@@ -3475,7 +3479,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
     }
     if (order.status !== 'READY_FOR_PICKUP' && order.status !== 'COMPLETED') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot complete pickup from ${order.status} status`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be marked collected'));
     }
     const { code } = completePickupSchema.parse(request.body ?? {});
     await assertHandoverRequestBudget(app.redis, order.id);
@@ -3552,7 +3556,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'NOT_AN_APPOINTMENT', 'This order is not an appointment.');
     }
     if (order.status !== 'ACCEPTED') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot complete appointment from ${order.status} status`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be marked complete'));
     }
     const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Appointment completed by vendor');
     return { success: true, data: updated };
@@ -3628,7 +3632,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'NOT_SELF_DELIVERY', 'This order is being delivered by a Swift rider — they complete it from their app.');
     }
     if (order.status !== 'READY_FOR_PICKUP') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot mark delivered from ${order.status} status`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be marked delivered'));
     }
     // updateStatus is the CAS: a concurrent cancel (or a double-tap) matches
     // nothing and throws, so exactly one transition and one status-log row.
@@ -3651,7 +3655,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
     const rejectableStatuses: readonly string[] = STORE_REJECTABLE_STATUSES;
     if (!rejectableStatuses.includes(order.status)) {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot reject order in ${order.status} status`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be rejected'));
     }
     const body = rejectOrderSchema.parse(request.body ?? {});
     const reason = body.reason;

@@ -314,9 +314,12 @@ describe('[BOOK-S3] switch ON — a cash booking of an automatic listing is conf
     expect(told[0]!.data['kind']).toBeUndefined();
     const customerTold = await settledNotices(a.userId, order.id, 1);
     expect(customerTold.map((n) => n.title)).toEqual(['Booking confirmed']);
-    // The accept door has nothing left to do.
+    // The accept door has nothing left to do: a tap on it is answered with the order as it is, and changes nothing.
+    const before = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, acceptedAt: true } });
     const again = await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, shop.owner.token, {});
-    expect(again.statusCode).toBe(400);
+    expect(again.statusCode).toBe(200);
+    expect(await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { status: true, acceptedAt: true } })).toEqual(before);
+    expect(await settledNotices(a.userId, order.id, 1)).toHaveLength(1);
   });
 
   it('atomic: a failure after the standing acceptance rolls the whole checkout back — no order, no booking', async () => {

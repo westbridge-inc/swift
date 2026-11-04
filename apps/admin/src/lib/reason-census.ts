@@ -52,6 +52,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
 
   // ── Orders ─────────────────────────────────────────────────────────────
   { route: 'PUT /orders/:id/cancel', helper: 'cancelOrder', args: ['ord_1', { refund: false }] },
+  { route: 'POST /finance/cash-settlements/:id/close', helper: 'closeCashSettlement', args: ['cs_1'] },
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
   { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
     requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },
@@ -119,6 +120,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'POST /billing/agent-payments/:id/attach', helper: 'attachAgentPayment', args: ['pay_1', 'sub_1'], requiredBodyKeys: ['subscriptionId'] },
   { route: 'POST /billing/agent-payments/:id/refund-flag', helper: 'flagAgentPaymentRefund', args: ['pay_1'], requiredBodyKeys: ['note'] },
   // [MMG REVERSAL · owner #11] Return a whole MMG weekly-fee payment: the whole amount, typed.
+  { route: 'POST /billing/mmg-checkouts/:id/refund-case', helper: 'openFeeRefundCase', args: ['mco_1', 'DUPLICATE'], requiredBodyKeys: ['kind', 'reason'] },
   { route: 'POST /billing/mmg-checkouts/:id/reverse', helper: 'reverseMmgFeePayment', args: ['mco_1', 2100], requiredBodyKeys: ['amountGyd'] },
   { route: 'POST /billing/mmg-fee-reversals/:id/resolve', helper: 'resolveMmgFeeReversal', args: ['rev_1', 'NOT_RETURNED', 'MMG-STMT-123'], requiredBodyKeys: ['outcome', 'mmgReference'] },
   // [continues #1592] Weekly-fee payment confirmations: the reason travels in the body (and the header).

@@ -48,7 +48,7 @@ describe('[RIDER-SAFE] the wiring', () => {
     const d = src('modules/dispatch/dispatch.service.ts');
     const taxi = d.indexOf('[R-05 certification catch] TAXI slow lane');
     const food = d.indexOf('[RIDER-SAFE 3 · COORD ruling 29 Oct 2026] FOOD slow lane');
-    const notice = d.indexOf("title: 'No movers available right now'");
+    const notice = d.indexOf('title: `No ${worker}s available right now`');
     expect(taxi).toBeGreaterThan(0);
     expect(food).toBeGreaterThan(taxi);
     expect(notice).toBeGreaterThan(food);

@@ -855,6 +855,14 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     })();
   });
 
+  // Fastify stops the HTTP server before its onClose hooks run, and that waits for every open connection. A websocket
+  // holds one, so with one client connected a shutdown sat at its cap and failed. This node's transports go first. Never
+  // disconnectSockets: a client told 'io server disconnect' does not retry, and builds already in stores would go silent
+  // at every deploy. A closed transport retries, re-reads its token and reaches the next API.
+  app.addHook('preClose', async () => {
+    io.engine.close();
+  });
+
   app.addHook('onClose', async () => {
     authorityRecheckClosing = true;
     clearInterval(authorityRecheckTimer);

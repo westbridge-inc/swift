@@ -652,6 +652,8 @@ export interface CashSettlementRow {
   status: 'OWED' | 'RIDER_CONFIRMED' | 'STORE_CONFIRMED' | 'SETTLED';
   riderConfirmedAt: string | null;
   storeConfirmedAt: string | null;
+  /** When Swift support closed it. A closed record is not a settled one: `status` stays what it was. */
+  closedAt?: string | null;
   createdAt: string;
   vendor: { id: string; name: string } | null;
   rider: { id: string; name: string } | null;
@@ -665,6 +667,13 @@ export interface CashSettlementsResponse {
 }
 export const fetchCashSettlements = (params?: string): Promise<CashSettlementsResponse> =>
   apiFetch(`/api/v1/admin/finance/cash-settlements?${params || 'limit=50'}`);
+/**
+ * C4 (money class): close a delivery-pay record neither side can. A record only: Swift moves nothing and the row keeps
+ * what it says. The first call answers 202 APPROVAL_REQUIRED; a second admin (or the owner's solo approval) decides it in
+ * Approvals, and the asking admin applies it from there.
+ */
+export const closeCashSettlement = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/finance/cash-settlements/${encodeURIComponent(id)}/close`, { method: 'POST', body: '{}', reason });
 
 export interface PaymentMix {
   byMethod: { method: string; count: number; total: number }[];
@@ -1286,6 +1295,34 @@ export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED
   });
 export const checkMmgFeeReversal = (reversalId: string) =>
   apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/check`, { method: 'POST', body: '{}' });
+// [Row 156] A partner asked for a weekly-fee payment back: 3 business days. A case is that ask and its clock. It moves no
+// money and takes no MMG reference, and only MMG's proven return closes it.
+export type FeeRefundKind = 'DUPLICATE' | 'MISTAKEN';
+export interface FeeRefundCaseRow {
+  id: string;
+  checkoutId: string;
+  subscriptionId: string;
+  kind: FeeRefundKind;
+  reason: string;
+  amount: number;
+  currencyCode: string;
+  state: 'OPEN' | 'REFUNDED';
+  dueBy: string;
+  overdue: boolean;
+  reversalId: string | null;
+  refundedAt: string | null;
+  openedAt: string;
+}
+export const fetchFeeRefundCases = (state: 'OPEN' | 'REFUNDED'): Promise<Envelope<FeeRefundCaseRow[]>> =>
+  apiFetch(`/api/v1/admin/billing/fee-refund-cases?state=${state}`);
+export const fetchFeeRefundCase = (checkoutId: string): Promise<Envelope<FeeRefundCaseRow | null>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/refund-case`);
+export const openFeeRefundCase = (checkoutId: string, kind: FeeRefundKind, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/refund-case`, {
+    method: 'POST',
+    body: JSON.stringify({ kind, reason }),
+    reason,
+  });
 
 export interface PaymentConfirmation {
   id: string; subscriptionId: string; source: string; sourceId: string | null;

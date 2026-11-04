@@ -105,8 +105,12 @@ describe('[WEB-POLICE] the police clearance on the rider/driver Documents page',
     expect(box.checked).toBe(false);
     const cardButton = within(optional).getByText('Police Clearance Certificate').closest('button') as HTMLButtonElement;
     expect(cardButton.disabled).toBe(true);
-    fireEvent.click(box);
-    expect(cardButton.disabled).toBe(false);
+    // The section is lazy, so it can commit with the card's mount effect still pending, and that effect clears the tick:
+    // a click landing first is lost. Tick until the box holds, then read the button as strictly as before.
+    await waitFor(() => {
+      if (!box.checked) fireEvent.click(box);
+      expect(cardButton.disabled).toBe(false);
+    });
     fireEvent.change(screen.getByLabelText('Choose a file for Police Clearance Certificate'), { target: { files: [new File(['synthetic'], 'synthetic.pdf', { type: 'application/pdf' })] } });
     await waitFor(() => expect(writes).toHaveLength(2));
     expect(writes[1]).toEqual({ method: 'POST', path: '/verification/documents', body: {
