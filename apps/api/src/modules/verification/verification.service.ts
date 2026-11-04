@@ -40,7 +40,7 @@ import { storeFeeNotice, storeFeeNoticeDedupeKey, storeFeeStanding, type StoreFe
 import { FOOD_HANDLERS_NOTICE_KIND, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, FOOD_HANDLERS_WHERE, foodHandlerAttestationView, foodHandlersNotice, foodHandlerStoresOf, foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
 import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { docTypeName } from './doc-names';
-import { lastPaperHeld, partnerApprovalsOpen, PARTNER_APPROVAL_HELD, type PartnerAtTheLastPaper } from './approval-brake';
+import { lastPaperHeld, partnerApprovalsOpen, PARTNER_APPROVAL_HELD, type UnfinishedPartner } from './approval-brake';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
@@ -1165,6 +1165,7 @@ export class VerificationService {
         ? resolveApprovalExpiry(candidate.docType, expiresAt, candidate.expiresAt)
         : (expiresAt ?? candidate.expiresAt ?? null);
 
+    let unfinished: UnfinishedPartner[] = [];
     const updated = await this.transitionPendingDocument(docId, 'APPROVED', {
         status: 'APPROVED',
         reviewedBy: adminId,
@@ -1181,7 +1182,7 @@ export class VerificationService {
         }),
     }, { reviewerId: adminId, approval: { expiresAt, insurance, ...(issuedOn ? { issuedOn } : {}) } }, async (tx, decided) => {
       // [BUG-HUNT F23] First, on the row just written: the whole decision rolls back and the paper stays waiting.
-      await this.holdTheLastPaper(tx, decided.userId);
+      await this.holdTheLastPaper(tx, unfinished);
       // [S2-29 · KYC-DECISION-ATOMIC] Everything the approval owes commits with it, or none of it does:
       // the approval notice (published after commit), the caller's audit rows, and the outbox row that owes the
       // trial decision. A throw anywhere here leaves the document PENDING, so the reviewer's retry decides it, once.
@@ -1199,7 +1200,7 @@ export class VerificationService {
         this.projectionNotices.get(tx)?.push(notice.id);
       }
       if (decision.within) await decision.within(tx, decided);
-    }).catch(async (error: unknown) => {
+    }, async (tx, userId) => { unfinished = await this.unfinishedPartners(tx, userId); }).catch(async (error: unknown) => {
       if (error instanceof AppError && error.code === PARTNER_APPROVAL_HELD) await this.markPaperHeld(docId, adminId);
       throw error;
     });
@@ -1224,37 +1225,46 @@ export class VerificationService {
   }
 
   /**
-   * [BUG-HUNT F23] The partner this approval would start, with this document already written approved in `tx`: the real
-   * gate decides, so expiry, the store's own list and the vehicle in use all count exactly as activation counts them.
-   * A partner with a fee on record has had their trial: a renewal never waits for ordering day.
+   * [BUG-HUNT F23] What this person has not finished, read under the decision's lock before the paper is written: the
+   * real gate decides, so expiry, the store's own list and the vehicle in use all count exactly as activation counts
+   * them. Anyone already live or with a fee on record has had their start, and a list already complete starts nothing
+   * new: neither ever waits for ordering day.
    */
-  private async partnerAtTheLastPaper(tx: Prisma.TransactionClient, userId: string): Promise<PartnerAtTheLastPaper | null> {
+  private async unfinishedPartners(tx: Prisma.TransactionClient, userId: string): Promise<UnfinishedPartner[]> {
+    if (partnerApprovalsOpen()) return [];
     const fee = { select: { id: true } };
     const person = await tx.user.findUniqueOrThrow({
       where: { id: userId },
       select: {
         firstName: true, lastName: true, roles: true,
-        vendorOwner: { select: { vendors: { select: { id: true, name: true, vendorType: true, subscription: fee } } } },
-        rider: { select: { subscription: fee } },
-        driver: { select: { subscription: fee } },
-        serviceProvider: { select: { id: true } },
+        vendorOwner: { select: { vendors: { select: { id: true, name: true, vendorType: true, isVerified: true, subscription: fee } } } },
+        rider: { select: { documentsVerified: true, subscription: fee } },
+        driver: { select: { documentsVerified: true, subscription: fee } },
+        serviceProvider: { select: { isVerified: true } },
       },
     });
+    const partners: UnfinishedPartner[] = [];
     for (const store of person.vendorOwner?.vendors ?? []) {
-      if (!store.subscription && await this.isRoleVerified(userId, store.vendorType as ChecklistRole, tx, store.id)) return { name: store.name, trial: true };
+      if (store.isVerified || store.subscription) continue;
+      partners.push({ name: store.name, trial: true, complete: (db) => this.isRoleVerified(userId, store.vendorType as ChecklistRole, db, store.id) });
     }
     const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'this partner';
-    const mover = !!person.rider || !!person.driver || person.roles.some((role) => role === 'MOVER' || role === 'RIDER' || role === 'DRIVER');
-    if (mover && !person.rider?.subscription && !person.driver?.subscription && await this.isRoleVerified(userId, 'MOVER', tx)) return { name, trial: true };
-    if (person.serviceProvider && await isProviderVerified(tx, userId)) return { name, trial: false };
-    return null;
+    const profiles = [person.rider, person.driver];
+    const mover = profiles.some(Boolean) || person.roles.some((role) => role === 'MOVER' || role === 'RIDER' || role === 'DRIVER');
+    if (mover && !profiles.some((profile) => profile?.subscription || profile?.documentsVerified)) {
+      partners.push({ name, trial: true, complete: (db) => this.isRoleVerified(userId, 'MOVER', db) });
+    }
+    if (person.serviceProvider && !person.serviceProvider.isVerified) {
+      partners.push({ name, trial: false, complete: (db) => isProviderVerified(db, userId) });
+    }
+    const unfinished: UnfinishedPartner[] = [];
+    for (const partner of partners) if (!await partner.complete(tx)) unfinished.push(partner);
+    return unfinished;
   }
 
-  /** [BUG-HUNT F23] Refuses the approval that would complete a partner while approvals are closed (approval-brake.ts). */
-  private async holdTheLastPaper(tx: Prisma.TransactionClient, userId: string): Promise<void> {
-    if (partnerApprovalsOpen()) return;
-    const partner = await this.partnerAtTheLastPaper(tx, userId);
-    if (partner) throw lastPaperHeld(partner);
+  /** [BUG-HUNT F23] Refuses the approval that newly completes a partner while approvals are closed (approval-brake.ts). */
+  private async holdTheLastPaper(tx: Prisma.TransactionClient, unfinished: readonly UnfinishedPartner[]): Promise<void> {
+    for (const partner of unfinished) if (await partner.complete(tx)) throw lastPaperHeld(partner);
   }
 
   /** [BUG-HUNT F23] The refused paper keeps who checked it and when, so nobody checks it twice. Staff-only: the applicant never sees it. */
@@ -1521,6 +1531,8 @@ export class VerificationService {
     // [S2-29 · KYC-DECISION-ATOMIC] What must commit with the decision: the decision's own effects
     // (L2, the outbox row, the notice) and the caller's audit rows. Runs last, inside the transaction.
     within?: DecisionWithin,
+    // [BUG-HUNT F23] Runs on an approval, under the decision's lock, before the paper is written.
+    beforeApproval?: (tx: Prisma.TransactionClient, userId: string) => Promise<void>,
   ): Promise<VerificationDocument> {
     const candidate = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
@@ -1553,6 +1565,7 @@ export class VerificationService {
         if (pending.status === 'PENDING') {
           await this.assertStoredVehicleApproval(tx, pending, review.approval?.insurance);
           data.expiresAt = resolveApprovalExpiry(pending.docType, review.approval?.expiresAt, pending.expiresAt);
+          await beforeApproval?.(tx, candidate.userId);
         }
       }
 

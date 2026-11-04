@@ -13,8 +13,9 @@ import type {
   MmgCheckoutTimelineEntry,
 } from '@swift/types';
 import {
-  checkMmgFeeReversal, fetchMmgCheckout, fetchMmgCheckouts, fetchMmgFeeReversal, resolveMmgFeeReversal, reverseMmgFeePayment,
-  type MmgFeeReversalRow, type MmgFeeReversalView,
+  checkMmgFeeReversal, fetchFeeRefundCase, fetchFeeRefundCases, fetchMmgCheckout, fetchMmgCheckouts, fetchMmgFeeReversal, openFeeRefundCase,
+  resolveMmgFeeReversal, reverseMmgFeePayment,
+  type FeeRefundKind, type MmgFeeReversalRow, type MmgFeeReversalView,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -146,6 +147,8 @@ export default function MmgPaymentsPage() {
         Find a partner&apos;s MMG weekly-fee payment by any reference they or MMG can quote. Every search and every opened payment is recorded.
       </p>
 
+      <RefundCases onOpen={setOpenId} />
+
       <form onSubmit={submit} className="flex flex-col md:flex-row gap-3 mb-6" role="search" aria-label="Find an MMG payment">
         <input
           type="search"
@@ -271,6 +274,7 @@ function Detail({ id }: { id: string }) {
             {d.reason ? <Field label="Reason (operators only)"><span className="font-mono text-xs">{d.reason}</span></Field> : null}
           </dl>
           {d.creditedPeriod ? <Credited period={d.creditedPeriod} /> : null}
+          {d.status === 'CONFIRMED' ? <RefundCasePanel checkoutId={d.id} /> : null}
           {d.status === 'CONFIRMED' ? <ReturnPanel checkoutId={d.id} amount={d.amount} currencyCode={d.currencyCode} /> : null}
         </div>
         <Timeline entries={d.timeline} truncated={d.timelineTruncated} />
@@ -329,6 +333,93 @@ function Timeline({ entries, truncated }: { entries: MmgCheckoutTimelineEntry[];
       )}
       {truncated ? <p className="text-xs mc-muted mt-2">Showing the first records only.</p> : null}
     </div>
+  );
+}
+
+const REFUND_KIND_WORDS: Record<FeeRefundKind, string> = { DUPLICATE: 'Paid twice', MISTAKEN: 'Paid by mistake' };
+const OVERDUE = <span className="mc-badge mc-tone-warn">Overdue</span>;
+
+/** [Row 156] What is waiting, so the page an overdue alert points to can show it. Read when the page opens, never on a timer. */
+function RefundCases({ onOpen }: { onOpen: (_checkoutId: string) => void }) {
+  const cases = useQuery({ queryKey: ['fee-refund-cases'], queryFn: () => fetchFeeRefundCases('OPEN'), refetchOnWindowFocus: false, staleTime: Infinity });
+  if (cases.isPending) return null;
+  if (cases.isError) return <div className="mb-6"><QueryFailed error={cases.error} what="the refund requests" onRetry={() => void cases.refetch()} retrying={cases.isFetching} /></div>;
+  const rows = cases.data.data;
+  if (rows.length === 0) return null;
+  return (
+    <section aria-label="Refund requests" className="rounded-[var(--mc-radius)] border border-[var(--mc-line)] bg-[var(--mc-card)] p-4 mb-6 space-y-2 text-sm">
+      <h2 className="font-semibold">Refund requests waiting</h2>
+      <ul className="space-y-1">
+        {rows.map((c) => (
+          <li key={c.id} className="flex flex-wrap items-center gap-2">
+            <span>{gyd(c.amount)} {c.currencyCode} · {REFUND_KIND_WORDS[c.kind]} · due by {day(c.dueBy)}</span>
+            {c.overdue ? OVERDUE : null}
+            <button type="button" onClick={() => onOpen(c.checkoutId)} aria-label={`Open refund request due by ${day(c.dueBy)}`} className="text-xs underline text-[var(--mc-accent)]">Open</button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * [Row 156] The partner asked for this payment back. Recording it starts the clock of 3 business days and moves no money:
+ * the return below is its own two-person act, and only MMG's records close a case, so nothing here can.
+ */
+function RefundCasePanel({ checkoutId }: { checkoutId: string }) {
+  const qc = useQueryClient();
+  const [kind, setKind] = useState<FeeRefundKind | null>(null);
+  const [reason, setReason] = useState('');
+  // Every read is recorded on the server, as the payment detail's is: read when asked.
+  const view = useQuery({ queryKey: ['fee-refund-case', checkoutId], queryFn: () => fetchFeeRefundCase(checkoutId), refetchOnWindowFocus: false, staleTime: Infinity });
+  const record = useMutation({
+    mutationFn: () => openFeeRefundCase(checkoutId, kind as FeeRefundKind, reason.trim()),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['fee-refund-case', checkoutId] });
+      void qc.invalidateQueries({ queryKey: ['fee-refund-cases'] });
+    },
+  });
+  const heading = <h3 className="font-semibold">Refund request</h3>;
+  const frame = 'rounded-lg border border-[var(--mc-line)] p-4 space-y-3 text-sm';
+  if (view.isPending) return null;
+  if (view.isError) return <section aria-label="Refund request" className={frame}>{heading}<QueryFailed error={view.error} what="the refund request on this payment" onRetry={() => void view.refetch()} retrying={view.isFetching} /></section>;
+  const c = view.data.data;
+  if (c) {
+    return (
+      <section aria-label="Refund request" className={frame}>
+        {heading}
+        <p className="mc-muted text-xs">{REFUND_KIND_WORDS[c.kind]} · recorded {when(c.openedAt)}</p>
+        <p>{c.reason}</p>
+        {c.state === 'REFUNDED'
+          ? <p className="font-semibold">Refunded through MMG on {day(c.refundedAt)}.</p>
+          : <p className="flex flex-wrap items-center gap-2"><span>Due by {day(c.dueBy)}. It closes once MMG&apos;s records prove the return.</span>{c.overdue ? OVERDUE : null}</p>}
+      </section>
+    );
+  }
+  const ready = kind !== null && reason.trim().length >= REASON_MIN;
+  return (
+    <section aria-label="Refund request" className={frame}>
+      {heading}
+      <p className="mc-muted text-xs">Record it when the partner asks for this payment back. It starts the 3 business days and moves no money: the return below does that.</p>
+      <form
+        className="space-y-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (ready && !record.isPending) record.mutate();
+        }}
+      >
+        <div className="flex flex-wrap gap-4">
+          {(Object.keys(REFUND_KIND_WORDS) as FeeRefundKind[]).map((k) => (
+            <label key={k} className="mc-choice">
+              <input type="radio" name={`refund-kind-${checkoutId}`} checked={kind === k} onChange={() => setKind(k)} /> {REFUND_KIND_WORDS[k]}
+            </label>
+          ))}
+        </div>
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={500} aria-label="What the partner said" placeholder="What the partner said. Required." className="mc-input" />
+        <button type="submit" disabled={!ready || record.isPending} className="mc-btn mc-btn-primary">{record.isPending ? 'Recording…' : 'Record the request'}</button>
+        {record.error ? <MutationError error={record.error} label="The request was not recorded" /> : null}
+      </form>
+    </section>
   );
 }
 

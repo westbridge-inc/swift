@@ -160,7 +160,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
     // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)
     'vat_threshold',
-    'billing_unknown_intents_sla', 'reconcile_mismatch', 'settlement_trailer_mismatch',
+    'ops_fee_refund_overdue', 'billing_unknown_intents_sla', 'reconcile_mismatch', 'settlement_trailer_mismatch',
     'settlement_deposit_mismatch', 'earnings_missing', 'agent_cash_sla',
     'incident_new', 'incident_sla_breach', 'incident_weekly_digest', 'incident_pattern_cross_reporter',
     'liveness_outage', 'liveness_review', 'compliance_violation', 'verification_pending',

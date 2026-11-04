@@ -18,8 +18,8 @@ import { countWaiting, type WaitingKey } from './dashboard-waiting';
 import { STORE_VAT_WAITING_WHERE, VAT_CERTIFICATE_DOC_TYPE } from '../store-vat/store-vat';
 import { z } from '../../lib/zod';
 import { isCategoryIconKey } from '../discovery/category-icon-keys';
-import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
-import { withLiveDocuments } from './live-documents';
+import { Prisma, type VehicleType, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
+import { idsByLiveDocuments, LIVE_DOCUMENTS_FILTER_CAP, withLiveDocuments } from './live-documents';
 import { NotificationService } from '../notification/notification.service';
 import { SupportService } from '../support/support.service';
 import { VerificationService, REJECTION_REASON_CODES } from '../verification/verification.service';
@@ -70,6 +70,7 @@ import { maskPhone } from '../auth/step-up';
 import { maskOwnPhone } from './person-contact';
 import { consoleRoleOf } from '../auth/console-role';
 import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
+import { feeRefundCaseOf, listFeeRefundCases, openFeeRefundCase } from '../billing/fee-refund-case';
 import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
 import {
   approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
@@ -1382,7 +1383,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // lastKnownLat / lastKnownLng never leave the API on a user object — the
     // ONE shared deny-list every auth response already uses.
     // [FOLLOWUPS · follows O-1] The person's number masked; the full one is the audited GET /users/:id/phone.
-    return { success: true, data: maskPersonPage(sanitizeUser({ ...user, addresses })) };
+    // [BUG-HUNT F06] The Profiles card answers from the verdict GO uses, as the lists do.
+    const liveOf = async <T extends { vehicleType: VehicleType; documentsVerified: boolean }>(mover: T | null, kind: 'RIDER' | 'DRIVER') => (
+      mover ? (await withLiveDocuments(app.prisma, [{ ...mover, userId: id }], kind))[0]! : null
+    );
+    const [rider, driver] = await Promise.all([liveOf(user.rider, 'RIDER'), liveOf(user.driver, 'DRIVER')]);
+    return { success: true, data: maskPersonPage(sanitizeUser({ ...user, rider, driver, addresses })) };
   });
 
   // [FOLLOWUPS · follows O-1] The audited door to this person's full number (person-contact.ts): a stated reason
@@ -2112,23 +2118,30 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(type && { riderType: type }),
       ...(status === 'online' && { isOnline: true }),
       ...(status === 'offline' && { isOnline: false }),
-      ...(status === 'verified' && { documentsVerified: true }),
-      ...(status === 'unverified' && { documentsVerified: false }),
     };
     const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
+    // [BUG-HUNT F06] The document filters read the verdict GO uses, never the old flag the Review Center does not set.
+    const newestFirst = [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
+    const matched = status === 'verified' || status === 'unverified'
+      ? await idsByLiveDocuments(app.prisma, await app.prisma.rider.findMany({
+        where, orderBy: newestFirst, take: LIVE_DOCUMENTS_FILTER_CAP,
+        select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+      }), 'RIDER', status === 'verified')
+      : null;
+    const pageIds = matched?.slice(skip, skip + limit);
+
     const [riders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.rider.findMany({
-        where,
+        where: pageIds ? { id: { in: pageIds } } : where,
         include: {
           user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true, status: true } },
           subscription: { select: { id: true, status: true, type: true } },
         },
-        skip,
-        take: limit,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        ...(pageIds ? {} : { skip, take: limit }),
+        orderBy: newestFirst,
       }),
-      app.prisma.rider.count({ where }),
+      matched ? Promise.resolve(matched.length) : app.prisma.rider.count({ where }),
       hiddenWhere ? app.prisma.rider.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
@@ -2192,9 +2205,10 @@ export async function adminRoutes(app: FastifyInstance) {
       profile.userId,
       kind === 'RIDER' ? { vehicleType: profile.vehicleType, kind: 'RIDER' } : { vehicleType: profile.vehicleType },
     );
-    const next = profile.documentsVerified ? 'VERIFIED'
-      : live.allowed ? 'CAN_VERIFY'
-        : live.reason === 'insurance' ? 'NEEDS_INSURANCE' : 'NEEDS_DOCUMENTS';
+    // [BUG-HUNT F06] GO reads the live verdict, so a mover it lets online has nothing left to verify. The old flag only
+    // keeps its one word: verified earlier, and a document has since lapsed.
+    const next = live.allowed || profile.documentsVerified ? 'VERIFIED'
+      : live.reason === 'insurance' ? 'NEEDS_INSURANCE' : 'NEEDS_DOCUMENTS';
     return {
       moverId: profile.id,
       kind,
@@ -2319,23 +2333,30 @@ export async function adminRoutes(app: FastifyInstance) {
       },
       ...(status === 'online' && { isOnline: true }),
       ...(status === 'offline' && { isOnline: false }),
-      ...(status === 'verified' && { documentsVerified: true }),
-      ...(status === 'unverified' && { documentsVerified: false }),
     };
     const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
+    // [BUG-HUNT F06] The document filters read the verdict GO uses, never the old flag the Review Center does not set.
+    const newestFirst = [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
+    const matched = status === 'verified' || status === 'unverified'
+      ? await idsByLiveDocuments(app.prisma, await app.prisma.driver.findMany({
+        where, orderBy: newestFirst, take: LIVE_DOCUMENTS_FILTER_CAP,
+        select: { id: true, userId: true, vehicleType: true, documentsVerified: true },
+      }), 'DRIVER', status === 'verified')
+      : null;
+    const pageIds = matched?.slice(skip, skip + limit);
+
     const [drivers, total, hiddenTestRecords] = await Promise.all([
       app.prisma.driver.findMany({
-        where,
+        where: pageIds ? { id: { in: pageIds } } : where,
         include: {
           user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true, status: true } },
           subscription: { select: { id: true, status: true, type: true } },
         },
-        skip,
-        take: limit,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        ...(pageIds ? {} : { skip, take: limit }),
+        orderBy: newestFirst,
       }),
-      app.prisma.driver.count({ where }),
+      matched ? Promise.resolve(matched.length) : app.prisma.driver.count({ where }),
       hiddenWhere ? app.prisma.driver.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
@@ -6121,6 +6142,47 @@ export async function adminRoutes(app: FastifyInstance) {
       (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
     );
     return { success: true, data: reversalOut(row as never) };
+  });
+
+  // ── [Row 156] A partner asked for a weekly-fee payment back ─────────────
+  //
+  // The ask and its 3 business days (billing/fee-refund-case.ts). It moves no
+  // money and takes no MMG reference; only a REVERSED reversal closes it.
+  app.get('/billing/fee-refund-cases', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { state } = z.object({ state: z.enum(['OPEN', 'REFUNDED']).optional() }).parse(request.query);
+    const rows = await listFeeRefundCases(app.prisma, { tenantId, ...(state ? { state } : {}) });
+    // A partner's payment and what they said, as the payment detail is: every read recorded, ids only, never the words.
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: { queryType: 'REFUND_CASES', matchedIds: rows.map((row) => row.id).join(','), matchedCount: rows.length, stateFilter: state ?? null },
+    });
+    return { success: true, data: rows };
+  });
+
+  app.get('/billing/mmg-checkouts/:id/refund-case', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const row = await feeRefundCaseOf(app.prisma, { tenantId, checkoutId: id });
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: { queryType: 'REFUND_CASE', checkoutId: id, matchedIds: row?.id ?? '', matchedCount: row ? 1 : 0 },
+    });
+    return { success: true, data: row };
+  });
+
+  app.post('/billing/mmg-checkouts/:id/refund-case', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      kind: z.enum(['DUPLICATE', 'MISTAKEN']),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers as never) ?? body.reason ?? '';
+    const row = await openFeeRefundCase(
+      app.prisma,
+      { tenantId, checkoutId: id, kind: body.kind, reason, actorId: request.user.userId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: row };
   });
 
   // "Check with MMG": MMG's lookup settles an open return (proof debits the
