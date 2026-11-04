@@ -1,7 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { hasProviderProfile, restoreSession, sessionProbe } from '@/lib/auth';
+import { restoreSession, sessionProbe } from '@/lib/auth';
+import { isProvider } from '@/lib/partner-profiles';
 import { SignOutButton } from '@/components/sign-out-button';
 import { GUYANA_DIAL_CODE, guyanaLocal } from '@/lib/guyana-phone';
 import { forgetSignedIn, markSignedIn, signedInBefore } from '@/lib/session-hint';
@@ -32,7 +33,7 @@ export async function homeFor(user: Record<string, unknown>): Promise<{ home: st
     return { home: '/portal', label: 'Go to your portal' };
   }
   // [REVIEW-G G3] A self-employed pro holds no partner role: sign-in sends them to their weekly fee, and so does this.
-  if (await hasProviderProfile()) return { home: '/portal/weekly-fee', label: 'Go to your weekly fee' };
+  if (await isProvider()) return { home: '/portal/weekly-fee', label: 'Go to your weekly fee' };
   return { home: '/', label: 'Go to Swift' };
 }
 

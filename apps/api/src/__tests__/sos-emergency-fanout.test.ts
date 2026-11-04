@@ -17,8 +17,8 @@ const alertIds: string[] = [];
 let seq = 0;
 const phone = () => `+${592_707_000_000 + Math.floor(Math.random() * 60_000_000) + (seq += 1)}`;
 
-async function seedActorWithContacts() {
-  const user = await prisma.user.create({ data: { phone: phone(), firstName: 'Rae', lastName: 'A', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date() } });
+async function seedActorWithContacts(firstName = 'Rae') {
+  const user = await prisma.user.create({ data: { phone: phone(), firstName, lastName: 'A', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date() } });
   userIds.push(user.id);
   const verifiedPhone = phone();
   const unverifiedPhone = phone();
@@ -93,6 +93,18 @@ describe('SOS fan-out → emergency contacts', () => {
     expect(receipts.resolvedNotice).toHaveLength(1);
     expect(receipts.resolvedNotice![0]!.ok).toBe(true);
     expect(receipts.contacts).toHaveLength(1); // original fan-out receipts NOT clobbered
+  });
+
+  it('[REVIEW-G5 S4-1] a name GSM-7 cannot carry: the text actually sent still says who, at the alert and at the all-clear', async () => {
+    const { user, verifiedPhone } = await seedActorWithContacts('\u674e\u660e');
+    const alert = await sos.create({ actorUserId: user.id, actorRole: 'CUSTOMER', triggerSource: 'BUTTON', immediate: true, lat: 6.8, lng: -58.15 });
+    alertIds.push(alert.id);
+    const sent = devChannelLog.find((e) => e.channel === 'sms' && e.to === verifiedPhone);
+    expect(sent!.body).toMatch(/^URGENT: Someone you know triggered an emergency SOS on Swift/);
+    resetDevChannelLog();
+    await sos.resolve(alert.id, 'ops-1', 'SAFE_CONFIRMED', 'called back, safe');
+    const allClear = devChannelLog.find((e) => e.channel === 'sms' && e.to === verifiedPhone);
+    expect(allClear!.body).toMatch(/^Update from Swift: the emergency alert involving the person you were alerted about has been closed/);
   });
 
   it('"I\'m safe" does NOT send an all-clear — only ops closing does (coercion doctrine)', async () => {

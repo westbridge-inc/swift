@@ -7,9 +7,10 @@ import { NotificationService, notifyAdmins, tenantOfUser, isReviewTenantId } fro
 import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
-import { stageEscalations, drainSosEscalations } from './sos-escalation';
+import { stageEscalations, drainSosEscalations, SOS_SMS_NAME_MAX } from './sos-escalation';
 import { appendRetrigger } from './sos-retrigger';
 import { acknowledgeOpsAlert } from './ops-alert';
+import { gsm7Name } from '../../utils/sms-text';
 
 // SOS engine — the life-safety state machine (safety spec §4). Server-owned,
 // exactly like the order machine: an explicit transition table, compare-and-set
@@ -81,6 +82,12 @@ export interface SosCreateInput {
    *  emergency (the in-ride SOS button, fired while the rider dials emergency
    *  services — a grace delay there only slows the ops page). */
   immediate?: boolean;
+}
+
+/** [SMS-COST] The text telling an emergency contact the alert was closed. The name travels only as GSM-7 can carry it. */
+export function sosClosedContactText(rawWho: string | null | undefined): string {
+  const who = gsm7Name(rawWho, SOS_SMS_NAME_MAX) || 'the person you were alerted about';
+  return `Update from Swift: the emergency alert involving ${who} has been closed by our safety team. If you're still concerned, please reach out to them directly.`;
 }
 
 export class SosService {
@@ -575,8 +582,8 @@ export class SosService {
     const { getChannels } = await import('../../providers/notifications/channels');
     const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
     const sms = getChannels().sms;
-    const who = authority.who || 'the person you were alerted about';
-    const body = `Update from Swift: the emergency alert involving ${who} has been closed by our safety team. If you're still concerned, please reach out to them directly.`;
+    // [SMS-COST · REVIEW-G4 S3-1] a name GSM-7 cannot carry falls back to words, never to nothing
+    const body = sosClosedContactText(authority.who);
     const notice: Array<{ id: string; ok: boolean }> = [];
     for (const c of contacts) {
       // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.
