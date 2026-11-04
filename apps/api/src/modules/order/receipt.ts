@@ -57,6 +57,11 @@ type ReceiptOrder = {
   fareBreakdown?: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null;
   /** [TAXI multi-stop 8/8] A ride's stops in order (absent for a ride without them). */
   stops?: Array<{ sequence: number; address: string; skipped: boolean }> | null;
+  /** [BUG-HUNT-2 G16] A ride's or a parcel's own facts. A store order leaves them out and its receipt does not change. */
+  orderType?: string | null;
+  pickupAddress?: string | null;
+  deliveryAddress?: string | null;
+  driver?: { firstName: string | null; vehicle: string | null; licensePlate: string | null } | null;
   /** [L02 · row 34] The cash the rider stated at the door, and how far short a
    *  handover was made (the rider bore the difference). */
   doorCashCollectedAmount?: unknown;
@@ -139,8 +144,13 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const shortfall = order.doorCashShortfallAmount == null ? 0 : Number(order.doorCashShortfallAmount);
   const shortCash = cashCaptured && order.paymentMethod !== 'MOBILE_MONEY' && Number.isFinite(shortfall) && shortfall > 0
     && order.doorCashCollectedAmount != null;
-  const paidHow =
-    order.paymentMethod === 'MOBILE_MONEY'
+  const isRide = order.orderType === 'TAXI';
+  const isParcel = order.orderType === 'COURIER';
+  const paidHow = isRide
+    ? (cashCaptured ? 'Paid in cash to your driver' : 'Cash to your driver, not recorded by Swift')
+    : isParcel
+      ? (cashCaptured ? 'Paid in cash to your rider' : 'Cash to your rider, not recorded by Swift')
+      : order.paymentMethod === 'MOBILE_MONEY'
       ? (order.paymentStatus === 'CAPTURED'
         ? 'Paid by MMG — directly to the store'
         : order.paymentStatus === 'CLAIMED'
@@ -206,12 +216,15 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
     ${order.vendor ? `${soldBy(order.vendor, order.seller ?? null)}<br>` : ''}
     ${new Date(order.placedAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })}<br>
     ${esc(paidHow)}
+    ${isRide && order.driver ? `<br>Driver: ${esc(order.driver.firstName ?? 'Your driver')}${order.driver.vehicle ? ` · ${esc(order.driver.vehicle)}` : ''}${order.driver.licensePlate ? ` · ${esc(order.driver.licensePlate)}` : ''}` : ''}
+    ${(isRide || isParcel) && order.pickupAddress ? `<br>From: ${esc(order.pickupAddress)}` : ''}
+    ${(isRide || isParcel) && order.deliveryAddress ? `<br>To: ${esc(order.deliveryAddress)}` : ''}
     ${order.stops && order.stops.length > 0 ? `<br>Stops: ${order.stops.map((st) => `${st.sequence}. ${esc(st.address)}${st.skipped ? ' (skipped)' : ''}`).join(' · ')}` : ''}
   </div>
   <table>
     ${rows}
-    <tr class="totals"><td>Items</td><td class="num">${money(order.subtotalCustomer)}</td></tr>
-    ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery pay for your rider${order.isExpress ? ' (express)' : ''}</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
+    ${isRide ? `<tr class="totals"><td>Fare</td><td class="num">${money(waiting ? waiting.routeFare : order.subtotalCustomer)}</td></tr>` : isParcel ? '' : `<tr class="totals"><td>Items</td><td class="num">${money(order.subtotalCustomer)}</td></tr>`}
+    ${deliveryFee > 0 ? `<tr class="totals"><td>${isParcel ? 'Delivery fee' : 'Delivery pay for your rider'}${order.isExpress ? ' (express)' : ''}</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
     ${distance ? `<tr class="totals"><td>Distance (${esc(distance.sourceLabel)})</td><td class="num">${esc(distance.label)}</td></tr>` : ''}
     ${discount > 0 ? `<tr class="totals"><td>Discount</td><td class="num">−${money(discount)}</td></tr>` : ''}
     ${tip > 0 ? `<tr class="totals"><td>Rider tip</td><td class="num">${money(tip)}</td></tr>` : ''}
@@ -219,8 +232,8 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
     <tr class="grand"><td>Total</td><td class="num">${money(order.totalAmount)}</td></tr>
   </table>
 ${vat ? `  ${vat}\n` : ''}  <div class="foot">
-    Swift charges no commission and never takes custody of order money. Order payment and any
-    delivery-pay handoff happen directly between the parties shown above. Questions? Support
+    ${isRide ? 'Swift charges no commission and never takes custody of the fare. You paid your driver directly.' : isParcel ? 'Swift charges no commission and never takes custody of the fee. You paid your rider directly.' : `Swift charges no commission and never takes custody of order money. Order payment and any
+    delivery-pay handoff happen directly between the parties shown above.`} Questions? Support
     lives in the Swift app.
   </div>
 </div>

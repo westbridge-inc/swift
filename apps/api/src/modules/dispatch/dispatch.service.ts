@@ -1721,10 +1721,10 @@ export class DispatchService {
             .send({
               userId: top.userId,
               type: 'ORDER_UPDATE',
-              title: isTaxi ? '\u{1F695} Someone nearby needs a pickup' : '\u{1F6F5} Order available nearby',
+              title: isTaxi ? '\u{1F695} Someone nearby needs a pickup' : order.orderType === 'COURIER' ? '\u{1F6F5} Parcel available nearby' : '\u{1F6F5} Order available nearby',
               body: isTaxi
                 ? `~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`
-                : `${order.vendor?.name ?? 'A store'} · ~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`,
+                : `${order.vendor?.name ?? 'A parcel to collect'} · ~${Math.round(top.etaMinutes)} min away · ${timeoutSeconds}s to accept`,
               audience: 'earner',
               data: {
                 kind: 'dispatch_offer',

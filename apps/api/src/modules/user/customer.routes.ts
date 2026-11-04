@@ -2781,6 +2781,8 @@ export async function customerRoutes(app: FastifyInstance) {
         vendor: { select: { name: true, addressLine1: true, city: true, phone: true } },
         customer: { select: { firstName: true, lastName: true } },
         items: { select: { name: true, quantity: true, totalCustomer: true, subStatus: true, vatClass: true } },
+        // [BUG-HUNT-2 G16] "The parties shown above" named nobody on a ride.
+        driver: { select: { licensePlate: true, vehicleColor: true, vehicleMake: true, vehicleModel: true, user: { select: { firstName: true } } } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -2800,7 +2802,12 @@ export async function customerRoutes(app: FastifyInstance) {
     const block = order.vendorId ? await publicStorefrontSeller(app.prisma, order.vendorId) : null;
     const seller = block ? { legalName: block.legalName, address: block.address, phone: block.phone } : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}), ...(stops ? { stops } : {}) } as never);
+    const driver = order.driver ? {
+      firstName: order.driver.user?.firstName ?? null,
+      vehicle: [order.driver.vehicleColor, order.driver.vehicleMake, order.driver.vehicleModel].filter(Boolean).join(' ') || null,
+      licensePlate: order.driver.licensePlate,
+    } : null;
+    return renderReceiptHtml({ ...order, driver, seller, ...(fareBreakdown ? { fareBreakdown } : {}), ...(stops ? { stops } : {}) } as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {

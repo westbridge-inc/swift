@@ -173,7 +173,7 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
         }}
       >
         <T variant="label" tone="muted" center>
-          Want to tip {driverName}? Cash at drop-off — 100% theirs, straight to their hand.
+          Want to tip {driverName}? Hand it over in cash — 100% theirs.
         </T>
       </View>
 

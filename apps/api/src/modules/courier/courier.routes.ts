@@ -102,6 +102,17 @@ const collectSchema = z.object({
   outcome: z.enum(['paid', 'refused']),
   gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
 });
+/** [BUG-HUNT-2 G15] Why a parcel is coming back, in the words true for that reason: "we couldn't reach the recipient" was said
+ *  for every reason, measured with "Recipient refused the parcel". Anything else the rider typed stays out of a notice. */
+const PARCEL_RETURN_WHY: Readonly<Record<string, string>> = {
+  'Recipient unreachable': 'We couldn’t reach the recipient.',
+  'Recipient refused the parcel': 'The recipient refused the parcel.',
+  'Wrong or incomplete address': 'The address was wrong or incomplete.',
+};
+export function parcelReturnWhy(reason: string): string {
+  return PARCEL_RETURN_WHY[reason.trim()] ?? 'The rider could not deliver it.';
+}
+
 const returnSchema = z.object({
   reason: z.string().trim().min(1).max(500),
   gps: pointSchema.optional(),
@@ -688,7 +699,7 @@ export default async function courierRoutes(app: FastifyInstance) {
           userId: order.customerId,
           type: 'ORDER_UPDATE',
           title: 'Parcel delivered',
-          body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'} — proof photo captured.`,
+          body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'}. The rider took a proof photo: if there is a problem, contact Swift support and they can check it.`,
           data: { orderId: id, status: 'DELIVERED' },
         }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
       }
@@ -723,7 +734,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Parcel delivered',
-      body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'} — proof photo captured.`,
+      body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'}. The rider took a proof photo: if there is a problem, contact Swift support and they can check it.`,
       data: { orderId: id, status: 'DELIVERED' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
 
@@ -784,7 +795,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Parcel coming back',
-      body: "We couldn't reach the recipient — the parcel is on its way back to you.",
+      body: `${parcelReturnWhy(body.reason)} The parcel is on its way back to you.`,
       data: { orderId: id, status: 'RETURNING' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return notification failed after commit'));
     try {
@@ -881,9 +892,20 @@ export default async function courierRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Parcel returned',
-      body: 'The parcel was returned to you — return proof captured.',
+      // [BUG-HUNT-2 G12] The owner's rule, said out loud: no refund of the fee and no return fee.
+      body: 'The parcel is back with you. The delivery fee stays with the rider, who rode both ways, and there is no return fee. The rider took a proof photo: if there is a problem, contact Swift support.',
       data: { orderId: id, status: 'RETURNED' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return-proof notification failed after commit'));
+    // [BUG-HUNT-2 G12] The rider rode both ways and has the fee in their hand, on no record they can see.
+    await notifications.send({
+      userId: request.user.userId,
+      type: 'ORDER_UPDATE',
+      title: 'Return recorded',
+      body: `${order.orderNumber} is closed. Any fee you collected for it is yours. A returned parcel does not show in Earnings.`,
+      audience: 'earner',
+      data: { orderId: id, status: 'RETURNED' },
+      dedupeKey: `parcel-returned:rider:${id}`,
+    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return-proof rider notice failed after commit'));
     return { success: true, data: courierRiderAnswer(request, updated) };
   });
 }

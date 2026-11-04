@@ -436,6 +436,13 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   </span>
                 </div>
               )}
+              {/* [BUG-HUNT-2 G11] "Proof photo captured", and nobody could open one. These are what support checks. */}
+              {[['Pickup photo', o.courierPickupProofPhotoUrl], ['Door photo', o.courierProofPhotoUrl], ['Return photo', o.courierReturnProofPhotoUrl]].map(([name, url]) => (url ? (
+                <div key={name} className="flex justify-between gap-4">
+                  <span className="mc-muted shrink-0">{name}</span>
+                  <a href={url} target="_blank" rel="noreferrer" className="text-[var(--mc-accent)] font-semibold">Open</a>
+                </div>
+              ) : null))}
               {o.deliveryAddress && !isRide && (
                 <div className="flex justify-between gap-4">
                   <span className="mc-muted shrink-0">Address</span>

@@ -710,7 +710,7 @@ function TaxiBooking({ navigation }: any) {
                     </T>
                   ) : (
                     <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                      Fare estimate · pay the driver cash or MMG at drop-off{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
+                      Your fare · pay the driver cash or MMG at drop-off{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
                     </T>
                   )}
                   {waitingTerms ? (

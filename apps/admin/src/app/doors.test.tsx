@@ -203,6 +203,17 @@ describe('[MC-AD5] an MMG payment dispute', () => {
   });
 });
 
+describe('[G11] the proof photos', () => {
+  it('support can open each one there is, and is shown no empty line', async () => {
+    serveOrder(orderOf({ orderType: 'COURIER', mmgClaimMismatchAt: null, courierProofPhotoUrl: 'https://cdn.example/door.jpg', courierReturnProofPhotoUrl: null, courierPickupProofPhotoUrl: 'https://cdn.example/pickup.jpg' }));
+    detail();
+    await screen.findByText('Door photo');
+    expect(screen.getByText('Pickup photo').parentElement!.querySelector('a')!.getAttribute('href')).toBe('https://cdn.example/pickup.jpg');
+    expect(screen.getByText('Door photo').parentElement!.querySelector('a')!.getAttribute('href')).toBe('https://cdn.example/door.jpg');
+    expect(screen.queryByText('Return photo')).toBeNull();
+  });
+});
+
 describe('reviewed door recovery paths', () => {
   it('shows a release with failed dispatch and offers a dispatch retry', async () => {
     const fetchMock = serveOrders({ body: { success: true, data: [heldOrder] } }, (request) => request.url.pathname.endsWith('/retry-dispatch')

@@ -1409,6 +1409,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       await closePendingStaffInvites(tx, vendorId, current.userId, new Date());
       await tx.vendorStaff.delete({ where: { id: current.id } });
     });
+    // [BUG-HUNT-2 G19] A removed team member found out when the screen stopped working.
+    const removedFrom = (await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true } }))?.name ?? 'the store';
+    await notifications.send({ userId: existing.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Removed from a store team', body: `You were removed from the team at ${removedFrom}.`, audience: 'customer', data: { vendorId } }).catch(() => undefined);
     // [Owner ruling #15] Out of the live room of the store at once, on every
     // API node: a removed member stops hearing it now, not at the next event
     // (the store-room gate would refuse them then anyway).
