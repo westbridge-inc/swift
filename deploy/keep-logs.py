@@ -18,6 +18,7 @@ stays 0. Standard library only.
 import gzip
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -43,7 +44,8 @@ SCRUBS = (
     (re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+'), 'Bearer [token]'),
     # A URL's query, and a bare path's: whatever follows the ? up to the next space or quote.
     (re.compile(r'(?<=[A-Za-z0-9_/.~%-])\?[^\s"\'`<>]*'), '?[query]'),
-    (re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'), '[email]'),
+    # {1,64}, the longest local part an address may have: unbounded, one long line costs n squared here.
+    (re.compile(r'[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'), '[email]'),
     (re.compile(r'\+\d[\d\s-]{7,16}\d'), '[phone]'),
     (re.compile(r'(?<![\d.])592[\s-]?\d{3}[\s-]?\d{4}(?!\d)'), '[phone]'),
     # A coordinate field in a JSON line, then a bare "6.80, -58.15" pair (a routing URL carries those).
@@ -130,6 +132,8 @@ def prune(directory: Path, wall=time.time) -> None:
 
 
 def main() -> int:
+    # The deploy's ceiling (timeout 180): leave through keep_service's finally, so a killed run keeps nothing.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         directory = Path(os.environ.get('SWIFT_KEPT_LOGS_DIR') or Path.home() / 'kept-logs')
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)

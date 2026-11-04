@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -98,6 +99,16 @@ def kept_text(directory: Path, service: str) -> str:
 
 
 class Scrub(unittest.TestCase):
+    def test_one_long_run_of_address_characters_costs_a_fraction_of_a_second(self):
+        # n squared before the local part had its limit: 13 s for this line, about 15 minutes for 1 MiB.
+        started = time.monotonic()
+        self.assertEqual(keep_logs.scrub_line('a' * 131_072), 'a' * 131_072)
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_the_longest_local_part_an_address_may_have_is_still_an_address(self):
+        local = 'a' * 64
+        self.assertEqual(keep_logs.scrub_line(f'to {local}@example.gy now'), 'to [email] now')
+
     def test_each_kind_goes_and_the_line_stays_readable(self):
         for raw, gone, says in [
             (f'to {PHONE} now', PHONE, '[phone]'),
@@ -299,6 +310,24 @@ class Bounded(unittest.TestCase):
         self.assertFalse(partial.exists())
 
 
+class KilledByTheCeiling(unittest.TestCase):
+    def test_a_timeout_kill_leaves_nothing_behind_and_says_so_by_its_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            env = fake_docker(directory, logs='printf "%s\\n" "$FIXTURE_LINES"; exec sleep 30')
+            run = subprocess.Popen(['python3', str(DEPLOY / 'keep-logs.py')], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.addCleanup(run.kill)
+            kept = directory / 'kept'
+            deadline = time.monotonic() + 20
+            while not (kept.is_dir() and list(kept.glob('.keep-*'))) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(len(list(kept.glob('.keep-*'))), 1, 'the run never started on a file')
+            run.send_signal(signal.SIGTERM)
+            run.communicate(timeout=10)
+            self.assertEqual(run.returncode, 143)
+            self.assertEqual(list(kept.iterdir()), [], 'a killed run left a file')
+
+
 class Wired(unittest.TestCase):
     def test_pilot_up_keeps_the_logs_before_it_recreates_anything_that_serves(self):
         text = (DEPLOY / 'pilot-up.sh').read_text()
@@ -309,6 +338,15 @@ class Wired(unittest.TestCase):
     def test_a_failed_keep_never_stops_a_deploy(self):
         line = next(l for l in (DEPLOY / 'pilot-up.sh').read_text().splitlines() if 'keep-logs.py"' in l)
         self.assertRegex(line, r'\|\| echo ')
+
+    def test_keeping_the_logs_cannot_stretch_the_outage_past_its_ceiling(self):
+        # The API is down while this runs: the ceiling holds even where its own watchdog cannot reach.
+        line = next(l for l in (DEPLOY / 'pilot-up.sh').read_text().splitlines() if 'keep-logs.py"' in l)
+        self.assertTrue(line.startswith('timeout 180 python3 '), line)
+
+    def test_it_runs_after_the_stop_so_the_last_lines_before_it_are_kept(self):
+        text = (DEPLOY / 'pilot-up.sh').read_text()
+        self.assertLess(text.index('stop api worker'), text.index('python3 "$HERE/keep-logs.py"'))
 
     def test_compose_caps_the_live_log_of_every_app_service(self):
         text = (DEPLOY / 'docker-compose.yml').read_text()

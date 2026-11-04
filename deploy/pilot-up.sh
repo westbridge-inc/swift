@@ -799,7 +799,7 @@ fi
 
 # [FIXES-4] The recreates below throw the old containers' logs away: keep them
 # first, scrubbed and bounded. It warns on any failure and never stops a deploy.
-python3 "$HERE/keep-logs.py" || echo "keep-logs did not run; the old logs go with their containers" >&2
+timeout 180 python3 "$HERE/keep-logs.py" || echo "keep-logs did not run; the old logs go with their containers" >&2
 "${COMPOSE[@]}" up -d --no-deps --force-recreate api worker
 if [ "$NO_PUBLIC" -eq 1 ]; then
   # Ready inside the private network: the API container is healthy, the
