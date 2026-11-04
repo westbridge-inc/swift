@@ -15,6 +15,7 @@ import { rateLimitKey } from '../utils/rate-limit-key';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { AdCheckoutService } from '../modules/ads/checkout.service';
+import { AdsRefundService } from '../modules/ads/refund.service';
 import { BookingService, lockCampaign } from '../modules/ads/booking.service';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -684,6 +685,86 @@ describe('A5: a payment that outruns its slots', () => {
     expect(notice?.body).toContain('owed back');
     expect(notice?.body).toContain('do not pay again');
     expect(notice?.body).not.toContain('review');
+  });
+
+  /** A page paid late, after its hold ran out and the campaign checked out again: the same week, the same booking row. */
+  async function lateOnARetakenSlot(priceThen?: number) {
+    const f = await invoiced();
+    const first = await open(f);
+    await raw.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status: 'EXPIRED', reason: 'NO_REPLY' } });
+    await app.prisma.adBooking.updateMany({ where: { campaignId: f.campaign.id }, data: { reservedUntil: new Date(Date.now() - MIN) } });
+    await new BookingService(app.prisma).releaseExpired();
+    expect((await invoiceOf(f.invoice.id)).status).toBe('VOID');
+    if (priceThen) await raw.adPlacement.update({ where: { id: f.placement.id }, data: { weeklyPrice: priceThen } });
+    const { invoice: second } = await new AdCheckoutService(app.prisma, app.io).checkout(f.campaign.id, 'MOCK');
+    const [booking] = await app.prisma.adBooking.findMany({ where: { campaignId: f.campaign.id } });
+    expect(booking!.status).toBe('RESERVED');
+    const txn = tx('LATEFIRST');
+    mmgPaid(first.row, txn, AMOUNT);
+    await ret({ token: replyOf(first.row, '0', txn) });
+    expect((await invoiceOf(f.invoice.id)).status).toBe('PAID');
+    const [intent] = await app.prisma.adRefundIntent.findMany({ where: { campaignId: f.campaign.id, reason: 'LATE_CAPTURE' } });
+    const inventory = () => app.prisma.adInventoryWeek.findFirstOrThrow({ where: { placementId: f.placement.id, weekStart: f.campaign.startWeek } }).then((w) => w.booked);
+    const refund = () => new AdsRefundService(app.prisma, app.io).drainOutbox({ intentIds: [intent!.id] });
+    const paySecond = async () => {
+      const page = await open({ invoice: second, owner: f.owner });
+      const paid = tx('SECONDPAGE');
+      mmgPaid(page.row, paid, Number(second.amount));
+      await ret({ token: replyOf(page.row, '0', paid) });
+    };
+    return { ...f, second, booking: booking!, intent: intent!, inventory, refund, paySecond };
+  }
+  const expectBookedAndOwed = async (l: Awaited<ReturnType<typeof lateOnARetakenSlot>>, owed: number) => {
+    const late = await invoiceOf(l.invoice.id);
+    expect([late.status, Number(late.refundedAmount)]).toEqual(['REFUNDED', owed]);
+    const second = await invoiceOf(l.second.id);
+    expect([second.status, Number(second.refundedAmount)]).toEqual(['PAID', 0]);
+    expect((await app.prisma.adBooking.findUniqueOrThrow({ where: { id: l.booking.id } })).status).toBe('CONFIRMED');
+    expect(await l.inventory()).toBe(1);
+    expect((await campaignOf(l.campaign.id)).status).toBe('PENDING_REVIEW');
+  };
+
+  it('its refund never takes the slot from the invoice that paid for it: the second payment first, then the refund', async () => {
+    const l = await lateOnARetakenSlot();
+    await l.paySecond();
+    await l.refund();
+    await expectBookedAndOwed(l, AMOUNT);
+  });
+
+  it('its refund never takes the slot from the invoice that paid for it: the refund first, then the second payment', async () => {
+    const l = await lateOnARetakenSlot();
+    await l.refund();
+    expect((await app.prisma.adBooking.findUniqueOrThrow({ where: { id: l.booking.id } })).status).toBe('RESERVED');
+    expect(await l.inventory()).toBe(1);
+    await l.paySecond();
+    await expectBookedAndOwed(l, AMOUNT);
+  });
+
+  it('what is owed back is what that payment was, whatever the slot costs now', async () => {
+    const l = await lateOnARetakenSlot(7000);
+    await l.paySecond();
+    await l.refund();
+    await expectBookedAndOwed(l, AMOUNT);
+    expect((await app.prisma.adRefundIntent.findUniqueOrThrow({ where: { id: l.intent.id } })).amountMinor).toBe(BigInt(AMOUNT * 100));
+    // The row belongs to the invoice that holds it now: the refund does not name it.
+    expect(await raw.adRefundItem.count({ where: { refundIntentId: l.intent.id } })).toBe(0);
+  });
+
+  it('even an item naming the row moves no booking: a late capture holds nothing', async () => {
+    const l = await lateOnARetakenSlot();
+    await raw.adRefundItem.create({ data: { tenantId, refundIntentId: l.intent.id, campaignId: l.campaign.id, bookingId: l.booking.id, kind: 'REFUND', amountMinor: BigInt(AMOUNT * 100) } });
+    await l.paySecond();
+    await l.refund();
+    await expectBookedAndOwed(l, AMOUNT);
+  });
+
+  it('it is owed back once: a replayed drain or executor moves nothing more', async () => {
+    const l = await lateOnARetakenSlot();
+    await l.refund();
+    expect((await new AdsRefundService(app.prisma, app.io).executeIntent(l.intent.id)).executed).toBe(false);
+    await raw.adRefundIntent.update({ where: { id: l.intent.id }, data: { status: 'PROCESSING' } });
+    await new AdsRefundService(app.prisma, app.io).executeIntent(l.intent.id);
+    expect(Number((await invoiceOf(l.invoice.id)).refundedAmount)).toBe(AMOUNT);
   });
 });
 
