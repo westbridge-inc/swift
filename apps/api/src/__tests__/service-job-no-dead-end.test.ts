@@ -32,6 +32,7 @@ let adminToken = '';
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'service-job-no-dead-end');
 let hour = 0;
 const people: string[] = [];
+const markets: string[] = [];
 
 async function person(roles: UserRole[] = ['CUSTOMER'], extra: Record<string, unknown> = {}) {
   const role = roles[0]!;
@@ -123,6 +124,7 @@ afterAll(async () => {
     await app.prisma.admin.deleteMany({ where: { userId: { in: people } } });
     await app.prisma.customer.deleteMany({ where: { userId: { in: people } } });
     await app.prisma.user.deleteMany({ where: { id: { in: people } } });
+    await app.prisma.tenant.deleteMany({ where: { id: { in: markets } } });
   });
   await app.close();
 });
@@ -252,6 +254,7 @@ describe('another market', () => {
   it('its jobs cannot be listed or closed from here', async () => {
     const tenantId = `job-door-${nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, '0')}`;
     await system(() => app.prisma.tenant.create({ data: { id: tenantId, name: 'Other market', slug: tenantId } }));
+    markets.push(tenantId);
     const customer = await person(['CUSTOMER'], { tenantId });
     const other = await person(['CUSTOMER'], { tenantId });
     const provider = await system(() => app.prisma.serviceProvider.create({ data: { userId: other.userId, trade: 'carpenter', isVerified: true } }));
