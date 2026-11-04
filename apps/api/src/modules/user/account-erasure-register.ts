@@ -139,6 +139,7 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'SensitiveReadLog.actorUserId': 'access to production data is audit-logged (Privacy Policy §7)',
   'SensitiveReadLog.subjectId': 'access to production data is audit-logged (Privacy Policy §7)',
   'AdCreative.reviewedByUserId': 'staff work: the reviewer of an ad (administrative trail, Privacy Policy §7)',
+  'FeeRefundCase.openedByUserId': 'staff work: who recorded a partner\'s ask for a weekly-fee payment back (administrative trail, Privacy Policy §7)',
   'FxRate.setByUserId': 'staff work: who set a rate (administrative trail, Privacy Policy §7)',
   'PricingConfigVersion.createdBy': 'staff work: who published a price version (administrative trail, Privacy Policy §7)',
   'PromoTerms.createdBy': 'staff work: who published promo terms (administrative trail, Privacy Policy §7)',

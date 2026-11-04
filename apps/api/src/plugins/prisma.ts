@@ -100,6 +100,7 @@ const TENANT_QUERY_EXTENSIONS = {
   mmgCheckoutIntent: scoped, mmgCheckoutKey: scoped, mmgCheckoutObservation: scoped, mmgCheckoutPart: scoped,
   // [MMG REVERSAL] A fee payment returned to the payer: their operator's money.
   mmgFeeReversal: scoped,
+  feeRefundCase: scoped,
   billingDunningClock: scoped, billingObligationTransition: scoped, paymentConfirmationHold: scoped, billingFeeNotice: scoped, billingNoticeHandoff: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
   moverFeeAuthority: scoped, moverFeeSubscription: scoped,

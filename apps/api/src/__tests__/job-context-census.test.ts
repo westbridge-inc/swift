@@ -27,7 +27,7 @@ const CROSS_TENANT = [
   'ads-lifecycle', 'ads-release-expired', 'ads-stats-rollup', 'ads-weekly-report', 'agent-cash-sla', 'algo-decision-retention',
   'audit-chain-anchor', 'audit-chain-verify', 'backup-freshness', 'erasure-ledger-watch', 'batching-shadow-scan', 'billing-fx-notices', 'billing-invariants',
   'booking-reminders', 'checkout-outbox', 'collusion-affinity-scan', 'compliance-sample', 'convert-trials', 'cw-scan',
-  'discovery-backfill', 'discovery-derivation', 'eta-pad-weekly', 'evidence-retention', 'expiry-sweep', 'flag-ratings',
+  'discovery-backfill', 'discovery-derivation', 'eta-pad-weekly', 'evidence-retention', 'expiry-sweep', 'fee-refund-case-sweep', 'flag-ratings',
   'guardian-sweep', 'handover-claims-reconcile', 'image-policy-sweep', 'incident-pattern-scan', 'incident-sla-watch',
   'incident-weekly-digest', 'liveness-midshift', 'malware-scanner-watch', 'mmg-accept-expiry', 'mmg-link-apply', 'mover-revocation-outbox', 'poll-mmg-billing',
   'prep-shadow-grade', 'prep-stats-nightly', 'process-billing', 'process-settlements', 'promote-sos-grace',

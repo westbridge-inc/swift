@@ -488,6 +488,7 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'CashHandoverEvidence.customerId': { reason: 'OTHER_PEOPLE', note: 'the cash handover record a mover filed for an order of yours' },
   'Admin.userId': { reason: 'STAFF_WORK', note: 'your Swift staff permissions' },
   'AdCreative.reviewedByUserId': { reason: 'STAFF_WORK', note: 'ad reviews done as staff' },
+  'FeeRefundCase.openedByUserId': { reason: 'STAFF_WORK', note: 'weekly-fee refund cases recorded as staff' },
   'AdRefundIntent.requestedByUserId': { reason: 'STAFF_WORK', note: 'ad refunds asked for on behalf of a business' },
   'AdsAuditLog.actorUserId': { reason: 'STAFF_WORK', note: 'changes made to the ads of a business' },
   'AuditChainEntry.actorId': { reason: 'STAFF_WORK', note: 'the tamper-evident log of document decisions made as staff' },

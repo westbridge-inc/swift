@@ -4050,6 +4050,7 @@ model MmgCheckoutIntent {
   keys                  MmgCheckoutKey[]
   /// [MMG REVERSAL] Attempts to return this payment to the partner (one live at a time).
   reversals             MmgFeeReversal[]
+  refundCase            FeeRefundCase?
   confirmationHold      PaymentConfirmationHold?
   /// [ENTERPRISE · E1] A chain checkout's branches: who it pays and how much of the one MMG payment each gets.
   parts                 MmgCheckoutPart[]
@@ -4070,6 +4071,40 @@ model MmgCheckoutIntent {
 /// MMG is asked; the fee wallet is debited exactly once, and only after MMG's
 /// own lookup proves the reversal. A lost or unclear answer is HELD for a
 /// person, visible and paged, never guessed. One live reversal per payment.
+/// [Row 156 · owner 1 Oct 2026] A partner asked for a weekly-fee payment back: a duplicate or a mistaken one.
+/// This is the ask and its clock, and it moves no money. The money goes through MmgFeeReversal, and only a
+/// REVERSED reversal of this very payment closes the case (a database trigger holds that).
+model FeeRefundCase {
+  id             String            @id @default(cuid())
+  tenantId       String
+  subscriptionId String
+  /// One case per payment, ever.
+  checkoutId     String            @unique
+  checkout       MmgCheckoutIntent @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
+  /// DUPLICATE | MISTAKEN
+  kind           String
+  /// What the partner said, in the words of the staff member who recorded it (ADM-006).
+  reason         String
+  openedByUserId String
+  /// The whole payment, frozen when the ask was recorded (MMG returns a payment in full only).
+  amount         Decimal           @db.Decimal(12, 2)
+  currencyCode   String            @db.Char(3)
+  /// The end of the third Monday-to-Friday after the ask, Guyana time. There is no holiday list, so this only
+  /// ever falls early, never late.
+  dueBy          DateTime
+  /// OPEN | REFUNDED. Forward only (database trigger).
+  state          String            @default("OPEN")
+  /// The REVERSED reversal that closed the case.
+  reversalId     String?           @unique
+  refundedAt     DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@index([tenantId])
+  @@index([state, dueBy])
+  @@map("fee_refund_cases")
+}
+
 model MmgFeeReversal {
   id                String            @id @default(cuid())
   tenantId          String
