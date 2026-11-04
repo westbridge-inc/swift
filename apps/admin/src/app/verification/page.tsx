@@ -13,7 +13,7 @@ import { CustomerIdRetired } from '@/components/verification/CustomerIdRetired';
 import { approveDoc, rejectDoc, errorCode, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { HELD_FOR_ORDERING_DAY, heldForOrderingDayLine, REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 import { label } from '@/lib/labels';
 import { gyDate, gyDateTime, gyTodayYmd } from '@/lib/dates';
 
@@ -57,6 +57,7 @@ export default function VerificationPage() {
   const [role, setRole] = useState('');
   const [type, setType] = useState('');
   const [age, setAge] = useState('');
+  const [heldOnly, setHeldOnly] = useState(false);
   const [now, setNow] = useState(Date.now);
   const [applicant, setApplicant] = useState<Applicant | null>(null);
   const [selected, setSelected] = useState<ReviewDocument | null>(null);
@@ -111,7 +112,8 @@ export default function VerificationPage() {
     const q = search.trim().toLowerCase();
     return (!q || `${a.name} ${a.phone}`.toLowerCase().includes(q)) &&
       (!age || (a.oldest > 0 && now - a.oldest >= Number(age) * 3_600_000)) &&
-      a.documents.some((d) => (!role || d.role === role) && (!type || d.docType === type));
+      a.documents.some((d) => (!role || d.role === role) && (!type || d.docType === type)) &&
+      (!heldOnly || a.documents.some((d) => d.approvalHeldAt));
   });
   // [ADMIN-AUDIT S2-2] The server's answer to each decision made on this page, by document id. Until the
   // re-reads land, the queue still lists a decided document as waiting: its chip shows the answer instead,
@@ -218,7 +220,11 @@ export default function VerificationPage() {
         ...(needsOwnName ? { ownNameConfirmed } : {}),
       }, note) : rejectDoc(doc.id, note, code as RejectionReasonCode);
     },
-    onError: (error) => setMutationError(error),
+    onError: (error) => {
+      setMutationError(error);
+      // [BUG-HUNT F23] A held paper now carries its marker: the queue shows it without a reload.
+      if (errorCode(error) === 'PARTNER_APPROVAL_HELD') void client.invalidateQueries({ queryKey: ['verification'] });
+    },
     onSuccess: (result, variables) => {
       const outcome = result?.data?.status;
       setNotice(outcome === 'PENDING'
@@ -277,7 +283,7 @@ export default function VerificationPage() {
   const vehicle = profile.data?.data?.driver ?? selected?.user?.driver;
   const rider = profile.data?.data?.rider;
   const businesses: { id?: string; name: string }[] = profile.data?.data?.vendorOwner?.vendors ?? [];
-  const clearFilters = () => { setSearch(''); setRole(''); setType(''); setAge(''); };
+  const clearFilters = () => { setSearch(''); setRole(''); setType(''); setAge(''); setHeldOnly(false); };
   return <div className="mc-page"><div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
     <div inert={decision ? true : undefined}>
       <header className="rc-page-heading"><p>Review the evidence and record the decision. Oldest submissions first.</p></header>
@@ -300,6 +306,7 @@ export default function VerificationPage() {
           <label>Applicant role<select aria-label="Applicant role" value={role} onChange={(e) => setRole(e.target.value)}><option value="">All roles</option>{[...new Set(['CUSTOMER', ...(queue.data ?? []).map((d) => d.role)])].sort().map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}</select></label>
           <label>Document type<select aria-label="Document type" value={type} onChange={(e) => setType(e.target.value)}><option value="">All documents</option>{[...new Set((queue.data ?? []).map((d) => d.docType))].sort().map((t) => <option key={t} value={t}>{docLabel(t)}</option>)}</select></label>
           <label>Waiting time<select aria-label="Waiting time" value={age} onChange={(e) => setAge(e.target.value)}><option value="">Any age</option><option value="24">Over 24 hours</option><option value="72">Over 3 days</option><option value="168">Over 7 days</option></select></label>
+          <label><input type="checkbox" checked={heldOnly} onChange={(e) => setHeldOnly(e.target.checked)} /> {HELD_FOR_ORDERING_DAY}</label>
           <button onClick={clearFilters}>Clear filters</button>
         </div>
         {/* [DOC-SECURITY G3] The queue is a document reviewer's read: a refusal says so, it is not a failed load. */}
@@ -313,6 +320,7 @@ export default function VerificationPage() {
               <td><strong>{a.name}</strong><small>{maskedPhone(a.phone)}</small></td>
               <td><span>{[...new Set(a.documents.map((d) => roleLabel(d.role)))].join(', ')}</span><small>{a.documents.length} {a.documents.length === 1 ? 'document' : 'documents'} · {a.documents.map((d) => docLabel(d.docType)).join(', ')}</small>
                 {/* [MC-AD1] a re-submission or a renewal is marked; a first upload is not */}
+                {a.documents.some((d) => d.approvalHeldAt) && <span className="rc-chip rc-chip-renewal">{HELD_FOR_ORDERING_DAY}</span>}
                 {a.documents.filter((d) => d.previousDecision).map((d) => <span key={d.id} className={`rc-chip rc-chip-${d.previousDecision?.kind === 'RENEWAL' ? 'renewal' : 'resubmitted'}`}>{resubmissionLabel(d)}{d.previousDecision?.kind === 'RESUBMITTED_AFTER_REJECTION' && `: ${d.previousDecision.reviewNote || 'No reason recorded'}`}</span>)}</td>
               <td><time dateTime={a.oldest ? new Date(a.oldest).toISOString() : undefined}>{waitingSince(a.oldest, now)}</time></td>
               <td><button className="rc-primary" onClick={() => openApplicant(a)}>Review</button></td>
@@ -336,6 +344,7 @@ export default function VerificationPage() {
           </nav>
           <div className="rc-review-body">
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
+            {heldForOrderingDayLine(selected) && <aside role="note" aria-label={HELD_FOR_ORDERING_DAY} className="rc-previous"><strong>{HELD_FOR_ORDERING_DAY}</strong><span>{heldForOrderingDayLine(selected)}</span></aside>}
             {selected.previousDecision && <aside role="note" aria-label="Earlier decision" className="rc-previous">
               <strong>{resubmissionLabel(selected)}</strong>
               <span>{previousDecisionLine(selected.previousDecision)}</span>

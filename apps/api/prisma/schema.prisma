@@ -703,6 +703,10 @@ model VerificationDocument {
   reviewedBy           String?
   reviewNote           String?
   reviewedAt           DateTime?
+  /// [BUG-HUNT F23] A reviewer checked this paper and it is the last one a partner needs: it waits for ordering day
+  /// (verification/approval-brake.ts). Who and when, so nobody checks it twice. Cleared when it is approved.
+  approvalHeldAt       DateTime?
+  approvalHeldBy       String?
   /// Insurance 5-point manual check (spec §3.4) — captured when an admin reviews
   /// a hire-insurance document. The taxi go-live gate requires HIRE + confirmed.
   insurerName          String?
