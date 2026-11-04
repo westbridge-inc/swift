@@ -793,7 +793,8 @@ describe('A6: a page nobody answered', () => {
 
   it('with no confirmed payment to prove a read with, a page waits as long as the checks would have taken, then goes to a person', async () => {
     const operator = `adread-${nanoid(8)}`;
-    await raw.tenant.create({ data: { id: operator, name: 'New operator', slug: operator, isActive: true } });
+    // Not active: the fixtures stay in place, and a second active operator would change other suites' public catalogue.
+    await raw.tenant.create({ data: { id: operator, name: 'New operator', slug: operator, isActive: false } });
     const owner = await makeUser();
     const advertiser = await raw.advertiser.create({ data: { tenantId: operator, companyName: `New Co ${nanoid(5)}`, industry: 'RETAIL', contactName: 'C', contactEmail: 'c@x.gy', contactPhone: '+5926000000', createdByUserId: owner.userId, status: 'APPROVED' } });
     const placement = await raw.adPlacement.create({ data: { tenantId: operator, key: `new_${nanoid(6)}`, name: 'New', tier: 3, mediaKind: 'IMAGE', weeklyPrice: AMOUNT, slotsPerWeek: 6 } });

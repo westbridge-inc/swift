@@ -95,6 +95,8 @@ afterAll(async () => {
   }
   await logins?.cleanup();
   await owner.adInvoice.deleteMany({ where: { number: { in: [numberOf(SEEN), numberOf(SEEN + 1)] } } });
+  // The fixtures stay in place, and a second active operator would change other suites' public catalogue.
+  await owner.tenant.update({ where: { id: OTHER_OPERATOR }, data: { isActive: false } });
   await owner.$disconnect();
 });
 
