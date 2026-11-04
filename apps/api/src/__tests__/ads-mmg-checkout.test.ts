@@ -836,7 +836,7 @@ describe('A8: the week after an automatic close', () => {
   });
 
   /** A page that ran out unanswered, closed as not paid on MMG's records, read and proven healthy. */
-  async function closed() {
+  async function closed(closedAt = new Date()) {
     const control = await invoiced();
     const paid = await open(control);
     const txn = tx('CONTROL');
@@ -845,7 +845,6 @@ describe('A8: the week after an automatic close', () => {
     const f = await invoiced();
     const page = await open(f);
     await raw.mmgCheckoutIntent.update({ where: { id: page.ref }, data: { expiresAt: new Date(Date.now() - NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS - 5 * MIN) } });
-    const closedAt = new Date();
     await service.pollIntents(closedAt);
     const row = await intentOf(page.ref);
     expect([row.status, row.reason]).toEqual(['NOT_PAID', NO_REPLY_CLOSED_REASON]);
@@ -905,10 +904,10 @@ describe('A8: the week after an automatic close', () => {
     expect((await open(f)).ref).not.toBe(f.page.ref);
   });
 
-  it('the week is the close\'s: its last hour is read, and a record after it is not this watch\'s', async () => {
-    const f = await closed();
+  it('the week is the close\'s, however long after the page that was: its last hour is read, and a record after it is not this watch\'s', async () => {
+    const f = await closed(later(new Date(), 2 * DAY));
     history.holds(tx('LASTHOUR'), AMOUNT, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(later(f.closedAt, AUTO_CLOSE_WATCH_MS - 10 * MIN)) });
-    const g = await closed();
+    const g = await closed(f.closedAt);
     history.holds(tx('AFTERTHEWEEK'), AMOUNT, { external_id: g.page.row.merchantTransactionId, modificationDate: gyStamp(later(g.closedAt, AUTO_CLOSE_WATCH_MS + HOUR)) });
     for (let i = 0; i < 40; i += 1) await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + DAY));
     expect((await intentOf(f.page.ref)).reason).toBe(AD_LATE_PAYMENT_LIKELY);
