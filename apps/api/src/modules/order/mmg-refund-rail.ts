@@ -232,9 +232,9 @@ export async function openMmgRefundOnReturn(tx: Tx, orderId: string, actorId: st
   if (order.mmgAttestedAmount === null) {
     const ticket = await openRefundCase(tx, {
       userId: order.customerId, orderId, subject: MMG_RETURN_NO_FIGURE_SUBJECT,
-      message: `Order ${order.orderNumber} came back after it was marked paid by MMG, and no amount is on record: the store never stated what it received. Check the MMG records with the store and the customer. No refund has been recorded.`,
+      message: returnCheckingLine(order.orderNumber),
     });
-    return { kind: 'NO_FIGURE', ticketId: ticket.id, orderId, orderNumber: order.orderNumber, tenantId: order.tenantId };
+    return { kind: 'NO_FIGURE', ticketId: ticket.id, orderId, orderNumber: order.orderNumber, tenantId: order.tenantId, customerId: order.customerId };
   }
   const amount = mmgRefundRemainder(order.mmgAttestedAmount, held);
   if (!amount.gt(0)) return null;
@@ -249,11 +249,14 @@ export async function openMmgRefundOnReturn(tx: Tx, orderId: string, actorId: st
 }
 
 export const MMG_RETURN_REFUND_REASON = 'The order came back to the store after the customer paid by MMG.';
-export const MMG_RETURN_NO_FIGURE_SUBJECT = 'Paid MMG order came back: no amount on record';
+// A support ticket is filed under its customer and shows in their Get Help: its subject and message are for them to read.
+// What staff need goes on the page to staff (tellOfReturnRefund).
+export const MMG_RETURN_NO_FIGURE_SUBJECT = 'Checking your MMG payment for a returned order';
+const returnCheckingLine = (orderNumber: string): string => `Your order ${orderNumber} went back to the store. Swift support is checking your MMG payment and will contact you.`;
 
 export type ReturnOutcome =
   | { kind: 'OWED'; obligationId: string; orderId: string; orderNumber: string; customerId: string; vendorId: string; amount: Prisma.Decimal; dueAt: Date }
-  | { kind: 'NO_FIGURE'; ticketId: string; orderId: string; orderNumber: string; tenantId: string }
+  | { kind: 'NO_FIGURE'; ticketId: string; orderId: string; orderNumber: string; tenantId: string; customerId: string }
   | null;
 
 // ─── The words ──────────────────────────────────────────────────────────────
@@ -364,11 +367,17 @@ export async function customerMmgRefund(prisma: PrismaClient, orderId: string, s
 /** [BUG-HUNT-2 G22] Both sides read what the return left owing, once each, after the commit. The order screens say it too. */
 export async function tellOfReturnRefund(prisma: PrismaClient, notifications: NotificationService, refund: NonNullable<ReturnOutcome>): Promise<void> {
   if (refund.kind === 'NO_FIGURE') {
-    await notifyAdmins(prisma, notifications, {
-      tenantId: refund.tenantId, title: 'Paid MMG order came back, no amount known',
-      body: `Order ${refund.orderNumber}: it was marked paid by MMG and no amount is on record. A person must check it.`,
-      data: { kind: 'support_ticket', ticketId: refund.ticketId, orderId: refund.orderId },
-    });
+    await Promise.all([
+      notifyAdmins(prisma, notifications, {
+        tenantId: refund.tenantId, title: 'Paid MMG order came back, no amount known',
+        body: `Order ${refund.orderNumber} came back after it was marked paid by MMG, and no amount is on record: the store never stated what it received. Check the MMG records with the store and the customer. No refund has been recorded.`,
+        data: { kind: 'support_ticket', ticketId: refund.ticketId, orderId: refund.orderId },
+      }),
+      notifications.send({
+        userId: refund.customerId, type: 'ORDER_UPDATE', audience: 'customer', title: 'Order returned', body: returnCheckingLine(refund.orderNumber),
+        data: { orderId: refund.orderId, kind: 'mmg_refund_checking' }, dedupeKey: `mmg-refund-checking:${refund.ticketId}`,
+      }),
+    ]);
     return;
   }
   const store = await prisma.vendor.findUnique({ where: { id: refund.vendorId }, select: { name: true, owner: { select: { userId: true } } } });
