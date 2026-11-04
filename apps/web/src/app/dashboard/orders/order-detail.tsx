@@ -311,7 +311,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   const [noShowRecorded, setNoShowRecorded] = useState(false);
   // [BUG-HUNT-2 G20] "Not collected": asked once, then the server's answer (or its refusal, verbatim).
   const [confirmNotCollected, setConfirmNotCollected] = useState(false);
-  const [notCollectedOutcome, setNotCollectedOutcome] = useState<string | null>(null);
+  const [notCollectedDone, setNotCollectedDone] = useState<'closed' | 'support' | null>(null);
   // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
   const [lastOut, setLastOut] = useState(false);
 
@@ -389,9 +389,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       return markNotCollected(id);
     },
     onSuccess: (answer) => {
-      setNotCollectedOutcome(answer?.sentToSupport === true
-        ? 'Swift support has this order. They close it and record the refund you owe the customer.'
-        : 'Order closed: recorded as not collected. No money moved.');
+      setNotCollectedDone(answer?.sentToSupport === true ? 'support' : 'closed');
     },
     onError: (e) => setError((e as Error).message),
     onSettled: () => {
@@ -744,7 +742,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       {prepLine && <p className="mt-3 text-xs text-[var(--swift-muted)]">{prepLine}</p>}
       {/* [STORE-DASH · owner 22 Oct "fast taps"] The next step is a big button in a bar that stays at the
           bottom of the window while it scrolls, as on the phone (VendorOrderDetailScreen action bar). */}
-      {(actions.length > 0 || confirmDelivered || confirmReject || confirmNoShow || noShowRecorded || confirmNotCollected || notCollectedOutcome || error) && (
+      {(actions.length > 0 || confirmDelivered || confirmReject || confirmNoShow || noShowRecorded || confirmNotCollected || notCollectedDone !== null || error) && (
         <div data-testid="order-action-bar" className="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 flex flex-wrap items-center gap-2 border-t border-[var(--swift-border)] bg-[var(--swift-card)] px-6 py-4">
           {!paused && customerDeciding(o) && <p role="status" className="w-full text-sm font-semibold text-amber-800">{OUT_OF_STOCK_WORDS.deciding}</p>}
           {!paused && nothingToAccept(o) && <p role="status" className="w-full text-sm font-semibold text-[var(--swift-red)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
@@ -892,7 +890,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
               </div>
             </div>
           )}
-          {notCollectedOutcome && <p role="status" className="w-full text-sm font-semibold">{notCollectedOutcome}</p>}
+          {notCollectedDone === 'support' && <p role="status" className="w-full text-sm font-semibold">Swift support has this order. They close it and record the refund you owe the customer.</p>}
+          {notCollectedDone === 'closed' && <p role="status" className="w-full text-sm font-semibold">Order closed: recorded as not collected. No money moved.</p>}
           {noShowRecorded && (
             <p role="status" className="w-full text-sm font-semibold">Booking closed: you recorded that the customer didn&rsquo;t come. The customer has been told.</p>
           )}
