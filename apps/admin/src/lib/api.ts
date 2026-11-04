@@ -770,6 +770,10 @@ export const setDriverRideClass = (id: string, rideClass: string, reason: string
 export const cancelOrder = (id: string, body: { refund?: boolean }, reason: string) =>
   apiFetch(`/api/v1/admin/orders/${id}/cancel`, { method: 'PUT', body: JSON.stringify({ ...body, reason }), reason });
 
+/** [BUG-HUNT-2 G01] A ride in progress that cannot finish: closed with no fare, and both sides told. */
+export const endStuckRide = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/orders/${id}/end-ride`, { method: 'POST', body: '{}', reason });
+
 /** The cash actually went back: a unique reference and the amount handed over. */
 export const settleOrderRefund = (id: string, reference: string, amount: string | number, reason: string) =>
   apiFetch(`/api/v1/admin/orders/${id}/refund-settled`, {

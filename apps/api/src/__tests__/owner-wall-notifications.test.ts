@@ -583,6 +583,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
     // The helper: the ON insert, the ON idempotent insert, and its collision re-insert (REVIEW-M S4-2).
     expect(bulk).toEqual({ [HELPER]: 3, 'modules/admin/admin.routes.ts': 1, 'modules/mover-revocation-outbox.ts': 1, 'modules/safety/incident.service.ts': 1 });
     expect(helperCalls).toEqual({
+      // [BUG-HUNT-2 G01] 'Ride closed by Swift' to both sides, inside the close's transaction
+      'modules/admin/admin.routes.ts insertNoticeFor': 1,
       'modules/auth/auth.service.ts insertNoticeFor': 1,
       'modules/billing/fee-demand-delivery.ts upsertNoticeFor': 1,
       'modules/cash/door-cash-hold.ts insertNoticeFor': 1,
