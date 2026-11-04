@@ -10,6 +10,9 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { AccountService } from '../modules/user/account.service';
+import { assertClearOfParties } from '../modules/integrity/party-authority';
+import { identityLineage } from '../modules/integrity/identity-review';
+import { AppError } from '../utils/errors';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { ACTIVE_TAXI_STATUSES } from '../modules/rides/rides.service';
@@ -331,19 +334,182 @@ describe('support ends a ride whose driver is gone', () => {
     };
   };
 
-  it.each(['passenger', 'driver'] as const)('an identity under review on the %s side refuses everyone: nobody can say who is linked', async (side) => {
+  // [COORD ruling on REVIEW-G11's note] Nobody is stuck: a review must not hold a ride open for ever. For ride end only, a
+  // SUPER_ADMIN who is not on the ride ends it, and the audit row says the review was open.
+  const closedRow = (orderId: string) => app.prisma.auditLog.findFirst({ where: { action: 'END_STUCK_RIDE', entityId: orderId } });
+
+  it.each(['passenger', 'driver'] as const)('an identity under review on the %s side: an ADMIN is refused, and a SUPER_ADMIN not on the ride ends it, on the record', async (side) => {
     const owner = await staff(['*'], 'SUPER_ADMIN');
     const r = await ride();
-    const party = side === 'passenger' ? r.customerId : r.driverUser;
-    const undo = await linked([party], true);
+    const undo = await linked([side === 'passenger' ? r.customerId : r.driverUser], true);
+    try {
+      const res = await end(r.orderId);
+      expect(res.statusCode, res.payload).toBe(409);
+      expect(res.json().error.code).toBe('IDENTITY_REVIEW_REQUIRED');
+      expect(await app.prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })).toMatchObject({ status: 'RIDE_IN_PROGRESS' });
+      expect(await closedRow(r.orderId)).toBeNull();
+
+      expect((await end(r.orderId, owner.token)).statusCode).toBe(200);
+      expect((await closedRow(r.orderId))!.changes).toMatchObject({ reason: TEST_ADMIN_REASON, previousStatus: 'RIDE_IN_PROGRESS', identityUnderReview: true, identityReviewReasons: ['LEGACY_AUTHORITY'] });
+    } finally {
+      await undo();
+    }
+  });
+
+  it('with no review open the record says nothing of one', async () => {
+    const r = await ride();
+    await end(r.orderId);
+    expect((await closedRow(r.orderId))!.changes).not.toHaveProperty('identityUnderReview');
+    expect((await closedRow(r.orderId))!.changes).not.toHaveProperty('identityReviewReasons');
+  });
+
+  it('a review opens no door to your own ride: a SUPER_ADMIN on it, or listed as linked to it, is refused', async () => {
+    const onIt = await staff(['*'], 'SUPER_ADMIN');
+    const own = await ride('RIDE_IN_PROGRESS', {}, { passenger: onIt.id });
+    const undoOwn = await linked([onIt.id], true);
+    const listed = await staff(['*'], 'SUPER_ADMIN');
+    const other = await ride();
+    const undoListed = await linked([other.customerId, listed.id], true);
+    try {
+      await refused(own.orderId, onIt.token, 'OWN_RIDE');
+      await refused(other.orderId, listed.token, 'OWN_RIDE');
+    } finally {
+      await undoOwn();
+      await undoListed();
+    }
+  });
+
+  // [Automated review on #2365] Under review the member list can be short, so 'not on the ride' is not known from the
+  // party's side. The actor is resolved from their own side too. A degraded record alone never refuses: the ride still has
+  // an exit, and the actor check is what makes that exit safe.
+  const clusters: string[] = [];
+  const cluster = async (data: { mergedIntoId?: string; authorityReviewRequired?: boolean } = {}) => {
+    const row = await app.prisma.identityCluster.create({ data });
+    clusters.push(row.id);
+    return row.id;
+  };
+  const place = (accountId: string, clusterId: string) => app.prisma.identityClusterMember.create({ data: { accountId, clusterId, linkedVia: [] } });
+  const clearClusters = async () => {
+    await app.prisma.identityClusterMember.deleteMany({ where: { clusterId: { in: clusters } } });
+    await app.prisma.identityCluster.deleteMany({ where: { id: { in: clusters } } });
+    clusters.length = 0;
+  };
+  /** A chain of merges `hops` long. The party's end is first, the root last. */
+  const chain = async (hops: number) => {
+    const ids = [await cluster()];
+    for (let at = 0; at < hops; at += 1) {
+      const next = await cluster();
+      await app.prisma.identityCluster.update({ where: { id: ids[ids.length - 1]! }, data: { mergedIntoId: next } });
+      ids.push(next);
+    }
+    return ids;
+  };
+  const twoInACycle = async () => {
+    const [a, b] = await chain(1) as [string, string];
+    await app.prisma.identityCluster.update({ where: { id: b }, data: { mergedIntoId: a } });
+    return [a, b] as const;
+  };
+
+  const DEGRADED: Array<[string, string, (party: string) => Promise<unknown>]> = [
+    ['flagged for review', 'LEGACY_AUTHORITY', async (party) => place(party, await cluster({ authorityReviewRequired: true }))],
+    ['in a merge cycle', 'LINEAGE_CYCLE', async (party) => place(party, (await twoInACycle())[0])],
+    ['merged into a cluster that is gone', 'MISSING_ROOT', async (party) => place(party, await cluster({ mergedIntoId: 'no-such-cluster' }))],
+    ['left behind by a merge', 'INCOMPLETE_MEMBERSHIP', async (party) => place(party, (await chain(1))[0]!)],
+    ['in a cluster too big to list', 'INCOMPLETE_MEMBERSHIP', async (party) => {
+      const big = await cluster();
+      await app.prisma.identityClusterMember.createMany({ data: Array.from({ length: 501 }, (_, at) => ({ accountId: `big-${RUN}-${big}-${String(at).padStart(3, '0')}`, clusterId: big, linkedVia: [] })) });
+      await place(party, big);
+    }],
+    ['on a merge chain past the limit', 'LINEAGE_LIMIT', async (party) => place(party, (await chain(40))[0]!)],
+  ];
+
+  it.each(DEGRADED)('a party %s: a degraded record alone does not refuse, and the row records why', async (_name, reason, degrade) => {
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    await degrade(r.customerId);
+    try {
+      const res = await end(r.orderId, owner.token);
+      expect(res.statusCode, res.payload).toBe(200);
+      expect((await closedRow(r.orderId))!.changes).toMatchObject({ identityUnderReview: true, identityReviewReasons: [reason] });
+    } finally {
+      await clearClusters();
+    }
+  });
+
+  it.each(DEGRADED)('a party %s: an ADMIN stays refused', async (_name, _reason, degrade) => {
+    const r = await ride();
+    await degrade(r.driverUser);
+    try {
+      expect((await end(r.orderId)).json().error.code).toBe('IDENTITY_REVIEW_REQUIRED');
+    } finally {
+      await clearClusters();
+    }
+  });
+
+  it('an actor who is under review themselves is refused, even with nothing to do with the ride', async () => {
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    await place(r.customerId, await cluster({ authorityReviewRequired: true }));
+    await place(owner.id, await cluster({ authorityReviewRequired: true }));
     try {
       const res = await end(r.orderId, owner.token);
       expect(res.statusCode, res.payload).toBe(409);
       expect(res.json().error.code).toBe('IDENTITY_REVIEW_REQUIRED');
+      expect(await closedRow(r.orderId)).toBeNull();
+    } finally {
+      await clearClusters();
+    }
+  });
+
+  it('an actor on the far end of a party\'s chain, where the list never reaches, is on the ride', async () => {
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    const ids = await chain(40);
+    await place(r.customerId, ids[0]!);
+    await place(owner.id, ids[ids.length - 1]!);
+    try {
+      await refused(r.orderId, owner.token, 'OWN_RIDE');
+    } finally {
+      await clearClusters();
+    }
+  });
+
+  it('an actor in the same cycle as a party, or left behind by the same merge, is refused', async () => {
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    const [a, b] = await twoInACycle();
+    await place(r.customerId, a);
+    await place(owner.id, b);
+    try {
+      expect(await identityLineage(app.prisma, r.customerId)).toEqual([a, b]); // a cycle is walked once
+      expect((await end(r.orderId, owner.token)).statusCode).toBe(409);
+      await app.prisma.identityClusterMember.deleteMany({ where: { accountId: { in: [r.customerId, owner.id] } } });
+      const left = await chain(1);
+      await place(r.customerId, left[0]!);
+      await place(owner.id, left[0]!);
+      expect((await end(r.orderId, owner.token)).statusCode).toBe(409);
       expect(await app.prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })).toMatchObject({ status: 'RIDE_IN_PROGRESS' });
+    } finally {
+      await clearClusters();
+    }
+  });
+
+  it('the shared rule stays closed for every other door: a review refuses a SUPER_ADMIN there', async () => {
+    const owner = await staff(['*'], 'SUPER_ADMIN');
+    const r = await ride();
+    const undo = await linked([r.customerId], true);
+    const words = { own: new AppError(403, 'OWN', 'x'), staff: new AppError(403, 'STAFF', 'x') };
+    try {
+      await expect(app.prisma.$transaction((tx) => assertClearOfParties(tx, owner.id, [r.customerId], words))).rejects.toMatchObject({ code: 'IDENTITY_REVIEW_REQUIRED' });
     } finally {
       await undo();
     }
+  });
+
+  it('a ride with the verified code and no Start records where it was, under review or not', async () => {
+    const r = await ride('DRIVER_ARRIVED', { ridePinVerified: true, ridePinVerifiedAt: new Date() });
+    await end(r.orderId);
+    expect((await closedRow(r.orderId))!.changes).toMatchObject({ reason: TEST_ADMIN_REASON, previousStatus: 'DRIVER_ARRIVED' });
   });
 
   it.each(['passenger', 'driver'] as const)('a staff account linked to the %s is staff on the ride: a SUPER_ADMIN not on it ends it', async (side) => {
