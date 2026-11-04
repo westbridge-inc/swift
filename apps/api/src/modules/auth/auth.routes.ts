@@ -154,9 +154,21 @@ export async function authRoutes(app: FastifyInstance) {
 
   /** [A-01] The session bootstrap a browser shell gates on — the server's attestation, never a token's presence. */
   app.get('/me', { preHandler: [app.authenticate] }, async (request) => {
-    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true, tenant: { select: { kind: true } } } });
-    if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
-    return { success: true, data: { user, sessionId: request.authSessionId, client: browserClientOf(request) } };
+    const found = await app.prisma.user.findUnique({
+      where: { id: request.user.userId },
+      select: {
+        id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true, tenant: { select: { kind: true } },
+        rider: { select: { id: true } }, driver: { select: { id: true } }, serviceProvider: { select: { id: true } },
+      },
+    });
+    if (!found) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
+    const { rider, driver, serviceProvider, ...user } = found;
+    // [PORTAL-404 · FLOW-QA F29] Which of this person's own partner profiles exist, as yes/no only: the same row each
+    // profile route reads (GET /rider/profile, /driver/profile, /provider/subscription answer 404 or 403 exactly when
+    // it is false). The website asks only for the profiles it holds, so a browser never logs a 404 for one it does
+    // not. The routes themselves are unchanged (the phone relies on their 404 to open onboarding).
+    const profiles = { rider: rider !== null, driver: driver !== null, provider: serviceProvider !== null };
+    return { success: true, data: { user, profiles, sessionId: request.authSessionId, client: browserClientOf(request) } };
   });
 
   /** [Legal research G2 · R26] GET /legal-acceptance — whether this person must accept the served legal texts

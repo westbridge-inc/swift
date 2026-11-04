@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { hasProviderProfile } from '@/lib/auth';
+import { isProvider } from '@/lib/partner-profiles';
 import { getProviderFee } from '@/lib/provider-fee-api';
 
 /**
@@ -25,7 +25,7 @@ export function NoEarnerProfile({ children }: { children: ReactNode }) {
 
 /** [REVIEW-M #2238 S4-2] A store owner who is also a pro: their own pro fee, one link from the store's weekly fee. */
 export function ProviderFeeLink() {
-  const pro = useQuery({ queryKey: ['has-provider'], queryFn: hasProviderProfile });
+  const pro = useQuery({ queryKey: ['has-provider'], queryFn: isProvider });
   if (!pro.data) return null;
   return <p className="mt-6 text-sm print:hidden"><Link href="/portal/weekly-fee" className="underline">Your service provider weekly fee</Link></p>;
 }
