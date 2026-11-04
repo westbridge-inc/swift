@@ -266,13 +266,14 @@ describe('[CHECKLIST-LEGAL (b)] the stored customer IDs are withdrawn and delete
   });
 
   // [REVIEW-G S2-2] The sweep is destructive and unattended: its scope is pinned. Only a customer's own ID is withdrawn
-  // and deleted; a partner document of the same person, another person's partner document, and this type filed for a
-  // partner role are left exactly as they were (the scope is checked on the reads and again at every write).
+  // and deleted; a partner document of the same person, another person's partner document, this type filed for a
+  // partner role, and a service provider's document (stored with role CUSTOMER, so only its type tells it from a
+  // customer's ID) are left exactly as they were (the scope is checked on the reads and again at every write).
   it('the retirement touches only customer IDs: partner documents, and the type filed for a partner role, are left alone', async () => {
     const both = await person();
     const own = await storedId(both, 'ON_FILE');
     const other = await person();
-    const partnerDoc = async (c: { id: string; token: string }, docType: string, role: 'MOVER', status: 'APPROVED' | 'PENDING') => {
+    const partnerDoc = async (c: { id: string; token: string }, docType: string, role: 'MOVER' | 'CUSTOMER', status: 'APPROVED' | 'PENDING') => {
       const fileUrl = await upload(c.token, readable());
       const doc = await system(() => app.prisma.verificationDocument.create({ data: {
         userId: c.id, role, docType, fileUrl, consentAt: new Date(), privacyNoticeVersion: '2026-10-29.2', status,
@@ -284,6 +285,7 @@ describe('[CHECKLIST-LEGAL (b)] the stored customer IDs are withdrawn and delete
       await partnerDoc(both, 'national_id', 'MOVER', 'APPROVED'), // the same person's partner ID
       await partnerDoc(other, 'drivers_licence', 'MOVER', 'PENDING'), // another person's partner document
       await partnerDoc(other, 'identity_l2', 'MOVER', 'APPROVED'), // the type, filed for a partner role
+      await partnerDoc(other, 'police_clearance', 'CUSTOMER', 'APPROVED'), // a service provider's document
     ];
     const before = await Promise.all(kept.map((k) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: k.docId }, select: { state: true, status: true, purgedAt: true, fileUrl: true, reviewNote: true } }))));
 

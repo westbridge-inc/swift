@@ -415,7 +415,7 @@ export async function verificationRoutes(app: FastifyInstance) {
 
   /**
    * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] POST /identity — the customer's ID is REMOVED: Swift no longer takes,
-   * keeps or reads a customer's ID (the stored ones are withdrawn and deleted by the daily sweep: customer-id-retirement.ts).
+   * keeps or reads a customer's ID (the stored ones are withdrawn and deleted by the daily sweep: VerificationService.retireCustomerIds).
    * A shipped app (builds 9-12, vc7/vc8) still offers "Your ID" and uploads the picture first (POST /verification/upload),
    * then calls here: the answer is 410 CUSTOMER_ID_NOT_NEEDED in polite words, nothing is recorded (no document, no
    * consent row), and the picture it just uploaded is erased NOW (only the caller's own, unclaimed, unheld upload:
