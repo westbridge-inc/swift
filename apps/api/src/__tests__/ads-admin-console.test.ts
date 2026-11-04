@@ -301,6 +301,21 @@ describe('§9.1 video transport cap (the 5 MB global-limit bug)', () => {
 });
 
 describe('§15.7 house ads manager', () => {
+  // [ADS-ON] The route itself, before any file is stored: a house ad's link meets the rules of a paid one.
+  it('refuses a house ad whose link the policy refuses, and stores nothing', async () => {
+    const admin = await makeAdmin();
+    const { placement } = await seedPaidCampaign();
+    const before = await app.prisma.houseAd.count({ where: { placementId: placement.id } });
+    const form = multipartBody(
+      { placementId: placement.id, kind: 'IMAGE', destinationType: 'URL', destinationValue: 'https://bit.ly/abc' },
+      { mime: 'image/png', content: REAL_PNG },
+    );
+    const res = await injectWithApproval(app, { method: 'POST', url: '/api/v1/admin/ads/house', payload: form.payload, headers: { 'x-swift-reason': TEST_ADMIN_REASON, 'content-type': form.contentType, authorization: `Bearer ${admin.token}` } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('URL_SHORTENER');
+    expect(await app.prisma.houseAd.count({ where: { placementId: placement.id } })).toBe(before);
+  });
+
   it('creates from a real image, rejects garbage bytes, updates sort/active (no hard delete)', async () => {
     const admin = await makeAdmin();
     const { placement } = await seedPaidCampaign();

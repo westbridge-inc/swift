@@ -853,6 +853,12 @@ export const reinstateAdvertiser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/ads/advertisers/${id}/reinstate`, { method: 'PUT', body: JSON.stringify({}), reason });
 
 export const fetchCreativeQueue = () => apiFetch('/api/v1/admin/ads/creatives/queue');
+// [ADS-ON] The allow-list of outside websites ads may open. A person decides each one, with a reason.
+export const fetchLinkDomains = () => apiFetch('/api/v1/admin/ads/link-domains');
+export const approveLinkDomain = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/ads/link-domains/${id}/approve`, { method: 'PUT', body: JSON.stringify({}), reason });
+export const rejectLinkDomain = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/ads/link-domains/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const approveCreative = (id: string) =>
   apiFetch(`/api/v1/admin/ads/creatives/${id}/approve`, { method: 'PUT', body: JSON.stringify({}) });
 export const rejectCreative = (id: string, reason: string, notes?: string) =>
