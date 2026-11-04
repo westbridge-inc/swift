@@ -89,13 +89,36 @@ describe('§8.1 checkout', () => {
     expect(await prisma.adBooking.count({ where: { campaignId: c.id } })).toBe(0);
   });
 
+  it('in production with MMG\'s own checkout off, no invoice is issued: nobody could pay it', async () => {
+    const a = await makeApprovedAdvertiser();
+    const p = await makePlacement();
+    const c = await makeDraft(a.id, p.id);
+    const previous = process.env['NODE_ENV'];
+    const mmgSwitch = process.env['MMG_CHECKOUT_ENABLED'];
+    process.env['NODE_ENV'] = 'production';
+    process.env['ADS_MMG_CHECKOUT'] = '1';
+    delete process.env['MMG_CHECKOUT_ENABLED'];
+    try {
+      await expect(checkout.checkout(c.id, 'MANUAL')).rejects.toMatchObject({ code: 'ADS_PAYMENT_PROVIDER_UNAVAILABLE' });
+    } finally {
+      delete process.env['ADS_MMG_CHECKOUT'];
+      if (mmgSwitch !== undefined) process.env['MMG_CHECKOUT_ENABLED'] = mmgSwitch;
+      if (previous === undefined) delete process.env['NODE_ENV'];
+      else process.env['NODE_ENV'] = previous;
+    }
+    expect(await prisma.adInvoice.count({ where: { campaignId: c.id } })).toBe(0);
+    expect(await prisma.adBooking.count({ where: { campaignId: c.id } })).toBe(0);
+  });
+
   it('in production with the switch on, the invoice is MMG\'s whatever a client asks for: the app in the stores asks for MANUAL', async () => {
     const a = await makeApprovedAdvertiser();
     const p = await makePlacement();
     const c = await makeDraft(a.id, p.id);
     const previous = process.env['NODE_ENV'];
+    const mmgSwitch = process.env['MMG_CHECKOUT_ENABLED'];
     process.env['NODE_ENV'] = 'production';
     process.env['ADS_MMG_CHECKOUT'] = '1';
+    process.env['MMG_CHECKOUT_ENABLED'] = '1';
     try {
       const { invoice } = await checkout.checkout(c.id, 'MANUAL');
       invoiceIds.push(invoice.id);
@@ -103,6 +126,8 @@ describe('§8.1 checkout', () => {
       expect(invoice.paymentUrl).toBeNull();
     } finally {
       delete process.env['ADS_MMG_CHECKOUT'];
+      if (mmgSwitch === undefined) delete process.env['MMG_CHECKOUT_ENABLED'];
+      else process.env['MMG_CHECKOUT_ENABLED'] = mmgSwitch;
       if (previous === undefined) delete process.env['NODE_ENV'];
       else process.env['NODE_ENV'] = previous;
     }
@@ -165,18 +190,14 @@ describe('§8.2 mark-paid', () => {
   });
 
   // [ADS-ON] A clash in the old count-and-retry could never retry: Postgres had aborted the transaction.
-  it('an invoice number follows the highest one, so a gap never names a number already taken', async () => {
+  it('an invoice number is never issued twice: it does not come from the rows, so a gap cannot name a number again', async () => {
     const a = await makeApprovedAdvertiser();
     const p = await makePlacement();
     const first = await checkout.checkout((await makeDraft(a.id, p.id)).id, 'MOCK');
-    invoiceIds.push(first.invoice.id);
-    const taken = Number(first.invoice.number.split('-')[2]) + 2;
-    const year = first.invoice.number.split('-')[1];
-    const holder = await prisma.adInvoice.create({ data: { advertiserId: a.id, campaignId: first.invoice.campaignId, number: `ADS-${year}-${String(taken).padStart(6, '0')}`, amount: 1, status: 'VOID' } });
-    invoiceIds.push(holder.id);
+    await prisma.adInvoice.delete({ where: { id: first.invoice.id } });
     const next = await checkout.checkout((await makeDraft(a.id, p.id, new Date('2026-08-10T00:00:00Z'))).id, 'MOCK');
     invoiceIds.push(next.invoice.id);
-    expect(Number(next.invoice.number.split('-')[2])).toBe(taken + 1);
+    expect(Number(next.invoice.number.split('-')[2])).toBeGreaterThan(Number(first.invoice.number.split('-')[2]));
   });
 
   it('checkouts at the same instant each get their own number', async () => {
@@ -191,6 +212,26 @@ describe('§8.2 mark-paid', () => {
 });
 
 describe('§6.1 reservation_expired', () => {
+  it('a campaign whose hold ran out can check out again: the same week, the same slot, a new invoice', async () => {
+    const a = await makeApprovedAdvertiser();
+    const p = await makePlacement();
+    const c = await makeDraft(a.id, p.id);
+    const first = await checkout.checkout(c.id, 'MOCK');
+    invoiceIds.push(first.invoice.id);
+    await prisma.adBooking.updateMany({ where: { campaignId: c.id }, data: { reservedUntil: new Date(Date.now() - 60_000) } });
+    await booking.releaseExpired();
+    const inventory = () => prisma.adInventoryWeek.findFirstOrThrow({ where: { placementId: p.id, weekStart: c.startWeek }, select: { booked: true } });
+    expect((await inventory()).booked).toBe(0);
+    const again = await checkout.checkout(c.id, 'MOCK');
+    invoiceIds.push(again.invoice.id);
+    expect(again.invoice.id).not.toBe(first.invoice.id);
+    expect(again.invoice.status).toBe('UNPAID');
+    const rows = await prisma.adBooking.findMany({ where: { campaignId: c.id } });
+    expect(rows.map((b) => b.status)).toEqual(['RESERVED']);
+    expect(rows[0]!.reservedUntil!.getTime()).toBeGreaterThan(Date.now());
+    expect((await inventory()).booked).toBe(1);
+  });
+
   it('an expired hold releases the slot, voids the invoice, and returns the campaign to DRAFT', async () => {
     const a = await makeApprovedAdvertiser();
     const p = await makePlacement();

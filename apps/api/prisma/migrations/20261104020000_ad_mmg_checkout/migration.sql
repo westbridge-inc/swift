@@ -8,6 +8,8 @@
 --  2. One OPEN or CONFIRMING checkout per invoice.
 --  3. A checkout is born from its invoice: same tenant, same whole amount, same currency, the invoice still unpaid.
 --  4. The payer is added to the fields that may never change under a confirmation hold.
+--  5. One sequence for ad invoice numbers. A number is unique across operators and a request sees one operator
+--     behind the tenant wall, so no number can be worked out from the rows. It starts past every number on record.
 --
 -- ROLLBACK: rollback.sql beside this file (forward repair is preferred). The guard refuses once any ad checkout
 -- exists: its MMG page and any payment on it are money evidence.
@@ -23,6 +25,11 @@ CREATE UNIQUE INDEX "mmg_checkout_intents_one_open_per_ad_invoice"
   ON "mmg_checkout_intents"("adInvoiceId") WHERE "status" IN ('OPEN', 'CONFIRMING');
 ALTER TABLE "mmg_checkout_intents" ADD CONSTRAINT "mmg_checkout_intents_adInvoiceId_fkey"
   FOREIGN KEY ("adInvoiceId") REFERENCES "ad_invoices"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+CREATE SEQUENCE "ad_invoice_number_seq";
+GRANT USAGE, SELECT ON SEQUENCE "ad_invoice_number_seq" TO swift_app;
+SELECT setval('"ad_invoice_number_seq"', COALESCE((SELECT max(substring("number" FROM '[0-9]+$')::bigint)
+  FROM "ad_invoices" WHERE "number" ~ '^ADS-[0-9]{4}-[0-9]{6,9}$'), 0) + 1, false);
 
 CREATE FUNCTION mmg_ad_checkout_lineage() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE i ad_invoices%ROWTYPE;

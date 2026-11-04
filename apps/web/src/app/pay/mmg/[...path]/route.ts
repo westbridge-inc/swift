@@ -13,7 +13,8 @@ const words = {
 // [ADS-ON] MMG sends every payment back to these one set of registered pages. When the API says the checkout was an
 // advertiser's, the page says so; anything else is the weekly fee's page, exactly as before.
 const adWords: Record<keyof typeof words, string> = {
-  CONFIRMED: 'Payment received. Your ad is now in review.',
+  // Never "in review" here: a payment that arrived after its booking ended is confirmed too, and is owed back.
+  CONFIRMED: 'Payment received. Open your campaign to see what happens next.',
   CONFIRMING: words.CONFIRMING,
   NOT_PAID: "MMG didn't complete this payment. You can try again from your campaign.",
   UNKNOWN: 'Open your campaign to see this payment.',

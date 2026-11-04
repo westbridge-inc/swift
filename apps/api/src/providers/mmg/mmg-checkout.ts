@@ -590,6 +590,11 @@ export function assertMmgCheckoutConfig(env: Record<string, string | undefined> 
   if (flag !== undefined && flag !== '' && flag !== '0' && flag !== '1') {
     throw new Error('FATAL: MMG_CHECKOUT_ENABLED must be exactly 0 or 1 — a misspelled switch is not guessed at. Refusing to start.');
   }
+  // [ADS-ON] Read as off, which takes no money, but a misspelling must not look like a switch that was turned on.
+  const adFlag = env['ADS_MMG_CHECKOUT'];
+  if (adFlag !== undefined && adFlag !== '' && adFlag !== '0' && adFlag !== '1') {
+    throw new Error('FATAL: ADS_MMG_CHECKOUT must be exactly 0 or 1 — a misspelled switch is not guessed at. Refusing to start.');
+  }
   // [DS632] The creationDate zone is exactly one of two words, or unset (then
   // every MMG payment is held for a person). A misspelled zone is not guessed
   // at, whatever the switch says.

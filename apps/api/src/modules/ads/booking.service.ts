@@ -176,9 +176,17 @@ export class BookingService {
         const inv = rows[0];
         if (!inv || inv.booked >= inv.capacity) throw new SlotUnavailableError(city, weekStart);
         await tx.adInventoryWeek.update({ where: { id: inv.id }, data: { booked: { increment: 1 } } });
-        await tx.adBooking.create({
-          data: { campaignId: campaign.id, placementId: placement.id, city, weekStart, amount: price, status: 'RESERVED', reservedUntil },
+        // [ADS-ON] A hold that ran out left its row RELEASED, and a week is one row per campaign: checking out again
+        // takes that row back, at today's price.
+        const retaken = await tx.adBooking.updateMany({
+          where: { campaignId: campaign.id, placementId: placement.id, city, weekStart, status: 'RELEASED' },
+          data: { amount: price, status: 'RESERVED', reservedUntil },
         });
+        if (retaken.count === 0) {
+          await tx.adBooking.create({
+            data: { campaignId: campaign.id, placementId: placement.id, city, weekStart, amount: price, status: 'RESERVED', reservedUntil },
+          });
+        }
         created += 1;
       }
     }

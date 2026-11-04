@@ -71,6 +71,14 @@ describe('paying an ad invoice', () => {
     expect(screen.queryByRole('button', { name: 'Pay with MMG' })).toBeNull();
   });
 
+  it('an invoice that can no longer be paid says so, and the button leaves', async () => {
+    api({}, () => ({ status: 409, body: { success: false, error: { code: 'INVOICE_NOT_PAYABLE', message: 'x' } } }));
+    const { user } = renderWithQuery(<CampaignRead advertiserId="a1" campaignId="c1" />);
+    await user.click(await screen.findByRole('button', { name: 'Pay with MMG' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('can no longer be paid. Do not pay again.');
+    expect(screen.queryByRole('button', { name: 'Pay with MMG' })).toBeNull();
+  });
+
   it('one tap, one request: the button waits while it goes through', async () => {
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => { release = resolve; });

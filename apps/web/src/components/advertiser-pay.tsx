@@ -24,6 +24,7 @@ export function PayInvoice({ invoiceId }: { invoiceId: string }) {
     },
     onError: (error) => {
       if (error instanceof ApiRequestError && (error.code === 'PAYMENT_CONFIRMING' || error.code === 'CHECKOUT_CONFIRMING')) { setConfirming(true); setWords(CONFIRMING); }
+      else if (error instanceof ApiRequestError && error.code === 'INVOICE_NOT_PAYABLE') { setConfirming(true); setWords('This invoice can no longer be paid. Do not pay again.'); }
       else setWords('MMG could not be opened. Try again in a minute.');
     },
   });

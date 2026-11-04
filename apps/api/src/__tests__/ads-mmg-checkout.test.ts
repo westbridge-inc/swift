@@ -23,7 +23,7 @@ import { MMG_CHECKOUT_TTL_MS, AD_HOLD_PAST_CHECKOUT_MS, MmgCheckoutService } fro
 import { MMG_CHECKOUT_RUNTIME_DECORATION, mmgCheckoutPublicRoutes, type MmgCheckoutRuntime } from '../modules/billing/mmg-checkout.routes';
 import { MMG_FEE_REVERSAL_SWITCH, MmgFeeReversalService } from '../modules/billing/mmg-fee-reversal';
 import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTests } from '../modules/billing/provider-identity-backfill';
-import { AD_LOOKUP_NEVER_CONFIRMED, AD_NO_REPLY_UNRESOLVED, NO_REPLY_CHECK_MAX_ATTEMPTS, NO_REPLY_CLOSED_REASON, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS } from '../modules/billing/mmg-expired-hold-check';
+import { AD_LATE_PAYMENT_LIKELY, AD_LOOKUP_NEVER_CONFIRMED, AD_NO_REPLY_UNRESOLVED, AD_POSSIBLE_MATCH, AUTO_CLOSE_LATE_RECORD_AUDIT, AUTO_CLOSE_WATCH_EVERY_MS, AUTO_CLOSE_WATCH_FIRST_MS, AUTO_CLOSE_WATCH_MS, AUTO_CLOSE_WATCH_PURPOSE, NO_REPLY_CHECK_MAX_ATTEMPTS, NO_REPLY_CLOSED_REASON, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS } from '../modules/billing/mmg-expired-hold-check';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { MMG_AD_PRODUCT_DESCRIPTION, MMG_CHECKOUT_PRODUCT_DESCRIPTION, SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
 import { lookupDetailFrom, type MmgCheckoutLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
@@ -45,6 +45,7 @@ import { testPrismaClient } from './helpers/test-prisma-client';
 //   A5 a payment that outruns its slots is recorded and owed back
 //   A6 a page nobody answered is read against MMG's records before the next page opens
 //   A7 the switch off takes no money; there is no typed-reference settlement anywhere
+//   A8 a page MMG's records closed is watched for a week, and no second page opens until the week reads clean
 // ---------------------------------------------------------------------------
 
 const DAY = 86_400_000;
@@ -125,6 +126,11 @@ const invoiceOf = (id: string) => app.prisma.adInvoice.findUniqueOrThrow({ where
 const campaignOf = (id: string) => app.prisma.adCampaign.findUniqueOrThrow({ where: { id } });
 const told = (userId: string) => app.prisma.notification.findMany({ where: { userId } });
 const paidBy = (row: { id: string }) => app.prisma.providerPayment.count({ where: { creditedPaymentId: `mco:${row.id}` } });
+const campaignsOf = async (f: { advertiser: { id: string }; campaign: { id: string }; owner: { token: string } }) => {
+  const res = await app.inject({ method: 'GET', url: `/api/v1/ads/advertiser/${f.advertiser.id}/campaigns`, headers: { authorization: `Bearer ${f.owner.token}` } });
+  expect(res.statusCode, res.body).toBe(200);
+  return (res.json().data as Array<{ id: string; invoices: Array<{ id: string; payable: boolean }> }>).find((c) => c.id === f.campaign.id)!;
+};
 
 async function buildApp(): Promise<FastifyInstance> {
   const server = Fastify({ logger: false });
@@ -347,6 +353,68 @@ describe('opening the page', () => {
     expect((await start(f.invoice.id, f.owner.token)).json().error.code).toBe('INVOICE_NOT_PAYABLE');
   });
 
+  it('an open page is never handed out for an invoice paid meanwhile: the same tap, or a new one', async () => {
+    const f = await invoiced();
+    const first = await open(f);
+    await raw.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status: 'NOT_PAID', reason: 'MMG_SAID_NOT_PAID', nextCheckAt: null } });
+    const tap = key();
+    const second = await start(f.invoice.id, f.owner.token, tap);
+    expect(second.statusCode).toBe(201);
+    await adSettlement.markPaid(f.invoice.id, { providerRef: tx('MEANWHILE') });
+    expect((await intentOf(second.json().data.ref)).status).toBe('OPEN');
+    for (const again of [tap, key()]) {
+      const res = await start(f.invoice.id, f.owner.token, again);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('INVOICE_NOT_PAYABLE');
+      expect(res.body).not.toContain('checkoutUrl');
+    }
+  });
+
+  it('an open page is never handed to an advertiser suspended since: the same tap, or a new one', async () => {
+    const f = await invoiced();
+    const tap = key();
+    expect((await start(f.invoice.id, f.owner.token, tap)).statusCode).toBe(201);
+    await raw.advertiser.update({ where: { id: f.advertiser.id }, data: { status: 'SUSPENDED' } });
+    for (const again of [tap, key()]) {
+      const res = await start(f.invoice.id, f.owner.token, again);
+      expect(res.statusCode).toBe(403);
+      expect(res.body).not.toContain('checkoutUrl');
+    }
+  });
+
+  it('an open page is never handed out while another payment on the campaign is with a person', async () => {
+    const f = await invoiced();
+    const first = await open(f);
+    await raw.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status: 'NOT_PAID', reason: 'MMG_SAID_NOT_PAID', nextCheckAt: null } });
+    const tap = key();
+    expect((await start(f.invoice.id, f.owner.token, tap)).statusCode).toBe(201);
+    await raw.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status: 'HELD', reason: 'CHECKOUT_NOT_OPEN' } });
+    for (const again of [tap, key()]) {
+      const res = await start(f.invoice.id, f.owner.token, again);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error.code).toBe('PAYMENT_CONFIRMING');
+      expect(res.body).not.toContain('checkoutUrl');
+    }
+    expect((await campaignsOf(f)).invoices.find((i) => i.id === f.invoice.id)?.payable).toBe(false);
+  });
+
+  it('an open page is never handed out for a campaign an admin stopped', async () => {
+    const f = await invoiced();
+    const tap = key();
+    expect((await start(f.invoice.id, f.owner.token, tap)).statusCode).toBe(201);
+    await raw.adCampaign.update({ where: { id: f.campaign.id }, data: { status: 'REJECTED' } });
+    expect((await start(f.invoice.id, f.owner.token, tap)).json().error.code).toBe('INVOICE_NOT_PAYABLE');
+    expect((await campaignsOf(f)).invoices.find((i) => i.id === f.invoice.id)?.payable).toBe(false);
+  });
+
+  it('the campaign list says what a tap would get: its own open page can be handed back, a suspended advertiser pays nothing', async () => {
+    const f = await invoiced();
+    await open(f);
+    expect((await campaignsOf(f)).invoices.find((i) => i.id === f.invoice.id)?.payable).toBe(true);
+    await raw.advertiser.update({ where: { id: f.advertiser.id }, data: { status: 'SUSPENDED' } });
+    expect((await campaignsOf(f)).invoices.find((i) => i.id === f.invoice.id)?.payable).toBe(false);
+  });
+
   it('opening a page and the expiry sweep serialize on the campaign: the sweep waits, and finds the page', async () => {
     const f = await invoiced();
     await app.prisma.adBooking.updateMany({ where: { campaignId: f.campaign.id }, data: { reservedUntil: new Date(Date.now() - MIN) } });
@@ -527,8 +595,9 @@ describe('A4: a second payment on a settled invoice', () => {
   it('a page MMG\'s records closed as unpaid, shown paid after the next page settled the invoice, reaches a person', async () => {
     const f = await invoiced();
     const first = await open(f);
-    // A page that ran out unanswered, and that MMG's records closed as not paid: the next page may open.
+    // A page that ran out unanswered, that MMG's records closed as not paid, and whose week read clean: the next page may open.
     await raw.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON, nextCheckAt: null } });
+    await raw.mmgCheckoutObservation.create({ data: { tenantId, intentId: first.ref, source: 'HISTORY', failure: 'HISTORY_NOT_FOUND', body: { purpose: AUTO_CLOSE_WATCH_PURPOSE, decision: 'WATCH_DONE' } } });
     const second = await open(f);
     const paid = tx('SECOND');
     mmgPaid(second.row, paid, AMOUNT);
@@ -577,6 +646,13 @@ describe('A5: a payment that outruns its slots', () => {
     expect((await campaignOf(f.campaign.id)).status).toBe('DRAFT');
     expect(await app.prisma.adBooking.count({ where: { campaignId: f.campaign.id, status: 'CONFIRMED' } })).toBe(0);
     expect(await app.prisma.adRefundIntent.count({ where: { campaignId: f.campaign.id, reason: 'LATE_CAPTURE' } })).toBe(1);
+    expect(await start(f.invoice.id, f.owner.token).then((r) => r.statusCode)).toBe(409);
+    // The advertiser paid and has no booking: they hear both, and never that their ad is in review.
+    const notice = (await told(f.owner.userId)).find((n) => (n.data as { status?: string }).status === 'LATE_CAPTURE');
+    expect(notice?.title).toBe('We received your payment, but your ad was not placed');
+    expect(notice?.body).toContain('owed back');
+    expect(notice?.body).toContain('do not pay again');
+    expect(notice?.body).not.toContain('review');
   });
 });
 
@@ -611,7 +687,6 @@ describe('A6: a page nobody answered', () => {
     const row = await intentOf(g.page.ref);
     expect([row.status, row.reason]).toEqual(['NOT_PAID', NO_REPLY_CLOSED_REASON]);
     expect((await invoiceOf(g.invoice.id)).status).toBe('UNPAID');
-    expect((await start(g.invoice.id, g.owner.token)).statusCode).toBe(201);
   });
 
   it('a record at MMG that could be this payment goes to a person, and nothing is credited', async () => {
@@ -671,6 +746,17 @@ describe('A6: a page nobody answered', () => {
     expect([(await intentOf(page.ref)).status, (await intentOf(page.ref)).reason]).toEqual(['HELD', AD_LOOKUP_NEVER_CONFIRMED]);
   });
 
+  it('a page that ran out with an answer on record and no transaction goes to a person: it is never left blocking with nobody told', async () => {
+    const f = await invoiced();
+    const page = await open(f);
+    await raw.mmgCheckoutIntent.update({ where: { id: page.ref }, data: { status: 'EXPIRED', reason: 'LOOKUP_NEVER_CONFIRMED', candidates: [], nextCheckAt: null, replyAt: new Date() } });
+    await service.pollIntents();
+    const row = await intentOf(page.ref);
+    expect([row.status, row.reason, row.candidates]).toEqual(['HELD', AD_LOOKUP_NEVER_CONFIRMED, []]);
+    expect((await invoiceOf(f.invoice.id)).status).toBe('UNPAID');
+    expect((await told(f.owner.userId)).some((n) => (n.data as { status?: string }).status === 'HELD')).toBe(true);
+  });
+
   it('a failed read closes nothing: it stays unresolved and is asked again', async () => {
     const f = await invoiced();
     const page = await open(f);
@@ -685,6 +771,134 @@ describe('A6: a page nobody answered', () => {
     await service.pollIntents(after(await intentOf(page.ref), NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS + MIN));
     const row = await intentOf(page.ref);
     expect([row.status, row.reason]).toEqual(['EXPIRED', 'NO_REPLY']);
+  });
+});
+
+describe('A8: the week after an automatic close', () => {
+  const HOUR = 3_600_000;
+  const later = (from: Date, ms: number) => new Date(from.getTime() + ms);
+  const decisionsOf = async (ref: string) => (await raw.mmgCheckoutObservation.findMany({
+    where: { intentId: ref, source: 'HISTORY', body: { path: ['purpose'], equals: AUTO_CLOSE_WATCH_PURPOSE } }, orderBy: { id: 'asc' },
+  })).map((o) => (o.body as { decision: string }).decision);
+
+  // The fixtures stay in place, and a watch reads a bounded number of checkouts a pass, oldest first: what other
+  // tests left behind is taken out of the poll, so each test reads its own page.
+  beforeEach(async () => {
+    await raw.mmgCheckoutIntent.updateMany({ where: { adInvoiceId: { not: null }, status: { in: ['OPEN', 'CONFIRMING', 'EXPIRED'] } }, data: { status: 'HELD', reason: 'ANOTHER_TEST', nextCheckAt: null } });
+    const earlier = await raw.mmgCheckoutIntent.findMany({ where: { adInvoiceId: { not: null }, status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON }, select: { id: true } });
+    await raw.mmgCheckoutObservation.createMany({ data: earlier.map((c) => ({ tenantId, intentId: c.id, source: 'HISTORY', failure: 'HISTORY_NOT_FOUND', body: { purpose: AUTO_CLOSE_WATCH_PURPOSE, decision: 'WATCH_DONE' } })) });
+  });
+
+  /** A page that ran out unanswered, closed as not paid on MMG's records, read and proven healthy. */
+  async function closed() {
+    const control = await invoiced();
+    const paid = await open(control);
+    const txn = tx('CONTROL');
+    mmgPaid(paid.row, txn, AMOUNT);
+    await ret({ token: replyOf(paid.row, '0', txn) });
+    const f = await invoiced();
+    const page = await open(f);
+    await raw.mmgCheckoutIntent.update({ where: { id: page.ref }, data: { expiresAt: new Date(Date.now() - NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS - 5 * MIN) } });
+    const closedAt = new Date();
+    await service.pollIntents(closedAt);
+    const row = await intentOf(page.ref);
+    expect([row.status, row.reason]).toEqual(['NOT_PAID', NO_REPLY_CLOSED_REASON]);
+    return { ...f, page, closedAt };
+  }
+  const refused = async (f: { invoice: { id: string }; owner: { token: string } }) => {
+    const res = await start(f.invoice.id, f.owner.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('PAYMENT_CONFIRMING');
+  };
+
+  it('a paid record MMG shows only now goes to a person: nothing settles, the advertiser is told, no second page opens', async () => {
+    const f = await closed();
+    const late = tx('ONLYINHISTORY');
+    history.holds(late, AMOUNT, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(later(f.closedAt, 4 * HOUR)) });
+    await service.pollIntents(later(f.closedAt, DAY));
+    const row = await intentOf(f.page.ref);
+    expect([row.status, row.reason]).toEqual(['HELD', AD_LATE_PAYMENT_LIKELY]);
+    expect(row.providerPaymentId).toBeNull();
+    expect((await invoiceOf(f.invoice.id)).status).toBe('UNPAID');
+    expect(await paidBy({ id: f.page.ref })).toBe(0);
+    expect((await told(f.owner.userId)).some((n) => (n.data as { status?: string }).status === 'HELD')).toBe(true);
+    expect(await app.prisma.auditLog.count({ where: { action: AUTO_CLOSE_LATE_RECORD_AUDIT, entityId: f.page.ref } })).toBe(1);
+    await refused(f);
+  });
+
+  it('a record dated before the close, that MMG shows only after it, is found too', async () => {
+    const f = await closed();
+    history.holds(tx('BACKDATED'), AMOUNT, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(new Date(f.page.row.createdAt.getTime() + MIN)) });
+    await service.pollIntents(later(f.closedAt, DAY));
+    expect((await intentOf(f.page.ref)).reason).toBe(AD_LATE_PAYMENT_LIKELY);
+  });
+
+  it('a record naming the page that is not plainly its payment goes to a person as a possible match', async () => {
+    const f = await closed();
+    history.holds(tx('OTHERAMOUNT'), AMOUNT + 1, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(later(f.closedAt, HOUR)) });
+    await service.pollIntents(later(f.closedAt, DAY));
+    const row = await intentOf(f.page.ref);
+    expect([row.status, row.reason]).toEqual(['HELD', AD_POSSIBLE_MATCH]);
+    expect(row.providerPaymentId).toBeNull();
+  });
+
+  it('a second page waits out the week, opens once the week has read clean, and the page is not read again', async () => {
+    const f = await closed();
+    await refused(f);
+    for (let t = AUTO_CLOSE_WATCH_FIRST_MS; t < AUTO_CLOSE_WATCH_MS; t += AUTO_CLOSE_WATCH_EVERY_MS) {
+      await service.pollIntents(later(f.closedAt, t));
+      expect((await decisionsOf(f.page.ref)).at(-1)).toBe('WATCH_CLEAR');
+    }
+    await refused(f);
+    await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + AUTO_CLOSE_WATCH_EVERY_MS));
+    expect((await decisionsOf(f.page.ref)).at(-1)).toBe('WATCH_DONE');
+    const reads = history.queries.length;
+    await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + 2 * DAY));
+    expect(history.queries.length).toBe(reads);
+    expect((await intentOf(f.page.ref)).status).toBe('NOT_PAID');
+    expect((await open(f)).ref).not.toBe(f.page.ref);
+  });
+
+  it('the week is the close\'s: its last hour is read, and a record after it is not this watch\'s', async () => {
+    const f = await closed();
+    history.holds(tx('LASTHOUR'), AMOUNT, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(later(f.closedAt, AUTO_CLOSE_WATCH_MS - 10 * MIN)) });
+    const g = await closed();
+    history.holds(tx('AFTERTHEWEEK'), AMOUNT, { external_id: g.page.row.merchantTransactionId, modificationDate: gyStamp(later(g.closedAt, AUTO_CLOSE_WATCH_MS + HOUR)) });
+    for (let i = 0; i < 40; i += 1) await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + DAY));
+    expect((await intentOf(f.page.ref)).reason).toBe(AD_LATE_PAYMENT_LIKELY);
+    expect((await intentOf(g.page.ref)).status).toBe('NOT_PAID');
+    expect((await decisionsOf(g.page.ref)).at(-1)).toBe('WATCH_DONE');
+  });
+
+  it('a worker that stopped catches up: a record inside the week is found however late it looks', async () => {
+    const f = await closed();
+    history.holds(tx('WORKERDOWN'), AMOUNT, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(later(f.closedAt, 5 * DAY)) });
+    const long = later(f.closedAt, 40 * DAY);
+    for (let i = 0; i < 20 && (await intentOf(f.page.ref)).status !== 'HELD'; i += 1) await service.pollIntents(long);
+    expect((await intentOf(f.page.ref)).reason).toBe(AD_LATE_PAYMENT_LIKELY);
+  });
+
+  it('a failed read clears nothing, and a week it never finished stays blocked, in front of a person', async () => {
+    const f = await closed();
+    history.answer = async () => ({ outcome: 'error', reason: 'MMG is down' });
+    await service.pollIntents(later(f.closedAt, DAY));
+    expect(await decisionsOf(f.page.ref)).toEqual(['WATCH_READ_FAILED']);
+    await refused(f);
+    await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + DAY + HOUR));
+    expect((await decisionsOf(f.page.ref)).at(-1)).toBe('WATCH_ENDED_INCOMPLETE');
+    await refused(f);
+    const reads = history.queries.length;
+    await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + 3 * DAY));
+    expect(history.queries.length).toBe(reads);
+  });
+
+  it('a close with no record of the read behind it is watched all the same', async () => {
+    const f = await invoiced();
+    const page = await open(f);
+    await raw.mmgCheckoutIntent.update({ where: { id: page.ref }, data: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON, nextCheckAt: null } });
+    history.holds(tx('NORECORD'), AMOUNT, { external_id: page.row.merchantTransactionId, modificationDate: gyStamp(new Date(Date.now() + 3 * HOUR)) });
+    await service.pollIntents(new Date(Date.now() + DAY));
+    expect((await intentOf(page.ref)).reason).toBe(AD_LATE_PAYMENT_LIKELY);
   });
 });
 

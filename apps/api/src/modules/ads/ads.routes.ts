@@ -2,9 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from '../../lib/zod';
 import { AdvertiserService, assertAdvertiserApprovedWithin, assertCapabilityWithin } from './advertiser.service';
 import { BookingService, MAX_AVAILABILITY_WEEKS } from './booking.service';
-import { adCheckoutKilled, adMmgCheckoutEnabled, AdCheckoutService } from './checkout.service';
-import { mmgCheckoutEnabled } from '../../providers/mmg/mmg-checkout';
+import { adCheckoutKilled, adMmgLive, AdCheckoutService } from './checkout.service';
 import { MMG_CHECKOUT_START_RATE, mmgCheckoutRuntimeOf } from '../billing/mmg-checkout.routes';
+import { unresolvedAdPayments } from '../billing/mmg-checkout.service';
 import { clientPlatform } from '../billing/fee-pay-actions';
 import { CreativeService } from './creative.service';
 import { AdsLifecycleService } from './lifecycle.service';
@@ -195,7 +195,6 @@ export async function adsRoutes(app: FastifyInstance) {
   //    the reply is a pointer, and these routes hand out the page and read the state, nothing else. ─────────────
   let mmgRuntime: ReturnType<typeof mmgCheckoutRuntimeOf> | null = null;
   const mmg = () => (mmgRuntime ??= mmgCheckoutRuntimeOf(app));
-  const adMmgLive = () => adMmgCheckoutEnabled() && mmgCheckoutEnabled();
 
   /** POST /invoices/:id/mmg-checkout — start one, or hand back the one already open. The OWNER's alone. */
   app.post<{ Params: { id: string } }>('/invoices/:id/mmg-checkout', { ...auth, config: { rateLimit: { ...MMG_CHECKOUT_START_RATE } } }, async (request, reply) => {
@@ -338,18 +337,30 @@ export async function adsRoutes(app: FastifyInstance) {
   /** §14.2 home — the advertiser's campaigns with placement + invoice status. */
   app.get<{ Params: { id: string } }>('/advertiser/:id/campaigns', auth, async (request) => {
     const member = await advertisers.assertCapability(request.params.id, request.user.userId, 'read');
-    const canPay = member.role === 'OWNER' && adMmgLive();
+    const advertiser = await app.prisma.advertiser.findUniqueOrThrow({ where: { id: request.params.id }, select: { status: true } });
+    const canPay = member.role === 'OWNER' && adMmgLive() && advertiser.status === 'APPROVED';
     const campaigns = await app.prisma.adCampaign.findMany({
       where: { advertiserId: request.params.id },
       include: {
         placement: { select: { key: true, name: true, tier: true, mediaKind: true } },
-        invoices: { select: { id: true, number: true, status: true, amount: true, paymentUrl: true } },
+        invoices: { select: { id: true, number: true, status: true, amount: true, paymentUrl: true, mmgCheckouts: { where: { status: 'OPEN' }, select: { id: true } } } },
         creatives: { select: { id: true, status: true, transcodeStatus: true } },
         bookings: { select: { weekStart: true, city: true, status: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: 100,
     });
+    // [ADS-ON] The same answer a tap gets: an open page of the invoice's own can be handed back, any other unresolved
+    // payment on the campaign stops it.
+    const payable = new Set<string>();
+    if (canPay) {
+      for (const c of campaigns) {
+        if (c.status !== 'PENDING_PAYMENT') continue;
+        for (const i of c.invoices) {
+          if (i.status === 'UNPAID' && await unresolvedAdPayments(app.prisma, c.id, i.mmgCheckouts[0]?.id) === 0) payable.add(i.id);
+        }
+      }
+    }
     return {
       success: true,
       data: campaigns.map((c) => ({
@@ -357,7 +368,7 @@ export async function adsRoutes(app: FastifyInstance) {
         placement: { key: c.placement.key, name: c.placement.name, tier: c.placement.tier, mediaKind: c.placement.mediaKind },
         cities: c.cities, startWeek: c.startWeek, endWeek: c.endWeek,
         totalAmount: c.totalAmount ? Number(c.totalAmount) : null, currency: c.currency,
-        invoices: c.invoices.map((i) => ({ id: i.id, number: i.number, status: i.status, amount: Number(i.amount), paymentUrl: i.paymentUrl, payable: canPay && i.status === 'UNPAID' })),
+        invoices: c.invoices.map((i) => ({ id: i.id, number: i.number, status: i.status, amount: Number(i.amount), paymentUrl: i.paymentUrl, payable: payable.has(i.id) })),
         creatives: c.creatives,
         bookings: c.bookings,
         createdAt: c.createdAt,

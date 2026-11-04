@@ -148,7 +148,7 @@ describe('an advertiser returning from MMG', () => {
   const page = async () => (await GET(new Request('https://web.test/pay/mmg/success?token=abc'), context())).text();
 
   it.each([
-    ['CONFIRMED', 'Payment received. Your ad is now in review.'],
+    ['CONFIRMED', 'Payment received. Open your campaign to see what happens next.'],
     ['CONFIRMING', "We're confirming your payment with MMG. Don't pay again. You can close this page."],
     ['NOT_PAID', "MMG didn't complete this payment. You can try again from your campaign."],
   ])('%s reads as an ad payment, never a weekly fee, and goes back to the campaigns', async (state, words) => {

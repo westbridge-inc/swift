@@ -50,4 +50,5 @@ ALTER TABLE "mmg_checkout_intents" DROP CONSTRAINT "mmg_checkout_intents_payer_s
 ALTER TABLE "mmg_checkout_intents" ADD CONSTRAINT "mmg_checkout_intents_payer_shape"
   CHECK (num_nonnulls("subscriptionId", "chainOwnerId") = 1);
 ALTER TABLE "mmg_checkout_intents" DROP COLUMN "adInvoiceId";
+DROP SEQUENCE "ad_invoice_number_seq";
 COMMIT;

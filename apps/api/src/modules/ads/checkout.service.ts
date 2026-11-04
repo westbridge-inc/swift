@@ -8,6 +8,7 @@ import { BookingService, lockCampaign } from './booking.service';
 import { AdsRefundService } from './refund.service';
 import { adCheckoutCounter } from '../../plugins/observability';
 import { isProduction } from '../../utils/runtime-mode';
+import { mmgCheckoutEnabled } from '../../providers/mmg/mmg-checkout';
 
 // Ad checkout & payment (ads-platform spec §8.1/§8.2). Ad money is PLATFORM
 // revenue paid UPFRONT — it reuses the subscription rails' discipline
@@ -43,6 +44,11 @@ export function adPaymentConfirmManualOnly(env: Record<string, string | undefine
 /** [ADS-ON] Advertisers may pay with MMG. Stays off until the owner has MMG's answers; only exactly 1 opens it. */
 export function adMmgCheckoutEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return env['ADS_MMG_CHECKOUT'] === '1';
+}
+
+/** [ADS-ON] THE rule for "an advertiser can pay": this switch, and MMG's own checkout. */
+export function adMmgLive(env: Record<string, string | undefined> = process.env): boolean {
+  return adMmgCheckoutEnabled(env) && mmgCheckoutEnabled(env);
 }
 
 /** What a settlement did. `already` is the same payment, seen again. */
@@ -82,8 +88,8 @@ export class AdCheckoutService {
     // [ADS-ON] The server decides how an invoice is paid: in production that is
     // the MMG checkout, and the provider a client names is not read (the app in
     // the stores asks for MANUAL). Fail before reading or reserving inventory:
-    // with the switch off, production issues no invoice nobody could pay.
-    if (isProduction() && !adMmgCheckoutEnabled()) {
+    // with either switch off, production issues no invoice nobody could pay.
+    if (isProduction() && !adMmgLive()) {
       throw new AppError(503, 'ADS_PAYMENT_PROVIDER_UNAVAILABLE', 'Paying for ads is not open yet.');
     }
     const invoiceProvider: AdPaymentProvider = isProduction() ? 'MMG' : provider;
@@ -132,17 +138,12 @@ export class AdCheckoutService {
     return { invoice, reservedUntil: nextExpiry?.reservedUntil ?? null };
   }
 
-  /** ADS-{YYYY}-{seq}, per-year monotonic. One allocator at a time, for the length of this transaction: a clash
-   *  could not be retried here, because Postgres has aborted the transaction by then. The next number follows the
-   *  highest one, never a count of rows, so a gap can never name a number already taken. */
+  /** ADS-{YYYY}-{seq}. Numbers are unique across operators, and this transaction sees one operator behind the tenant
+   *  wall, so a number can never be worked out from the rows: it comes from one sequence for all of them. A checkout
+   *  that rolls back leaves a gap; a number is never issued twice. */
   private async createInvoice(tx: Prisma.TransactionClient, tenantId: string, advertiserId: string, campaignId: string, amount: Prisma.Decimal, currency: string, provider: AdPaymentProvider): Promise<AdInvoice> {
-    const year = new Date().getUTCFullYear();
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`ad-invoice-number:${year}`}, 0))::text`;
-    const prefix = `ADS-${year}-`;
-    const [highest] = await tx.$queryRaw<Array<{ seq: number | null }>>`
-      SELECT max(substring("number" FROM '[0-9]+$')::int) AS seq FROM "ad_invoices"
-      WHERE "number" LIKE ${`${prefix}%`} AND "number" ~ '^ADS-[0-9]{4}-[0-9]{6,9}$'`;
-    const number = `${prefix}${String((highest?.seq ?? 0) + 1).padStart(6, '0')}`;
+    const [next] = await tx.$queryRaw<Array<{ seq: bigint }>>`SELECT nextval('ad_invoice_number_seq') AS seq`;
+    const number = `ADS-${new Date().getUTCFullYear()}-${String(next!.seq).padStart(6, '0')}`;
     return tx.adInvoice.create({
       data: {
         tenantId, advertiserId, campaignId, number,
@@ -227,6 +228,14 @@ export class AdCheckoutService {
         title: 'Ad payment arrived after the hold expired',
         body: `Invoice ${invoice.number} was paid after its reservation expired. The money is recorded, the inventory was not confirmed, and a full refund obligation is staged — settle it with the payout reference.`,
         data: { kind: 'ad_late_capture', campaignId: invoice.campaignId, invoiceNumber: invoice.number },
+      }).catch(() => {});
+      // They paid and have no booking: they hear both from Swift, before they ask.
+      const { notifyAdvertiserOwners } = await import('./ads-notify');
+      await notifyAdvertiserOwners(this.prisma, this.notifications, invoice.advertiserId, {
+        title: 'We received your payment, but your ad was not placed',
+        body: `We received ${invoice.currency} ${Number(invoice.amount).toLocaleString('en-US')} for invoice ${invoice.number}, but its booking was no longer held, so your ad was not placed. The full amount is owed back to you. Please do not pay again. Support will contact you.`,
+        kind: 'ad_mmg_checkout',
+        data: { status: 'LATE_CAPTURE', campaignId: invoice.campaignId, invoiceNumber: invoice.number },
       }).catch(() => {});
       return;
     }
