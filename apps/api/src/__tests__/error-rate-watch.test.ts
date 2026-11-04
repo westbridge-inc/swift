@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { Server } from 'socket.io';
-import { prismaPlugin } from '../plugins/prisma';
+import { prismaPlugin, TenantContextRequiredError } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
@@ -47,8 +47,7 @@ const io = { to: () => ({ emit: () => {} }), in: () => ({ fetchSockets: async ()
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const userIds: string[] = [];
-/** Each run starts somewhere of its own: the hour buckets of the last run are still in Redis for a day. */
-let days = 2_000 + (Date.now() % 100_000);
+let days = 2_000;
 
 /** A clock of the scenario's own, on the hour plus five minutes: far past anything another run wrote. */
 const clock = () => { days += 40; return Math.floor((Date.now() + days * DAY) / HOUR) * HOUR + 5 * 60_000; };
@@ -86,6 +85,7 @@ beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
+  app.decorate('io', io);
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   app.get('/boom', async () => { throw new Error('error-rate boom'); });
@@ -94,6 +94,7 @@ beforeAll(async () => {
   app.get('/fault-500', async () => { throw new AppError(500, 'INVARIANT', 'An invariant broke'); });
   app.get('/own-500', async () => { throw Object.assign(new Error('own status'), { statusCode: 500, code: 'TENANT_CONTEXT_REQUIRED' }); });
   app.get('/own-503', async () => { throw Object.assign(new Error('own status'), { statusCode: 503, code: 'FST_UNDER_PRESSURE' }); });
+  app.get('/wall', async () => { throw new TenantContextRequiredError('User', 'findUnique', 'request'); });
   app.get('/own-429', async () => { throw Object.assign(new Error('slow down'), { statusCode: 429, code: 'RATE' }); });
   app.get('/forbidden', async () => { throw new AppError(403, 'NO', 'No'); });
   app.get('/invalid', async () => z.object({ a: z.string() }).parse({}));
@@ -105,6 +106,9 @@ beforeEach(async () => {
   resetDevChannelLog(); process.env['OPS_ONCALL_PHONES'] = ONCALL;
   delete process.env['ERROR_SUSTAINED_ALERT_PER_DAY'];
   await wipe();
+  // The hour buckets of an earlier run stay in Redis for a day: each scenario starts with none.
+  const buckets = await app.redis.keys('err5xx:hour:*');
+  if (buckets.length > 0) await app.redis.del(...buckets);
 });
 afterEach(() => { delete process.env['OPS_ONCALL_PHONES']; delete process.env['ERROR_SUSTAINED_ALERT_PER_DAY']; });
 
@@ -125,14 +129,14 @@ describe('[FIXES-4 1] the pattern the per-minute pager could never see now pages
     const gap = Math.floor((7 * DAY) / 26);
     let sent = 0; let pagedAtError: number | null = null;
     for (let burst = 0; burst < 26; burst += 1) {
-      const size = burst % 3 === 0 ? 2 : 3; // 26 bursts, 70 errors
+      const size = burst % 3 === 0 && burst > 0 ? 2 : 3; // 26 bursts, 70 errors
       const at = t0 + burst * gap;
       await errors(size, at);
       sent += size;
       const res = await tick(who, at);
       if (res.outcome === 'delivered' && pagedAtError === null) pagedAtError = sent;
     }
-    expect(sent).toBeGreaterThanOrEqual(60);
+    expect(sent).toBe(70);
     expect(pagedAtError).toBeGreaterThanOrEqual(10);
     expect(pagedAtError).toBeLessThanOrEqual(12);
     expect(await pages()).toHaveLength(1);
@@ -202,7 +206,7 @@ describe('[FIXES-4 2] one page per episode, inside the on-call rules', () => {
     expect(page!.kind).toBe('PLATFORM');
     expect(page!.tenantId).toBeNull();
     expect(page!.sosAlertId).toBeNull();
-    expect(page!.body).toContain('12 server errors');
+    expect(page!.body).toContain('12 server errors in the last 24 to 25 hours:');
     expect(page!.body).toContain('Unhandled error');
     expect(page!.recipients.map((r) => r.userId)).toEqual(who.map((p) => p.userId));
     const [text] = texts();
@@ -268,6 +272,60 @@ describe('[FIXES-4 3] an acknowledged episode stays quiet, and is never silenced
     expect((await tick(who, t0 + 24 * HOUR)).outcome).toBe('delivered');
     expect(await pages()).toHaveLength(2);
     expect(texts()).toHaveLength(2);
+  });
+});
+
+describe('[FIXES-4 3b · REVIEW-G10 S4-4] the day bound holds without its Redis key', () => {
+  const aDayAgo = (id: string) => runWithoutTenant(() => app.prisma.opsAlert.update({ where: { id }, data: { createdAt: new Date(Date.now() - 25 * HOUR) } }), 'test-fixture:error-rate');
+
+  it('a page closed today stops a new one after a Redis wipe: no second alert, no second text', async () => {
+    const who = [await responder()];
+    await errors(10, Date.now());
+    expect((await tick(who, Date.now())).outcome).toBe('delivered');
+    await tick(who, Date.now() + 3 * HOUR); // quiet: closed
+    expect(await openPages()).toHaveLength(0);
+    await app.redis.del(SUSTAINED_ERROR_PAGE_KEY);
+    await errors(10, Date.now());
+    expect((await tick(who, Date.now())).outcome).toBe('deduped');
+    expect(await pages()).toHaveLength(1);
+    expect(texts()).toHaveLength(1);
+  });
+
+  it('an acknowledged page does the same', async () => {
+    const who = [await responder()];
+    await errors(10, Date.now());
+    await tick(who, Date.now());
+    const [page] = await pages();
+    await runWithoutTenant(() => acknowledgeOpsAlert(app.prisma, { opsAlertId: page!.id, userId: who[0]!.userId }), 'test:error-rate');
+    await app.redis.del(SUSTAINED_ERROR_PAGE_KEY);
+    await errors(1, Date.now());
+    expect((await tick(who, Date.now())).outcome).toBe('deduped');
+    expect(await pages()).toHaveLength(1);
+  });
+
+  it('a page from more than a day ago bounds nothing: errors that go on page again', async () => {
+    const who = [await responder()];
+    await errors(10, Date.now());
+    await tick(who, Date.now());
+    const [page] = await pages();
+    await runWithoutTenant(() => acknowledgeOpsAlert(app.prisma, { opsAlertId: page!.id, userId: who[0]!.userId }), 'test:error-rate');
+    await aDayAgo(page!.id);
+    await app.redis.del(SUSTAINED_ERROR_PAGE_KEY);
+    await errors(1, Date.now());
+    expect((await tick(who, Date.now())).outcome).toBe('delivered');
+    expect(await pages()).toHaveLength(2);
+  });
+
+  it('nobody staffed: bursts through a closed page text once a day, not once a burst', async () => {
+    await errors(10, Date.now());
+    expect((await tick([], Date.now())).outcome).toBe('pending');
+    expect((await tick([], Date.now())).outcome).toBe('pending'); // still owed: an open page is not a page that was had
+    await tick([], Date.now() + 3 * HOUR); // quiet: closed, nobody ever had it
+    expect(await openPages()).toHaveLength(0);
+    await errors(10, Date.now());
+    expect((await tick([], Date.now())).outcome).toBe('deduped');
+    expect(await pages()).toHaveLength(1);
+    expect(texts()).toHaveLength(1);
   });
 });
 
@@ -370,6 +428,84 @@ describe('[FIXES-4 5] the count is what the error handler answered', () => {
     await app.redis.expire(key, 10);
     await tallyServerError(app.redis, ms);
     expect(await app.redis.ttl(key)).toBeGreaterThan(25 * 3600);
+  });
+});
+
+describe('[FIXES-4 5b · REVIEW-G10 S3-1] the per-minute spike sees what the tally sees', () => {
+  const SPIKE = 'Server error spike';
+  const windowKey = () => `err5xx:${Math.floor(Date.now() / 60_000)}`;
+  let admin: Person;
+  const spikes = () => runWithoutTenant(() => app.prisma.notification.count({ where: { userId: admin.userId, title: SPIKE } }), 'test-read:error-rate');
+  const settled = async (want: number) => { for (let i = 0; i < 200 && (await spikes()) < want; i += 1) await new Promise((r) => setTimeout(r, 10)); };
+  const hit = async (url: string, times: number, status: number) => { for (let i = 0; i < times; i += 1) expect((await app.inject({ method: 'GET', url })).statusCode).toBe(status); };
+
+  beforeEach(async () => {
+    // Not across the top of a minute: the spike's window is one minute.
+    while (Date.now() % 60_000 > 50_000) await new Promise((r) => setTimeout(r, 250));
+    await app.redis.del(windowKey(), 'ops_page:error-spike');
+    admin = await responder();
+    await runWithoutTenant(() => app.prisma.notification.deleteMany({ where: { title: SPIKE } }), 'test-cleanup:error-rate');
+    process.env['ERROR_RATE_ALERT_PER_MIN'] = '3';
+  });
+  afterEach(() => { delete process.env['ERROR_RATE_ALERT_PER_MIN']; });
+
+  it.each([
+    ['AppError 500s', '/fault-500', 500],
+    ['the tenant wall refusing (TENANT_CONTEXT_REQUIRED)', '/wall', 500],
+    ['errors carrying their own 503', '/own-503', 503],
+    ['unknown errors, as before', '/boom', 500],
+  ])('%s fire it', async (_name, url, status) => {
+    await hit(url, 3, status);
+    await settled(1);
+    expect(await spikes()).toBe(1);
+  });
+
+  it('deliberate refusals do not', async () => {
+    await hit('/refuse-503', 5, 503);
+    await hit('/refuse-502', 5, 502);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await spikes()).toBe(0);
+    expect(await app.redis.get(windowKey())).toBeNull();
+  });
+
+  it('each error counts once, whichever branch answered it: two below the line stay below it', async () => {
+    await hit('/boom', 1, 500);
+    await hit('/fault-500', 1, 500);
+    for (let i = 0; i < 100 && Number((await app.redis.get(windowKey())) ?? 0) < 2; i += 1) await new Promise((r) => setTimeout(r, 10));
+    expect(await app.redis.get(windowKey())).toBe('2');
+    expect(await spikes()).toBe(0);
+  });
+
+  it('it cannot double-page: a burst past the line pages once, and a second one inside 15 minutes not at all', async () => {
+    await hit('/wall', 3, 500);
+    await settled(1);
+    await hit('/wall', 10, 500);
+    await hit('/fault-500', 10, 500);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await spikes()).toBe(1);
+    expect(await app.redis.ttl('ops_page:error-spike')).toBeGreaterThan(800);
+    // the next minute crosses the line again, inside the 15 minutes
+    await app.redis.del(windowKey());
+    await hit('/wall', 3, 500);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await spikes()).toBe(1);
+  });
+
+  it('it adds no text: push and inbox only', async () => {
+    await hit('/fault-500', 3, 500);
+    await settled(1);
+    const pushes = () => devChannelLog.filter((e) => e.channel === 'push' && e.to === admin.device).map((e) => e.data?.['kind']);
+    for (let i = 0; i < 200 && pushes().length === 0; i += 1) await new Promise((r) => setTimeout(r, 10)); // the push follows the inbox row
+    expect(pushes()).toEqual(['ops_error_spike']);
+    expect(devChannelLog.filter((e) => e.channel === 'sms')).toHaveLength(0);
+    expect(await pages()).toHaveLength(0);
+  });
+
+  it('its words say what it counts', async () => {
+    await hit('/own-503', 3, 503);
+    await settled(1);
+    const [notice] = await runWithoutTenant(() => app.prisma.notification.findMany({ where: { userId: admin.userId, title: SPIKE } }), 'test-read:error-rate');
+    expect(notice!.body).toBe('3+ server errors in the last minute. Check Sentry / the API logs now.');
   });
 });
 

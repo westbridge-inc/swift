@@ -2,7 +2,8 @@ import type { PrismaClient } from '@prisma/client';
 import type Redis from 'ioredis';
 import type { NotificationService } from '../notification/notification.service';
 import { serverErrorsByHour } from '../../lib/server-error-tally';
-import { pageOps, resolveOpsPage, type PageOutcome } from './ops-page';
+import { runAsSystem } from '../../plugins/tenant-context';
+import { OPS_PAGE_CAPABILITY, pageOps, resolveOpsPage, type PageOutcome } from './ops-page';
 
 // ---------------------------------------------------------------------------
 // [FIXES-4] Server errors that keep happening, too few at a time for the spike.
@@ -19,7 +20,9 @@ import { pageOps, resolveOpsPage, type PageOutcome } from './ops-page';
 //    at most 6 a UTC day, GSM-7, one part;
 //  - a delivered page holds its key for a day, so one page a day is the most
 //    this condition can open, whatever the bursts do. Errors that never stop
-//    page again the next day: bounded, never silenced;
+//    page again the next day: bounded, never silenced. The database holds the
+//    same bound: a Redis wipe, or a page nobody was staffed to receive, cannot
+//    open another that day;
 //  - this clock hour and the last one holding no error close the page: nobody
 //    is reminded of a condition that ended. The day's count cannot say so, it
 //    remembers for a day.
@@ -52,11 +55,21 @@ export async function watchErrorRate(
     return { errors, threshold, outcome: 'quiet' };
   }
   if (errors < threshold) return { errors, threshold, outcome: 'below' };
+  // [REVIEW-G10 S4-4] A page that closed or was acknowledged inside the day still counts when its key is gone.
+  // An open one is pageOps' own to answer.
+  const pagedToday = await runAsSystem(OPS_PAGE_CAPABILITY, () => deps.prisma.opsAlert.findFirst({
+    where: {
+      kind: 'PLATFORM', title: SUSTAINED_ERROR_PAGE_TITLE, createdAt: { gt: new Date(nowMs - SUSTAINED_ERROR_PAGE_WINDOW_SECONDS * 1000) },
+      OR: [{ closedAt: { not: null } }, { acknowledgedAt: { not: null } }],
+    },
+    select: { id: true },
+  }));
+  if (pagedToday) return { errors, threshold, outcome: 'deduped' };
   const page = await pageOps(deps, {
     key: SUSTAINED_ERROR_PAGE_KEY,
     windowSeconds: SUSTAINED_ERROR_PAGE_WINDOW_SECONDS,
     title: SUSTAINED_ERROR_PAGE_TITLE,
-    body: `${errors} server errors in the last 24 hours: too few in any one minute for the spike page. Read the API logs for "Unhandled error": each line names the route and the error class.`,
+    body: `${errors} server errors in the last 24 to 25 hours: too few in any one minute for the spike page. Read the API logs for "Unhandled error": each line names the route and the error class.`,
     data: { kind: 'ops_error_sustained', errors },
   });
   return { errors, threshold, outcome: page.status };
