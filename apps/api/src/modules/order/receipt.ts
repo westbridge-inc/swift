@@ -145,7 +145,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const isRide = order.orderType === 'TAXI';
   const isParcel = order.orderType === 'COURIER';
   const paidHow = isRide
-    ? (cashCaptured ? 'Paid in cash to your driver' : 'Cash to your driver, not recorded by Swift')
+    ? (cashCaptured ? 'Paid to your driver' : 'Cash to your driver, not recorded by Swift')
     : isParcel
       ? (cashCaptured ? 'Paid in cash to your rider' : 'Cash to your rider, not recorded by Swift')
       : order.paymentMethod === 'MOBILE_MONEY'

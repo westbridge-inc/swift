@@ -109,6 +109,13 @@ const PARCEL_RETURN_WHY: Readonly<Record<string, string>> = {
   'Recipient refused the parcel': 'The recipient refused the parcel.',
   'Wrong or incomplete address': 'The address was wrong or incomplete.',
 };
+/** [BUG-HUNT-2 G12] The owner's rule, said out loud: no refund of the fee and no return fee. A recipient who was to pay never
+ *  did, so the sender paid no fee for anything to stay anywhere. */
+export function parcelReturnedBody(payer: string | null): string {
+  const fee = payer === 'RECIPIENT' ? 'There is no return fee.' : 'The delivery fee stays with the rider, who rode both ways, and there is no return fee.';
+  return `The parcel is back with you. ${fee} The rider took a proof photo: if there is a problem, contact Swift support.`;
+}
+
 export function parcelReturnWhy(reason: string): string {
   return PARCEL_RETURN_WHY[reason.trim()] ?? 'The rider could not deliver it.';
 }
@@ -816,7 +823,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (!rider) throw new NotFoundError('Rider');
     const order = await app.prisma.order.findFirst({
       where: { id, orderType: 'COURIER', riderId: rider.id },
-      select: { id: true, status: true, orderNumber: true, customerId: true },
+      select: { id: true, status: true, orderNumber: true, customerId: true, courierPayer: true },
     });
     if (!order) throw new NotFoundError('CourierOrder', id);
     if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
@@ -892,8 +899,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Parcel returned',
-      // [BUG-HUNT-2 G12] The owner's rule, said out loud: no refund of the fee and no return fee.
-      body: 'The parcel is back with you. The delivery fee stays with the rider, who rode both ways, and there is no return fee. The rider took a proof photo: if there is a problem, contact Swift support.',
+      body: parcelReturnedBody(order.courierPayer),
       data: { orderId: id, status: 'RETURNED' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return-proof notification failed after commit'));
     // [BUG-HUNT-2 G12] The rider rode both ways and has the fee in their hand, on no record they can see.

@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderReceiptHtml } from '../modules/order/receipt';
 import { partyCaseView } from '../modules/custody/custody-case';
-import { parcelReturnWhy } from '../modules/courier/courier.routes';
+import { parcelReturnWhy, parcelReturnedBody } from '../modules/courier/courier.routes';
 
 const base = {
   id: 'o1', orderNumber: 'SW-1', status: 'DELIVERED', placedAt: new Date('2026-11-04T12:00:00.000Z'), paymentMethod: 'CASH', paymentStatus: 'CAPTURED', fulfillment: 'DELIVERY',
@@ -14,7 +14,7 @@ describe('[G16] a receipt uses its own words', () => {
   const parcel = renderReceiptHtml({ ...base, orderType: 'COURIER', subtotalCustomer: 0, deliveryFee: 1188, totalAmount: 1188, pickupAddress: 'Stabroek', deliveryAddress: 'Kitty' });
 
   it('a ride: who drove, the route, the fare, no store words', () => {
-    for (const word of ['Paid in cash to your driver', 'Driver: Dan · White Toyota · PAB 1234', 'From: Stabroek', 'To: Kitty', '<td>Fare</td>', 'You paid your driver directly']) expect(ride).toContain(word);
+    for (const word of ['Paid to your driver', 'Driver: Dan · White Toyota · PAB 1234', 'From: Stabroek', 'To: Kitty', '<td>Fare</td>', 'You paid your driver directly']) expect(ride).toContain(word);
     for (const word of ['on delivery', '>Items<', 'parties shown above']) expect(ride).not.toContain(word);
   });
   it('a parcel: paid to the rider, a delivery fee, no items', () => {
@@ -45,5 +45,26 @@ describe('[G19] a rider whose signal died reported nothing', () => {
   });
   it('a rider who did report one keeps those words', () => {
     expect(partyCaseView({ ...kase, reason: 'CRASH' }, 'CUSTOMER', order)!.body).toContain('reported a problem');
+  });
+});
+
+describe('[G12 · COORD 4 Nov 2026] a parcel back with its sender', () => {
+  it('a sender who paid keeps the owner\'s rule: the fee stays with the rider, no return fee', () => {
+    expect(parcelReturnedBody('SENDER')).toContain('The delivery fee stays with the rider, who rode both ways, and there is no return fee.');
+  });
+
+  it('a recipient-pays parcel had no fee from the sender, so none is said to stay anywhere', () => {
+    const body = parcelReturnedBody('RECIPIENT');
+    expect(body).not.toContain('delivery fee');
+    expect(body).toContain('There is no return fee.');
+    expect(body).toContain('contact Swift support');
+  });
+});
+
+describe('[G16 · COORD 4 Nov 2026] a ride sold as cash or MMG at drop-off', () => {
+  it('the receipt says paid to your driver, never how', () => {
+    const ride = renderReceiptHtml({ ...base, orderType: 'TAXI', pickupAddress: 'Stabroek', deliveryAddress: 'Kitty', totalAmount: 1100 } as never);
+    expect(ride).toContain('Paid to your driver');
+    expect(ride).not.toContain('Paid in cash to your driver');
   });
 });
