@@ -20,9 +20,10 @@ import { BookingService, lockCampaign } from '../modules/ads/booking.service';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
-import { MMG_CHECKOUT_TTL_MS, AD_HOLD_PAST_CHECKOUT_MS, MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
+import { MMG_CHECKOUT_TTL_MS, AD_HOLD_PAST_CHECKOUT_MS, MmgCheckoutService, mmgCreationInstant } from '../modules/billing/mmg-checkout.service';
 import { MMG_CHECKOUT_RUNTIME_DECORATION, mmgCheckoutPublicRoutes, type MmgCheckoutRuntime } from '../modules/billing/mmg-checkout.routes';
 import { MMG_FEE_REVERSAL_SWITCH, MmgFeeReversalService } from '../modules/billing/mmg-fee-reversal';
+import { openFeeRefundCase } from '../modules/billing/fee-refund-case';
 import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTests } from '../modules/billing/provider-identity-backfill';
 import { AD_LATE_PAYMENT_LIKELY, AD_LOOKUP_NEVER_CONFIRMED, AD_NO_REPLY_UNRESOLVED, AD_POSSIBLE_MATCH, AUTO_CLOSE_LATE_RECORD_AUDIT, AUTO_CLOSE_WATCH_EVERY_MS, AUTO_CLOSE_WATCH_FIRST_MS, AUTO_CLOSE_WATCH_MS, AUTO_CLOSE_WATCH_PURPOSE, NO_REPLY_CHECK_BACKOFF_MS, NO_REPLY_CHECK_MAX_ATTEMPTS, NO_REPLY_CLOSED_REASON, NO_REPLY_FIRST_CHECK_AFTER_EXPIRY_MS } from '../modules/billing/mmg-expired-hold-check';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
@@ -992,6 +993,33 @@ describe('A8: the week after an automatic close', () => {
     expect((await intentOf(f.page.ref)).reason).toBe(AD_LATE_PAYMENT_LIKELY);
   });
 
+  it('every read of the week goes back over the page: a record dated before the close is found on the last day too', async () => {
+    const f = await closed(later(new Date(), 2 * DAY));
+    let when = later(f.closedAt, AUTO_CLOSE_WATCH_FIRST_MS);
+    while (when.getTime() < f.closedAt.getTime() + AUTO_CLOSE_WATCH_MS - DAY) {
+      await service.pollIntents(when);
+      when = later(when, AUTO_CLOSE_WATCH_EVERY_MS);
+    }
+    expect(await decisionsOf(f.page.ref)).not.toContain('WATCH_DONE');
+    history.holds(tx('LASTDAY'), AMOUNT, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(new Date(f.page.row.createdAt.getTime() + MIN)) });
+    await service.pollIntents(when);
+    const row = await intentOf(f.page.ref);
+    expect([row.status, row.reason, row.providerPaymentId]).toEqual(['HELD', AD_LATE_PAYMENT_LIKELY, null]);
+    expect((await invoiceOf(f.invoice.id)).status).toBe('UNPAID');
+  });
+
+  it('a bad read of the page stops nothing ahead of it, and no week ends clean on it', async () => {
+    const f = await closed(later(new Date(), 2 * DAY));
+    history.answer = async (query) => (mmgCreationInstant(query.fromdate, 'GUYANA_WALL_CLOCK')! < f.page.row.createdAt.getTime()
+      ? { outcome: 'error', reason: 'MMG is down' } : { outcome: 'rows', rows: [] });
+    await service.pollIntents(later(f.closedAt, DAY));
+    expect((await decisionsOf(f.page.ref)).at(-1)).toBe('WATCH_BEHIND');
+    for (let i = 0; i < 40 && (await decisionsOf(f.page.ref)).at(-1) === 'WATCH_BEHIND'; i += 1) await service.pollIntents(later(f.closedAt, AUTO_CLOSE_WATCH_MS + HOUR));
+    expect((await decisionsOf(f.page.ref)).at(-1)).toBe('WATCH_READ_FAILED');
+    expect(await decisionsOf(f.page.ref)).not.toContain('WATCH_DONE');
+    await refused(f);
+  });
+
   it('a record naming the page that is not plainly its payment goes to a person as a possible match', async () => {
     const f = await closed();
     history.holds(tx('OTHERAMOUNT'), AMOUNT + 1, { external_id: f.page.row.merchantTransactionId, modificationDate: gyStamp(later(f.closedAt, HOUR)) });
@@ -1103,6 +1131,17 @@ describe('no reversal, and the database\'s own floor', () => {
     vi.unstubAllEnvs();
     process.env['ADS_ENABLED'] = '1';
     expect(await app.prisma.mmgFeeReversal.count({ where: { checkoutId: page.ref } })).toBe(0);
+  });
+
+  it('a refund case on an ad checkout is refused as an ad payment, never as a pay-all one', async () => {
+    const f = await invoiced();
+    const page = await open(f);
+    const txn = tx('NOCASE');
+    mmgPaid(page.row, txn, AMOUNT);
+    await ret({ token: replyOf(page.row, '0', txn) });
+    await expect(runWithTenant(tenantId, () => openFeeRefundCase(app.prisma, { tenantId, checkoutId: page.ref, kind: 'DUPLICATE', reason: 'A reason for the test', actorId: f.owner.userId }, async () => {})))
+      .rejects.toMatchObject({ code: 'AD_CHECKOUT' });
+    expect(await raw.feeRefundCase.count({ where: { checkoutId: page.ref } })).toBe(0);
   });
 
   it('A2: a checkout for any other amount is refused by the database', async () => {

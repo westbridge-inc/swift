@@ -76,7 +76,7 @@ export async function openFeeRefundCase(
       const intent = await tx.mmgCheckoutIntent.findFirst({ where: { id: input.checkoutId, tenantId: input.tenantId } });
       if (!intent) throw new NotFoundError('MMG checkout', input.checkoutId);
       // Only a payment Swift credited on MMG's proof has anything to return, and a pay-all payment has no single payer.
-      if (!intent.subscriptionId) throw reversalRefusal('CHAIN_CHECKOUT');
+      if (!intent.subscriptionId) throw reversalRefusal(intent.adInvoiceId ? 'AD_CHECKOUT' : 'CHAIN_CHECKOUT');
       if (intent.status !== 'CONFIRMED') throw reversalRefusal('NOT_CONFIRMED');
       if (await tx.mmgFeeReversal.findFirst({ where: { checkoutId: intent.id, state: 'REVERSED' }, select: { id: true } })) throw reversalRefusal('ALREADY_REVERSED');
       const created = await tx.feeRefundCase.create({ data: {
