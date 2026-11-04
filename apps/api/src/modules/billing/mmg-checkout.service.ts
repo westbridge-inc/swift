@@ -723,6 +723,8 @@ export class MmgCheckoutService {
         // Persisted, with the key that asked for it, BEFORE the page leaves the server [F3].
         const created = await this.prisma.$transaction(async (tx) => {
           await lockCampaign(tx, invoice.campaignId);
+          // A tap at the same instant got here first: its page is this tap's answer, never a refusal.
+          if (await tx.mmgCheckoutIntent.count({ where: { adInvoiceId: input.invoiceId, status: { in: ['OPEN', 'CONFIRMING'] } } }) > 0) return null;
           const fresh = await payable(tx);
           const expiresAt = new Date(now.getTime() + MMG_CHECKOUT_TTL_MS);
           const intent = await tx.mmgCheckoutIntent.create({
@@ -739,6 +741,7 @@ export class MmgCheckoutService {
           });
           return intent;
         });
+        if (!created) continue;
         mmgCheckoutEventsCounter.labels('created').inc();
         return { created: true, checkout: await this.started(created, input.userId) };
       } catch (err) {

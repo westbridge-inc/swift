@@ -15,7 +15,7 @@ import { rateLimitKey } from '../utils/rate-limit-key';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { AdCheckoutService } from '../modules/ads/checkout.service';
-import { BookingService } from '../modules/ads/booking.service';
+import { BookingService, lockCampaign } from '../modules/ads/booking.service';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
@@ -329,6 +329,27 @@ describe('opening the page', () => {
     const f = await invoiced();
     const res = await Promise.all(Array.from({ length: 5 }, () => start(f.invoice.id, f.owner.token)));
     expect(res.every((r) => r.statusCode === 200 || r.statusCode === 201), res.map((r) => r.body).join()).toBe(true);
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: f.invoice.id } })).toBe(1);
+  });
+
+  it('A3: two taps that both got past the first look: the second is handed the first\'s page, never refused', async () => {
+    const f = await invoiced();
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let locked = () => {};
+    const isLocked = new Promise<void>((resolve) => { locked = resolve; });
+    const blocker = raw.$transaction(async (tx) => { await lockCampaign(tx, f.campaign.id); locked(); await held; }, { timeout: 30_000 });
+    await isLocked;
+    const taps = [start(f.invoice.id, f.owner.token), start(f.invoice.id, f.owner.token)];
+    for (let i = 0; i < 400; i += 1) {
+      const [waiting] = await raw.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+      if (waiting!.n >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    release();
+    await blocker;
+    const res = await Promise.all(taps);
+    expect(res.map((r) => r.statusCode).sort(), res.map((r) => r.body).join(' ')).toEqual([200, 201]);
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: f.invoice.id } })).toBe(1);
   });
 
