@@ -511,8 +511,8 @@ export async function stageStoreMmgClaim(
  * obligation — the `audit` callback is the route's `auditWithin`, invoked as
  * the last write inside this transaction.
  */
-export async function resolveMmgClaimDisagreement(
-  tx: MmgClaimTx,
+export async function resolveMmgClaimDisagreement<Tx extends MmgClaimTx>(
+  tx: Tx,
   input: {
     orderId: string;
     tenantId: string;
@@ -522,6 +522,8 @@ export async function resolveMmgClaimDisagreement(
     actorId: string;
     now?: Date;
     audit: (tx: MmgClaimTx, facts: AuditFacts) => Promise<void>;
+    /** What the decision opens elsewhere, on this lock and in this commit. Not called on a replay. */
+    afterDecision?: (tx: Tx, decided: MmgClaimFacts) => Promise<void>;
   },
 ): Promise<MmgClaimCommandOutcome> {
   const now = input.now ?? new Date();
@@ -553,6 +555,7 @@ export async function resolveMmgClaimDisagreement(
     note: input.note,
     noticeObligation: id,
   });
+  await input.afterDecision?.(tx, decision.next);
   await mmgClaimLockObserver.beforeCommit?.({ orderId: input.orderId, actor: 'ADMIN' });
   return { replayed: false, facts: decision.next, notice, outboxId: id };
 }
@@ -648,7 +651,7 @@ export interface MmgClaimDelivery {
   adminReached: number | null;
 }
 
-type OrderForNotice = MmgClaimFacts & { vendor: { owner: { userId: string } | null } | null; rider: { userId: string } | null };
+type OrderForNotice = MmgClaimFacts & { mmgAttestedAmount?: unknown; vendor: { owner: { userId: string } | null } | null; rider: { userId: string } | null };
 
 const REASON_TEXT: Record<MmgDisagreementReason, { customer: string; store: string; ops: string }> = {
   CUSTOMER_DENIED: {
@@ -668,12 +671,12 @@ const REASON_TEXT: Record<MmgDisagreementReason, { customer: string; store: stri
  * back at the store, so it can no longer continue or be cancelled, and a payment that reached the store is the store's to
  * give back.
  */
-function claimDecisionWords(orderNumber: string, upheld: boolean, returned: boolean): { customer: string; store: string } {
+function claimDecisionWords(orderNumber: string, upheld: boolean, returned: boolean, figureKnown: boolean): { customer: string; store: string } {
   if (returned) {
     return upheld
       ? {
         customer: `Swift support found that your MMG payment for order #${orderNumber} reached the store. The order went back to the store, so the store refunds you directly. If the store does not answer, contact Swift support.`,
-        store: `Swift support found that the customer's MMG payment for order #${orderNumber} reached you. The order came back to you, so you owe the customer that money back.`,
+        store: `Swift support found that the customer's MMG payment for order #${orderNumber} reached you. The order came back to you, so you owe the customer that money back.${figureKnown ? ' Send it from your MMG, then tap Refund sent on the order.' : ' Swift support will contact you about the amount.'}`,
       }
       : {
         customer: `Swift support found that no MMG payment for order #${orderNumber} reached the store. The order went back to the store, so you have nothing to pay and nothing more to do.`,
@@ -702,7 +705,7 @@ export async function deliverMmgClaimNotice(deps: MmgClaimNoticeDeps, notice: Mm
   return runWithTenant(notice.tenantId, async () => {
     const order = (await deps.prisma.order.findFirst({
       where: { id: notice.orderId, tenantId: notice.tenantId },
-      select: { ...MMG_CLAIM_FACTS_SELECT, vendor: { select: { owner: { select: { userId: true } } } }, rider: { select: { userId: true } } },
+      select: { ...MMG_CLAIM_FACTS_SELECT, mmgAttestedAmount: true, vendor: { select: { owner: { select: { userId: true } } } }, rider: { select: { userId: true } } },
     })) as OrderForNotice | null;
     const sent: MmgClaimDelivery['sent'] = [];
     const skipped: MmgClaimDelivery['skipped'] = [];
@@ -761,7 +764,7 @@ export async function deliverMmgClaimNotice(deps: MmgClaimNoticeDeps, notice: Mm
       }
     } else if (order.mmgClaimRevision === notice.revision && order.mmgClaimResolvedRevision === notice.revision && notice.resolution) {
       const upheld = notice.resolution === 'CUSTOMER_PAID';
-      const words = claimDecisionWords(order.orderNumber, upheld, order.status === RETURNED_STATUS);
+      const words = claimDecisionWords(order.orderNumber, upheld, order.status === RETURNED_STATUS, order.mmgAttestedAmount != null);
       plan.push({
         role: 'customer', userId: order.customerId, type: 'ORDER_UPDATE',
         title: 'Payment review finished',

@@ -58,7 +58,7 @@ import { cancelChainDealChange, chainOf, changeChainDeal, setChainDeal } from '.
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
 import { tellCustomersOfStoreSuspension } from '../vendor/store-suspension-notices';
 import { taxiNotificationData } from '../rides/taxi-notification';
-import { assertMayDecideRefund, openRefundWhere, refundResolvedNotice, refundVoidedNotice, resolveMmgRefundDispute, tellBothOfRefund, voidMmgRefundObligation } from '../order/mmg-refund-rail';
+import { assertMayDecideRefund, openMmgRefundOnReturn, openRefundWhere, refundResolvedNotice, refundVoidedNotice, resolveMmgRefundDispute, tellBothOfRefund, tellOfReturnRefund, voidMmgRefundObligation, type ReturnOutcome } from '../order/mmg-refund-rail';
 import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
@@ -7070,6 +7070,7 @@ export async function adminRoutes(app: FastifyInstance) {
       expectedClaimRevision: z.number().int().min(0),
     }).parse(request.body);
     const tenantId = requireTenantId();
+    let returned = null as ReturnOutcome;
     const outcome = await app.prisma.$transaction((tx) => resolveMmgClaimDisagreement(tx, {
       orderId: id,
       tenantId,
@@ -7078,7 +7079,18 @@ export async function adminRoutes(app: FastifyInstance) {
       note: body.note,
       actorId: request.user.userId,
       audit: (auditTx, facts) => auditWithin(auditTx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+      // [BUG-HUNT-2 G22] Support found the customer paid and the goods are already back: owed, in the finding's commit.
+      afterDecision: async (decidedTx, decided) => {
+        if (decided.status === 'RETURNED' && body.resolution === 'CUSTOMER_PAID') {
+          returned = await openMmgRefundOnReturn(decidedTx, id, request.user.userId, new Date());
+        }
+      },
     }));
+    // An owed refund's words are the finding's own notice. With no figure, a person is asked; the case stands if this fails.
+    if (returned?.kind === 'NO_FIGURE') {
+      await tellOfReturnRefund(app.prisma, notifications, returned)
+        .catch((err: unknown) => request.log.warn({ err, orderId: id }, 'page for the no-figure case failed; the ticket is open'));
+    }
     const facts = outcome.facts;
     if (outcome.replayed) {
       // [R5] A replay changed nothing and wrote no row. The decision it repeats

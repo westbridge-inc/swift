@@ -1,4 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { openMmgRefundOnReturn, tellOfReturnRefund, type ReturnOutcome } from '../order/mmg-refund-rail';
 import { randomInt, timingSafeEqual } from 'node:crypto';
 import type { CustodyIncidentReason, CustodyRecoveryCase, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -763,6 +764,7 @@ export async function confirmReturn(
     where: { orderId: input.orderId, state: 'RETURN_REQUIRED' },
   });
   if (!pre) throw new AppError(409, 'NO_RETURN_PENDING', 'This order has no return waiting to be confirmed.');
+  let owed = null as ReturnOutcome;
   const committed = await deps.orderService.transitionOrderAtomically({
     orderId: input.orderId,
     target: 'RETURNED',
@@ -775,6 +777,8 @@ export async function confirmReturn(
       if (locked.orderType === 'COURIER') {
         await tx.order.update({ where: { id: locked.id }, data: { courierReturnedAt: new Date() } });
       }
+      // [BUG-HUNT-2 G22] The goods are back and the store has the money: owed, in this commit.
+      owed = await openMmgRefundOnReturn(tx, locked.id, input.actor.userId, new Date());
     },
     ...(input.actor.role === 'ADMIN' && input.actor.userId ? {
       operatorAudit: {
@@ -787,6 +791,8 @@ export async function confirmReturn(
   });
   const kase = await deps.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: pre.id } });
   await publishCaseChange(deps, kase, committed.order);
+  // The record stands whatever happens here; both order screens say the same.
+  if (owed) await tellOfReturnRefund(deps.prisma, deps.notifications, owed).catch(() => undefined);
   return kase;
 }
 

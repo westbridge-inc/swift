@@ -89,6 +89,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'vendor_customer_answered',
     // [BUG-HUNT-2 G08] the MMG refund rail, each side told once per step (standard, like its MMG peers)
     'mmg_refund_sent', 'mmg_refund_confirmed', 'mmg_refund_disputed', 'mmg_refund_overdue', 'mmg_refund_resolved',
+    // [BUG-HUNT-2 G22] a paid order came back: each side told what is owed, once
+    'mmg_refund_owed', 'mmg_refund_owed_store',
     // [BUG-HUNT-2 G20] the store, once: a pickup has been ready for a day and nobody came
     'pickup_not_collected',
     // Rides
