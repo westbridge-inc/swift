@@ -516,6 +516,9 @@ function mmgAwareMessage(message: string): string {
 // the time, and once it is IN PROGRESS the provider is in the customer's home or
 // on the job, so the app no longer cancels it — the customer contacts the
 // provider (or Swift support), exactly as the Terms (§7) say. There is never a fee.
+// A booking nobody has accepted, and a booking running very late, stay free as for
+// every kind above (Terms §7): a pro who never answers leaves nobody stuck. A started
+// job the customer cannot close is closed by Swift support (POST /admin/service-jobs/:id/close).
 // ---------------------------------------------------------------------------
 
 export const SERVICE_JOB_STARTED_CODE = 'SERVICE_JOB_STARTED';
@@ -558,7 +561,9 @@ export function serviceAppointmentFreeCancelEnd(job: ServiceJobCancelSnapshot): 
 }
 
 /** The customer's cancel of a service job, exactly as the Terms (§7) say: free in the app while it is a request
- *  (REQUESTED or QUOTED); once it is booked (SCHEDULED) or started (IN_PROGRESS), refused with who to contact.
+ *  (REQUESTED or QUOTED) and while the provider has not confirmed the time; once it is booked (SCHEDULED and
+ *  confirmed), refused with who to contact, and free again once the provider is very late (`VERY_LATE_AFTER_MIN`
+ *  past the time and not started); once started (IN_PROGRESS), refused with who to contact.
  *  Closed jobs (COMPLETED / CANCELLED) are the route's own "already closed" answer, before this is asked.
  *  [BOOK-P2 · owner B1] A job booked from a pro's menu (an appointment), while INSTANT_BOOKING is on: free
  *  until two hours before it starts (never less than one minute after it was confirmed), then refused with
@@ -572,6 +577,10 @@ export function serviceJobCancelVerdict(job: ServiceJobCancelSnapshot, now: Date
     if (windowEnd != null && now.getTime() <= windowEnd.getTime()) return { allowed: true, free: true, reason: 'IN_WINDOW' };
     if (now.getTime() >= plusMinutes(job.scheduledFor, VERY_LATE_AFTER_MIN).getTime()) return { allowed: true, free: true, reason: 'TOO_LATE' };
     return { allowed: false, free: false, code: CANCEL_WINDOW_CLOSED_CODE, message: APPOINTMENT_WINDOW_CLOSED_MESSAGE };
+  }
+  if (job.status === 'SCHEDULED' && job.providerConfirmedAt == null) return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
+  if (job.status === 'SCHEDULED' && job.scheduledFor != null && now.getTime() >= plusMinutes(job.scheduledFor, VERY_LATE_AFTER_MIN).getTime()) {
+    return { allowed: true, free: true, reason: 'TOO_LATE' };
   }
   return { allowed: false, free: false, code: SERVICE_JOB_BOOKED_CODE, message: SERVICE_JOB_BOOKED_MESSAGE };
 }

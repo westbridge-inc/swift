@@ -15,6 +15,7 @@ import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
 import { gyDate, gyDateTime } from '@/lib/dates';
+import { ServiceJobsCard } from './service-jobs';
 
 /** [BUG-GUARDS C5] Why a strike was given, in words (cash-rules.service writes
  *  `failed_payment_<outcome>` when a cash order fails at the door). */
@@ -174,6 +175,8 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             />
           </section>
 
+          <ServiceJobsCard userId={id} onResult={show} />
+
           <section aria-labelledby="strikes" className="mc-card">
             <h2 id="strikes" className="mc-label">Strikes</h2>
             {(u.strikes ?? []).length === 0 ? (
@@ -209,7 +212,15 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
               {(u.vendorOwner?.vendors ?? []).map((v: { id: string; name: string; status: string }) => (
                 <li key={v.id}><Link href={`/vendors/${v.id}`} className="mc-row min-h-11"><Truncate text={v.name} /><StatusBadge group="VendorStatus" value={v.status} /></Link></li>
               ))}
-              {!u.rider && !u.driver && (u.vendorOwner?.vendors ?? []).length === 0 ? <li className="mc-muted">Customer only.</li> : null}
+              {u.serviceProvider ? (
+                <li className="mc-row min-h-11"><span>Service provider: {u.serviceProvider.trade}</span><span className={`mc-badge${u.serviceProvider.isVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.serviceProvider.isVerified ? 'Documents approved' : 'Documents not approved'}</span></li>
+              ) : null}
+              {/* A MOVER who stopped before the vehicle step has neither profile: not a customer, and which kind is not known yet. */}
+              {!u.rider && !u.driver && (u.roles ?? []).includes('MOVER') ? (
+                <li className="mc-muted">Signed up as a rider or driver and has not added a vehicle yet, so which one is not known.</li>
+              ) : !u.rider && !u.driver && !u.serviceProvider && (u.vendorOwner?.vendors ?? []).length === 0 ? (
+                <li className="mc-muted">Customer only.</li>
+              ) : null}
             </ul>
           </section>
 

@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { WeeklyFee } from './weekly-fee';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
@@ -243,5 +243,17 @@ describe('[review F1] a stale Back tap on the web', () => {
     await screen.findByText("We couldn't reopen that MMG page. Its latest status is shown here.");
     expect(assign).not.toHaveBeenCalled();
     expect(reads.every((path) => path.endsWith('/own-open'))).toBe(true); view.unmount();
+  });
+});
+
+// [Row 156] A partner who paid twice or by mistake is told what to do, in the words the refunds page already promises:
+// no new promise, and no time for MMG's part.
+describe('[Row 156] charged twice, or by mistake', () => {
+  it.each(['vendor', 'rider'] as const)('%s: says what the refunds page says, and links to it', async (family) => {
+    mockApi(() => ({ body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', payActions: [] } } }));
+    renderWithQuery(<WeeklyFee family={family} />);
+    const words = await screen.findByText(/^Charged twice, or by mistake\?/);
+    expect(words.textContent).toContain('refunds the extra or mistaken charge in full, within 14 days, to the method you paid with');
+    expect(within(words).getByRole('link', { name: 'How refunds work' }).getAttribute('href')).toBe('/legal/refunds');
   });
 });

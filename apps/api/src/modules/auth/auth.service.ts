@@ -312,7 +312,7 @@ export class AuthService {
       where: { id: userId },
       // tenant.kind rides the login response: the app's "Demo environment"
       // chip (STA-1 DL-1) reads it, and nothing else about the response differs.
-      include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
+      include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } }, vendorStaffMemberships: { select: { id: true }, take: 1 } },
     });
     if (!user) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
     // [COORD 18 Oct, option S] The signed-in person never gets the live averageRating/totalRatings of their own
@@ -343,7 +343,10 @@ export class AuthService {
       return issued;
     });
 
-    return { user: sanitizeUser(user), tokens };
+    // [BUG-HUNT F03] Branch staff hold no partner role and no vendorOwner: `storeStaff` is how the website knows their
+    // home is the store dashboard. Yes/no only: the membership rows never ride along.
+    const { vendorStaffMemberships, ...person } = user;
+    return { user: sanitizeUser({ ...person, storeStaff: vendorStaffMemberships.length > 0 }), tokens };
   }
 
   /** Once per process: anchor the served terms/privacy texts at LEGAL_VERSION

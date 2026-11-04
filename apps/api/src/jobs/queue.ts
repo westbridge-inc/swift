@@ -1,5 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../modules/order/order-room-emission.service';
-import { Queue, Worker, UnrecoverableError, type Job, type ConnectionOptions } from 'bullmq';
+import { Queue, Worker, UnrecoverableError, type Job, type ConnectionOptions, type RedisOptions } from 'bullmq';
 import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -78,6 +78,22 @@ export function bullConnectionOpts(redis: Redis): ConnectionOptions {
     ...(o.tls ? { tls: o.tls } : {}),
     ...(o.family ? { family: o.family } : {}),
   };
+}
+
+/**
+ * A producer's connection. BullMQ's default retry reaches 20 s between tries, so after a Redis restart a queue.add sits
+ * that long, and a checkout already committed answers later than the phone waits. A producer retries at most 1 s apart.
+ *
+ * ioredis refuses what is queued every (maxRetriesPerRequest + 1) tries, so a shorter wait alone would refuse an add
+ * after about 18 s instead of about 4 minutes. The limit rises with it: an add waits exactly as long as before, and only
+ * the return is sooner. A job that enqueues mid-outage is not failed by this.
+ *
+ * Workers stay on bullConnectionOpts and BullMQ's own retry, on purpose. Measured: with this retry alone, a job whose
+ * processor finished during a 23 s outage was recorded as FAILED at about 18 s, and it waits with the default. Their
+ * blocking client must have no limit, so the raised one cannot be shared.
+ */
+export function bullProducerOpts(redis: Redis): ConnectionOptions {
+  return { ...(bullConnectionOpts(redis) as RedisOptions), retryStrategy: (times: number) => Math.min(times * 200, 1_000), maxRetriesPerRequest: 240 };
 }
 
 /** Bounded retry with exponential backoff — for the job classes CERTIFIED as
@@ -258,7 +274,7 @@ export function createQueues(
   redis: Redis,
   log?: Pick<FastifyBaseLogger, 'error'>,
 ): SwiftQueues {
-  const connection = bullConnectionOpts(redis);
+  const connection = bullProducerOpts(redis);
   const defaultJobOptions = DEFAULT_JOB_OPTIONS;
   const created: Queue[] = [];
   const build = (name: string): Queue => {

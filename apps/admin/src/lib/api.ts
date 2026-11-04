@@ -270,6 +270,9 @@ export interface AdminUser {
   isPhoneVerified: boolean;
   createdAt: string;
   lastActiveAt: string | null;
+  /** Which mover profile exists. Absent on a row from an API that did not say. */
+  rider?: { id: string } | null;
+  driver?: { id: string } | null;
 }
 
 export interface Promo {
@@ -336,6 +339,22 @@ export const revealCustodyPartyPhone = (id: string, party: 'holder' | 'relay', r
 
 // ─── Detail pages (People phase) ─────────────────────────────────
 export const fetchUserDetail = (id: string) => apiFetch(`/api/v1/admin/users/${id}`);
+
+/** One service job of a person, as customer or as pro (GET /admin/users/:id/service-jobs). */
+export interface AdminServiceJob {
+  id: string;
+  status: string;
+  description: string;
+  quoteAmount: string | number | null;
+  scheduledFor: string | null;
+  providerConfirmedAt: string | null;
+  createdAt: string;
+  customer: { id: string; firstName: string | null; lastName: string | null };
+  provider: { userId: string; trade: string; user: { firstName: string | null; lastName: string | null } };
+}
+export const fetchUserServiceJobs = (id: string): Promise<Envelope<AdminServiceJob[]>> => apiFetch(`/api/v1/admin/users/${id}/service-jobs`);
+/** Swift support closes a job nobody else can: no money moves, both sides are told. */
+export const closeServiceJob = (id: string, reason: string) => apiFetch(`/api/v1/admin/service-jobs/${id}/close`, { method: 'POST', reason });
 export const fetchVendorDetail = (id: string) => apiFetch(`/api/v1/admin/vendors/${id}`);
 export const fetchRiderDetail = (id: string) => apiFetch(`/api/v1/admin/riders/${id}`);
 export const fetchDriverDetail = (id: string) => apiFetch(`/api/v1/admin/drivers/${id}`);

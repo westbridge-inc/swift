@@ -66,6 +66,10 @@ describe('production socket Redis readiness', () => {
       await Promise.all([patternEntered.promise, channelsEntered.promise]);
       await new Promise((resolve) => setImmediate(resolve));
       expect(ready).toBe(false);
+      await vi.waitFor(() => {
+        expect(adapterClients.length === 2 && adapterClients.every((client) => client.status === 'ready')).toBe(true);
+      });
+      expect(app.checkSocketAdapterReady()).toBe(false);
 
       releasePattern.resolve();
       await new Promise((resolve) => setImmediate(resolve));

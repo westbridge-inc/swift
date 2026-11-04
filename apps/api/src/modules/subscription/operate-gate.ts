@@ -16,8 +16,8 @@ import type { FeePausePredicate } from '../billing/mmg-pause';
 // minutes for the billing sweep, because a mover or vendor earning unpaid is
 // the business model leaking. Everything else (PAUSED, SUSPENDED, CANCELLED,
 // CHURNED) does not operate. A missing subscription row is caller policy:
-// movers require one; legacy riders pre-dating birth-on-verification are
-// grandfathered (their historical behavior, preserved exactly).
+// movers require one, except a legacy rider pre-dating birth-on-verification
+// (the `documentsVerified` grant, rider go-online); stores keep their own.
 
 export const OPERABLE_STATUSES: readonly SubscriptionStatus[] = ['TRIAL', 'ACTIVE', 'PAST_DUE'];
 

@@ -22,6 +22,7 @@ import { SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { CountryConfigService } from '../modules/country/country-config.service';
+import { cleanupBillingClocks, cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 
 const DAY = 86_400_000;
 const users: string[] = [];
@@ -53,11 +54,16 @@ afterAll(async () => {
   if (!app) return;
   if (orders.length) await app.prisma.order.deleteMany({ where: { id: { in: orders } } });
   if (users.length) {
-    await app.prisma.subscription.deleteMany({ where: { OR: [{ rider: { userId: { in: users } } }, { driver: { userId: { in: users } } }] } });
+    // A rider whose papers are all approved holds a fee after GO: it outlives its payer's row, so it goes last.
+    const fees = (await app.prisma.subscription.findMany({ where: { OR: [{ rider: { userId: { in: users } } }, { driver: { userId: { in: users } } }] }, select: { id: true } })).map((s) => s.id);
+    await cleanupPayerBillingClocks(app.prisma, users);
+    await cleanupBillingClocks(app.prisma, fees);
+    await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: fees } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.subject.deleteMany({ where: { OR: [{ id: { in: subjects } }, { createdById: { in: users } }] } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
+    await app.prisma.subscription.deleteMany({ where: { id: { in: fees } } });
   }
   for (const riderId of riders) {
     await app.redis.del(`rider:location_db_ts:${riderId}`, `rider:online_since:${riderId}`);

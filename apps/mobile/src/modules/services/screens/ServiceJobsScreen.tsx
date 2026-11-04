@@ -18,6 +18,7 @@ import {
   parseServiceQuoteInput,
   serviceJobDueDelayMs,
   serviceJobErrorMessage,
+  serviceJobSlotWords,
   showsServiceJobAgreedPrice,
 } from '../../../lib/serviceJobPresentation';
 import { Card, Chip, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T, TonePill } from '../../../kit';
@@ -314,7 +315,7 @@ function JobCard({ job, navigation }: { job: any; navigation: any }) {
           <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
             {formatAppointmentDate(job.createdAt)}
             {job.scheduledFor
-              ? ` · booked ${formatAppointmentSlot(job.scheduledFor)}`
+              ? ` · ${serviceJobSlotWords(job, formatAppointmentSlot(job.scheduledFor))}`
               : ''}
           </T>
         </View>

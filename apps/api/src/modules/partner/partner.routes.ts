@@ -96,6 +96,9 @@ export async function partnerRoutes(app: FastifyInstance) {
       { accepted: body.acceptAgreement === true, ip: request.ip, surface: consentSurfaceOf(request), weeklyFeeAck: body.weeklyFeeAck },
     );
     await completeUserRoleAuthorityTransition(app, authorityCleanup);
+    // Papers approved before this vehicle was saved owe the weekly fee now: no later approval will (a repeat save collects
+    // what a failed one missed).
+    if (result.kind !== 'VENDOR') await verification.settleMoverFee(request.user.userId);
     reply.code(result.created ? 201 : 200);
     const provisioned = {
       kind: result.kind,
@@ -148,6 +151,8 @@ export async function partnerRoutes(app: FastifyInstance) {
         driverId: authorityCleanup.driverId ?? result.retiredDriverId,
       });
     }
+    // A vehicle whose list the approved papers already complete owes the fee now, as on the first save.
+    if (result.changed) await verification.settleMoverFee(userId);
     return {
       success: true,
       data: {
