@@ -1,4 +1,5 @@
 import { ApiRequestError, apiFetch } from './auth';
+import { unlessNotHeld } from './partner-profiles';
 
 /**
  * [BILL-PRO PR6 · owner A4/B3] What the website reads and sends about a pro's own weekly fee (GET
@@ -16,8 +17,13 @@ export interface ProFeeTerms {
 export interface ProFeeView { data: unknown | null; standing?: ProFeeStanding; coveredBy?: 'STORE' | null; feeTerms?: ProFeeTerms }
 export type ProFeeAck = { version: string; amount: number; currencyCode: string };
 
-/** The pro's fee view; null when the person has no provider profile. */
-export async function getProviderFee(): Promise<ProFeeView | null> {
+/** The pro's fee view; null when the person has no provider profile. [PORTAL-404 · F29] Not asked when /auth/me said
+ *  there is none (lib/partner-profiles): a rider's or a store's Weekly fee page no longer logs its 404. */
+export function getProviderFee(): Promise<ProFeeView | null> {
+  return unlessNotHeld('provider', readProviderFee);
+}
+
+async function readProviderFee(): Promise<ProFeeView | null> {
   try {
     const body = await apiFetch('/api/v1/provider/subscription') as ProFeeView;
     return { data: body.data ?? null, standing: body.standing, coveredBy: body.coveredBy ?? null, feeTerms: body.feeTerms };

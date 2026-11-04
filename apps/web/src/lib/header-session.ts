@@ -1,4 +1,5 @@
-import { hasProviderProfile, sessionProbe } from '@/lib/auth';
+import { sessionProbe } from '@/lib/auth';
+import { isProvider } from '@/lib/partner-profiles';
 import { roleHome } from '@/lib/role-home';
 
 /**
@@ -12,5 +13,5 @@ export async function headerAccount(): Promise<{ href: string; label: string } |
   const { kind } = roleHome(session.user);
   if (kind === 'business') return { href: '/dashboard', label: 'Dashboard' };
   if (kind === 'earner') return { href: '/portal', label: 'My portal' };
-  return (await hasProviderProfile()) ? { href: '/portal/weekly-fee', label: 'My weekly fee' } : null;
+  return (await isProvider()) ? { href: '/portal/weekly-fee', label: 'My weekly fee' } : null;
 }

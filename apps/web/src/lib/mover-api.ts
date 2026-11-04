@@ -5,6 +5,7 @@
 // the phone by design (GPS + push belong in the field).
 import { ApiRequestError, apiFetch } from './auth';
 import { parseAmount } from './money';
+import { unlessNotHeld } from './partner-profiles';
 
 // [W-10] This used to be `soft()`: `.catch(() => null)` on every read, so a
 // 500, an offline phone or a schema change was indistinguishable from "you
@@ -25,8 +26,10 @@ const absentOrThrow = <T,>(p: Promise<{ data: T }>): Promise<T | null> =>
   });
 
 // ── Profiles: a mover may be a rider, a driver, or both ─────────────────────
-export const getRiderProfile = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/rider/profile'));
-export const getDriverProfile = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/driver/profile'));
+// [PORTAL-404 · F29] Asked only when /auth/me did not say the person holds no such profile (lib/partner-profiles):
+// a rider's pages no longer ask for a driver profile and log the 404.
+export const getRiderProfile = () => unlessNotHeld('rider', () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/rider/profile')));
+export const getDriverProfile = () => unlessNotHeld('driver', () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/driver/profile')));
 
 // ── Earnings ────────────────────────────────────────────────────────────────
 /** Today / this week / this month / all time, each { total, count } — the SAME shape on the rider and the driver
