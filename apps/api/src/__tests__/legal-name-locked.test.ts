@@ -77,7 +77,7 @@ afterAll(async () => {
 });
 
 describe('[F21] a name a person checked is locked in the apps', () => {
-  it.each([['drivers_licence'], ['national_id'], ['owner_national_id'], ['hire_car_driver_licence'], ['own_name_declaration']])('after an approved %s: refused, and the name stands', async (docType) => {
+  it.each([['drivers_licence'], ['national_id'], ['owner_national_id'], ['hire_car_driver_licence'], ['own_name_declaration'], ['police_clearance'], ['food_handler_cert'], ['gei_electrical_licence'], ['pest_control_operator_licence'], ['pesticide_applicator_certificate'], ['digital_id']])('after an approved %s: refused, and the name stands', async (docType) => {
     const u = await makeUser([[docType, 'APPROVED']]);
     const res = await save(u.token, { firstName: 'Someone', lastName: 'Else' });
     expect(res.statusCode).toBe(409);
