@@ -123,8 +123,10 @@ afterAll(async () => {
 async function liveBookedCampaign(placementId: string, company: string, freqCap?: number, tenantId = tenant) {
   const a = await prisma.advertiser.create({ data: { companyName: company, industry: 'RETAIL', contactName: 'C', contactEmail: 'c@x.gy', contactPhone: '+5926000000', createdByUserId: `u-${nanoid(6)}`, status: 'APPROVED', tenantId } });
   advertiserIds.push(a.id);
-  const c = await prisma.adCampaign.create({ data: { tenantId, advertiserId: a.id, placementId, name: company, cities: ['*'], startWeek: WK, endWeek: WK, status: 'LIVE', destinationType: 'URL', destinationValue: 'https://x.gy' } });
+  const c = await prisma.adCampaign.create({ data: { tenantId, advertiserId: a.id, placementId, name: company, cities: ['*'], startWeek: WK, endWeek: WK, status: 'LIVE', destinationType: 'URL', destinationValue: 'https://x.gy', destinationHost: 'x.gy', destinationApprovedAt: new Date() } });
   campaignIds.push(c.id);
+  // [ADS-ON] A link serves only once a person approved it and its website is on the allow-list.
+  await prisma.adLinkDomain.upsert({ where: { tenantId_host: { tenantId, host: 'x.gy' } }, create: { tenantId, host: 'x.gy', status: 'APPROVED' }, update: {} });
   await prisma.adCreative.create({ data: { campaignId: c.id, kind: 'IMAGE', fileUrl: `https://cdn/${nanoid(6)}.png`, headline: `${company} sale`, ctaLabel: 'Shop', status: 'APPROVED', transcodeStatus: 'READY' } });
   await prisma.adInventoryWeek.create({ data: { placementId, city: '*', weekStart: WK, capacity: 6, booked: 1 } }).catch(() => {});
   await prisma.adBooking.create({ data: { campaignId: c.id, placementId, city: '*', weekStart: WK, amount: 5000, status: 'CONFIRMED' } });

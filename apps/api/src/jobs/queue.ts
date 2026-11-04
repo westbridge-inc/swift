@@ -2170,6 +2170,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { AdsCronService } = await import('../modules/ads/cron.service');
         const res = await new AdsCronService(ctx.prisma, ctx.io).tick();
         if (res.autoCancelled + res.activated + res.completed > 0) ctx.log.info(res, 'ads: lifecycle tick');
+        // [ADS-ON] Ad links are re-checked weekly; the tick walks the ones whose week is up.
+        const links = await new AdsCronService(ctx.prisma, ctx.io).recheckLinks().catch((err: unknown) => { ctx.log.error({ err }, 'ads: link re-check failed'); return { checked: 0, stopped: 0 }; });
+        if (links.checked > 0) ctx.log.info(links, 'ads: link re-check');
         // [ads security] advertiser team invitations past their days are deleted (they hold a person's id).
         const { AdvertiserService } = await import('../modules/ads/advertiser.service');
         const expiredInvites = await new AdvertiserService(ctx.prisma, ctx.io).purgeExpiredTeamInvites();

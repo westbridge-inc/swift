@@ -6570,6 +6570,12 @@ enum AdDestinationType {
   DEEPLINK
 }
 
+enum AdLinkDomainStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum AdRefundReason {
   AUTO_CANCEL_UNAPPROVED
   ADVERTISER_CANCEL
@@ -6690,6 +6696,13 @@ model AdCampaign {
   endWeek          DateTime          @db.Date // Monday of the LAST booked week
   destinationType  AdDestinationType @default(NONE)
   destinationValue String?
+  /// [ADS-ON] The outside link's host (without www), the key into AdLinkDomain.
+  destinationHost  String?
+  /// [ADS-ON] Who approved this ad's link at review, and when. Nothing with a link serves without it.
+  destinationApprovedByUserId String?
+  destinationApprovedAt       DateTime?
+  /// [ADS-ON] The last check the link passed; re-checked weekly while the campaign can run.
+  destinationCheckedAt        DateTime?
   status           AdCampaignStatus  @default(DRAFT)
   statusReason     String?
   totalAmount      Decimal?          @db.Decimal(12, 2)
@@ -6941,12 +6954,36 @@ model HouseAd {
   ctaLabel         String?
   destinationType  AdDestinationType @default(NONE)
   destinationValue String?
+  /// [ADS-ON] Same four fields as AdCampaign: the operator who saved the link is its human approval.
+  destinationHost  String?
+  destinationApprovedByUserId String?
+  destinationApprovedAt       DateTime?
+  destinationCheckedAt        DateTime?
   active           Boolean           @default(true)
   sort             Int               @default(0)
   placement        AdPlacement       @relation(fields: [placementId], references: [id])
 
   @@index([tenantId, placementId, active])
   @@map("house_ads")
+}
+
+/// [ADS-ON · 4 Oct ruling] The allow-list of outside websites an ad may open. The first ad using a new
+/// website leaves a PENDING row; only a person approves it (who and when below). The host is exact:
+/// a subdomain is its own row, so approving one shop never approves the platform it is hosted on.
+model AdLinkDomain {
+  id               String             @id @default(cuid())
+  tenantId         String             @default("swift-default")
+  host             String
+  status           AdLinkDomainStatus @default(PENDING)
+  reviewNotes      String?
+  reviewedByUserId String?
+  reviewedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@unique([tenantId, host])
+  @@index([tenantId, status])
+  @@map("ad_link_domains")
 }
 
 model AdsSettings {

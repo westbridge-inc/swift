@@ -4,6 +4,8 @@ import { log } from '../../utils/logger';
 import { mondayOf, weekStartInstant } from './ads-weeks';
 import { AdsLifecycleService } from './lifecycle.service';
 import { AdsRefundService } from './refund.service';
+import { AdLinkService } from './ad-link.service';
+import { adsEnabled } from './ads-enabled';
 
 // Campaign lifecycle crons (ads-platform spec §6.1). One hourly tick advances
 // every campaign through the time-driven transitions — all via the ONE
@@ -68,6 +70,13 @@ export class AdsCronService {
       }
     }
     return cancelled;
+  }
+
+  /** [ADS-ON · 4 Oct ruling] The weekly re-check of ad links. Off with ads: while nothing can serve, Swift's
+   *  servers fetch no advertiser's website. */
+  async recheckLinks(now = new Date()): Promise<{ checked: number; stopped: number }> {
+    if (!adsEnabled()) return { checked: 0, stopped: 0 };
+    return new AdLinkService(this.prisma, this.io).recheckDue(now);
   }
 
   /** §6.1 week_start: a SCHEDULED campaign whose start week has arrived (today

@@ -6,6 +6,7 @@ import { adCheckoutKilled, adMmgLive, AdCheckoutService } from './checkout.servi
 import { MMG_CHECKOUT_START_RATE, mmgCheckoutRuntimeOf } from '../billing/mmg-checkout.routes';
 import { unresolvedAdPayments } from '../billing/mmg-checkout.service';
 import { clientPlatform } from '../billing/fee-pay-actions';
+import { AdLinkService } from './ad-link.service';
 import { CreativeService } from './creative.service';
 import { AdsLifecycleService } from './lifecycle.service';
 import { AdStatsService } from './stats.service';
@@ -40,6 +41,7 @@ export async function adsRoutes(app: FastifyInstance) {
   });
   const auth = { preHandler: [app.authenticate] };
   const advertisers = new AdvertiserService(app.prisma, app.io);
+  const adLinks = new AdLinkService(app.prisma, app.io);
 
   /** POST /advertiser/register — a logged-in user registers a company; it
    *  lands PENDING_REVIEW in the founder queue and they become OWNER. */
@@ -118,6 +120,8 @@ export async function adsRoutes(app: FastifyInstance) {
     await advertisers.assertCapability(body.advertiserId, request.user.userId, 'campaign');
     const placement = await app.prisma.adPlacement.findUnique({ where: { id: body.placementId } });
     if (!placement || !placement.active) throw new NotFoundError('AdPlacement', body.placementId);
+    // [ADS-ON · 4 Oct ruling] The link's shape is judged here, and a new website queues for a person.
+    const destination = await adLinks.admit(placement.tenantId, body.destinationType ?? 'NONE', body.destinationValue);
 
     const startWeek = mondayOfDate(new Date(`${body.startWeek}T00:00:00Z`));
     const endWeek = mondayOfDate(new Date(`${body.endWeek}T00:00:00Z`));
@@ -137,7 +141,7 @@ export async function adsRoutes(app: FastifyInstance) {
       data: {
         advertiserId: body.advertiserId, placementId: body.placementId, name: body.name,
         objective: body.objective ?? null, cities: body.cities, startWeek, endWeek,
-        destinationType: body.destinationType ?? 'NONE', destinationValue: body.destinationValue ?? null,
+        ...destination,
       },
     });
     return { success: true, data: { id: campaign.id, status: campaign.status, startWeek: campaign.startWeek, endWeek: campaign.endWeek } };
@@ -260,7 +264,9 @@ export async function adsRoutes(app: FastifyInstance) {
       const campaign = await app.prisma.adCampaign.findUnique({ where: { id: request.params.id }, select: { advertiserId: true } });
       if (!campaign) throw new NotFoundError('AdCampaign', request.params.id);
       await advertisers.assertCapability(campaign.advertiserId, request.user.userId, 'campaign');
-      const updated = await lifecycle.transition(request.params.id, event, request.user.userId, undefined, { byAdvertiser: true });
+      // [ADS-ON] A campaign the link check paused goes back only on a passing check.
+      const linkRechecked = event === 'resume' && await adLinks.recheckForResume(request.params.id);
+      const updated = await lifecycle.transition(request.params.id, event, request.user.userId, undefined, { byAdvertiser: true, ...(linkRechecked ? { linkRechecked: true as const } : {}) });
       return { success: true, data: { id: updated.id, status: updated.status } };
     };
   // ── Serving + events (spec §11/§12) — PUBLIC by design (anonymous allowed);
@@ -318,7 +324,8 @@ export async function adsRoutes(app: FastifyInstance) {
   });
 
   app.post<{ Params: { id: string } }>('/campaigns/:id/pause', auth, memberEvent('pause'));
-  app.post<{ Params: { id: string } }>('/campaigns/:id/resume', auth, memberEvent('resume'));
+  // [ADS-ON] A resume after a link pause fetches the advertiser's website: bounded per person.
+  app.post<{ Params: { id: string } }>('/campaigns/:id/resume', { ...auth, config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, memberEvent('resume'));
 
   /** GET /campaigns/:id/stats — the advertiser dashboard numbers (spec §12.3).
    *  Reads the nightly AdStatsDaily rollups ONLY; the reconciliation merge-gate

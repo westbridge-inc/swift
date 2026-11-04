@@ -164,7 +164,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'liveness_outage', 'liveness_review', 'compliance_violation', 'verification_pending',
     'verification_sla_breach', 'verification_legal_hold_overdue', 'audit_chain_broken',
     'audit_chain_anchor', 'integrity_appeal', 'dup_doc', 'vendor_pending', 'advertiser_application',
-    'ad_review_sla_risk', 'ad_campaign_killed_ops', 'ad_refund_payout_task', 'ad_campaign_paid',
+    'ad_review_sla_risk', 'ad_campaign_killed_ops', 'ad_house_link_off', 'ad_refund_payout_task', 'ad_campaign_paid',
   ],
 };
 

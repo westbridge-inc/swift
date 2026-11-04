@@ -4,6 +4,7 @@ import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { log } from '../../utils/logger';
+import { queueLinkForPayment } from './ad-link.service';
 import { BookingService, lockCampaign } from './booking.service';
 import { AdsRefundService } from './refund.service';
 import { adCheckoutCounter } from '../../plugins/observability';
@@ -101,6 +102,8 @@ export class AdCheckoutService {
     if (campaign.advertiser.status !== 'APPROVED') {
       throw new AppError(403, 'ADVERTISER_NOT_APPROVED', 'Your advertiser account must be approved before checkout.');
     }
+    // [ADS-ON] A link that can never run is said before any money moves.
+    await queueLinkForPayment(this.prisma, campaign);
     if (campaign.status !== 'DRAFT' && campaign.status !== 'PENDING_PAYMENT') {
       throw new AppError(409, 'CAMPAIGN_NOT_CHECKOUTABLE', `A ${campaign.status} campaign cannot check out.`);
     }

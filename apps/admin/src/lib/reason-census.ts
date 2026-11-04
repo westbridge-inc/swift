@@ -66,6 +66,8 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
 
   // ── Ads ────────────────────────────────────────────────────────────────
   { route: 'PUT /ads/advertisers/:id/approve', helper: 'approveAdvertiser', args: ['adv_1'] },
+  { route: 'PUT /ads/link-domains/:id/approve', helper: 'approveLinkDomain', args: ['dom_1'] },
+  { route: 'PUT /ads/link-domains/:id/reject', helper: 'rejectLinkDomain', args: ['dom_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /ads/advertisers/:id/reject', helper: 'rejectAdvertiser', args: ['adv_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /ads/advertisers/:id/suspend', helper: 'suspendAdvertiser', args: ['adv_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /ads/advertisers/:id/reinstate', helper: 'reinstateAdvertiser', args: ['adv_1'] },
