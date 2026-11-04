@@ -298,7 +298,6 @@ export function craftedBodies(w: World): Record<string, Record<string, unknown>>
     [`POST ${A}/billing/mover-fees/:userId/resolve`]: { expectedRevision: 1, canonicalSubscriptionId: v.subscription, sourceSubscriptionIds: [v.subscription], reason: 'matrix probe' },
     [`POST ${A}/notifications/broadcast`]: { title: 'matrix probe', body: 'matrix probe', category: 'service' },
     [`POST ${A}/ads/refund-intents/:id/settle`]: { manualPayoutRef: 'MATRIX-REF' },
-    [`PUT ${A}/ads/invoices/:id/mark-paid`]: { reference: 'MATRIX-REF' },
     [`POST ${A}/billing/usd-migration/mode-b`]: { sunsetAt },
     [`POST ${A}/billing/confirmations/:id/resolve`]: { sourceId: v.subscription, epoch: 1, clockVersion: 0, decision: 'UNPAID', evidenceReference: 'MATRIX evidence 0001', reason: 'matrix probe' },
     [`POST ${A}/billing/mmg-checkouts/:id/reverse`]: { amountGyd: 2000, reason: 'matrix probe' },

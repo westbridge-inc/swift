@@ -1299,7 +1299,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // Isolated: a checkout failure never stops the rest of this poll.
           try {
             const { MmgCheckoutService } = await import('../modules/billing/mmg-checkout.service');
-            const checkouts = await new MmgCheckoutService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).pollIntents();
+            const { AdCheckoutService } = await import('../modules/ads/checkout.service');
+            const checkouts = await new MmgCheckoutService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io), { adSettlement: () => new AdCheckoutService(ctx.prisma, ctx.io) }).pollIntents();
             if (checkouts.expired + checkouts.checked > 0) ctx.log.info(checkouts, 'MMG checkouts polled');
           } catch (err) {
             ctx.log.error({ err }, '[MMG checkout] poll failed; the next poll retries');

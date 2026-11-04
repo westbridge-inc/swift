@@ -1,3 +1,4 @@
+import { lockCampaign } from '../ads/booking.service';
 import type { MmgCheckoutIntent, Prisma, PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
 import type { MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 import { payInfo } from './agent-cash.service';
@@ -126,7 +127,9 @@ type Db = PrismaClient | Prisma.TransactionClient;
 
 /** Every subscription a checkout pays: its one subscription, or a chain
  *  checkout's branches (sorted by subscription, the lock order). */
-export async function coveredFees(db: Db, intent: Pick<MmgCheckoutIntent, 'id' | 'subscriptionId' | 'amount'>): Promise<CoveredFee[]> {
+export async function coveredFees(db: Db, intent: Pick<MmgCheckoutIntent, 'id' | 'subscriptionId' | 'amount'> & Partial<Pick<MmgCheckoutIntent, 'adInvoiceId'>>): Promise<CoveredFee[]> {
+  // [ADS-ON] An ad checkout pays an invoice, no weekly fee: no clock, no hold, no credit here.
+  if (intent.adInvoiceId) return [];
   if (intent.subscriptionId) {
     return [{ subscriptionId: intent.subscriptionId, amount: Number(intent.amount), source: { checkoutId: intent.id }, partId: null }];
   }
@@ -139,7 +142,13 @@ export async function coveredFees(db: Db, intent: Pick<MmgCheckoutIntent, 'id' |
  *  payer's row first, then the subscriptions sorted): every verifier, credit,
  *  hold and release of a checkout serializes here. Returns the covered fees
  *  and the payer's user and tenant. */
-export async function lockCheckoutAuthority(tx: Prisma.TransactionClient, intent: Pick<MmgCheckoutIntent, 'id' | 'subscriptionId' | 'amount'>) {
+export async function lockCheckoutAuthority(tx: Prisma.TransactionClient, intent: Pick<MmgCheckoutIntent, 'id' | 'subscriptionId' | 'amount' | 'adInvoiceId' | 'createdByUserId' | 'tenantId'>) {
+  // [ADS-ON] An ad checkout serializes on its campaign: the lock its settlement and the expiry sweep take.
+  if (intent.adInvoiceId) {
+    const invoice = await tx.adInvoice.findUniqueOrThrow({ where: { id: intent.adInvoiceId }, select: { campaignId: true } });
+    await lockCampaign(tx, invoice.campaignId);
+    return { covered: [] as CoveredFee[], payer: { userId: intent.createdByUserId, tenantId: intent.tenantId } };
+  }
   const covered = await coveredFees(tx, intent);
   let payer: { userId: string; tenantId: string } | null = null;
   for (const fee of covered) {

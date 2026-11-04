@@ -36,7 +36,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { lockFeeCollectionAuthority, moverFeeSourceSummary, resolveMoverFeeAuthority, resolveMoverFeeHold, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { CashRulesService, orderingRestriction, STRIKE_RESTRICTION_LIFTED } from '../cash/cash-rules.service';
 import { resolveHeldDoorCash } from '../cash/door-cash-hold';
-import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
+import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES, type CanonicalOrderTransitionInput } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
 import { RatingStatsService } from '../rating/rating-stats.service';
@@ -3546,11 +3546,35 @@ export async function adminRoutes(app: FastifyInstance) {
     // The code was verified and the driver never tapped Start: the passenger is in the car, so a cancel is refused and the
     // machine has no FAILED from here. The ride walks through its own start to the same exit, in one commit.
     const neverStarted = order.status === 'DRIVER_ARRIVED' && hasTaxiPassengerCustody(order);
+    // The close, both notices and the driver going offline commit with the transition, as the job close does. It runs on
+    // the step that reaches FAILED, after that step frees the driver, so nothing writes the driver available again.
+    const closeRide: NonNullable<CanonicalOrderTransitionInput['withinTransaction']> = async (tx, locked) => {
+      noticeIds.length = 0;
+      const driver = locked.driverId ? await tx.driver.findUnique({ where: { id: locked.driverId }, select: { id: true, userId: true } }) : null;
+      const parties = [
+        { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
+        ...(driver ? [{ userId: driver.userId, body: `${closed} You are offline until you go online again. If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
+      ];
+      await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
+      if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
+        throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
+      }
+      for (const party of parties) {
+        const row = await insertNoticeFor(tx, {
+          userId: party.userId, type: 'ORDER_UPDATE', title: 'Ride closed by Swift', body: party.body,
+          data: taxiNotificationData(id, { status: 'FAILED' }, party.audience) as Prisma.InputJsonObject,
+          dedupeKey: `ride-closed:${id}:${party.userId}`,
+        });
+        noticeIds.push(row.id);
+      }
+      // A gone driver left online would be offered the next ride. A driver already on another ride is not touched.
+      if (driver) await tx.driver.updateMany({ where: { id: driver.id, currentRideId: null }, data: { isOnline: false, isAvailable: false, locationSessionId: null } });
+    };
     await orderService.transitionOrderAtomically({
       orderId: id,
       ...(neverStarted
-        ? { target: 'RIDE_IN_PROGRESS' as const, allowedFrom: ['DRIVER_ARRIVED'] as const, note: 'Passenger code verified: the driver never started the trip', continueTo: { target: 'FAILED' as const, note: closeNote, when: () => true } }
-        : { target: 'FAILED' as const, allowedFrom: ['RIDE_IN_PROGRESS'] as const, note: closeNote }),
+        ? { target: 'RIDE_IN_PROGRESS' as const, allowedFrom: ['DRIVER_ARRIVED'] as const, note: 'Passenger code verified: the driver never started the trip', continueTo: { target: 'FAILED' as const, note: closeNote, when: () => true, withinTransaction: closeRide } }
+        : { target: 'FAILED' as const, allowedFrom: ['RIDE_IN_PROGRESS'] as const, note: closeNote, withinTransaction: closeRide }),
       changedBy: request.user.userId,
       operatorAudit: {
         userId: request.user.userId,
@@ -3562,26 +3586,6 @@ export async function adminRoutes(app: FastifyInstance) {
         userAgent: request.headers['user-agent'],
       },
       invalidStatus: (current) => new AppError(409, 'RIDE_NOT_IN_PROGRESS', `This ride is not in progress (it is ${current}).`),
-      // The close, the audit row and both notices commit together, as the job close does.
-      withinTransaction: async (tx, locked) => {
-        const driver = locked.driverId ? await tx.driver.findUnique({ where: { id: locked.driverId }, select: { userId: true } }) : null;
-        const parties = [
-          { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
-          ...(driver ? [{ userId: driver.userId, body: `${closed} If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
-        ];
-        await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
-        if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
-          throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
-        }
-        for (const party of parties) {
-          const row = await insertNoticeFor(tx, {
-            userId: party.userId, type: 'ORDER_UPDATE', title: 'Ride closed by Swift', body: party.body,
-            data: taxiNotificationData(id, { status: 'FAILED' }, party.audience) as Prisma.InputJsonObject,
-            dedupeKey: `ride-closed:${id}:${party.userId}`,
-          });
-          noticeIds.push(row.id);
-        }
-      },
     });
     await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'FAILED' });
     await Promise.all(noticeIds.map((noticeId) => notifications.publishPersisted(noticeId)));
@@ -5270,19 +5274,6 @@ export async function adminRoutes(app: FastifyInstance) {
     const result = await backfillAdRefundIntents(app.prisma, { dryRun: body.dryRun, tenantId: body.tenantId, limit: body.limit, actor: request.user.userId });
     if (!body.dryRun) await audit(request.user.userId, 'BACKFILL_AD_REFUNDS', 'AdRefundIntent', 'backfill', { created: result.created, tenantId: body.tenantId ?? null }, request);
     return { success: true, data: result };
-  });
-
-  /** §8.2 admin "mark invoice paid" — the Caribbean reality path (bank
-   *  transfer / MMG sent outside checkout). Requires a reference note; audited;
-   *  idempotent. Confirms bookings + moves the campaign into creative review. */
-  app.put('/ads/invoices/:id/mark-paid', { preHandler: [adminGuard] }, async (request) => {
-    const { id } = request.params as { id: string };
-    const { reference } = z.object({ reference: z.string().trim().min(3).max(200) }).parse(request.body ?? {});
-    const { AdCheckoutService } = await import('../ads/checkout.service');
-    // [ADM-002] The settlement transaction writes the canonical audit row.
-    const invoice = await new AdCheckoutService(tenantPrisma, app.io).markPaid(id, { adminUserId: request.user.userId, manualReference: reference,
-      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }) });
-    return { success: true, data: { id: invoice.id, number: invoice.number, status: invoice.status, paidAt: invoice.paidAt } };
   });
 
   /** Seed the three home placements + AdsSettings for the tenant (ads §2).

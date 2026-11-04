@@ -779,3 +779,27 @@ describe('[FIXES-4] cash the business takes itself is never left "awaiting confi
     expect(screen.queryByText('Cash is handled by the business')).toBeNull();
   });
 });
+
+// [BUG-HUNT-2 G04] At the pickup the server decides whether the passenger may cancel: this page cannot see the ride code.
+describe('[G04] a ride at the pickup on the web', () => {
+  const arrived = (over: Record<string, unknown>) => ({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null, ...over });
+  const stubRide = () => {
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+  };
+
+  it('offers the cancel when the server says so', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(arrived({ canCancel: true, cancellationMessage: 'This ride is very late starting.' }) as never);
+    stubRide();
+    render(<OrderDetailPage />);
+    expect(await screen.findByRole('button', { name: /cancel/i })).toBeTruthy();
+  });
+
+  it('offers nothing when it does not', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(arrived({ canCancel: false }) as never);
+    stubRide();
+    render(<OrderDetailPage />);
+    await screen.findByText(/Open the Swift app for your safety PIN and SOS/);
+    expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull();
+  });
+});
