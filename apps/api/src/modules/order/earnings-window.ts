@@ -1,3 +1,5 @@
+import type { Prisma, PrismaClient } from '@prisma/client';
+
 /**
  * SWIFT-080: the earnings-summary "window" contract. Both
  * `/rider/earnings/summary` and `/driver/earnings/summary` must return each
@@ -10,11 +12,19 @@
  * the exact drift class SWIFT-080 exists to kill. This is the single source so
  * the two routes cannot diverge again.
  *
- * `count` requires the aggregate to be taken with `_count: true`.
+ * `count` is the jobs in the window (jobsIn below).
  */
-export function earningsWindow(agg: { _sum: { amount: unknown }; _count?: number }): {
+export function earningsWindow(agg: { _sum: { amount: unknown } }, jobs: number): {
   total: number;
   count: number;
 } {
-  return { total: Number(agg._sum.amount ?? 0), count: agg._count ?? 0 };
+  return { total: Number(agg._sum.amount ?? 0), count: jobs };
+}
+
+/**
+ * [BUG-HUNT F08] One job is one job. There is one Earning row per fee and per tip, so counting rows called a delivery
+ * with a tip two jobs, beside a history listing one. The count is the orders behind the rows.
+ */
+export async function jobsIn(db: Pick<PrismaClient, 'earning'>, where: Prisma.EarningWhereInput): Promise<number> {
+  return (await db.earning.groupBy({ by: ['orderId'], where })).length;
 }

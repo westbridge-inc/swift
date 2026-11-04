@@ -99,8 +99,9 @@ describe('[R045-ADS-04] one campaign, one active invoice, one provider reference
     expect(await prisma.adsAuditLog.count({ where: { entityId: invoice.id, action: 'INVOICE_MARK_PAID' } })).toBe(1);
     expect((await bookingsOf(campaign.id)).map((b) => b.status)).toEqual(['CONFIRMED']);
     expect((await campaignOf(campaign.id)).status).toBe('PENDING_REVIEW');
-    const replay = await checkout.markPaid(invoice.id, { providerRef: 'another-ref' });
-    expect(replay.providerRef).toBe(ref); // the invoice is settled once, under its first reference
+    // [ADS-ON] The invoice is settled once, under its first reference; another payment is refused, not absorbed.
+    await expect(checkout.markPaid(invoice.id, { providerRef: 'another-ref' })).rejects.toMatchObject({ code: 'AD_INVOICE_ALREADY_PAID' });
+    expect((await invoicesOf(campaign.id))[0]!.providerRef).toBe(ref);
     const other = await scaffold();
     const second = await checkout.checkout(other.campaign.id, 'MOCK');
     await expect(checkout.markPaid(second.invoice.id, { providerRef: ref })).rejects.toThrow(/already settled another invoice/);
@@ -146,7 +147,8 @@ describe('[R045-ADS-05] the barrier race between expiry and confirmation never p
     expect((await bookingsOf(campaign.id)).map((b) => b.status)).toEqual(['RELEASED']);
     expect((await prisma.adInventoryWeek.findFirstOrThrow({ where: { placementId: placement.id, weekStart: MON } })).booked).toBe(0);
     // the money arrives anyway
-    const late = await checkout.markPaid(invoice.id, { providerRef: `MMG-${nanoid(6)}` });
+    const capture = `MMG-${nanoid(6)}`;
+    const late = await checkout.markPaid(invoice.id, { providerRef: capture });
     expect(late.status).toBe('PAID');
     const after = await campaignOf(campaign.id);
     expect(after.status).toBe('DRAFT');
@@ -157,7 +159,7 @@ describe('[R045-ADS-05] the barrier race between expiry and confirmation never p
     expect(intent.items).toHaveLength(1);
     expect(intent.outbox).not.toBeNull();
     // a replayed capture is the same obligation
-    await checkout.markPaid(invoice.id, { providerRef: `MMG-${nanoid(6)}` });
+    await checkout.markPaid(invoice.id, { providerRef: capture });
     expect(await prisma.adRefundIntent.count({ where: { campaignId: campaign.id } })).toBe(1);
     // executed: the full amount is owed back, nothing is flipped, the invoice shows it
     await refunds.executeNow(intent.id);
@@ -186,7 +188,7 @@ describe('[R045-ADS-06] the reservation and the campaign status are one write', 
 });
 
 describe('operations: rollback switches and the scan', () => {
-  it('checkout unavailable rather than ambiguous; confirmation routed to manual review', async () => {
+  it('checkout unavailable rather than ambiguous; settlement waits while confirmation is paused', async () => {
     const { campaign } = await scaffold();
     process.env['AD_CHECKOUT_KILL'] = '1';
     try {
@@ -194,13 +196,13 @@ describe('operations: rollback switches and the scan', () => {
       expect(await bookingsOf(campaign.id)).toHaveLength(0);
     } finally { delete process.env['AD_CHECKOUT_KILL']; }
     const { invoice } = await checkout.checkout(campaign.id, 'MOCK');
+    const providerRef = `MMG-${nanoid(8)}`;
     process.env['AD_PAYMENT_CONFIRM_MANUAL_ONLY'] = '1';
     try {
-      await expect(checkout.markPaid(invoice.id, { providerRef: 'hook' })).rejects.toThrow(/confirms this invoice by hand/);
+      await expect(checkout.markPaid(invoice.id, { providerRef })).rejects.toMatchObject({ code: 'ADS_CONFIRMATION_PAUSED' });
       expect((await invoicesOf(campaign.id))[0]!.status).toBe('UNPAID');
-      const paid = await checkout.markPaid(invoice.id, { adminUserId: 'admin', manualReference: 'bank ref' });
-      expect(paid.status).toBe('PAID');
     } finally { delete process.env['AD_PAYMENT_CONFIRM_MANUAL_ONLY']; }
+    expect((await checkout.markPaid(invoice.id, { providerRef })).status).toBe('PAID');
   });
   it('the scan names a paid campaign with no confirmed inventory and a campaign with two active invoices', async () => {
     const { campaign, advertiser } = await scaffold('PENDING_PAYMENT');

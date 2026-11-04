@@ -436,7 +436,7 @@ describe('GOLD-5 · ADMIN-05 — suspend, ban and reinstate', () => {
     const vendor = await sys(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: store.vendorId } }));
     expect({ status: vendor.status, accepting: vendor.acceptingOrders, source: vendor.suspensionSource }).toEqual({ status: 'SUSPENDED', accepting: false, source: 'ADMIN' });
     expect((await sys(() => app.prisma.auditLog.findMany({ where: { entityId: store.vendorId, action: 'SUSPEND_VENDOR' } }))).map((t) => ({ by: t.userId, reason: (t.changes as Record<string, unknown>)['reason'] }))).toEqual([{ by: ops.userId, reason }]);
-    expect((await sys(() => app.prisma.notification.findMany({ where: { userId: store.owner.userId, title: 'Vendor Suspended' } }))).map((n) => n.body)).toEqual([reason]);
+    expect((await sys(() => app.prisma.notification.findMany({ where: { userId: store.owner.userId, title: 'Store suspended' } }))).map((n) => n.body)).toEqual([reason]);
 
     // New orders are refused, from an empty cart and from a full one.
     const add = await call('POST', '/api/v1/customer/cart/items', shopper.token, { vendorId: store.vendorId, itemId: store.itemId, quantity: 1 });

@@ -10,6 +10,15 @@ const words = {
   NOT_PAID: "MMG didn't complete this payment. You can try again in the Swift app.",
   UNKNOWN: 'Open the Swift app to see your weekly fee.',
 };
+// [ADS-ON] MMG sends every payment back to these one set of registered pages. When the API says the checkout was an
+// advertiser's, the page says so; anything else is the weekly fee's page, exactly as before.
+const adWords: Record<keyof typeof words, string> = {
+  // Never "in review" here: a payment that arrived after its booking ended is confirmed too, and is owed back.
+  CONFIRMED: 'Payment received. Open your campaign to see what happens next.',
+  CONFIRMING: words.CONFIRMING,
+  NOT_PAID: "MMG didn't complete this payment. You can try again from your campaign.",
+  UNKNOWN: 'Open your campaign to see this payment.',
+};
 type Context = { params: Promise<{ path: string[] }> };
 const headers = {
   'Content-Type': 'text/html; charset=utf-8',
@@ -118,6 +127,7 @@ function readPath(path: unknown): { outcome: string; token: string | undefined }
 
 async function handle(request: Request, context: Context) {
   let state: keyof typeof words = 'UNKNOWN';
+  let advertiser = false;
   let status = 200;
   const client = clientAddress(request);
   try {
@@ -162,7 +172,10 @@ async function handle(request: Request, context: Context) {
     if (response.ok) {
       const body = await response.json();
       const candidate = body?.data?.state;
-      if (body?.success === true && Object.hasOwn(words, candidate)) state = candidate;
+      if (body?.success === true && Object.hasOwn(words, candidate)) {
+        state = candidate;
+        advertiser = body?.data?.audience === 'ADVERTISER';
+      }
     }
   } catch (error) {
     // Deliberately no logging: URLs, form fields and fetch errors can carry return tokens.
@@ -170,7 +183,9 @@ async function handle(request: Request, context: Context) {
   }
   // A route-handler document bypasses the React layout and all analytics. No
   // return input, outcome, amount, identity or reference reaches this HTML.
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>Swift weekly fee</title><style>body{margin:0;background:${tokens['--swift-canvas']};color:${tokens['--swift-ink']};font:18px/1.6 system-ui,sans-serif}main{max-width:32rem;margin:10vh auto;padding:2rem}h1{font-size:2rem;line-height:1.2}a{display:inline-block;color:${tokens['--swift-red']};font-weight:650;text-underline-offset:4px}p{margin-top:1.5rem}</style></head><body><main><h1>Weekly fee</h1><p>${words[state]}</p><p><a href="swift://pay/mmg/return">Back to the Swift app</a></p><p><a href="/weekly-fee">Continue on the web</a></p></main></body></html>`, { status, headers });
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><meta name="referrer" content="no-referrer"><title>${advertiser ? 'Swift ads' : 'Swift weekly fee'}</title><style>body{margin:0;background:${tokens['--swift-canvas']};color:${tokens['--swift-ink']};font:18px/1.6 system-ui,sans-serif}main{max-width:32rem;margin:10vh auto;padding:2rem}h1{font-size:2rem;line-height:1.2}a{display:inline-block;color:${tokens['--swift-red']};font-weight:650;text-underline-offset:4px}p{margin-top:1.5rem}</style></head><body><main>${advertiser
+    ? `<h1>Ad payment</h1><p>${adWords[state]}</p><p><a href="/advertiser">Back to your campaigns</a></p>`
+    : `<h1>Weekly fee</h1><p>${words[state]}</p><p><a href="swift://pay/mmg/return">Back to the Swift app</a></p><p><a href="/weekly-fee">Continue on the web</a></p>`}</main></body></html>`, { status, headers });
 }
 export const GET = handle;
 export const POST = handle;
