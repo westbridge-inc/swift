@@ -684,6 +684,47 @@ export async function expireUnpaidMmgAcceptancesJob(ctx: JobContext, batch = 100
   return cancelled;
 }
 
+/** [BUG-HUNT-2 G20] A ready pickup nobody collected: its store told once at 24 hours (dedupe key per order, in the order's
+ *  tenant), and one platform page for support at 48 hours, closed when none is left. It closes no order. */
+export async function pickupNotCollectedWatchJob(ctx: JobContext, batch = 500): Promise<{ notCollected: number; overTwoDays: number }> {
+  const { PICKUP_NOT_COLLECTED_AFTER_HOURS, isPickupNotCollected, pickupWaitingOver } = await import('../modules/order/cancel-policy');
+  const {
+    PICKUP_SUPPORT_PAGE_AFTER_HOURS, PICKUP_UNCOLLECTED_KEY, PICKUP_UNCOLLECTED_TITLE, PICKUP_UNCOLLECTED_WINDOW_SECONDS,
+    pickupUncollectedStoreNotice, readyPickupsSince,
+  } = await import('../modules/order/pickup-not-collected');
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const { pageOps, resolveOpsPage } = await import('../modules/ops/ops-page');
+  const notifications = new NotificationService(ctx.prisma, ctx.io);
+  const now = new Date();
+  const rows = (await ctx.prisma.order.findMany({
+    where: readyPickupsSince(new Date(now.getTime() - PICKUP_NOT_COLLECTED_AFTER_HOURS * 3_600_000)),
+    select: { id: true, orderNumber: true, orderType: true, fulfillment: true, status: true, readyAt: true, scheduledFor: true, paymentMethod: true, vendor: { select: { owner: { select: { userId: true } } } } },
+    orderBy: { readyAt: 'asc' },
+    take: batch,
+  })).filter((row) => isPickupNotCollected(row, now));
+  for (const row of rows) {
+    const ownerUserId = row.vendor?.owner.userId;
+    if (!ownerUserId) continue;
+    await inTenantOf(ctx.prisma, { order: row.id }, () => notifications.send({
+      userId: ownerUserId, type: 'ORDER_UPDATE', audience: 'business', ...pickupUncollectedStoreNotice(row),
+      data: { orderId: row.id, kind: 'pickup_not_collected' }, dedupeKey: `pickup-not-collected:store:${row.id}`,
+    })).catch((err: unknown) => ctx.log.warn({ err, orderId: row.id }, 'not-collected store notice failed: the next sweep retries'));
+  }
+  const overTwoDays = rows.filter((row) => pickupWaitingOver(row, PICKUP_SUPPORT_PAGE_AFTER_HOURS, now));
+  if (overTwoDays.length === 0) {
+    await resolveOpsPage(ctx.prisma, PICKUP_UNCOLLECTED_TITLE, 'no-pickup-uncollected');
+    return { notCollected: rows.length, overTwoDays: 0 };
+  }
+  await pageOps({ prisma: ctx.prisma, redis: ctx.redis, notifications }, {
+    key: PICKUP_UNCOLLECTED_KEY,
+    windowSeconds: PICKUP_UNCOLLECTED_WINDOW_SECONDS,
+    title: PICKUP_UNCOLLECTED_TITLE,
+    body: `${overTwoDays.length} pickup order(s) ready for over two days and not collected, oldest ${overTwoDays[0]!.orderNumber}. Call the store and the customer, then close it from the order.`,
+    data: { kind: 'ops_pickup_uncollected', count: overTwoDays.length, orderIds: overTwoDays.slice(0, 10).map((row) => row.id) },
+  });
+  return { notCollected: rows.length, overTwoDays: overTwoDays.length };
+}
+
 /**
  * LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed become
  * visible to the vendor + dispatchable. No-op while every order is unheld
@@ -1487,6 +1528,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { NotificationService } = await import('../modules/notification/notification.service');
         const result = await watchOverdueRides({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
         if (result.overdue > 0) ctx.log.warn({ ...result }, 'taxi rides open far past their estimate');
+        return;
+      }
+      if (job.name === 'pickup-not-collected-watch') {
+        const result = await pickupNotCollectedWatchJob(ctx);
+        if (result.overTwoDays > 0) ctx.log.warn({ ...result }, 'pickup orders not collected for over two days');
         return;
       }
       if (job.name === 'fee-refund-case-sweep') {
@@ -3043,6 +3089,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // [BUG-HUNT-2 G01] Every ten minutes: no silent three-day ride.
   await queues.verificationQueue.add('ride-overdue-watch', {}, {
     repeat: { every: 10 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [BUG-HUNT-2 G20] Every fifteen minutes: a ready pickup nobody collected.
+  await queues.verificationQueue.add('pickup-not-collected-watch', {}, {
+    repeat: { every: 15 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });

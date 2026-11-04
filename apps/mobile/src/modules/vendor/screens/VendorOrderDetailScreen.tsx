@@ -36,6 +36,8 @@ import {
 import { deliveryOwnerView } from './delivery-owner';
 import { NO_SHOW_WORDS, orderNoShowOpen } from '../noShow';
 import { NoShowConfirm, useStartClock } from '../NoShowConfirm';
+import { NOT_COLLECTED_WORDS, notCollectedGoesToSupport, notCollectedOpen } from '../notCollected';
+import { NotCollectedConfirm } from '../NotCollectedConfirm';
 
 /** [MOB-050] The customer's collection code, as the server mints it. */
 export const PICKUP_CODE_LENGTH = 6;
@@ -159,6 +161,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   // popup asks once, then shows the server's answer (NoShowConfirm).
   const noShowNow = useStartClock(order?.fulfillment === 'APPOINTMENT' ? order?.appointmentSlot : null, () => { void refetch(); });
   const [noShowAsk, setNoShowAsk] = useState(false);
+  // [BUG-HUNT-2 G20] "Not collected" asks once, then shows the server's answer. Kept up after the close: the answer is on it.
+  const [notCollectedAsk, setNotCollectedAsk] = useState(false);
 
   // [MOB-050] A missing orderId is not a slow network. It used to render the
   // loading block forever, so a bad deep link looked like a hang.
@@ -215,7 +219,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const actions = withHandoverSteps(order, orderActions(order), mmgDisputePaused(order));
   // [BOOK-NS-APP · owner B3] Beside "Mark complete": an accepted appointment whose time has started.
   const canNoShow = orderNoShowOpen(order, noShowNow);
-  const actionBar = actions.length > 0 || canNoShow;
+  const canNotCollected = notCollectedOpen(order);
+  const actionBar = actions.length > 0 || canNoShow || canNotCollected;
   // [MOB-050] The one state where a counter hand-over is due.
   const awaitingCollection = !terminal && ['READY', 'READY_FOR_PICKUP'].includes(String(order.status).toUpperCase());
   // [TAP-AUDIT] The step buttons also wait while a pick tick is still on its way (a Ready sent before it lands would be
@@ -738,11 +743,21 @@ function VendorOrderDetailBody({ navigation, route }: any) {
               onPress={() => setNoShowAsk(true)}
             />
           ) : null}
+          {canNotCollected ? (
+            <PillButton
+              label={NOT_COLLECTED_WORDS.button}
+              variant="outline"
+              style={{ flex: 1 }}
+              disabled={busy}
+              onPress={() => setNotCollectedAsk(true)}
+            />
+          ) : null}
         </View>
       ) : null}
 
       {/* [BOOK-NS-APP · owner B3] Asks once; stays up with the server's refusal or its closed state. */}
       {noShowAsk ? <NoShowConfirm orderId={order.id} onClose={() => setNoShowAsk(false)} /> : null}
+      {notCollectedAsk ? <NotCollectedConfirm orderId={order.id} goesToSupport={notCollectedGoesToSupport(order)} onClose={() => setNotCollectedAsk(false)} /> : null}
 
       {/* Reject confirm — destructive, so it gets the kit popup */}
       <PopupCard visible={confirmReject} onClose={() => setConfirmReject(false)}>
