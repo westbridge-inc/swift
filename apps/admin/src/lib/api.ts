@@ -1267,6 +1267,34 @@ export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED
   });
 export const checkMmgFeeReversal = (reversalId: string) =>
   apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/check`, { method: 'POST', body: '{}' });
+// [Row 156] A partner asked for a weekly-fee payment back: 3 business days. A case is that ask and its clock. It moves no
+// money and takes no MMG reference, and only MMG's proven return closes it.
+export type FeeRefundKind = 'DUPLICATE' | 'MISTAKEN';
+export interface FeeRefundCaseRow {
+  id: string;
+  checkoutId: string;
+  subscriptionId: string;
+  kind: FeeRefundKind;
+  reason: string;
+  amount: number;
+  currencyCode: string;
+  state: 'OPEN' | 'REFUNDED';
+  dueBy: string;
+  overdue: boolean;
+  reversalId: string | null;
+  refundedAt: string | null;
+  openedAt: string;
+}
+export const fetchFeeRefundCases = (state: 'OPEN' | 'REFUNDED'): Promise<Envelope<FeeRefundCaseRow[]>> =>
+  apiFetch(`/api/v1/admin/billing/fee-refund-cases?state=${state}`);
+export const fetchFeeRefundCase = (checkoutId: string): Promise<Envelope<FeeRefundCaseRow | null>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/refund-case`);
+export const openFeeRefundCase = (checkoutId: string, kind: FeeRefundKind, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/refund-case`, {
+    method: 'POST',
+    body: JSON.stringify({ kind, reason }),
+    reason,
+  });
 
 export interface PaymentConfirmation {
   id: string; subscriptionId: string; source: string; sourceId: string | null;
