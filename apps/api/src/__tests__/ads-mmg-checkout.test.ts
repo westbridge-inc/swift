@@ -224,6 +224,28 @@ describe('the switch, and who may pay', () => {
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: f.invoice.id } })).toBe(0);
   });
 
+  it('the checkout kill switch closes the page too: rollback means unavailable, on every door', async () => {
+    const f = await invoiced();
+    process.env['AD_CHECKOUT_KILL'] = '1';
+    try {
+      const res = await start(f.invoice.id, f.owner.token);
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error.code).toBe('ADS_CHECKOUT_UNAVAILABLE');
+    } finally { delete process.env['AD_CHECKOUT_KILL']; }
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: f.invoice.id } })).toBe(0);
+  });
+
+  it('a second owner tapping Pay while the first owner\'s page is open is told not to pay, never "subscription not found"', async () => {
+    const f = await invoiced();
+    await open(f);
+    const second = await makeUser();
+    await app.prisma.advertiserMember.create({ data: { advertiserId: f.advertiser.id, userId: second.userId, role: 'OWNER', acceptedAt: new Date() } });
+    const res = await start(f.invoice.id, second.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('PAYMENT_CONFIRMING');
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: f.invoice.id } })).toBe(1);
+  });
+
   it('a suspended advertiser cannot open a page, even as owner', async () => {
     const f = await invoiced();
     await app.prisma.advertiser.update({ where: { id: f.advertiser.id }, data: { status: 'SUSPENDED' } });

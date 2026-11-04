@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from '../../lib/zod';
 import { AdvertiserService, assertAdvertiserApprovedWithin, assertCapabilityWithin } from './advertiser.service';
 import { BookingService, MAX_AVAILABILITY_WEEKS } from './booking.service';
-import { adMmgCheckoutEnabled, AdCheckoutService } from './checkout.service';
+import { adCheckoutKilled, adMmgCheckoutEnabled, AdCheckoutService } from './checkout.service';
 import { mmgCheckoutEnabled } from '../../providers/mmg/mmg-checkout';
 import { MMG_CHECKOUT_START_RATE, mmgCheckoutRuntimeOf } from '../billing/mmg-checkout.routes';
 import { clientPlatform } from '../billing/fee-pay-actions';
@@ -203,6 +203,8 @@ export async function adsRoutes(app: FastifyInstance) {
     if (!invoice) throw new NotFoundError('AdInvoice', request.params.id);
     await advertisers.assertCapability(invoice.advertiserId, request.user.userId, 'finance');
     if (!adMmgLive()) throw new AppError(409, 'PAY_ACTION_OFF', 'Paying for ads with MMG is not open yet.');
+    // [R045-ADS-04] Rollback makes checkout unavailable on every door, this one too.
+    if (adCheckoutKilled()) throw new AppError(503, 'ADS_CHECKOUT_UNAVAILABLE', 'Ad checkout is paused — try again shortly.');
     // [store review] A demo tenant is fiction with no money rail: it never opens a real MMG page.
     const tenant = await app.prisma.tenant.findUnique({ where: { id: invoice.tenantId }, select: { kind: true } });
     if (tenant?.kind !== 'PRODUCTION') throw new AppError(409, 'PAY_ACTION_OFF', 'Paying for ads with MMG is not open here.');

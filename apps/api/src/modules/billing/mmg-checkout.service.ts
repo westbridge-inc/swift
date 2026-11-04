@@ -2072,6 +2072,8 @@ export class MmgCheckoutService {
     const opened = intent.status === 'OPEN' ? await openCheckoutUrl(intent) : null;
     const result = await this.prisma.$transaction(async (tx) => {
       const { covered, payer } = await lockCheckoutAuthority(tx, intent);
+      // [ADS-ON] Two owners can share an advertiser, but a page belongs to the one who opened it.
+      if (payer.userId !== userId && intent.adInvoiceId) throw new AppError(409, 'PAYMENT_CONFIRMING', 'Another owner has a payment open for this invoice. Do not pay again.');
       if (payer.userId !== userId) throw new NotFoundError('Subscription', intent.subscriptionId ?? intent.id);
       const now = new Date();
       // [ENTERPRISE E1] The page goes out only while EVERY subscription it pays allows it (its own hold, nothing else).
