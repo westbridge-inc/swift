@@ -15,7 +15,7 @@ export function useServiceCatalog() {
       }
       return catalog;
     },
-    staleTime: 60_000,
+    staleTime: 0, // Recheck service availability on mount/reconnect, even with a warm cache.
     retry: 1,
   });
 }

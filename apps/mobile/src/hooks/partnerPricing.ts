@@ -2,7 +2,6 @@ import { useQuery } from '@tanstack/react-query';
 import { authApi } from '../services/api';
 import type { PartnerPricing } from '../lib/partnerPricing';
 
-const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 
 /** Public weekly price list for the partner pitch ("N days free, then X/week").
@@ -10,17 +9,15 @@ const MINUTE_MS = 60 * 1000;
  *  own module, so the earner and business hooks that bill a preview sample at
  *  the live quote depend on nothing else in the verification hooks.
  *
- *  `fresh` is for the signup screens [PR1270-S2-04]: a preview sample may read
- *  an hour-old list, but a partner about to agree to a weekly fee reads one
- *  fetched on this mount and refreshed every minute the screen stays open, so
- *  the fee on the door is the fee today — never a figure cached an hour ago
- *  and changed since. */
+ *  All prices refresh on mount under the app query policy. `fresh` keeps the
+ *  signup screens' additional minute-by-minute refresh [PR1270-S2-04] while
+ *  a partner is about to agree to the weekly fee. */
 export function usePartnerPricing(countryCode?: string, enabled = true, opts?: { fresh?: boolean }) {
   const fresh = opts?.fresh === true;
   return useQuery({
     queryKey: ['pricing', countryCode ?? 'GY'],
     queryFn: async () => (await authApi.pricing(countryCode))?.data?.data as PartnerPricing,
-    staleTime: fresh ? 0 : HOUR_MS,
+    staleTime: 0,
     refetchOnMount: fresh ? 'always' : true,
     refetchInterval: fresh ? MINUTE_MS : false,
     enabled,

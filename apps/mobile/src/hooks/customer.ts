@@ -153,7 +153,7 @@ export function useDiscoveryCategories(lat?: number, lng?: number) {
   return useQuery<DiscoveryRail>({
     queryKey: ['discovery', 'categories', lat?.toFixed?.(2), lng?.toFixed?.(2)],
     queryFn: () => unwrap<DiscoveryRail>(discoveryApi.categories({ lat, lng })),
-    staleTime: 60_000,
+    staleTime: 0, // Availability counts refresh behind the immediately visible cache.
     retry: false,
   });
 }
@@ -209,7 +209,7 @@ export function useMarketDepth() {
       rememberMarketDepth(data);
       return data as MarketDepthBody;
     },
-    staleTime: 5 * 60_000,
+    staleTime: 0, // Recheck catalogue eligibility on mount/reconnect, even with a warm cache.
     // [E29] A cold start seeds the query with the last complete verdict, so a
     // failing first read shows what the device last knew. The seed is stale
     // on purpose (0): the server is always asked again, and a later complete
