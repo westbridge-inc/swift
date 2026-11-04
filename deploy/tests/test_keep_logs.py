@@ -44,8 +44,8 @@ spec.loader.exec_module(keep_logs)
 
 # Synthetic fixtures only. A phone is from the reserved fictional range. The token
 # is built here, so the file itself holds nothing a secret scanner would stop on.
-PHONE = '+5920612345'
-PHONE_SPACED = '+592 061 2345'
+PHONE = '+5920712345'
+PHONE_SPACED = '+592 071 2345'
 PHONE_BARE = '592-061-2345'
 PHONE_ABROAD = '+18785550100'
 EMAIL = 'someone.fixture@example.com'
