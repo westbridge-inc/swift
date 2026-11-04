@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { OrderStatus } from '@prisma/client';
@@ -93,6 +93,7 @@ const inject = (method: 'POST' | 'GET', url: string, token: string, payload?: Re
 });
 
 beforeAll(async () => {
+  vi.stubEnv('RUN_WORKERS', '0'); // requests only: the scheduler would leave recurring jobs on queues other suites read
   app = await buildApp();
   await app.ready();
   incidents = new IncidentService(app.prisma, app.io);
@@ -120,6 +121,7 @@ afterAll(async () => {
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }).catch(() => undefined);
   });
   await app?.close();
+  vi.unstubAllEnvs();
 });
 
 describe('[F18] goods: the suspension lifts when the delivery completes', () => {
