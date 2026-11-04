@@ -51,19 +51,19 @@ export async function holdsValidDocument(prisma: Db, ownerUserId: string, legacy
 }
 
 /** The store a gate is judged for: its owner, its market, and [FOOD-PERMIT] whether it is a registered restaurant. */
-export interface GateContext { ownerUserId: string; countryCode: string; store?: { vendorId: string; vendorType: string; tier: string | null } }
+export interface GateContext { ownerUserId: string; countryCode: string; store?: { vendorId: string; vendorType: string } }
 
 export async function vendorOwnerContext(prisma: Db, vendorId: string): Promise<GateContext> {
-  const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { vendorType: true, tier: true, owner: { select: { user: { select: { id: true, countryCode: true } } } } } });
+  const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { vendorType: true, owner: { select: { user: { select: { id: true, countryCode: true } } } } } });
   if (!vendor) throw new AppError(404, 'NOT_FOUND', 'Vendor not found');
-  return { ownerUserId: vendor.owner.user.id, countryCode: vendor.owner.user.countryCode, store: { vendorId, vendorType: vendor.vendorType, tier: vendor.tier } };
+  return { ownerUserId: vendor.owner.user.id, countryCode: vendor.owner.user.countryCode, store: { vendorId, vendorType: vendor.vendorType } };
 }
 
 /**
  * Does the store hold what the gate asks for? The owner's VALID document — or, [FOOD-PERMIT · owner 24 Oct 2026] for
- * the food handler's certificate at a REGISTERED restaurant, its owner's tick that everyone who handles food there
- * holds a current one (vendor/food-handlers.ts): the certificate is optional there, the tick is what made it live. A
- * home cook, or any other store selling prepared food, still needs the certificate itself.
+ * the food handler's certificate at a restaurant, its owner's tick that everyone who handles food there holds a
+ * current one (vendor/food-handlers.ts): the certificate is optional there, the tick is what made it live. Any other
+ * store selling prepared food still needs the certificate itself.
  */
 async function storeHolds(prisma: Db, ctx: GateContext, legacyCode: string, now: Date): Promise<boolean> {
   if (await holdsValidDocument(prisma, ctx.ownerUserId, legacyCode, now)) return true;

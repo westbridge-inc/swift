@@ -12,7 +12,6 @@ import { withPreviousDecisions } from '../verification/previous-decision';
 import { REVIEW_QUEUE_SELECT, reviewQueueRow } from './review-queue-row';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
-import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction, runWithoutTenant } from '../../plugins/prisma';
 import { countWaiting, type WaitingKey } from './dashboard-waiting';
@@ -2024,8 +2023,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!vendor) throw new NotFoundError('Vendor', id);
 
     const isFeatured = featured !== undefined ? featured : !vendor.isFeatured;
-    // [DOC-1 §3.6 · P3-2] No promoted placement at the unregistered tier.
-    if (isFeatured) assertPromotable(vendor);
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] Every store may be featured: the self-declared tier that could not be
+    // (no promoted placement) is removed.
 
     const updated = await app.prisma.vendor.update({
       where: { id },
@@ -7454,7 +7453,7 @@ export async function adminRoutes(app: FastifyInstance) {
         where: { userId: ticket.userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
       });
     if (!confirmedInApp) {
-      throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request confirmed in the app can be completed here.');
+      throw new AppError(409, 'NOT_A_CLOSURE_REQUEST', 'Only an account closure request the account holder confirmed (in the app or on the website) can be completed here.');
     }
     if (ticket.status === 'RESOLVED') throw new AppError(409, 'ALREADY_RESOLVED', 'This closure request is already resolved.');
     const [subject, staffGrant] = await Promise.all([
@@ -7466,7 +7465,27 @@ export async function adminRoutes(app: FastifyInstance) {
       || subject.roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
       throw new ForbiddenError('A staff account is not closed from the support queue.');
     }
-    const outcome = await new AccountService(app).deleteAccount(ticket.userId);
+    // This request's writes to the ticket: with the owner wall on, the named capability inside the tenant boundary;
+    // otherwise the given transaction (the erasure's own, so a refused completion rolls its claim back) or tenantPrisma.
+    const writeTicket = (where: Prisma.SupportTicketWhereInput, data: Prisma.SupportTicketUpdateManyMutationInput, tx?: Prisma.TransactionClient) => (closureScope
+      ? ownerWallSystem('admin:support-closure', () => app.prisma.supportTicket.updateMany({ where: { AND: [where, closureScope] }, data }))
+      : (tx ?? tenantPrisma).supportTicket.updateMany({ where, data }));
+    // [WEB-DELETE · COORD security review #2304] Completion is irreversible and the owner may cancel the request at
+    // the same moment: the erasure claims the request (IN_PROGRESS) under the person's lock before it erases anything,
+    // so a request the owner cancelled since the checks above is refused there, and the owner's cancel (the same lock)
+    // is refused once the claim holds. A completion the erasure then refuses (live orders, open cash) gives the claim
+    // back, so the owner can still cancel.
+    const claimWhere = { id, userId: ticket.userId, category: 'ACCOUNT' as const, subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
+    const outcome = await new AccountService(app).deleteAccount(ticket.userId, false, 'app', {
+      claimClosure: async (tx) => (await writeTicket(claimWhere, { status: 'IN_PROGRESS' }, tx)).count === 1,
+    }).catch(async (error: unknown) => {
+      // Not after the erasure's cut-off (it sets DEACTIVATED with its marker, in one write).
+      const person = await tenantPrisma.user.findUnique({ where: { id: ticket.userId }, select: { status: true } }).catch(() => null);
+      if (person && person.status !== 'DEACTIVATED' && ticket.status !== 'IN_PROGRESS') {
+        await writeTicket({ id, status: 'IN_PROGRESS' }, { status: ticket.status }).catch(() => undefined);
+      }
+      throw error;
+    });
     const complete = 'deleted' in outcome && outcome.deleted === true;
     const closureWhere = { id, status: { not: 'RESOLVED' as const } };
     const closureData = {
@@ -7475,11 +7494,7 @@ export async function adminRoutes(app: FastifyInstance) {
         ? 'Account closed and personal data de-identified; financial and legal records are retained.'
         : 'Account closed; the remaining erasure is pending and retried automatically.',
     };
-    if (closureScope) {
-      await ownerWallSystem('admin:support-closure', () => app.prisma.supportTicket.updateMany({ where: { AND: [closureWhere, closureScope] }, data: closureData }));
-    } else {
-      await tenantPrisma.supportTicket.updateMany({ where: closureWhere, data: closureData });
-    }
+    await writeTicket(closureWhere, closureData);
     return { success: true, data: { ticketId: id, outcome } };
   });
 

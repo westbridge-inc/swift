@@ -4,7 +4,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { requestOtp, loginWithOtp, registrationProofFor, wrongCode } from './helpers/otp';
 import { LEGAL_VERSION } from '../modules/legal/legal.routes';
@@ -23,7 +23,7 @@ async function buildTestApp() {
   await server.register(redisPlugin);
   await server.register(authPlugin);
   await server.register(socketPlugin);
-  await server.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(server);
   await server.ready();
   return server;
 }

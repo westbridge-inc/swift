@@ -9,7 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -162,7 +162,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
@@ -207,13 +207,15 @@ describe('[MC-PR2] the approve route is a request to the one activation authorit
     });
   });
 
-  it('reads a promoted store tier through the same transaction as its checklist', async () => {
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] The self-declared tier this read through the transaction is removed; the
+  // store's basis a checklist still follows is its own-name flag (vendor/own-name.ts), read the same way.
+  it('reads a store\'s own-name basis through the same transaction as its checklist', async () => {
     const owner = await makeUser('TierTransaction');
-    const store = await makeStore(owner.id, 'PENDING_APPROVAL', { tier: 'UNREGISTERED' });
-    for (const t of ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo']) await doc(owner.id, t, 'APPROVED');
+    const store = await makeStore(owner.id, 'PENDING_APPROVAL', { tradesUnderOwnName: true });
+    for (const t of ['owner_national_id', 'own_name_declaration', 'storefront_photo']) await doc(owner.id, t, 'APPROVED');
     expect(await svc.isRoleVerified(owner.id, 'SUPERMARKET')).toBe(true);
     await app.prisma.$transaction(async (tx) => {
-      await tx.vendor.update({ where: { id: store.id }, data: { tier: 'REGISTERED' } });
+      await tx.vendor.update({ where: { id: store.id }, data: { tradesUnderOwnName: false } });
       expect(await svc.isRoleVerified(owner.id, 'SUPERMARKET', tx)).toBe(false);
       expect((await svc.activationChecklist(owner.id, 'SUPERMARKET', { db: tx })).complete).toBe(false);
     });

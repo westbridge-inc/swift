@@ -124,7 +124,8 @@ describe('[WEB-POLICE] the police clearance on the rider/driver Documents page',
     vi.spyOn(moverApi, 'getRiderProfile').mockResolvedValue({ vehicleType } as never);
     vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue(moverStatus(checklist) as never);
     renderWithQuery(<DocumentsPage />);
-    await screen.findByText(`${checklist.length} document${checklist.length === 1 ? '' : 's'} still needed before you can go online.`);
+    // [FLOW-QA F17] the header counts what is left to send
+    await screen.findByText(`${checklist.length} document${checklist.length === 1 ? '' : 's'} to send before you can go online.`);
     expect(screen.queryByText(/Police Clearance/)).toBeNull();
     expect(screen.queryByRole('heading', { name: 'Optional' })).toBeNull();
     expect(screen.queryByRole('checkbox', { name: /police clearance/ })).toBeNull();

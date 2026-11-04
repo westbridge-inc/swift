@@ -30,9 +30,6 @@ const EXPIRING_DOC_TYPES = [
   // The restaurant licence, sanitary certificate and trade licence ask for their YEAR (reviewerTypes).
   // [ROLE-DOCS · owner 21 Oct 2026] no liquor licence: alcohol is banned outright and no gate names it.
   'sanitary_certificate', 'trade_licence',
-  // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
-  // validity like a licence, so the console must ask for its date too.
-  'self_declaration_unregistered',
   // [TRADES · 13 Oct 2026; R15] the service-trade licences and certificates. The ones checked again
   // every January ask for the certificate's YEAR instead of a date (reviewerTypes 'certificateYear').
   'pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration',
@@ -293,8 +290,8 @@ export default function VerificationPage() {
           {l.label}<span aria-hidden="true"> {laneCounts ? (l.value === 'all' ? laneCounts.operator + laneCounts.customer : laneCounts[l.value]) : '—'}</span>
         </button>)}</div>
         {counts.isError && <p className="rc-muted">Lane counts unavailable. <button onClick={() => void counts.refetch()}>Retry counts</button></p>}
-        {/* [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] Swift keeps no customer IDs: this lane holds service providers' documents. */}
-        {lane !== 'operator' && <p className="rc-muted">This lane holds service providers&apos; documents, filed with their customer account. Swift keeps no customer IDs. Every document view is audit-logged.</p>}
+        {/* [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] Swift keeps no customer IDs (a held one stays until its hold ends): this lane holds service providers' documents. */}
+        {lane !== 'operator' && <p className="rc-muted">This lane holds service providers&apos; documents, filed with their customer account. Swift keeps no customer IDs, except one a legal or safety hold keeps until the hold ends. Every document view is audit-logged.</p>}
       </div>
       {!applicant ? <>
         <button className="rc-filter-toggle" aria-expanded={filtersOpen} aria-controls="review-filters" onClick={() => setFiltersOpen(!filtersOpen)}>Filters{search || role || type || age ? " · active" : ""}</button>

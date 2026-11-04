@@ -216,7 +216,7 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               })}
               <PriceCard title="Services" price={amount(list.service)} trialDays={list.pricing.trialDays}>
                 <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                  Plumbers, electricians, mechanics, barbers and other trades that book work.
+                  Plumbers, electricians, mechanics, tutors and other trades that book work.
                 </p>
               </PriceCard>
               {list.catalogue.map((band, i) => {

@@ -12,7 +12,7 @@ import { sendOnBehalfOf } from '../../providers/notifications/review-seal';
 import { alertClassOf } from '../../providers/notifications/alert-class';
 import { PUSH_DEVICE_SELECT, pushToDevices } from '../../providers/notifications/device-push';
 import { log } from '../../utils/logger';
-import { runWithoutTenant } from '../../plugins/tenant-context';
+import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter, pushNoDeviceCounter } from '../../plugins/observability';
 import { ringRecipients, storeTeam } from './store-team';
 import { vendorAlertSms } from './vendor-alert-sms';
@@ -412,7 +412,7 @@ export async function notifyAdmins(
   const { where: audience } = await adminAudienceFor(prisma, input.tenantId);
   const admins = await runWithoutTenant(() => prisma.user.findMany({
     where: audience,
-    select: { id: true },
+    select: { id: true, tenantId: true },
   }));
   // [REPORT-035 F-035-06 · S0 evidence] Count DELIVERIES, not candidates.
   // send() deliberately swallows a persist failure and returns '' — so
@@ -421,14 +421,19 @@ export async function notifyAdmins(
   // human with an inbox row (the F-024-04 rule, applied at the source).
   let reached = 0;
   for (const admin of admins) {
-    const id = await notifications.send({
+    // [TENANT-WALL] Each admin's notice is written and pushed in THAT admin's
+    // own tenant, never in whatever context raised the page. A page raised by
+    // a request with no tenant bound (a 5xx spike counted on a public route, a
+    // webhook) wrote the inbox row, but the push fan-out's read of the admin
+    // was refused under the tenant wall: nobody's phone rang.
+    const id = await runWithTenant(admin.tenantId, () => notifications.send({
       userId: admin.id,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: input.title,
       body: input.body,
       data: input.data,
       ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
-    });
+    }));
     if (id) reached += 1;
   }
   // SWIFT-AUD-D7-03: ops pages get the same ack-tracking as vendor/mover

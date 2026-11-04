@@ -5,11 +5,13 @@
  */
 export type TierView = {
   registration: { onFile: true; recordId: string } | { onFile: false; submission: { status: string; submittedAt: string } | null };
+  /** [REVIEW-F S4-1] Sent by GET /vendor/tier from this release on; absent from an older server. */
+  tradesUnderOwnName?: boolean;
 };
-export function registrationLine(t: Pick<TierView, 'registration'>): string {
+export function registrationLine(t: Pick<TierView, 'registration' | 'tradesUnderOwnName'>): string {
   if (t.registration.onFile) return 'Business registration on file.';
   const sub = t.registration.submission;
-  if (!sub) return 'No business registration on file yet.';
+  if (!sub) return t.tradesUnderOwnName ? 'This store trades under its owner’s own name, so it needs no business registration.' : 'No business registration on file yet.';
   return sub.status === 'PENDING' ? 'Business registration submitted — under review.' : `Business registration ${sub.status.toLowerCase().replace(/_/g, ' ')}.`;
 }
 /** What every store reads now. */

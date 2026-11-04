@@ -51,7 +51,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { PartnerService } from '../modules/partner/partner.service';
 import type { NotificationService } from '../modules/notification/notification.service';
 import type { PaymentProvider } from '../providers/payment/payment-provider';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import * as pricing from '../modules/country/country-config.service';
 import { partnerPriceList } from '../modules/country/partner-pricing';
 import { GUYANA_TZ } from '../modules/prep/prep-time';
@@ -421,7 +421,7 @@ async function pricingApp(tiersByCountry: Record<string, unknown>): Promise<Fast
   const app = Fastify({ logger: false });
   app.decorate('prisma', { countryConfig: countryConfigFake(tiersByCountry) } as unknown as PrismaClient);
   app.decorate('authenticate', async () => undefined);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
   return app;
 }
@@ -488,7 +488,7 @@ describe('Guyana partner rate card — owner rates are the seeded config', () =>
     for (const applied of [
       '2026-09-02.1', '2026-09-23.1', '2026-09-23.3', '2026-09-29.1', '2026-09-30.1', '2026-10-01.1', '2026-10-01.2', '2026-10-04.1',
       '2026-10-04.2', '2026-10-06.1', '2026-10-07.1', '2026-10-07.2', '2026-10-13.1', '2026-10-13.2', '2026-10-13.3', '2026-10-14.1', '2026-10-14.2',
-      '2026-10-14.3', '2026-10-14.4', '2026-10-14.5', '2026-10-24.1',
+      '2026-10-14.3', '2026-10-14.4', '2026-10-14.5', '2026-10-24.1', '2026-10-29.1',
     ]) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
   });
 

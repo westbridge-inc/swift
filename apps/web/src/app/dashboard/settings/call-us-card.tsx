@@ -57,7 +57,7 @@ export function CallUsCard({ storeId }: { storeId: string | null }) {
         inputMode="tel"
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder="+592 225 1234"
+        placeholder="e.g. +592 6XX XXXX"
         className="mt-3 w-full rounded-lg border border-[var(--swift-border)] px-3 py-2 text-sm focus:border-[var(--swift-red)] focus:outline-none"
       />
       <div className="mt-2 flex flex-wrap items-center gap-2">

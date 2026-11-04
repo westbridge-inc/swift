@@ -58,6 +58,7 @@ const PRIVATE_PAGES = [
   '(app)/account/favourites/page.tsx',
   '(app)/account/help/page.tsx',
   '(app)/account/profile/page.tsx',
+  '(app)/account/profile/delete/page.tsx', // [WEB-DELETE] the signed-in customer deletes their account
   '(app)/account/safety/page.tsx',
   '(app)/cart/page.tsx', // guest basket is public to browse but stays out of search
   '(app)/checkout/page.tsx', // [W4] the one checkout: a guest's basket is shown, still out of search
@@ -79,18 +80,21 @@ const PRIVATE_PAGES = [
   'dashboard/qr/page.tsx', // [STORE-LINK] the store's own QR code and share link (owners and managers)
   'dashboard/schedule/page.tsx', // a Services store's bookings (customer first names)
   'dashboard/settings/page.tsx',
+  'dashboard/settings/delete-account/page.tsx', // [WEB-DELETE] a store's people delete (or close) their own account
   'dashboard/settings/vat-report/page.tsx', // [O-5] a store's own VAT report (its order numbers and VAT figures)
   'dashboard/weekly-fee/page.tsx',
   'dashboard/weekly-fee/statement/page.tsx', // [ENTERPRISE E3] the owner's fee statement (their own name and fees)
   'dashboard/weekly-fee/pay-all/page.tsx', // [ENTERPRISE E1b] the owner pays every branch's fee (branch names and fees)
   'portal/page.tsx',
   'portal/account/page.tsx',
+  'portal/account/delete/page.tsx', // [WEB-DELETE] a rider or driver deletes their own account
   'portal/documents/page.tsx',
   'portal/history/page.tsx',
   'portal/weekly-fee/page.tsx',
   'weekly-fee/page.tsx',
   'selfie/page.tsx',
   'login/page.tsx', // identity flows, not public search content
+  '(marketing)/account-deleted/page.tsx', // [WEB-DELETE] one person's deletion receipt, never search content
   'offline/page.tsx', // utility fallback, already intentionally noindex
   'qr/not-found/page.tsx', // QR lifecycle screens, not store content
   'qr/retired/page.tsx',

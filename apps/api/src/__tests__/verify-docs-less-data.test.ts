@@ -204,7 +204,8 @@ describe('[VERIFY-DOCS] a medical certificate is never accepted', () => {
       await app.prisma.serviceProvider.create({ data: { userId: m.userId, trade: 'ELECTRICIAN', portfolioPhotos: [] } });
       const country = new CountryConfigService(app.prisma);
       expect(await country.getDocumentChecklist('GY', 'VENDOR')).toEqual(['business_registration']);
-      expect(await country.getDocumentChecklist('GY', 'VENDOR', 'UNREGISTERED')).toEqual(['owner_national_id']);
+      // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] no tier but OWN_NAME exists: any other tier reads the standard list
+      expect(await country.getDocumentChecklist('GY', 'VENDOR', 'UNREGISTERED')).toEqual(['business_registration']);
       expect(await country.getOptionalDocuments('GY', 'VENDOR', ['business_registration'])).toEqual(['police_clearance']);
       expect(await country.getMoverChecklist('GY', 'BICYCLE')).toEqual(['national_id']);
       expect(await country.getMoverOptionalDocuments('GY', 'BICYCLE')).toEqual([]);

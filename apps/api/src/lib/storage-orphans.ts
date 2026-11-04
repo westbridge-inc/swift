@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { runAsSystem } from '../plugins/tenant-context';
 import { censusSeesEveryRow, type CensusVisibilityRow } from './census-visibility';
+import { closeSealedPhotoEnvelope, shredSealedPhotoKey } from '../providers/storage/sealed-photo';
 import {
   isOwnedAvatarKey,
   resolveUnreferencedAvatarObject,
@@ -261,7 +262,11 @@ export async function retryStorageOrphan(
         const owner = await tx.user.findUnique({ where: { id: row.userId! }, select: { tenantId: true } });
         if (!owner || owner.tenantId !== row.tenantId) return false;
         await resolveUnreferencedAvatarObject(tx, { fileKey: row.key, userId: row.userId! });
+        // [DOC-SECURITY G2] A sealed profile photo: its key is shredded first (every copy unreadable), then the
+        // bytes go; the envelope closes only once their absence is confirmed. A plain photo has no envelope.
+        await shredSealedPhotoKey(tx, row.key, row.userId!);
         if (!await deleteStorageObjectAndConfirmAbsent(storage, row.key)) return false;
+        await closeSealedPhotoEnvelope(tx, row.key, row.userId!);
         const closed = await tx.storageOrphan.updateMany({
           where: {
             id: row.id, key: row.key, reason: row.reason, userId: row.userId,

@@ -7,13 +7,13 @@
  *  - The tick is stored server-side in the consent ledger (who, which store, when, the words' version and hash) and
  *    is REQUIRED: the activation projection never makes a registered restaurant live without it, nor does the console.
  *  - The certificate stays uploadable (optional), reviewed by a person and shown on the storefront while current.
- *  - A home cook (the self-declared tier) keeps the certificate REQUIRED and is never asked for the tick.
+ *  - [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] The self-declared tier (the home cook who kept the certificate REQUIRED and
+ *    was never asked to tick) is removed: a store row still marked with it is a restaurant like any other.
  *  - Old phone builds (9/11/12) cannot show the tick. Fail-safe both ways: (1) a store that has never been live — or
  *    is coming back from not being live — is HELD until the tick is given (web dashboard, or the updated app); the
  *    old app sees the step in its checklist, and uploading a file there is refused with words saying where to tick;
  *    (2) a restaurant that is ALREADY live is never taken down for it: it is told once, in its notices, to tick.
- *  - The prepared-food listing gate (CUISINE / DISH) accepts the tick in place of the certificate for a registered
- *    restaurant only.
+ *  - The prepared-food listing gate (CUISINE / DISH) accepts the tick in place of the certificate for a restaurant only.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -151,16 +151,15 @@ describe('[FOOD-PERMIT] what a registered restaurant is asked for', () => {
     expect(doc.status).toBe('PENDING');
   });
 
-  it('a home cook (self-declared tier) keeps the certificate required and is never asked to tick', async () => {
+  it('[CHECKLIST-LEGAL] a store row still marked with the removed self-declared tier is asked to tick like any restaurant', async () => {
     const o = await restaurant({ tier: 'UNREGISTERED' });
     const status = await statusOf(o);
-    expect(status.checklist).toContain('food_handler_cert');
-    expect(status.checklist).not.toContain(TICK_TYPE);
-    expect(status.foodHandlerAttestation).toBeUndefined();
+    expect(status.checklist).not.toContain('food_handler_cert');
+    expect(status.checklist).toContain(TICK_TYPE);
+    expect(status.foodHandlerAttestation).toBeDefined();
     const res = await tick(o);
-    expect(res.statusCode, res.body).toBe(409);
-    expect(res.json().error.code).toBe('FOOD_HANDLERS_NOT_APPLICABLE');
-    expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: o.userId, documentType: TICK_TYPE } }))).toBe(0);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: o.userId, documentType: TICK_TYPE } }))).toBe(1);
   });
 
   it('a supermarket is never asked to tick', async () => {
@@ -294,9 +293,11 @@ describe('[FOOD-PERMIT] the prepared-food listing gate', () => {
     expect((await handlerGate(o))?.ok).toBe(true);
   });
 
-  it('a home cook needs the certificate itself', async () => {
+  it('[CHECKLIST-LEGAL] a store row still marked with the removed tier passes it with the tick too', async () => {
     const o = await restaurant({ tier: 'UNREGISTERED' });
     expect((await handlerGate(o))?.ok).toBe(false);
+    expect((await tick(o)).statusCode).toBe(201);
+    expect((await handlerGate(o))?.ok).toBe(true);
   });
 });
 
@@ -368,7 +369,7 @@ describe('[FOOD-PERMIT] who may tick, and which tick counts', () => {
     expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: o.userId, documentType: TICK_TYPE } }))).toBe(1);
   }, 60_000);
 
-  it('a tick row for a home cook’s store never stands in for the certificate', async () => {
+  it('[CHECKLIST-LEGAL] a tick row for a store row still marked with the removed tier stands in like any restaurant’s', async () => {
     const ticked = await restaurant();
     expect((await tick(ticked)).statusCode).toBe(201); // the words are published
     const o = await restaurant({ tier: 'UNREGISTERED' });
@@ -378,7 +379,7 @@ describe('[FOOD-PERMIT] who may tick, and which tick counts', () => {
     }));
     const handlerGate = (await system(async () => gateVerdicts(app.prisma, await vendorOwnerContext(app.prisma, o.vendorId), [{ id: 'cat-cuisine', slug: 'caribbean', kind: 'CUISINE' as const }])))
       .find((v) => v.requiredDocType === 'food_handler_cert');
-    expect(handlerGate?.ok).toBe(false);
-    expect((await statusOf(o)).checklist).toContain('food_handler_cert');
+    expect(handlerGate?.ok).toBe(true);
+    expect((await statusOf(o)).checklist).not.toContain('food_handler_cert');
   });
 });

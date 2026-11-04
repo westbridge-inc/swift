@@ -93,8 +93,13 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  2026-10-29.1 [DEPT-PRICE · owner 29 Oct ~22:31Z]: 2026-10-24.1 with Guyana's department-store weekly fee at
  *  GY$45,000 (was 60,000). Nothing else moves. Production bills it only after the owner-signed seed applies this
  *  version; stores already billed above it then move down from their next weekly fee (BillingService
- *  applyCardPriceCuts), never a fee already charged. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-29.1';
+ *  applyCardPriceCuts), never a fee already charged.
+ *  2026-11-01.1 [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 17:31Z (a)]: 2026-10-29.1 without the self-declared
+ *  (unregistered) tier: the RESTAURANT_UNREGISTERED, SUPERMARKET_UNREGISTERED and STORE_UNREGISTERED lists are gone.
+ *  Only a registered business, or a trader under their own name (the *_OWN_NAME lists), joins. Nothing else moves.
+ *  Until the owner-signed seed applies this version, a stored copy still names the three lists; nothing reads them
+ *  (country-config RETIRED_LIST_KEYS, doc-registry RETIRED_REGISTRY_LIST_KEYS). */
+export const PLATFORM_CONFIG_VERSION = '2026-11-01.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -162,8 +167,9 @@ const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
 /**
  * The LAUNCH document checklists, as code. The CountryConfig row carries a copy the
  * founder may edit; readers merge these defaults UNDER the stored JSON so a key added
- * here (the UNREGISTERED tier lists, P3-2) exists on every environment without a reseed,
- * while an edited stored list still wins.
+ * here (the own-name store lists, ROLE-DOCS) exists on every environment without a reseed,
+ * while an edited stored list still wins. A key the owner retired is removed from the stored
+ * copy too (country-config RETIRED_LIST_KEYS), so an older seed never brings it back.
  *
  * Every list is REQUIRED: each type in it must be approved and current before the role
  * goes live. A `<KEY>_OPTIONAL` list (OPTIONAL_LIST_SUFFIX, doc-registry) names documents
@@ -207,19 +213,14 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     RESTAURANT_OPTIONAL: ['food_handler_cert'],
     SUPERMARKET: ['owner_national_id', 'business_registration', 'storefront_photo'],
     STORE: ['owner_national_id', 'business_registration', 'storefront_photo'],
-    // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
-    // self-declaration, the storefront photo, and — never waived — the food handler permit for food (the home cook IS
-    // the food handler: [FOOD-PERMIT · owner 24 Oct 2026] this tier keeps it REQUIRED and is never offered the tick).
-    // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
     // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's OWN name (Business Names (Registration) Act,
     // Cap. 90:05, s.3: a true surname with only first names or initials needs no registration) gives the signed own-name
     // declaration in place of the business registration; everything else is unchanged (vendor/own-name.ts).
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] There is no other way in: the self-declared (unregistered) tier and its
+    // three lists are removed. A registered business or a trader under their own name joins; nobody else.
     RESTAURANT_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'gra_restaurant_licence', 'storefront_photo'],
     SUPERMARKET_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
     STORE_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
-    RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
-    SUPERMARKET_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
-    STORE_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
     // Service businesses (owner ruling, 6 Oct 2026 ~21:25 GYT): the store opens on the owner's ID;
     // a police clearance is OPTIONAL for the store, and a HOME-VISIT booking needs the owner's
     // approved, current one (modules/verification/home-visits) — in-shop bookings never do.

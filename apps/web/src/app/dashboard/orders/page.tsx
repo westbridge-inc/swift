@@ -8,7 +8,7 @@ import { mmgDisputePaused } from '@/lib/mmg-dispute';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useFeedPollInterval } from '@/lib/store-live-feed';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
-import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, PickupCodeCard, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
+import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, NotLiveGuide, OrderCardActions, PickupCodeCard, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
 import { useStoreRole } from '@/lib/store-role';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
@@ -139,9 +139,13 @@ export default function OrdersPage() {
         the calm "nothing here" texts need the last read to have succeeded. */}
     {orders.data && <>
       {!orders.isError && openOrUnknown === 0 ? (
-        store.data?._count?.orders === 0
-          ? <FirstOrderGuide store={store.data} manager={manager} listening={!orders.isError} />
-          : <BoardQuiet lastOrderAt={lastOrderAt} />
+        // [WEB-ONBOARDING] a store never approved yet is told what is left, never "The board is live."
+        store.data?.status === 'PENDING_APPROVAL'
+          ? <NotLiveGuide store={store.data} manager={manager} owner={role === 'OWNER'} />
+          // [REVIEW S4] the first-order guide says the board is live: only a live store gets it
+          : store.data?._count?.orders === 0 && storeLive
+            ? <FirstOrderGuide store={store.data} manager={manager} listening={!orders.isError} />
+            : <BoardQuiet lastOrderAt={lastOrderAt} />
       ) : <div className="sw-order-board">{board.map(c => <section key={c.key} aria-label={`${c.label} orders`} className="min-w-0 space-y-3">
         <div className="flex items-baseline gap-2"><h2 className="sw-heading">{c.label}</h2><span className="sw-caption">{byBucket.get(c.key)?.length ?? 0}</span></div><p className="sw-caption">{c.hint}</p>
         {(byBucket.get(c.key) ?? []).map(row)}

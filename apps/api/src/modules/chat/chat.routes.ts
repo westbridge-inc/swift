@@ -1,4 +1,5 @@
 import { emitToChatRoom } from '../order/order-room-emission.service';
+import { resolveAvatarUrls } from '../../utils/avatar-url';
 import { scanUpload } from '../../lib/malware-scan';
 import type { FastifyInstance } from 'fastify';
 import { z } from '../../lib/zod';
@@ -464,15 +465,22 @@ export async function chatRoutes(app: FastifyInstance) {
         if (error instanceof AppError && [403, 404].includes(error.statusCode)) continue;
         throw error;
       }
+      const shownParticipants = r.participants.filter((p) => current.participants.has(p.userId));
+      // [DOC-SECURITY G2] Each photo as a link the phone can load (a sealed photo's signed link, or the bucket's
+      // presigned one), never the stored key.
+      const photos = await resolveAvatarUrls(shownParticipants.map((p) => customerPhotoHidden(p).user.avatar));
       listed.push({
         id: r.id,
         orderId: r.orderId,
-        participants: r.participants.filter((p) => current.participants.has(p.userId)).map((p) => ({
-          userId: p.user.id,
-          name: p.user.firstName,
-          avatar: customerPhotoHidden(p).user.avatar,
-          role: p.role,
-        })),
+        participants: shownParticipants.map((p) => {
+          const avatar = customerPhotoHidden(p).user.avatar;
+          return {
+            userId: p.user.id,
+            name: p.user.firstName,
+            avatar: avatar ? photos.get(avatar) ?? null : null,
+            role: p.role,
+          };
+        }),
         lastMessage,
       });
     }

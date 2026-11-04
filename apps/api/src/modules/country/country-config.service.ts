@@ -1,5 +1,5 @@
 import type { PrismaClient, CountryConfig, VehicleType, Prisma } from '@prisma/client';
-import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER, OWN_NAME_LIST_SUFFIX, OWN_NAME_TIER } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, OWN_NAME_LIST_SUFFIX, OWN_NAME_TIER } from '../verification/doc-registry';
 import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
@@ -313,18 +313,16 @@ export class CountryConfigService {
     // whose every document type is ACTIVE (legal facts verified). Until then
     // the answer is the JSON these lists have always come from: same
     // signature, same lists, no behaviour change (test_checklist_facade_unchanged).
-    // [DOC-1 §3.6 · P3-2] At the UNREGISTERED tier the same role reads its
-    // <ROLE>_UNREGISTERED list (the registry set at that tier, else the JSON key);
-    // a role with no such list is not offered the tier and keeps its standard set.
     // [ROLE-DOCS · owner 21 Oct 2026] At the OWN_NAME tier (a store trading under its owner's own name) the role
-    // reads its <ROLE>_OWN_NAME list the same way; a role with no such list keeps its standard set.
-    const unregistered = tier === UNREGISTERED_TIER;
+    // reads its <ROLE>_OWN_NAME list (the registry set at that tier, else the JSON key); a role with no such list
+    // keeps its standard set. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No other tier exists: the self-declared
+    // (unregistered) tier is removed, so any other tier a caller names reads the standard set, and a stored copy of
+    // the retired lists from an older seed is never read (RETIRED_LIST_KEYS).
     const ownName = tier === OWN_NAME_TIER;
-    const fromRegistry = await registryChecklist(db, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : ownName ? OWN_NAME_TIER : undefined);
+    const fromRegistry = await registryChecklist(db, code, roleKey, new Date(), ownName ? OWN_NAME_TIER : undefined);
     if (fromRegistry) return fromRegistry.filter((docType) => !isNeverAcceptedDocType(docType));
     const config = await this.getByCode(code, db);
-    const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
-    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
+    const lists = withoutRetiredLists(config.documentChecklists);
     if (ownName && lists[`${roleKey}${OWN_NAME_LIST_SUFFIX}`]) return lists[`${roleKey}${OWN_NAME_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
     return (lists[roleKey] ?? []).filter((docType) => !isNeverAcceptedDocType(docType));
   }
@@ -377,8 +375,19 @@ export class CountryConfigService {
  * [ROLE-DOCS · owner ruling 21 Oct 2026] Lists the owner retired. A stored copy written by an older seed (production
  * holds the 2026-10-14.5 seed) never brings them back: no optional document for EVERY mover (the optional national ID
  * and the riders' police clearance are gone) and no customer ID + selfie list.
+ * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] Nor the self-declared (unregistered) tier's three lists: the tier is
+ * removed (production's stored copy names them until the owner-signed seed of 2026-11-01.1).
  */
-export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
+export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set([
+  'MOVER_OPTIONAL', 'CUSTOMER_L2', 'RESTAURANT_UNREGISTERED', 'SUPERMARKET_UNREGISTERED', 'STORE_UNREGISTERED',
+]);
+
+/** The code's lists UNDER the stored (signed) ones, minus the retired keys: what every checklist reader starts from. */
+export function withoutRetiredLists(stored: unknown): Record<string, string[]> {
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((stored ?? {}) as Record<string, string[]>) };
+  for (const key of RETIRED_LIST_KEYS) delete lists[key];
+  return lists;
+}
 
 /** The mover lists: the code's lists UNDER the stored (signed) ones, minus the retired keys. FAIL CLOSED (security
  *  review, COORD 21 Oct): a key the stored row lacks — a profile added in code, or a row seeded before the key existed —
@@ -387,9 +396,7 @@ export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL',
  *  profile key a vehicle asks for today (MOVER_NO_LICENCE, MOVER_MOTOR, MOVER_TAXI_EXTRA, MOVER_COMMERCIAL); from the
  *  code it gains only MOVER_TAXI_EXTRA_OPTIONAL. */
 export function moverListsFrom(stored: unknown): Record<string, string[]> {
-  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((stored ?? {}) as Record<string, string[]>) };
-  for (const key of RETIRED_LIST_KEYS) delete lists[key];
-  return lists;
+  return withoutRetiredLists(stored);
 }
 
 /** The REQUIRED mover list from a checklist map: the MOVER base plus the vehicle's profiles. */

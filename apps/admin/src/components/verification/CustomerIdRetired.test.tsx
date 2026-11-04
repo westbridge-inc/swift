@@ -31,6 +31,12 @@ describe('[CHECKLIST-LEGAL (b)] a customer ID in the Review Center', () => {
     expect(page).not.toMatch(/Customer IDs are shown deliberately/);
   });
 
+  // [REVIEW-F S4-2] A hold keeps an ID until it ends, so the lane's line is not an absolute.
+  it('the operator lane line names the hold', () => {
+    const page = readFileSync(join(__dirname, '../../app/verification/page.tsx'), 'utf8');
+    expect(page).toContain('Swift keeps no customer IDs, except one a legal or safety hold keeps until the hold ends.');
+  });
+
   it('the label in lists is "Customer ID"', () => {
     expect(docLabel('identity_l2')).toBe('Customer ID');
   });

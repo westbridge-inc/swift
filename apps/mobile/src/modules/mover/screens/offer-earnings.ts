@@ -59,3 +59,12 @@ export function offerEarnings(
   const bonus = amount(rescueBonus);
   return { fare: f, tip, total: f + tip, showTip: tip > 0, bonus, showBonus: bonus > 0 };
 }
+
+/**
+ * [WS-6.0 · promo-film finding 2 Nov 2026] Does a cash job hand a store a share? Only a store order does: the server's
+ * cash math (`cashMathForOffer`) pays no store on a taxi ride or a courier job (payToVendor 0), and the card read
+ * "Pay the store $0 · you keep $800" there. The store's line shows only when there is money to hand over.
+ */
+export function owesStore(cashMath: { payToVendor?: unknown } | null | undefined): boolean {
+  return amount(cashMath?.payToVendor) > 0;
+}

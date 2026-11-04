@@ -615,8 +615,8 @@ model CountryConfig {
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
   ///   l3MinPaidOrders, l3MinAccountAgeDays, outlierMultiplier }
   cashRules Json?
-  /// [DOC-1 §3.6 · FD-DOC-1 · P3-2] Micro-vendor tier caps, merged over the code defaults in
-  /// vendor-tier.ts: ordersPerDay, grossPerWeek (major units), nudgeAtFraction.
+  /// [DOC-1 §3.6 · FD-DOC-1 · P3-2] Micro-vendor tier caps. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] RETIRED with
+  /// the self-declared tier: nothing reads it (kept so an older release still reads the row; a later contract step).
   vendorTierCaps Json?
 
   /// [MOB-018] The market emergency policy: per service (police/fire/ambulance)
@@ -1594,8 +1594,8 @@ model Vendor {
   /// [RETIER PR-A] When the store FIRST went live (set by the activation projection and the console's reinstate,
   /// never cleared). Null = never live: only such a store is priced on its own catalogue when its fee is born.
   firstLiveAt             DateTime?
-  /// [DOC-1 §3.6 · P3-2] See VendorTier. Set to UNREGISTERED only by the vendor's own
-  /// signed self-declaration; set to REGISTERED only by a VALID registration record.
+  /// [DOC-1 §3.6 · P3-2] See VendorTier. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] Always REGISTERED: the
+  /// self-declared tier is removed (migration 20261101120000 moved every row) and nothing writes the column.
   tier                    VendorTier               @default(REGISTERED)
   tierChangedAt           DateTime?
   /// [ROLE-DOCS · owner 21 Oct 2026] The store trades under its owner's own name (Business Names (Registration)
@@ -1607,6 +1607,11 @@ model Vendor {
   // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT
   // lift it). Reinstatement CAS-matches BILLING only.
   suspensionSource        String?
+  /// [WEB-DELETE · owner ruling 1 Nov 2026] When the owner's account closure request paused this store's NEW orders
+  /// (user/closure-pause.ts). While it is set nothing turns order intake back on (a database CHECK keeps
+  /// acceptingOrders false): only Swift staff resolving the request, or the owner cancelling it, clears it. Orders
+  /// already placed still finish.
+  closurePausedAt         DateTime?
   isFeatured              Boolean                  @default(false)
   averageRating           Float                    @default(5.0)
   totalRatings            Int                      @default(0)
@@ -1741,12 +1746,11 @@ enum VendorType {
   SERVICE
 }
 
-/// [DOC-1 §3.6 · P3-2] The micro-vendor tier. UNREGISTERED = a verified person trading
-/// without a DCRA certificate under a signed self-declaration: capped orders/day and
-/// gross/week, no promoted placement, licence-gated categories closed (it holds no
-/// licence). REGISTERED = a business-registration (or incorporation) record is VALID;
-/// promotion is automatic on that record and lifts every cap. Existing vendors default
-/// to REGISTERED so nothing already live is capped by the migration (expand rule).
+/// [DOC-1 §3.6 · P3-2] The micro-vendor tier. [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] UNREGISTERED is
+/// RETIRED: the self-declared tier (capped orders a day and sales a week under a signed self-declaration) is
+/// removed, and only a registered business or a trader under their own name joins. No row holds it after
+/// migration 20261101120000 and no code writes or reads it. The value stays in the type so an older release can
+/// still read the column and be rolled back to; dropping it is a later contract step.
 enum VendorTier {
   UNREGISTERED
   REGISTERED
@@ -3602,6 +3606,13 @@ model Subscription {
   isTrialActive      Boolean               @default(false)
   trialEndDate       DateTime?
   autoRenew          Boolean               @default(true)
+  /// [WEB-DELETE · owner ruling 2 Nov 2026] The store owner's account closure request holds this weekly fee from this
+  /// instant (billing/closure-fee-hold.ts): no week that starts at or after it is born, charged or reminded, and at
+  /// the end of the paid week the plan pauses owing nothing. A week owed before it settles exactly as ever (autoRenew
+  /// is untouched). Cleared, and the fee restarted from then, when the request ends without closing the account.
+  closureHoldAt       DateTime?
+  /// The closure request (support ticket) that holds it.
+  closureHoldTicketId String?
   lastPaymentDate    DateTime?
   lastPaymentId      String?
   failedAttempts     Int                   @default(0)
@@ -8520,8 +8531,9 @@ model BusinessProfile {
   subject        Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
   ownerAccountId String  @unique
   tradingName    String?
-  entityForm     String  @default("UNREGISTERED")
-  tier           String  @default("TIER_UNREGISTERED")
+  /// [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] Nothing reads these two; their defaults no longer name the removed tier.
+  entityForm     String  @default("UNDECLARED")
+  tier           String  @default("STANDARD")
 
   @@map("business_profile")
 }

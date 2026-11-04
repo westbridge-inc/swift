@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { shownRatingFor } from '../rating/rating-groups';
 import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -546,7 +547,9 @@ export async function ridesRoutes(app: FastifyInstance) {
     // installed store build (it dials it) — a bridge-aware client calls through Swift and is sent none.
     const driver = {
       ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average,
-      user: { ...ride.driver.user, phone: counterpartPhone(request, ride.driver.user.phone) },
+      // [DOC-SECURITY G2] The driver's photo as a link the passenger's phone can load (a sealed photo's signed
+      // link, or the bucket's presigned one), never the stored key.
+      user: { ...ride.driver.user, avatar: await resolveAvatarUrl(ride.driver.user.avatar), phone: counterpartPhone(request, ride.driver.user.phone) },
     };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
@@ -577,6 +580,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     if (ride.driver) {
       const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
       Object.assign(ride.driver as object, { displayRating: shown.displayRating, averageRating: shown.average });
+      // [DOC-SECURITY G2] The driver's photo as a loadable link, never the stored key (as /active).
+      if (ride.driver.user) ride.driver.user.avatar = await resolveAvatarUrl(ride.driver.user.avatar);
     }
     // Same trip-end rule as /active: the pay link only for a ride that is
     // underway or done (receipt / pay-later), never during matching.
