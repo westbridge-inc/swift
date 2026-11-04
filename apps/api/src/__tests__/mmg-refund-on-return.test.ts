@@ -205,12 +205,24 @@ describe('[G22 · COORD 4 Nov 2026] a paid MMG order came back and no figure is 
     const [kase, ...more] = await cases(o.id);
     expect(more).toEqual([]);
     expect(kase).toMatchObject({ category: 'PAYMENT', subject: MMG_RETURN_NO_FIGURE_SUBJECT, userId: customer.id, status: 'OPEN' });
-    expect(kase!.message).toContain('no amount is on record');
-    expect(kase!.message).toContain('No refund has been recorded.');
-    expect(kase!.message).not.toMatch(/GY\$|1,?500/);
+
+    // The ticket is filed under the customer and shows in their Get Help: their words, never staff's.
+    const shown = (await call('GET', '/api/v1/customer/support', customer)).body;
+    expect(shown).toContain(`Your order ${o.orderNumber} went back to the store.`);
+    for (const staffWords of ['never stated', 'Check the MMG records', 'No refund has been recorded', 'no amount is on record']) expect(shown, staffWords).not.toContain(staffWords);
+    expect(`${kase!.subject} ${kase!.message}`).not.toMatch(/GY\$|1,?500/);
+
+    // One plain line to the customer, no figure in it.
+    const line = await told(customer.id, o.id, 'mmg_refund_checking');
+    expect(line).toHaveLength(1);
+    expect(line[0]!.body).toBe(`Your order ${o.orderNumber} went back to the store. Swift support is checking your MMG payment and will contact you.`);
+    expect(line[0]!.data).toMatchObject({ audience: 'customer' });
+
+    // The staff words are on the page to support.
     const page = await sys(() => app.prisma.notification.findMany({ where: { userId: admin.id, title: 'Paid MMG order came back, no amount known', data: { path: ['orderId'], equals: o.id } } }));
     expect(page).toHaveLength(1);
     expect(page[0]!.data).toMatchObject({ kind: 'support_ticket', ticketId: kase!.id });
+    expect(page[0]!.body).toContain('no amount is on record: the store never stated what it received. Check the MMG records with the store and the customer. No refund has been recorded.');
   });
 
   it('a finding that the customer paid does the same, and the store is not sent to a button that is not there', async () => {
@@ -221,6 +233,10 @@ describe('[G22 · COORD 4 Nov 2026] a paid MMG order came back and no figure is 
     expect((await resolve(o.id, 'CUSTOMER_PAID', held.mmgClaimRevision)).statusCode).toBe(200);
     expect(await owedOn(o.id)).toEqual([]);
     expect(await cases(o.id)).toHaveLength(1);
+    // The same finding sent again is a replay: nothing opens a second time, and nobody is told twice.
+    expect((await resolve(o.id, 'CUSTOMER_PAID', held.mmgClaimRevision)).statusCode).toBe(200);
+    expect(await cases(o.id)).toHaveLength(1);
+    expect(await told(customer.id, o.id, 'mmg_refund_checking')).toHaveLength(1);
     const store = await sys(() => app.prisma.notification.findMany({ where: { userId: owner.id, title: 'Payment review finished', data: { path: ['orderId'], equals: o.id } } }));
     expect(store[0]!.body).toContain('you owe the customer that money back.');
     expect(store[0]!.body).not.toContain('Refund sent');
