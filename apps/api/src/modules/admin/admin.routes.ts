@@ -77,6 +77,7 @@ import {
 } from './solo-approval';
 import { sanitizeUser } from '../auth/auth.service';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
+import { closeSettlementBySwift, SETTLEMENT_CLOSED_DISPOSITION } from '../cash/delivery-cash-settlement.service';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
@@ -3865,10 +3866,10 @@ export async function adminRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
       }),
       app.prisma.deliveryCashSettlement.count({ where }),
-      // Unfiltered health totals — how much store→rider cash is in each state.
+      // Unfiltered health totals — how much store→rider cash is in each state. A closed record is nobody's to chase.
       app.prisma.deliveryCashSettlement.groupBy({
         by: ['status'],
-        where: { order: { tenantId }, rider: { user: { tenantId } }, vendor: { tenantId } },
+        where: { order: { tenantId }, rider: { user: { tenantId } }, vendor: { tenantId }, closedAt: null },
         _sum: { amount: true },
         _count: true,
       }),
@@ -3885,6 +3886,7 @@ export async function adminRoutes(app: FastifyInstance) {
       status: s.status,
       riderConfirmedAt: s.riderConfirmedAt,
       storeConfirmedAt: s.storeConfirmedAt,
+      closedAt: s.closedAt,
       createdAt: s.createdAt,
       vendor: s.vendor ? { id: s.vendor.id, name: s.vendor.name } : null,
       rider: s.rider
@@ -3894,6 +3896,25 @@ export async function adminRoutes(app: FastifyInstance) {
 
     const paged = paginatedResponse(data, total, { page, limit, skip });
     return { success: true, ...paged, summary };
+  });
+
+  /**
+   * POST /finance/cash-settlements/:id/close — a record neither side can close: a store that never confirms, or has
+   * left Swift. RECORD ONLY: Swift moves nothing and the row keeps every fact it held; the amount stays the store's
+   * debt to the rider, between them. C4: a stated reason and a second admin (the approval gate above).
+   */
+  app.post('/finance/cash-settlements/:id/close', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const closed = await closeSettlementBySwift(tenantPrisma as unknown as PrismaClient, {
+      settlementId: id,
+      adminUserId: request.user.userId,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+    await Promise.all(closed.noticeIds.map((noticeId) => notifications.publishPersisted(noticeId)));
+    return { success: true, data: { id: closed.id, closedAt: closed.closedAt, disposition: SETTLEMENT_CLOSED_DISPOSITION } };
   });
 
   /** MMG-vs-cash mix, last 30 days of completed orders, plus MMG confirmation

@@ -5007,6 +5007,10 @@ model DeliveryCashSettlement {
   storeConfirmedById  String?
   riderAttestedAmount Decimal?             @db.Decimal(10, 2)
   storeAttestedAmount Decimal?             @db.Decimal(10, 2)
+  /// Swift support closed this record because neither side can (the reason is in the audit row). Nobody can confirm it
+  /// any more and it blocks nobody. Everything above stays as it was: a closed record is not a settled one.
+  closedAt         DateTime?
+  closedById       String?
   createdAt        DateTime             @default(now())
   @@index([tenantId])
 

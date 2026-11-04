@@ -633,6 +633,8 @@ export interface CashSettlementRow {
   status: 'OWED' | 'RIDER_CONFIRMED' | 'STORE_CONFIRMED' | 'SETTLED';
   riderConfirmedAt: string | null;
   storeConfirmedAt: string | null;
+  /** When Swift support closed it. A closed record is not a settled one: `status` stays what it was. */
+  closedAt?: string | null;
   createdAt: string;
   vendor: { id: string; name: string } | null;
   rider: { id: string; name: string } | null;
@@ -646,6 +648,13 @@ export interface CashSettlementsResponse {
 }
 export const fetchCashSettlements = (params?: string): Promise<CashSettlementsResponse> =>
   apiFetch(`/api/v1/admin/finance/cash-settlements?${params || 'limit=50'}`);
+/**
+ * C4 (money class): close a delivery-pay record neither side can. A record only: Swift moves nothing and the row keeps
+ * what it says. The first call answers 202 APPROVAL_REQUIRED; a second admin (or the owner's solo approval) decides it in
+ * Approvals, and the asking admin applies it from there.
+ */
+export const closeCashSettlement = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/finance/cash-settlements/${encodeURIComponent(id)}/close`, { method: 'POST', body: '{}', reason });
 
 export interface PaymentMix {
   byMethod: { method: string; count: number; total: number }[];
