@@ -1465,6 +1465,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (result.state === 'down') ctx.log.warn({ ...result }, 'malware scanner not answering');
         return;
       }
+      if (job.name === 'error-rate-watch') {
+        // [FIXES-4] Server errors too few a minute for the spike page, read from the hourly tally:
+        // one platform page a day at most (durable OpsAlert path); an errorless stretch closes it.
+        const { watchErrorRate } = await import('../modules/ops/error-rate-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const result = await watchErrorRate({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (result.outcome === 'delivered' || result.outcome === 'pending') ctx.log.warn({ ...result }, 'server errors keep happening');
+        return;
+      }
       if (job.name === 'upload-rescan') {
         // [Row 312 · COORD 21 Oct] Uploads stored unscanned (safety evidence while the scanner was down,
         // or MALWARE_SCAN_BYPASS=1): scanned once clamd answers; a positive or an unscannable one is
@@ -2987,6 +2996,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // failed ask in a row pages ops. Nothing is dialled while MALWARE_SCAN is dark.
   await queues.verificationQueue.add('malware-scanner-watch', {}, {
     repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [FIXES-4] Every five minutes: server errors in the last day, too few a minute for the spike page.
+  await queues.verificationQueue.add('error-rate-watch', {}, {
+    repeat: { every: 5 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });

@@ -15,6 +15,7 @@
  *  - an error with no status is logged as before, now naming its class;
  *  - neither line carries the error's message, the request's path values or
  *    its query string, and a code that is not a plain identifier is left out;
+ *  - an AppError 500 is a fault, logged the same way [FIXES-4];
  *  - a 4xx and an AppError refusal stay off the error log, as before.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -49,6 +50,7 @@ beforeAll(async () => {
   app.get('/probe/unknown/:id', async () => { throw new RangeError(`out of range for ${SECRET}`); });
   app.get('/probe/client/:id', async () => { throw Object.assign(new Error(`too many ${SECRET}`), { statusCode: 429, code: 'SLOW_DOWN' }); });
   app.get('/probe/app-error/:id', async () => { throw new AppError(503, 'ENCRYPTION_OFF', 'Encryption is not configured.'); });
+  app.get('/probe/app-fault/:id', async () => { throw new AppError(500, 'INVARIANT_BROKEN', `broke at ${SECRET}`); });
   await app.ready();
 });
 
@@ -92,6 +94,15 @@ describe('[VIEWER-FIX] every 5xx leaves an error line that names its cause, and 
     expect(logged[0]).toMatchObject({ msg: 'Unhandled error', errorClass: 'RangeError' });
   });
 
+  it('[FIXES-4] an AppError 500 (a broken invariant) is logged too, by class and code, and answers as before', async () => {
+    const res = await get('/probe/app-fault');
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error.code).toBe('INVARIANT_BROKEN');
+    const logged = errorLines('/probe/app-fault/:id');
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ msg: 'Unhandled error', statusCode: 500, errorClass: 'AppError', errorCode: 'INVARIANT_BROKEN' });
+  });
+
   it('a 4xx and a deliberate AppError refusal stay off the error log, as before', async () => {
     expect((await get('/probe/client')).statusCode).toBe(429);
     expect((await get('/probe/app-error')).statusCode).toBe(503);
@@ -101,6 +112,6 @@ describe('[VIEWER-FIX] every 5xx leaves an error line that names its cause, and 
 
   it('no line carries an error message, a path value or the query string', () => {
     expect(raw.length).toBeGreaterThan(0);
-    for (const forbidden of [SECRET, PATH_VALUE, 'sig=', 'bucket.example', 'reached the database']) expect(raw).not.toContain(forbidden);
+    for (const forbidden of [SECRET, PATH_VALUE, 'sig=', 'bucket.example', 'reached the database', 'broke at']) expect(raw).not.toContain(forbidden);
   });
 });
