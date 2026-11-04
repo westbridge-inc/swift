@@ -1,4 +1,5 @@
 import { RetainedUploadPhotos } from '../../../lib/retainedUploadPhotos';
+import { parcelUnpaidWords } from '../../../lib/parcelUnpaidWords';
 import { MapCredits } from '../../../components/MapCredits';
 import { uploadHandoverPhoto } from '../../../hooks/mover';
 import type { AuthSessionSnapshot } from '../../../lib/authSession';
@@ -328,16 +329,8 @@ export function ActiveJobScreen({ navigation }: any) {
         {
           onSuccess: (res: any) => {
             capturedProofs.current.forget(captured.key);
-            if (outcome && outcome !== 'paid') {
-              const claim = res?.claim?.status;
-              toast.show(
-                claim === 'AUTO_APPROVED' ? 'Failed delivery recorded — the Swift guarantee covers it.'
-                  : claim === 'PENDING_REVIEW' ? 'Failed delivery recorded — your claim is under review.'
-                    : 'Failed delivery recorded.',
-              );
-              navigation?.goBack?.();
-              return;
-            }
+            // [BUG-HUNT-2 G02] Unpaid at the door: the parcel is still in their hands, so the job stays, on its return leg.
+            if (outcome && outcome !== 'paid') toast.show(parcelUnpaidWords(res?.claim?.status));
             active.refetch?.();
           },
           onError: (proofError: any) => {
@@ -531,6 +524,11 @@ export function ActiveJobScreen({ navigation }: any) {
     const recorded = isDriver ? 'Unpaid fare recorded' : 'Failed delivery recorded';
     const onSuccess = (res: any) => {
       const claim = res?.claim?.status;
+      if (isCourier) {
+        toast.show(parcelUnpaidWords(claim));
+        active.refetch?.();
+        return;
+      }
       toast.show(
         claim === 'AUTO_APPROVED' ? `${recorded} — the Swift guarantee covers it.`
           : claim === 'PENDING_REVIEW' ? `${recorded} — your claim is under review.`
@@ -1303,7 +1301,7 @@ export function ActiveJobScreen({ navigation }: any) {
           {isDriver
             ? 'Record what happened. Your evidence and fare claim will be reviewed; a missing photo does not stop you recording the outcome.'
             : isCourier
-              ? 'Record what happened at the door. Add a photo if available; incomplete evidence goes to review.'
+              ? 'Record what happened at the door, then bring the parcel back to the sender. Add a photo if available; incomplete evidence goes to review.'
               : 'Record what happened. Add a photo if available; missing or insufficient evidence goes to review.'}
         </T>
         {<PillButton label={photoBusy ? 'Saving photo…' : handoverPhoto?.orderId === job?.id ? 'Replace photo' : 'Add photo'} disabled={busy} onPress={() => void addHandoverPhoto()} />}
