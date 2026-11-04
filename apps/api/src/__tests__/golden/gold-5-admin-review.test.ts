@@ -529,7 +529,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
     expect(block.map((b) => ({ level: b.level, by: b.decidedBy }))).toEqual([{ level: 'BLOCK_PENDING_FOUNDER', by: rev2.userId }]);
     // The partner hears the generic message — never which signal caught them.
     const told = await sys(() => app.prisma.notification.findMany({ where: { userId: suspect.userId, title: 'Document rejected' } }));
-    expect(told.map((n) => n.body)).toEqual([`Your business registration was rejected: ${FRAUD_GENERIC_TEXT}. Please fix it and resubmit.`]);
+    expect(told.map((n) => n.body)).toEqual([`Your Business Registration was rejected: ${FRAUD_GENERIC_TEXT}. Please fix it and resubmit.`]);
     expect(told[0]!.body.toLowerCase()).not.toMatch(/seal|tamper|altered/);
   });
 });

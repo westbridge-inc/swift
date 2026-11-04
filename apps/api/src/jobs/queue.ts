@@ -1481,6 +1481,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (result.state === 'down') ctx.log.warn({ ...result }, 'malware scanner not answering');
         return;
       }
+      if (job.name === 'fee-refund-case-sweep') {
+        // [Row 156] A partner's ask for a weekly-fee payment back: closed only on MMG's proven return; overdue ones page.
+        const { sweepFeeRefundCases } = await import('../modules/billing/fee-refund-case');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const result = await sweepFeeRefundCases({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (result.refunded || result.overdue) ctx.log.info({ ...result }, 'weekly-fee refund cases swept');
+        return;
+      }
       if (job.name === 'error-rate-watch') {
         // [FIXES-4] Server errors too few a minute for the spike page, read from the hourly tally:
         // one platform page a day at most (durable OpsAlert path); an errorless stretch closes it.
@@ -2015,6 +2023,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const handovers = await drainHandoverNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
           if (handovers.pending > 0) ctx.log.warn(handovers, 'handover notices remain pending');
           else if (handovers.expired > 0) ctx.log.warn(handovers, 'handover pushes closed unconfirmed; the inbox notices remain');
+        });
+        await drain('delivery-custody-lift', async () => {
+          // [BUG-HUNT F18] The suspension a finished delivery lifts commits with the delivery, at every door;
+          // whatever its post-commit attempt could not finish is finished here.
+          const { drainDeliveryLifts, liftAfterDelivery } = await import('../modules/safety/delivery-lift');
+          const lifts = await drainDeliveryLifts({ prisma: ctx.prisma, lift: liftAfterDelivery(ctx.prisma, ctx.io) });
+          if (lifts.pending > 0) ctx.log.warn(lifts, 'delivery lifts remain owed');
+          else if (lifts.expired > 0) ctx.log.warn(lifts, 'delivery lifts closed unfinished; the cases stay with a person');
         });
         await drain('driver-pickup-notice', async () => {
           // [L07] The passenger's "driver on the way / arrived" notice commits with
@@ -3012,6 +3028,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // failed ask in a row pages ops. Nothing is dialled while MALWARE_SCAN is dark.
   await queues.verificationQueue.add('malware-scanner-watch', {}, {
     repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [Row 156] Weekly-fee refund cases: every fifteen minutes, close the proven ones and page the overdue.
+  await queues.verificationQueue.add('fee-refund-case-sweep', {}, {
+    repeat: { every: 15 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });
