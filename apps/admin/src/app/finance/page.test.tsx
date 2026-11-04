@@ -225,3 +225,50 @@ describe('finance settlement mutation', () => {
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
   });
 });
+
+describe('a stuck delivery-pay record', () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: 'cs-1', orderId: 'order-1', orderNumber: 'A100', amount: 500, status: 'OWED', riderConfirmedAt: null, storeConfirmedAt: null, closedAt: null,
+    createdAt: '2026-10-01T12:00:00.000Z', vendor: { id: 'v-1', name: 'Gone Store' }, rider: { id: 'r-1', name: 'Test Rider' }, ...over,
+  });
+  const ledger = (rows: unknown[], mutation = noMutation) => (request: ApiRequest) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/finance/cash-settlements') {
+      return { body: { success: true, data: rows, meta: { page: 1, limit: 50, total: rows.length, totalPages: 1 }, summary: {} } };
+    }
+    return financeHandler(mutation)(request);
+  };
+
+  it('Close record states the reason to the record, and a second admin is awaited, never shown as a failure', async () => {
+    const fetchMock = mockApi(ledger([row()], (request) => {
+      if (request.method === 'POST' && request.url.pathname === '/api/v1/admin/finance/cash-settlements/cs-1/close') {
+        return { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it takes effect.', details: { approvalId: 'a-1' } } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    }));
+    const { user } = renderWithQuery(<FinancePage />);
+    await user.click(await screen.findByRole('button', { name: 'Close record…' }));
+    const panel = await screen.findByRole('dialog', { name: 'Close this delivery pay record?' });
+    expect(panel.textContent).toContain('Both sides are told. Swift moves no money.');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'The store has left Swift and cannot confirm this handover');
+    await user.click(within(panel).getByRole('button', { name: 'Close record' }));
+    expect((await screen.findByRole('status')).textContent).toContain("Sent for a second admin's approval");
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(url).toBe(`${API_ORIGIN}/api/v1/admin/finance/cash-settlements/cs-1/close`);
+    expect(new Headers(init?.headers).get('x-swift-reason')).toBe('The store has left Swift and cannot confirm this handover');
+  });
+
+  it('a settled record offers no close', async () => {
+    mockApi(ledger([row({ status: 'SETTLED' })]));
+    renderWithQuery(<FinancePage />);
+    expect(await screen.findByText(/Gone Store/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Close record…' })).toBeNull();
+  });
+
+  it('a closed record says so, offers no close, and its status stays what it was', async () => {
+    mockApi(ledger([row({ status: 'STORE_CONFIRMED', closedAt: '2026-11-04T12:00:00.000Z' })]));
+    renderWithQuery(<FinancePage />);
+    expect(await screen.findByText('Closed by Swift')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Close record…' })).toBeNull();
+    expect(screen.getAllByText('Store confirmed').length).toBeGreaterThan(0);
+  });
+});

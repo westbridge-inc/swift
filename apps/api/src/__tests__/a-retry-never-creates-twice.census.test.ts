@@ -243,6 +243,8 @@ const SCOPE: Record<string, Entry> = {
 
 /** Verb-matched routes that create none of the eight things (reviewed). */
 const OUT: Record<string, string> = {
+  // [Row 156] A note that a clock started, not one of the eight: it moves no money, and checkoutId is unique, so a retry is 409.
+  [`${ADMIN}|POST|/billing/mmg-checkouts/:id/refund-case`]: 'records a partner\'s ask on one payment: unique per payment (a retry is REFUND_CASE_EXISTS), and it moves no money',
   // [WEB-DELETE · owner ruling 1 Nov 2026]
   [`${CUSTOMER}|POST|/account/closure-request/cancel`]: 'The owner takes back their own closure request: it resolves that ticket and lifts its pause on new orders, under the person lock (a replay finds no open request and is refused). No order or money.',
   [`${CUSTOMER}|POST|/orders/:id/reorder`]: 'Fills the CART from a past order; nothing is ordered until checkout (which holds its own key).',
