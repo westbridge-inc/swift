@@ -407,6 +407,21 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
     }
   });
 
+  // [BUG-HUNT F23] A near miss reads as closed, which on ordering day would hold every partner with no word to anyone.
+  it.each(['true', 'yes', 'on', '2', 'open', '1 '])('PARTNER_APPROVALS_OPEN=%j is refused before anything changes', (value) => {
+    writeFileSync(log, '');
+    const r = runPilot({ ...PRODUCTION, PARTNER_APPROVALS_OPEN: value });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('PARTNER_APPROVALS_OPEN must be 1, 0 or empty');
+    expect(changedNothing(r.calls)).toEqual([]);
+  });
+
+  it.each(['', '0', '1'])('PARTNER_APPROVALS_OPEN=%j passes this check', (value) => {
+    writeFileSync(log, '');
+    const r = runPilot({ ...PRODUCTION, PARTNER_APPROVALS_OPEN: value });
+    expect(r.stderr).not.toContain('PARTNER_APPROVALS_OPEN');
+  });
+
   it.each(['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'])('production refuses %s unless it is unset or 0, in every mode, before anything changes', (name) => {
     for (const args of everyMode) {
       for (const value of ['1', 'true', 'on']) {

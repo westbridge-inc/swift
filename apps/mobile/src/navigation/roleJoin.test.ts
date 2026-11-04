@@ -144,7 +144,9 @@ describe('rider and driver: a customer with no mover account lands on the applic
 
   it('the mover shell opens the application for an unverified account — the server’s verification status decides, not a dashboard', () => {
     expect(MOVER_STACK).toContain("useVerificationStatus<any>('MOVER', undefined, { poll: true })");
-    expect(MOVER_STACK).toContain('{status?.roleVerified ? <MoverHomeScreen navigation={navigation} /> : <MoverOnboardingScreen status={status} />}');
+    // Approved documents and a saved vehicle together open Home (MoverStack.noVehicle.navigation.test.ts drives it).
+    expect(MOVER_STACK).toContain('const verified = !!status?.roleVerified && status?.vehicleType !== null;');
+    expect(MOVER_STACK).toContain('{verified ? <MoverHomeScreen navigation={navigation} /> : <MoverOnboardingScreen status={status} />}');
   });
 
   it('after "Save vehicle" the granted roles make the account an insider, so the probes refetch as one', () => {

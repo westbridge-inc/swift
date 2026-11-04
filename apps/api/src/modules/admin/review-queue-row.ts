@@ -23,6 +23,9 @@ export const REVIEW_QUEUE_SELECT = {
   createdAt: true, expiresAt: true, consentAt: true, privacyNoticeVersion: true,
   // An automatic marker ('auto:…', 'kyc:…') or a reviewer's id: the console says which, in words.
   reviewedBy: true,
+  // [BUG-HUNT F23] A paper a reviewer checked and held for ordering day (verification/approval-brake.ts).
+  approvalHeldAt: true,
+  approvalHeldBy: true,
   user: {
     select: {
       id: true, firstName: true, lastName: true, phone: true, countryCode: true,
@@ -47,6 +50,8 @@ export function reviewQueueRow(doc: ReviewQueueDocument & { previousDecision: Pr
     consentAt: doc.consentAt,
     privacyNoticeVersion: doc.privacyNoticeVersion,
     reviewedBy: doc.reviewedBy,
+    approvalHeldAt: doc.approvalHeldAt,
+    approvalHeldBy: doc.approvalHeldBy,
     previousDecision: doc.previousDecision,
     // [VERIFY-DOCS] What the reviewer must type to approve it.
     reviewerTypes: reviewerTypedFields(doc.docType),

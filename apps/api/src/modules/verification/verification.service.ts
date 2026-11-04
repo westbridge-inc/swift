@@ -31,6 +31,7 @@ import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, IdentityReviewRequiredError } from '../integrity/identity-review';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { moverRoleMayGo } from '../mover-role-rule';
 import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
@@ -38,6 +39,7 @@ import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND, storeGoLiv
 import { storeFeeNotice, storeFeeNoticeDedupeKey, storeFeeStanding, type StoreFeeQuote } from '../partner/store-fee';
 import { FOOD_HANDLERS_NOTICE_KIND, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, FOOD_HANDLERS_WHERE, foodHandlerAttestationView, foodHandlersNotice, foodHandlerStoresOf, foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
 import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { lastPaperHeld, partnerApprovalsOpen, PARTNER_APPROVAL_HELD, type PartnerAtTheLastPaper } from './approval-brake';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
@@ -55,6 +57,7 @@ import { SEALED_PHOTO_KEY_WHERE } from '../../providers/storage/sealed-photo';
 import { assertClaimableUpload } from './upload-window';
 import { liveDuplicateHolders } from './duplicate-holders';
 import {
+  isProviderVerified,
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
   refreshProviderVerification,
@@ -156,22 +159,32 @@ export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClien
   return (await approvedEvidenceFor(db, userId, [POLICE_CLEARANCE_DOC_TYPE], now)).length > 0;
 }
 
-/** A mover's saved vehicle from rows already read: the side they use now, else the side they
+/** The mover profile in use, from rows already read: the side they use now, else the side they
  *  last chose (while they still hold that role), else the Rider-first fallback of legacy
- *  profiles. The one rule for getMoverVehicleType and getStatus. */
+ *  profiles. The one rule for getMoverVehicleType, getStatus and the weekly fee. */
+function moverProfileInUse<R, D>(
+  user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
+  rider: R | null,
+  driver: D | null,
+): 'RIDER' | 'DRIVER' | null {
+  if (user?.activeRole === 'RIDER' && rider) return 'RIDER';
+  if (user?.activeRole === 'DRIVER' && driver) return 'DRIVER';
+  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+    if (user.lastMoverRole === 'RIDER' && rider) return 'RIDER';
+    if (user.lastMoverRole === 'DRIVER' && driver) return 'DRIVER';
+  }
+  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+  return rider ? 'RIDER' : driver ? 'DRIVER' : null;
+}
+
+/** A mover's saved vehicle: the vehicle of the profile in use. */
 function moverVehicleFrom(
   user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
   rider: { vehicleType: VehicleType } | null,
   driver: { vehicleType: VehicleType } | null,
 ): VehicleType | null {
-  if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
-  if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
-  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
-    if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
-    if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
-  }
-  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
-  return rider?.vehicleType ?? driver?.vehicleType ?? null;
+  const inUse = moverProfileInUse(user, rider, driver);
+  return inUse === 'RIDER' ? rider!.vehicleType : inUse === 'DRIVER' ? driver!.vehicleType : null;
 }
 
 /** A read started before it is known to be needed: marked handled at once, so a failure while an
@@ -932,6 +945,8 @@ export class VerificationService {
         result = { ...result, status: 'pending_manual' as const };
       }
     }
+    // [BUG-HUNT F23] Before ordering day no machine approves anything: a person holds the last paper (approval-brake.ts).
+    if (result.status === 'approved' && !partnerApprovalsOpen()) result = { ...result, status: 'pending_manual' as const };
     result = await this.holdOnCrossSubjectCollision(userId, roleKey, fileUrl, result);
 
     // [DOC-1 P4-4 · P6-4] The result lands as rows, then §0.5 and §6.9 decide
@@ -1153,6 +1168,8 @@ export class VerificationService {
         status: 'APPROVED',
         reviewedBy: adminId,
         reviewedAt: new Date(),
+        approvalHeldAt: null,
+        approvalHeldBy: null,
         expiresAt: effectiveExpiry,
         ...(insurance && {
           insurerName: insurance.insurerName,
@@ -1162,6 +1179,8 @@ export class VerificationService {
           plateCrossChecked: insurance.plateCrossChecked,
         }),
     }, { reviewerId: adminId, approval: { expiresAt, insurance, ...(issuedOn ? { issuedOn } : {}) } }, async (tx, decided) => {
+      // [BUG-HUNT F23] First, on the row just written: the whole decision rolls back and the paper stays waiting.
+      await this.holdTheLastPaper(tx, decided.userId);
       // [S2-29 · KYC-DECISION-ATOMIC] Everything the approval owes commits with it, or none of it does:
       // the approval notice (published after commit), the caller's audit rows, and the outbox row that owes the
       // trial decision. A throw anywhere here leaves the document PENDING, so the reviewer's retry decides it, once.
@@ -1179,6 +1198,9 @@ export class VerificationService {
         this.projectionNotices.get(tx)?.push(notice.id);
       }
       if (decision.within) await decision.within(tx, decided);
+    }).catch(async (error: unknown) => {
+      if (error instanceof AppError && error.code === PARTNER_APPROVAL_HELD) await this.markPaperHeld(docId, adminId);
+      throw error;
     });
 
     // After commit. [VERIFY-DOCS] The typed number becomes a HARD identity key BEFORE the trial
@@ -1198,6 +1220,48 @@ export class VerificationService {
     await this.processDecisionOutbox({ documentId: docId });
 
     return updated;
+  }
+
+  /**
+   * [BUG-HUNT F23] The partner this approval would start, with this document already written approved in `tx`: the real
+   * gate decides, so expiry, the store's own list and the vehicle in use all count exactly as activation counts them.
+   * A partner with a fee on record has had their trial: a renewal never waits for ordering day.
+   */
+  private async partnerAtTheLastPaper(tx: Prisma.TransactionClient, userId: string): Promise<PartnerAtTheLastPaper | null> {
+    const fee = { select: { id: true } };
+    const person = await tx.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: {
+        firstName: true, lastName: true, roles: true,
+        vendorOwner: { select: { vendors: { select: { id: true, name: true, vendorType: true, subscription: fee } } } },
+        rider: { select: { subscription: fee } },
+        driver: { select: { subscription: fee } },
+        serviceProvider: { select: { id: true } },
+      },
+    });
+    for (const store of person.vendorOwner?.vendors ?? []) {
+      if (!store.subscription && await this.isRoleVerified(userId, store.vendorType as ChecklistRole, tx, store.id)) return { name: store.name, trial: true };
+    }
+    const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'this partner';
+    const mover = !!person.rider || !!person.driver || person.roles.some((role) => role === 'MOVER' || role === 'RIDER' || role === 'DRIVER');
+    if (mover && !person.rider?.subscription && !person.driver?.subscription && await this.isRoleVerified(userId, 'MOVER', tx)) return { name, trial: true };
+    if (person.serviceProvider && await isProviderVerified(tx, userId)) return { name, trial: false };
+    return null;
+  }
+
+  /** [BUG-HUNT F23] Refuses the approval that would complete a partner while approvals are closed (approval-brake.ts). */
+  private async holdTheLastPaper(tx: Prisma.TransactionClient, userId: string): Promise<void> {
+    if (partnerApprovalsOpen()) return;
+    const partner = await this.partnerAtTheLastPaper(tx, userId);
+    if (partner) throw lastPaperHeld(partner);
+  }
+
+  /** [BUG-HUNT F23] The refused paper keeps who checked it and when, so nobody checks it twice. Staff-only: the applicant never sees it. */
+  private async markPaperHeld(docId: string, adminId: string): Promise<void> {
+    await this.prisma.verificationDocument.updateMany({
+      where: { id: docId, status: 'PENDING' },
+      data: { approvalHeldAt: new Date(), approvalHeldBy: adminId },
+    });
   }
 
   async rejectDocument(docId: string, adminId: string, reason: string, reasonCode?: RejectionReasonCode, decision: { within?: DecisionWithin; storeVatDecision?: true } = {}) {
@@ -2478,6 +2542,8 @@ export class VerificationService {
     await this.projectionTransaction(async (tx) => {
       await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR NO KEY UPDATE`;
       await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${vendorId} FOR UPDATE`;
+      const held = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { name: true, subscription: { select: { id: true } } } });
+      if (!held.subscription && !partnerApprovalsOpen()) throw lastPaperHeld({ name: held.name, trial: true });
       const before = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true, owner: { select: { user: { select: { status: true } } } } } });
       if (before.status !== 'PENDING_APPROVAL' || before.owner.user.status !== 'ACTIVE') {
         throw new AppError(409, 'ACTIVATION_HELD', 'The store or owner changed while approving. Refresh its checklist.');
@@ -2555,6 +2621,9 @@ export class VerificationService {
     for (const vendor of owner.vendors) {
       const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
       const verified = checklistOk && (!disclosureGate || (country != null && (await compileActivationDisclosure(db, vendor.id, { accountId: userId, tenantId: country.tenantId })).complete));
+      // [BUG-HUNT F23] No store's first go-live before ordering day, on any run of this projection. The last paper is held
+      // at approval; this keeps a store whose papers were already complete where it is, with no trial started.
+      if (verified && (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL') && !partnerApprovalsOpen() && !(await db.subscription.findUnique({ where: { vendorId: vendor.id }, select: { id: true } }))) continue;
       // [owner #51] A FIRST go-live also needs a published phone (vendor/go-live.ts).
       if (verified && awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
         await this.askForPublishedPhone(db, userId, vendor);
@@ -3548,6 +3617,8 @@ export class VerificationService {
     // the decision transaction; the auto-approval path reaches it here. It is
     // idempotent, so the double run after manual review is harmless.
     await this.projectVendorActivation(this.prisma, userId);
+    // [BUG-HUNT F23] Nothing below starts before ordering day; the row owes nothing more until a person approves.
+    if (!partnerApprovalsOpen()) return true;
     const owner = await this.prisma.vendorOwner.findUnique({
       where: { userId },
       include: { vendors: { select: { id: true, isVerified: true } } },
@@ -3564,15 +3635,60 @@ export class VerificationService {
       }
     }
 
-    const [driver, rider] = await Promise.all([
-      this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true } }),
-      this.prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
+    await this.moverFeeTail(userId);
+    return true;
+  }
+
+  /**
+   * A mover's weekly fee is owed the moment they hold BOTH a mover profile and approved documents, whichever came
+   * second. An approval reaches this through afterApproval. A saved vehicle (POST /partner/become, PUT /partner/vehicle)
+   * reaches it here, after its commit: papers approved before the vehicle owe the fee then, with no later approval to
+   * collect it. Same law as an approval (one fee, one trial, the deletion write barrier). A failure never undoes the
+   * saved vehicle: it is logged, and GO collects what is owed (settleMoverFeeAtGo). True when the tail ran.
+   */
+  async settleMoverFee(userId: string, inUse?: 'RIDER' | 'DRIVER'): Promise<boolean> {
+    try {
+      if (!await this.openForOwedWork(userId)) return false;
+      await this.moverFeeTail(userId, inUse);
+      return true;
+    } catch (err) {
+      log().error({ err, userId }, 'the weekly fee owed to a mover was not born; go-online collects it');
+      return false;
+    }
+  }
+
+  /** Go-online's door, past the document gate and before the fee gate reads the row: nobody works without a fee, nobody
+   *  is refused one they are owed, and a taxi never works on a delivery fee (a rider's papers for a car activate nothing
+   *  until the car is in use). A mover who already holds the right fee pays these reads. */
+  async settleMoverFeeAtGo(userId: string, kind: 'RIDER' | 'DRIVER'): Promise<void> {
+    const [user, sources, authority] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true } }),
+      this.prisma.subscription.findMany({ where: { OR: [{ rider: { userId } }, { driver: { userId } }] }, select: { type: true } }),
+      this.prisma.moverFeeAuthority.findUnique({ where: { userId }, select: { feeType: true } }),
     ]);
-    if ((driver || rider) && (await this.isRoleVerified(userId, 'MOVER'))) {
+    // A GO its own role check will refuse moves nothing: this profile is not in use.
+    if (!user || !moverRoleMayGo(user.activeRole, kind)) return;
+    const onTaxiFee = (authority?.feeType ?? sources.find((s) => s.type === 'TAXI_DRIVER')?.type) === 'TAXI_DRIVER';
+    if (sources.length === 0 || (kind === 'DRIVER' && !onTaxiFee)) await this.settleMoverFee(userId, kind);
+  }
+
+  /** The fee of the profile in use, on the verdict GO asks of that vehicle, so no clock starts on papers GO refuses. A
+   *  profile not in use activates nothing: a car with no papers, or one the mover has left, never prices the motorbike
+   *  they ride. `inUse` names it when the caller knows (GO for that profile); otherwise the account's own pointer does. */
+  private async moverFeeTail(userId: string, inUse?: 'RIDER' | 'DRIVER'): Promise<void> {
+    const [user, driver, rider] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
+      this.prisma.driver.findUnique({ where: { userId }, select: { id: true, licensePlate: true, vehicleType: true } }),
+      this.prisma.rider.findUnique({ where: { userId }, select: { id: true, vehicleType: true } }),
+    ]);
+    const kind = inUse ?? moverProfileInUse(user, rider, driver);
+    const vehicleType = kind === 'DRIVER' ? driver?.vehicleType : kind === 'RIDER' ? rider?.vehicleType : null;
+    if (!kind || !vehicleType) return;
+    if ((await this.getLiveOperationStatus(userId, { vehicleType, kind })).allowed) {
       // PLATE capture (identity integrity §2.1 — HARD) AWAITED here so the
       // link exists before the trial decision runs; capture failures are
       // swallowed inside the service and never block activation.
-      if (driver?.licensePlate) {
+      if (kind === 'DRIVER' && driver?.licensePlate) {
         const { IdentityService } = await import('../integrity/identity.service');
         const { normalizePlate } = await import('../integrity/normalize');
         await new IdentityService(this.prisma).capture({
@@ -3581,10 +3697,9 @@ export class VerificationService {
         });
       }
       // [REVIEW-PARTNER] The fiction's partners are never billed: no trial is born (createRow would refuse it).
-      if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
-      if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
+      if (kind === 'DRIVER' && driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
+      if (kind === 'RIDER' && rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
-    return true;
   }
 
   /**
