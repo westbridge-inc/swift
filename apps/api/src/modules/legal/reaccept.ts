@@ -42,7 +42,7 @@ export const MATERIAL_CHANGES: ReadonlyArray<MaterialChange> = [
     // [Owner rulings 21 Oct 2026: taxi waiting charge ON at launch; phone crash reports ON · research E4 + B8]
     version: '2026-10-21',
     summary: [
-      'Taxi: a waiting charge of GY$300 for each full 10 minutes the car waits for you, shown before you book. It counts from when your driver arrives at the pickup, never at your final destination; the app shows it as it runs and your receipt lists it separately.',
+      'Taxi: a waiting charge of GY$300 for each full 10 minutes the car waits for you, never more than GY$1,800 for a ride, shown before you book. It counts from when the app has placed the car at your pickup, never at your final destination; the app shows it as it runs and your receipt lists it separately.',
       'Privacy: if the Swift app crashes, it sends a crash report (phone model, app version and the error; never your messages or location) to Swift’s own server. Crash and error reports are kept for 90 days.',
     ],
   },
@@ -141,6 +141,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 17:31Z (b) · COORD: minor, NON-material, no forced re-accept; DRAFT until counsel]
     version: '2026-11-01.1',
     why: 'Swift asks for less and keeps less: a customer is never asked for an ID any more, and the IDs customers added before are withdrawn and deleted (unless a legal or safety hold keeps one until it ends). The Terms and the Privacy Policy now say so. No one is asked for more and nothing is taken from anyone, so nobody is asked again.',
+  },
+  {
+    // [owner ruling 4 Nov 2026: passenger-favourable, NON-material like 2026-10-28, no fresh tick; DRAFT until counsel]
+    version: '2026-11-04',
+    why: 'Terms section 4: the taxi waiting charge can only cost less. It is now never more than GY$1,800 for a ride, it starts only when the app has placed the car at the pickup (a passenger confirming the arrival no longer starts it), and it stops when the ride code is verified, not when the trip starts. The other documents change only by their date.',
   },
 ];
 

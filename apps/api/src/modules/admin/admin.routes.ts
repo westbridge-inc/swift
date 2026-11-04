@@ -90,6 +90,10 @@ import { transitionServiceJob } from '../services/service-job-transition';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
+import { LIVE_SOS_STATUSES } from '../safety/sos.service';
+import { taxiNotificationData } from '../rides/taxi-notification';
+import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
+import { assertMayEndRide } from '../rides/end-ride-authority';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
@@ -110,6 +114,7 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { assertAccountActionAuthority, lockUserRoleAuthority, transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 import { platformStats } from './platform-stats';
 import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCaseRiderPhones, maskMoverListRow, maskMoverPage, maskPersonPage, maskUserListRow, maskVendorListRow, maskVendorPhones, revealPersonPhone, VENDOR_CONTACT_PARTIES } from './person-contact';
 // [SEC-PII] the subscriptions list's masking (its own line: the line above is shared with other open changes)
@@ -3524,6 +3529,68 @@ export async function adminRoutes(app: FastifyInstance) {
       ipAddress: request.ip, userAgent: request.headers['user-agent'],
     });
     return { success: true, data: { caseId: kase.id, state: kase.state } };
+  });
+
+  // [BUG-HUNT-2 G01] A ride in progress has two exits, and both are the driver's own handover. With the driver gone it
+  // stayed open for days: the passenger could not book or delete, and suspend and ban on the driver refused. Support ends
+  // it here. FAILED is the machine's own exit, and it frees the driver. No fare is invented: nothing about money moves,
+  // because nothing about money is known, so no earning, no strike and no claim, and the amount and payment stay as they
+  // were. A live SOS comes first: closing the ride must never be what ends a response.
+  app.post('/orders/:id/end-ride', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const order = await app.prisma.order.findUnique({
+      where: { id },
+      select: { status: true, orderType: true, ridePinVerified: true, ridePinVerifiedAt: true },
+    });
+    if (!order) throw new NotFoundError('Order', id);
+    if (order.orderType !== 'TAXI') throw new AppError(409, 'NOT_A_RIDE', 'Only a taxi ride ends here.');
+    const closed = 'Swift support closed this ride. Swift has no record of what was paid, and moved no money.';
+    const noticeIds: string[] = [];
+    const closeNote = 'Closed by Swift support: no payment on record';
+    // The code was verified and the driver never tapped Start: the passenger is in the car, so a cancel is refused and the
+    // machine has no FAILED from here. The ride walks through its own start to the same exit, in one commit.
+    const neverStarted = order.status === 'DRIVER_ARRIVED' && hasTaxiPassengerCustody(order);
+    await orderService.transitionOrderAtomically({
+      orderId: id,
+      ...(neverStarted
+        ? { target: 'RIDE_IN_PROGRESS' as const, allowedFrom: ['DRIVER_ARRIVED'] as const, note: 'Passenger code verified: the driver never started the trip', continueTo: { target: 'FAILED' as const, note: closeNote, when: () => true } }
+        : { target: 'FAILED' as const, allowedFrom: ['RIDE_IN_PROGRESS'] as const, note: closeNote }),
+      changedBy: request.user.userId,
+      operatorAudit: {
+        userId: request.user.userId,
+        action: 'END_STUCK_RIDE',
+        entity: 'Order',
+        entityId: id,
+        changes: (previousStatus) => ({ reason, previousStatus }),
+        ipAddress: request.ip,
+        userAgent: request.headers['user-agent'],
+      },
+      invalidStatus: (current) => new AppError(409, 'RIDE_NOT_IN_PROGRESS', `This ride is not in progress (it is ${current}).`),
+      // The close, the audit row and both notices commit together, as the job close does.
+      withinTransaction: async (tx, locked) => {
+        const driver = locked.driverId ? await tx.driver.findUnique({ where: { id: locked.driverId }, select: { userId: true } }) : null;
+        const parties = [
+          { userId: locked.customerId, body: `${closed} If you paid the driver or have a question, open Get Help.`, audience: 'customer' as const },
+          ...(driver ? [{ userId: driver.userId, body: `${closed} If you have a question, open Get Help.`, audience: 'earner' as const }] : []),
+        ];
+        await assertMayEndRide(tx, request.user.userId, parties.map((party) => party.userId));
+        if (await tx.sosAlert.count({ where: { orderId: id, status: { in: LIVE_SOS_STATUSES } } }) > 0) {
+          throw new AppError(409, 'SOS_LIVE', 'An SOS is open on this ride. Resolve it first.');
+        }
+        for (const party of parties) {
+          const row = await insertNoticeFor(tx, {
+            userId: party.userId, type: 'ORDER_UPDATE', title: 'Ride closed by Swift', body: party.body,
+            data: taxiNotificationData(id, { status: 'FAILED' }, party.audience) as Prisma.InputJsonObject,
+            dedupeKey: `ride-closed:${id}:${party.userId}`,
+          });
+          noticeIds.push(row.id);
+        }
+      },
+    });
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'FAILED' });
+    await Promise.all(noticeIds.map((noticeId) => notifications.publishPersisted(noticeId)));
+    return { success: true, data: { id, status: 'FAILED' } };
   });
 
   app.put('/orders/:id/cancel', { preHandler: [adminGuard] }, async (request) => {
