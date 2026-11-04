@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import { incidentIntakeCounter, incidentIntakeGauge } from '../../plugins/observability';
 import { placeLegalHold, drainLegalHoldVault, type LegalHoldObserver } from './legal-hold';
 import { insertNoticeFor } from '../../lib/owner-wall-notices';
+import { heldOverGoods } from './delivery-lift';
 
 // Incident Management (safety spec §8) — the case machine. Server-owned like
 // the order and SOS machines: explicit transition table, CAS updates, illegal
@@ -583,7 +584,8 @@ export class IncidentService {
    * [BUG-HUNT F18 · COORD 4 Nov 2026] A rider whose session ended with goods in the bag is suspended until the goods get
    * there. This runs once the delivery is done: only for goods, only when the person who held them delivered them, and
    * never over a decision a person has made. The case itself stays on the queue for ops. A passenger's case never lifts
-   * here. Runs after the delivery commits, on its durable outbox row, so a failure is retried; lifting twice is a no-op.
+   * here. Runs after the delivery commits, on its own durable row (delivery-lift.ts), so a failure is retried; lifting
+   * twice is a no-op.
    */
   async liftAfterGoodsDelivered(orderId: string): Promise<number> {
     const order = await this.prisma.order.findUnique({
@@ -591,16 +593,7 @@ export class IncidentService {
       select: { status: true, orderType: true, rider: { select: { userId: true } } },
     });
     if (order?.status !== 'DELIVERED' || order.orderType === 'TAXI' || !order.rider) return 0;
-    const held = await this.prisma.incidentCase.findMany({
-      where: {
-        orderId,
-        subjectUserId: order.rider.userId,
-        category: 'MOVER_SESSION_LOST_IN_CUSTODY',
-        interimAction: 'SUSPENDED_PENDING_REVIEW',
-        status: { in: ['OPEN', 'TRIAGED', 'INVESTIGATING'] },
-      },
-      select: { id: true },
-    });
+    const held = await this.prisma.incidentCase.findMany({ where: heldOverGoods(orderId, order.rider.userId), select: { id: true } });
     for (const kase of held) await this.liftInterim(kase.id, DELIVERY_COMPLETED_LIFT);
     return held.length;
   }

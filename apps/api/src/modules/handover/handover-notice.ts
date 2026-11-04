@@ -1,5 +1,4 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
-import type { Server } from 'socket.io';
 import { ownerWallSystem } from '../../lib/owner-rls';
 import { upsertNoticeFor } from '../../lib/owner-wall-notices';
 import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
@@ -33,24 +32,12 @@ export async function persistHandoverNotice(tx: Prisma.TransactionClient, order:
   } });
 }
 
-/** [BUG-HUNT F18] The rider's side of a completed delivery: a custody suspension over goods lifts. */
-export const liftAfterDelivery = (prisma: PrismaClient, io: Server) => async (orderId: string): Promise<void> => {
-  const { IncidentService } = await import('../safety/incident.service');
-  await new IncidentService(prisma, io).liftAfterGoodsDelivered(orderId);
-};
-
 /** One inbox row; retry push submission after outages or a lost response.
  *  Every row ends: delivered once when the customer has no push channel (the
  *  inbox row IS the channel), delivered when push confirms, or closed
  *  unconfirmed after HANDOVER_NOTICE_WINDOW_MS. */
 export async function drainHandoverNotices(
-  deps: {
-    prisma: PrismaClient;
-    notifications: Pick<NotificationService, 'publishPersisted'>;
-    now?: () => Date;
-    /** [BUG-HUNT F18] What the completion owes the rider, on this same durable row: a failure leaves it pending. */
-    afterCompletion?: (orderId: string) => Promise<unknown>;
-  },
+  deps: { prisma: PrismaClient; notifications: Pick<NotificationService, 'publishPersisted'>; now?: () => Date },
   options: { orderId?: string; limit?: number } = {},
 ): Promise<{ delivered: number; pending: number; expired: number }> {
   const system = <T>(fn: () => Promise<T>) => runAsSystem('handover-notice-drain', fn);
@@ -87,7 +74,6 @@ export async function drainHandoverNotices(
       const payload = row.payload as Record<string, unknown>;
       if (typeof payload['notificationId'] === 'string' && typeof payload['customerUserId'] === 'string' && payload['orderId'] === row.orderId) {
         sent = await runWithTenant(row.tenantId, async () => {
-          await deps.afterCompletion?.(row.orderId);
           // [item 20] The customer's notice, read by the job bound to the order's tenant: the named capability under the owner wall.
           const notice = await ownerWallSystem('handover:customer-notice', () => deps.prisma.notification.findFirst({ where: {
             id: payload['notificationId'] as string, user: { tenantId: row.tenantId }, userId: payload['customerUserId'] as string,

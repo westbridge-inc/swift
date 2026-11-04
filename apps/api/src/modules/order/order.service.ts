@@ -1,4 +1,5 @@
-import { persistHandoverNotice, drainHandoverNotices, liftAfterDelivery } from '../handover/handover-notice';
+import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
+import { drainDeliveryLifts, liftAfterDelivery, persistDeliveryLift } from '../safety/delivery-lift';
 import { authorizeHandover, preflightHandoverDoor, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
 import { emitToOrderRoom, emitToStoreRoom } from './order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
@@ -2792,6 +2793,7 @@ export class OrderService {
       }
     }
     if (input.handover) await persistHandoverNotice(tx, order);
+    if (input.target === 'DELIVERED') await persistDeliveryLift(tx, order);
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
 
@@ -2834,8 +2836,10 @@ export class OrderService {
     }
 
 
-    if (input.handover) await drainHandoverNotices({ prisma: this.prisma, notifications: this.notifications, afterCompletion: liftAfterDelivery(this.prisma, this.io) }, { orderId: input.orderId })
+    if (input.handover) await drainHandoverNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId: input.orderId })
       .catch((err) => log().warn({ err, orderId: input.orderId }, 'handover notice remains pending after commit'));
+    if (input.target === 'DELIVERED') await drainDeliveryLifts({ prisma: this.prisma, lift: liftAfterDelivery(this.prisma, this.io) }, { orderId: input.orderId })
+      .catch((err) => log().warn({ err, orderId: input.orderId }, 'delivery lift remains owed after commit'));
 
     // [DISPATCH 1/3 · B4] Every operational cancellation passes here (vendor
     // reject, courier sender cancel, admin cancel, the no-response

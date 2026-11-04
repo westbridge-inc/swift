@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -5,7 +7,9 @@ import type { OrderStatus } from '@prisma/client';
 import { buildApp } from '../app';
 import { AuthService } from '../modules/auth/auth.service';
 import { DELIVERY_COMPLETED_LIFT, IncidentService } from '../modules/safety/incident.service';
-import { drainHandoverNotices, HANDOVER_NOTICE_KIND } from '../modules/handover/handover-notice';
+import { DELIVERY_LIFT_KIND, DELIVERY_LIFT_WINDOW_MS, drainDeliveryLifts, persistDeliveryLift } from '../modules/safety/delivery-lift';
+import { IN_PROCESS_OUTBOX_KINDS } from '../modules/order/checkout-outbox';
+import { getTenantId } from '../plugins/tenant-context';
 import { runWithoutTenant } from '../plugins/prisma';
 import { fixtureTag, testPhone, wordFreeTag } from './helpers/fixture-ids';
 
@@ -88,6 +92,13 @@ async function logOutWithGoods(status: OrderStatus = 'ARRIVED') {
 }
 
 const stamp = async (riderId: string) => (await app.prisma.rider.findUniqueOrThrow({ where: { id: riderId } })).safetySuspendedAt;
+const liftRow = (orderId: string) => app.prisma.orderOutbox.findFirstOrThrow({ where: { orderId, kind: DELIVERY_LIFT_KIND } });
+const liftRows = (orderId: string) => app.prisma.orderOutbox.count({ where: { orderId, kind: DELIVERY_LIFT_KIND } });
+/** The row the delivery's transaction writes, without the real door's own post-commit drain. */
+async function deliveredWithRow(orderId: string, riderUserId: string) {
+  const order = await app.prisma.order.update({ where: { id: orderId }, data: { status: 'DELIVERED' } });
+  await app.prisma.$transaction((tx) => persistDeliveryLift(tx, { ...order, rider: { userId: riderUserId } }));
+}
 const inject = (method: 'POST' | 'GET', url: string, token: string, payload?: Record<string, unknown>) => app.inject({
   method, url, headers: { authorization: `Bearer ${token}`, ...(payload ? { 'content-type': 'application/json' } : {}) }, ...(payload ? { payload } : {}),
 });
@@ -145,6 +156,7 @@ describe('[F18] goods: the suspension lifts when the delivery completes', () => 
     expect((await inject('POST', '/api/v1/rider/go-online', rider.token, GPS)).statusCode).not.toBe(423);
     const told = await app.prisma.notification.findMany({ where: { userId: rider.userId, title: 'Suspension lifted' } });
     expect(told).toHaveLength(1);
+    expect((await liftRow(order.id)).processedAt).not.toBeNull();
   });
 
   it('what they were told at the time says so', async () => {
@@ -162,23 +174,43 @@ describe('[F18] goods: the suspension lifts when the delivery completes', () => 
     expect(await app.prisma.notification.count({ where: { userId: rider.userId, title: 'Suspension lifted' } })).toBe(1);
   });
 
-  it('a failed lift keeps the outbox row owed, and the sweep finishes it', async () => {
-    const { rider, order, customer } = await logOutWithGoods();
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'DELIVERED' } });
-    // A real notice, so the push would go through and close the row: only the lift's failure can keep it owed.
-    const dedupeKey = `order:${order.id}:${HANDOVER_NOTICE_KIND}`;
-    const notice = await app.prisma.notification.create({ data: { userId: customer.id, dedupeKey, type: 'ORDER_UPDATE', title: 'Delivered!', body: 'fixture' } });
-    await app.prisma.orderOutbox.create({
-      data: { id: `gl_${nanoid(12)}`, dedupeKey, orderId: order.id, tenantId: order.tenantId, kind: HANDOVER_NOTICE_KIND, queue: 'notification', payload: { orderId: order.id, customerUserId: customer.id, notificationId: notice.id } },
-    });
-    const notifications = { publishPersisted: async () => true };
-    const failed = await drainHandoverNotices({ prisma: app.prisma, notifications, afterCompletion: async () => { throw new Error('lift failed'); } }, { orderId: order.id });
-    expect(failed).toMatchObject({ pending: 1, delivered: 0 });
+  it('a failed lift keeps its row owed, backed off, and the sweep finishes it', async () => {
+    const { rider, order } = await logOutWithGoods();
+    await deliveredWithRow(order.id, rider.userId);
+    const failed = await drainDeliveryLifts({ prisma: app.prisma, lift: async () => { throw new Error('lift failed'); } }, { orderId: order.id });
+    expect(failed).toMatchObject({ pending: 1, lifted: 0 });
+    const owed = await liftRow(order.id);
+    expect(owed.processedAt).toBeNull();
+    expect(owed.availableAt.getTime()).toBeGreaterThan(Date.now());
     expect(await stamp(rider.riderId)).not.toBeNull();
     await app.prisma.orderOutbox.updateMany({ where: { orderId: order.id }, data: { availableAt: new Date(0) } });
-    const retried = await drainHandoverNotices({ prisma: app.prisma, notifications, afterCompletion: (id) => incidents.liftAfterGoodsDelivered(id) }, { orderId: order.id });
-    expect(retried).toMatchObject({ delivered: 1, pending: 0 });
+    const retried = await drainDeliveryLifts({ prisma: app.prisma, lift: (id) => incidents.liftAfterGoodsDelivered(id) }, { orderId: order.id });
+    expect(retried).toMatchObject({ lifted: 1, pending: 0 });
+    expect((await liftRow(order.id)).processedAt).not.toBeNull();
     expect(await stamp(rider.riderId)).toBeNull();
+  });
+
+  it('a lift that never lands closes after its window: the row ends, and the case is a person\'s', async () => {
+    const { rider, order, kase } = await logOutWithGoods();
+    await deliveredWithRow(order.id, rider.userId);
+    const later = new Date(Date.now() + DELIVERY_LIFT_WINDOW_MS + 1000);
+    const lift = vi.fn(async () => undefined);
+    expect(await drainDeliveryLifts({ prisma: app.prisma, lift, now: () => later }, { orderId: order.id })).toMatchObject({ expired: 1, lifted: 0 });
+    expect(lift).not.toHaveBeenCalled();
+    expect((await liftRow(order.id)).processedAt).not.toBeNull();
+    expect(await stamp(rider.riderId)).not.toBeNull();
+    expect((await app.prisma.incidentCase.findUniqueOrThrow({ where: { id: kase.id } })).status).toBe('OPEN');
+  });
+
+  it('the lift runs bound to the order\'s tenant, in process, and the worker sweep carries it', async () => {
+    const { rider, order } = await logOutWithGoods();
+    await deliveredWithRow(order.id, rider.userId);
+    let tenant: string | null = null;
+    await drainDeliveryLifts({ prisma: app.prisma, lift: async () => { tenant = getTenantId(); } }, { orderId: order.id });
+    expect(tenant).toBe(order.tenantId);
+    // A published row closes when its queue accepts the job, which is not a lift.
+    expect(IN_PROCESS_OUTBOX_KINDS).toContain(DELIVERY_LIFT_KIND);
+    expect(readFileSync(join(__dirname, '../jobs/queue.ts'), 'utf8')).toMatch(/drainDeliveryLifts\(\{ prisma: ctx\.prisma, lift: liftAfterDelivery\(ctx\.prisma, ctx\.io\) \}\)/);
   });
 });
 
@@ -199,6 +231,8 @@ describe('[F18] everything else stays with a person', () => {
     await app.prisma.order.update({ where: { id: order.id }, data: { status: 'DELIVERED', riderId: relay.riderId } });
     expect(await incidents.liftAfterGoodsDelivered(order.id)).toBe(0);
     expect(await stamp(rider.riderId)).not.toBeNull();
+    await app.prisma.$transaction((tx) => persistDeliveryLift(tx, { ...order, rider: { userId: relay.userId } }));
+    expect(await liftRows(order.id)).toBe(0);
   });
 
   it('a decision a person made stands', async () => {
@@ -207,6 +241,8 @@ describe('[F18] everything else stays with a person', () => {
     await app.prisma.order.update({ where: { id: order.id }, data: { status: 'DELIVERED' } });
     expect(await incidents.liftAfterGoodsDelivered(order.id)).toBe(0);
     expect(await stamp(rider.riderId)).not.toBeNull();
+    await app.prisma.$transaction((tx) => persistDeliveryLift(tx, { ...order, rider: { userId: rider.userId } }));
+    expect(await liftRows(order.id)).toBe(0);
   });
 
   it('goods on the way back: no lift, and the notice says a person reviews it', async () => {
