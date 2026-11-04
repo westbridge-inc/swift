@@ -15,6 +15,7 @@ const SEND = /\.(sendSms|sendEmail)\(/;
 /** Files that send a text or an e-mail, each a service message (never an offer). */
 const SERVICE_SENDERS: Record<string, string> = {
   'modules/admin/admin-email-change.ts': 'security notice to an admin e-mail address being replaced',
+  'modules/admin/phone-change.ts': 'the code to a new number and the notice to the old one when support moves an account',
   'modules/admin/solo-approval.ts': 'the owner approval code for a privileged action',
   'modules/ops/seed-plan.ts': 'the owner sign-in code and notices for a solo production re-seed',
   'modules/auth/auth.service.ts': 'sign-in codes',
