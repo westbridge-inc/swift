@@ -466,7 +466,9 @@ describe('deleting a menu item archives its order and booking references', () =>
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('CANCELLED');
     expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ stockQuantity: 1, isAvailable: false, autoHiddenAt: null });
     expect(await app.prisma.stockMovement.count({ where: { orderId: order.id, itemId: item.id, reason: 'CANCEL_RESTOCK' } })).toBe(1);
-    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture retry' }, customerToken)).statusCode).toBe(400);
+    // A second tap gets the first tap's answer, and restocks nothing.
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture retry' }, customerToken)).statusCode).toBe(200);
+    expect(await app.prisma.stockMovement.count({ where: { orderId: order.id, itemId: item.id, reason: 'CANCEL_RESTOCK' } })).toBe(1);
   });
 
   it('a stale menu editor cannot restore an archived item to availability', async () => {
