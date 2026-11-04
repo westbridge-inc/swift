@@ -563,14 +563,13 @@ export async function watchAutoClosedCheckouts(db: PrismaClient, deps: WatchDeps
   const endedIds = await endedWatches(db);
   // No age limit: every automatic close stays watched until it ends (oldest first).
   // [ENTERPRISE E1 · REVIEW-M #2224 S3-1] A pay-all checkout closed this way is watched too, once (its branches hold through parts).
-  const watchedFields = WATCHED_FIELDS;
   const closedRows = await db.paymentConfirmationHold.findMany({
     where: { status: 'PROVEN_UNPAID', resolvedBy: NO_REPLY_CHECK_ACTOR, OR: [
       { ...(endedIds.length ? { checkoutId: { notIn: endedIds } } : {}), checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } },
       { checkoutPart: { is: { ...(endedIds.length ? { checkoutId: { notIn: endedIds } } : {}), checkout: { is: { status: 'NOT_PAID', reason: NO_REPLY_CLOSED_REASON } } } } },
     ] },
     orderBy: [{ resolvedAt: 'asc' }, { id: 'asc' }], take: SCAN,
-    select: { id: true, resolvedAt: true, checkout: { select: watchedFields }, checkoutPart: { select: { checkout: { select: watchedFields } } } },
+    select: { id: true, resolvedAt: true, checkout: { select: WATCHED_FIELDS }, checkoutPart: { select: { checkout: { select: WATCHED_FIELDS } } } },
   });
   const watchedIds = new Set<string>();
   const closed = closedRows.flatMap((row) => {
