@@ -3,8 +3,8 @@ import { insertTicketFor } from '../../lib/owner-wall-tickets';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { AppError } from '../../utils/errors';
 import { formatGuyanaTime } from '../../utils/guyana-day';
-import { consoleRoleOf } from '../auth/console-role';
 import { requireIdentityAuthority } from '../integrity/identity-review';
+import { assertClearOfParties } from '../integrity/party-authority';
 import { normaliseReference } from '../money/evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import {
@@ -351,23 +351,15 @@ export async function tellBothOfRefund(prisma: PrismaClient, notifications: Noti
 export async function assertMayDecideRefund(tx: Tx, actorId: string, parties: { customerId: string; vendorId: string }, approvalId?: string | null): Promise<void> {
   const store = await tx.vendor.findUnique({ where: { id: parties.vendorId }, select: { owner: { select: { userId: true } }, staff: { select: { userId: true } } } });
   const named = [parties.customerId, ...(store ? [store.owner.userId, ...store.staff.map((member) => member.userId)] : [])];
-  const onOrder = new Set<string>();
-  for (const person of named) {
-    onOrder.add(person);
-    for (const linked of (await requireIdentityAuthority(tx, person)).memberIds) onOrder.add(linked);
-  }
   const approver = approvalId ? (await tx.privilegedApproval.findUnique({ where: { id: approvalId }, select: { approvedBy: true } }))?.approvedBy ?? null : null;
   if (approvalId && !approver) throw new AppError(403, 'APPROVAL_NOT_FOUND', 'This approval could not be read. Ask for a new one.');
+  const staff = new AppError(403, 'STAFF_ON_ORDER', 'A staff account is on this order. Only a SUPER_ADMIN who is not on it can decide this refund.');
   await requireIdentityAuthority(tx, actorId);
-  if (approver) await requireIdentityAuthority(tx, approver);
-  if (onOrder.has(actorId)) throw new AppError(403, 'OWN_ORDER', 'You are on this order. Someone else at Swift must decide this refund.');
-  if (approver && onOrder.has(approver)) throw new AppError(403, 'APPROVER_ON_ORDER', 'The admin who approved this is on the order. Ask someone else to approve it.');
-  const deciders = approver ? [actorId, approver] : [actorId];
-  const rows = await tx.user.findMany({ where: { id: { in: [...deciders, ...onOrder] } }, select: { id: true, roles: true } });
-  const roleOf = (userId: string) => consoleRoleOf(rows.find((row) => row.id === userId)?.roles);
-  if ([...onOrder].some((person) => roleOf(person) !== null) && deciders.some((decider) => roleOf(decider) !== 'SUPER_ADMIN')) {
-    throw new AppError(403, 'STAFF_ON_ORDER', 'A staff account is on this order. Only a SUPER_ADMIN who is not on it can decide this refund.');
+  if (approver) {
+    await requireIdentityAuthority(tx, approver);
+    await assertClearOfParties(tx, approver, named, { own: new AppError(403, 'APPROVER_ON_ORDER', 'The admin who approved this is on the order. Ask someone else to approve it.'), staff });
   }
+  await assertClearOfParties(tx, actorId, named, { own: new AppError(403, 'OWN_ORDER', 'You are on this order. Someone else at Swift must decide this refund.'), staff });
 }
 
 /** Open obligations, for the sweep and the list. */

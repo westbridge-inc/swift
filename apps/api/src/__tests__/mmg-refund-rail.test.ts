@@ -492,6 +492,18 @@ describe('[G08] who may decide, by what the database says', () => {
     expect((await obligationOf(order.id)).status).toBe('OWED');
   });
 
+  it('and a second person whose identity is waiting for a person refuses too', async () => {
+    const order = await owed();
+    const row = await obligationOf(order.id);
+    const approver = await actor(['ADMIN', 'CUSTOMER'], 'ADMIN', true);
+    const approval = await approvedBy(approver, () => voidIt(row.id));
+    await linked([approver.id], true);
+    const res = await voidIt(row.id, admin, approval);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('IDENTITY_REVIEW_REQUIRED');
+    expect((await obligationOf(order.id)).status).toBe('OWED');
+  });
+
   it('on a staff order the second person must be a SUPER_ADMIN too', async () => {
     const staffer = await actor(['ADMIN', 'CUSTOMER'], 'ADMIN', true);
     const order = await asCustomer(staffer, () => owed());
