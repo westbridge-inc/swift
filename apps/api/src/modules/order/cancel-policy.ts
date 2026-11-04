@@ -90,7 +90,7 @@ export const PICKUP_NOT_COLLECTED_AFTER_HOURS = 24;
  *  count as very late: a store order `STORE_VERY_LATE_AFTER_MIN`, a ride at its
  *  pickup `TAXI_ARRIVED_VERY_LATE_MIN`, every other kind `VERY_LATE_AFTER_MIN`.
  *  The one place the number is chosen. */
-export function veryLateAfterMin(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment' | 'status'>): number {
+export function veryLateAfterMin(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'> & Partial<Pick<CancellationSnapshot, 'status'>>): number {
   if (isStoreOrder(order)) return STORE_VERY_LATE_AFTER_MIN;
   return order.orderType === 'TAXI' && order.status === 'DRIVER_ARRIVED' ? TAXI_ARRIVED_VERY_LATE_MIN : VERY_LATE_AFTER_MIN;
 }
