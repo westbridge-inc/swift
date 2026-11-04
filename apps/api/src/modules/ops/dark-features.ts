@@ -344,6 +344,16 @@ export const DARK_FEATURES: DarkFeature[] = [
       'An advertiser owed a refund gets nothing back: the refund is recorded as owed, but bookings, inventory, the credit balance and the invoice stay as they were until it is released.',
     impact: 'money',
   },
+  {
+    key: 'partner_approvals',
+    setting: 'PARTNER_APPROVALS_OPEN',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Approving partners (ordering day)',
+    whileOff:
+      'Review goes on, but the last paper a partner needs cannot be approved: it waits in the Review Center, marked held, and no free trial starts and no store goes live. Nothing machine-approves. Open it on ordering day, then approve the batch. Unset means closed in production only.',
+    impact: 'money',
+  },
   // ── [SWITCHES fact-check, 21 Oct] launch switches the code reads that no register named.
   {
     key: 'car_deliveries',
@@ -463,6 +473,13 @@ export function darkFeatureMisconfigurations(env: Record<string, string | undefi
   const out: string[] = [];
   if (env['MALWARE_SCAN'] === 'clamd' && !env['CLAMD_HOST']?.trim()) {
     out.push('MALWARE_SCAN=clamd with no CLAMD_HOST: every upload is refused (UPLOAD_SCAN_UNAVAILABLE) until the scanner is named.');
+  }
+  const approvals = env['PARTNER_APPROVALS_OPEN'];
+  if (approvals !== undefined && approvals !== '' && approvals !== '0' && approvals !== '1') {
+    out.push(`PARTNER_APPROVALS_OPEN=${approvals} reads as closed: only 1 opens it. Partners cannot be approved.`);
+  }
+  if (env['WEB_ORDERING'] === 'live' && approvals !== '1') {
+    out.push('WEB_ORDERING=live with PARTNER_APPROVALS_OPEN not 1: ordering is open and no new partner can be approved. Ordering day opens approvals first.');
   }
   return out;
 }

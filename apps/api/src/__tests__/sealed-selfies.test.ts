@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
@@ -24,6 +24,17 @@ import { sealExistingPhotos } from '../modules/user/seal-existing-photos';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { REAL_PNG, uniquePng } from './helpers/real-image';
 import { testPhone } from './helpers/fixture-ids';
+
+// The writer's 16 random characters come from nanoid, whose alphabet holds - and _. A test that takes whatever it draws
+// meets a name starting with one of them about 1 run in 32, so the first character is chosen here, never left to chance.
+const nameStart = vi.hoisted(() => ({ char: null as string | null }));
+vi.mock('nanoid', async (importOriginal) => {
+  const real = await importOriginal<typeof import('nanoid')>();
+  return { ...real, nanoid: (size?: number) => {
+    const id = real.nanoid(size);
+    return size === 16 && nameStart.char ? `${nameStart.char}${id.slice(1)}` : id;
+  } };
+});
 
 // ---------------------------------------------------------------------------
 // [DOC-SECURITY G2] THE SELFIES ARE SEALED AT REST, LIKE THE DOCUMENTS.
@@ -189,10 +200,14 @@ describe('[DOC-SECURITY G2] the signup selfie is sealed at rest', () => {
     expect((await app.inject({ method: 'GET', url: linkPath(link) })).statusCode).toBe(404);
   });
 
-  it("the reviewer's view beside an ID shows it through the same signed link", async () => {
+  afterEach(() => { nameStart.char = null; });
+
+  it.each(['A', '7', '-', '_'])("the reviewer's view beside an ID shows it through the same signed link, name starting %s", async (char) => {
     const u = await makeUser(['MOVER']);
+    nameStart.char = char;
     await postFile('/api/v1/auth/selfie', u.token, REAL_PNG);
     const user = await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: u.userId }, select: { id: true, avatar: true, selfieCapturedAt: true } }));
+    expect(user.avatar!.split('/').at(-1)!.startsWith(char)).toBe(true);
     const shown = await signupSelfieFor('national_id', user);
     expect(shown?.url).toMatch(SIGNED_LINK);
     expect((await app.inject({ method: 'GET', url: linkPath(shown!.url) })).statusCode).toBe(200);

@@ -42,6 +42,34 @@ describe('[F17] the header counts what is left to send', () => {
   });
 });
 
+describe('documents approved before a vehicle was saved', () => {
+  const noVehicle = () => {
+    vi.spyOn(moverApi, 'getRiderProfile').mockResolvedValue(null as never);
+    vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue({
+      checklist: MOTOR, documents: MOTOR.map((t) => doc(t, 'APPROVED')), missing: [], roleVerified: true, vehicleType: null,
+    } as never);
+    renderWithQuery(<DocumentsPage />);
+  };
+
+  it('is never told it is cleared to work: it is told what is left, with a real button to the vehicle step', async () => {
+    noVehicle();
+    expect(await screen.findByText('Your documents are approved. You still need to choose rider or driver and add your vehicle.')).toBeTruthy();
+    expect(screen.queryByText(/cleared to work/)).toBeNull();
+    const button = screen.getByRole('link', { name: 'Choose rider or driver' });
+    expect(button.getAttribute('href')).toBe('/signup?resume=mover');
+    expect(button.className).toContain('sw-btn sw-btn-md');
+  });
+
+  it('a saved vehicle reads as before, whichever way the page learned of it', async () => {
+    vi.spyOn(moverApi, 'getVerificationStatus').mockResolvedValue({
+      checklist: MOTOR, documents: MOTOR.map((t) => doc(t, 'APPROVED')), missing: [], roleVerified: true, vehicleType: 'CAR',
+    } as never);
+    renderWithQuery(<DocumentsPage />);
+    expect(await screen.findByText('You are fully verified and cleared to work.')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Choose rider or driver' })).toBeNull();
+  });
+});
+
 describe('[F18] a new mover reads how to start first; the renewal line is for approved movers', () => {
   it('not approved yet', async () => {
     open([]);

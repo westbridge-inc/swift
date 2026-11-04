@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { DARK_FEATURES, darkFeatureMisconfigurations, darkFeatureStatus, darkFeaturesOff } from '../modules/ops/dark-features';
+import { partnerApprovalsOpen } from '../modules/verification/approval-brake';
 import { moverPushRequired } from '../modules/notification/mover-push-authority';
 import { carDeliveriesEnabled } from '../config/vehicle-classes';
 import { taxiMaxStops } from '../modules/rides/taxi-stops-flag';
@@ -152,6 +153,8 @@ describe('[dark features] the registry matches the code that reads the switch', 
       // [O-1] old builds' counterpart phones (retired with builds 9-12) + the call bridge switch
       read('apps/api/src/modules/calls/counterpart-phone.ts'),
       read('apps/api/src/modules/calls/call-relay-switch.ts'),
+      // [BUG-HUNT F23] the brake on approving partners
+      read('apps/api/src/modules/verification/approval-brake.ts'),
     ].join('\n');
     expect(sources.length, 'could not read the sources — the check cannot run').toBeGreaterThan(500);
     for (const f of DARK_FEATURES) {
@@ -278,5 +281,31 @@ describe('[SWITCHES] the launch switches are registered and read exactly as the 
     expect(darkFeatureMisconfigurations({ MALWARE_SCAN: 'clamd', CLAMD_HOST: 'clamd' })).toEqual([]);
     expect(darkFeatureMisconfigurations({})).toEqual([]);
     expect(read('deploy/preflight.ts')).toContain('darkFeatureMisconfigurations(production)');
+  });
+});
+
+// [BUG-HUNT F23] The brake on approving partners. What the register reports is what the reader decides, on the only
+// value that opens it, and a near miss or ordering opened first is said before a deploy.
+describe('[BUG-HUNT F23] the partner approvals switch', () => {
+  const on = (env: Record<string, string | undefined>) => darkFeatureStatus(env).find((f) => f.key === 'partner_approvals')!.on;
+
+  it('the register agrees with the reader in production', () => {
+    for (const value of [undefined, '', '0', 'true', ' 1']) {
+      const env = { NODE_ENV: 'production', PARTNER_APPROVALS_OPEN: value };
+      expect(on(env), String(value)).toBe(false);
+      expect(partnerApprovalsOpen(env), String(value)).toBe(false);
+    }
+    expect(on({ NODE_ENV: 'production', PARTNER_APPROVALS_OPEN: '1' })).toBe(true);
+    expect(partnerApprovalsOpen({ NODE_ENV: 'production', PARTNER_APPROVALS_OPEN: '1' })).toBe(true);
+  });
+
+  it('a near miss is named before a deploy; 1, 0 and nothing are not', () => {
+    expect(darkFeatureMisconfigurations({ PARTNER_APPROVALS_OPEN: 'true' }).join()).toContain('reads as closed');
+    for (const value of [undefined, '', '0', '1']) expect(darkFeatureMisconfigurations({ PARTNER_APPROVALS_OPEN: value })).toEqual([]);
+  });
+
+  it('ordering open while approvals are closed is named', () => {
+    expect(darkFeatureMisconfigurations({ WEB_ORDERING: 'live' }).join()).toContain('Ordering day opens approvals first');
+    expect(darkFeatureMisconfigurations({ WEB_ORDERING: 'live', PARTNER_APPROVALS_OPEN: '1' })).toEqual([]);
   });
 });
