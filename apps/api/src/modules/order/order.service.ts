@@ -1,4 +1,4 @@
-import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
+import { persistHandoverNotice, drainHandoverNotices, liftAfterDelivery } from '../handover/handover-notice';
 import { authorizeHandover, preflightHandoverDoor, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
 import { emitToOrderRoom, emitToStoreRoom } from './order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
@@ -93,6 +93,7 @@ import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, ref
 import { ATTESTABLE_PAYMENT_STATUSES } from '../vendor/mmg-attestation';
 import { lineVatClass, orderVatAmountFields, orderVatCreateFields, recomputeOrderVat, vatTermsForCheckout } from '../store-vat/order-vat';
 import { isExpiredUnpaidMmgAcceptance, isUnpaidMmgAcceptance, mmgAcceptedClaimedPushCopy, mmgAcceptedPayBy, mmgAcceptedPushCopy, mmgOrderNoun } from './mmg-accept-expiry';
+import { orderStageRefusal, STEP_GONE } from './order-status-words';
 
 interface CheckoutInput {
   userId: string;
@@ -632,8 +633,37 @@ type RiderAssignmentSnapshot = Prisma.OrderGetPayload<{
   select: typeof RIDER_ASSIGNMENT_SNAPSHOT_SELECT;
 }>;
 
+/** A ride is a "Ride" in the customer's words [Item 64 · review S4]; a booking is a booking; food keeps its exact words. */
+function cancelNoun(order: Pick<Order, 'fulfillment' | 'orderType'>): 'Booking' | 'Ride' | 'Order' {
+  return order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
+}
+
+/**
+ * The banner the customer reads first after a cancel (the tracking screen shows the server's message before its own
+ * fallback). A booking's money is with the PROVIDER: the noun and the party follow the row's fulfillment.
+ * [REPORT-007-v4 F-02] Never assert "no charge" on an MMG order: PENDING is absence of the store's attestation, not
+ * proof the customer's external transfer didn't happen. The platform cannot know, so it says what is true and points at
+ * the party who holds the money.
+ * [owner #46/#50] Every customer cancel is free: `cancellationFee: 0` stays in the answer only because builds 9 and 10
+ * read it (a number) after a cancel; it is never anything but zero.
+ */
+function customerCancelAnswer(
+  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod'>,
+  cancelled: string | null,
+): { message: string; cancellationFee: number } {
+  const noun = cancelNoun(order);
+  const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
+  if (order.paymentMethod === 'MOBILE_MONEY') {
+    return {
+      message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
+      cancellationFee: 0,
+    };
+  }
+  return { message: cancelled ?? `${noun} cancelled — no charge`, cancellationFee: 0 };
+}
+
 const CANONICAL_TRANSITION_INCLUDE = {
-  vendor: { select: { name: true, ownerId: true } },
+  vendor: { select: { name: true, ownerId: true, vendorType: true } },
   customer: { select: { id: true, firstName: true } },
   rider: {
     select: {
@@ -2394,7 +2424,7 @@ export class OrderService {
     if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
     if (!input.handover && !input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)
-        ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
+        ?? new AppError(409, 'INVALID_TRANSITION', orderStageRefusal(source.status, STEP_GONE));
     }
 
     // A BOOKING is confirmed, completed or cancelled — never prepared, marked
@@ -2437,7 +2467,7 @@ export class OrderService {
     }
     if (!input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)
-        ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
+        ?? new AppError(409, 'INVALID_TRANSITION', orderStageRefusal(source.status, STEP_GONE));
     }
     // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
@@ -2804,7 +2834,7 @@ export class OrderService {
     }
 
 
-    if (input.handover) await drainHandoverNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId: input.orderId })
+    if (input.handover) await drainHandoverNotices({ prisma: this.prisma, notifications: this.notifications, afterCompletion: liftAfterDelivery(this.prisma, this.io) }, { orderId: input.orderId })
       .catch((err) => log().warn({ err, orderId: input.orderId }, 'handover notice remains pending after commit'));
 
     // [DISPATCH 1/3 · B4] Every operational cancellation passes here (vendor
@@ -2839,6 +2869,8 @@ export class OrderService {
     });
 
     if (!preview) throw new AppError(404, 'NOT_FOUND', 'Order not found');
+    // [BUG-HUNT F12] A second tap after a lost reply: the first one worked, so this is the answer it lost.
+    if (preview.status === 'CANCELLED') return customerCancelAnswer(preview, null);
 
     if (
       IN_TRANSIT.includes(preview.status)
@@ -2890,7 +2922,7 @@ export class OrderService {
             throw new AppError(400, 'IN_TRANSIT', 'Order is already on its way and cannot be cancelled');
           }
           if (!ORDER_TRANSITIONS.CANCELLED.includes(order.status)) {
-            throw new AppError(400, 'INVALID_STATUS', `This order is ${order.status} and cannot be cancelled`);
+            throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be cancelled'));
           }
           // [REPORT-006 F-006-01] Checked from the LOCKED row: a vendor
           // capture serializes on this same orders lock, so cancel-after-
@@ -3050,33 +3082,13 @@ export class OrderService {
       });
     }
 
-    // [REPORT-007-v4 F-02] Never assert "no charge" on an MMG order: PENDING
-    // is absence of the store's attestation, not proof the customer's external
-    // transfer didn't happen. The platform cannot know, so it says what is
-    // true and points at the party who holds the money.
-    // The result is the banner the customer reads first (the tracking screen
-    // shows the server's message before its own fallback). A booking is a
-    // booking and its money is with the PROVIDER — the noun and the party
-    // follow the committed row's fulfillment; the MMG uncertainty above is the
-    // server's and is unchanged. Food keeps its exact words.
-    // A ride is a "Ride" in the customer's words [Item 64 · review S4].
-    // [owner #46/#50] Every customer cancel is free — there is no fee any more.
-    // `cancellationFee: 0` stays in the answer only because builds 9 and 10
-    // read it (a number) after a cancel; it is never anything but zero.
-    const noun = order.fulfillment === 'APPOINTMENT' ? 'Booking' : order.orderType === 'TAXI' ? 'Ride' : 'Order';
-    const refundParty = order.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store';
     // [Item 64] The plain reason, when the platform found nobody to do the job.
     // [owner #46/#52] ...and when it was running very late.
-    const cancelled = noMoverFree
-      ? `${noun} cancelled — no mover was found.`
-      : tooLateFree ? `${noun} cancelled because it was running very late.` : null;
-    if (order.paymentMethod === 'MOBILE_MONEY') {
-      return {
-        message: `${cancelled ?? `${noun} cancelled.`} If you already sent the MMG payment, ${refundParty} refunds you directly.`,
-        cancellationFee: 0,
-      };
-    }
-    return { message: cancelled ?? `${noun} cancelled — no charge`, cancellationFee: 0 };
+    const noun = cancelNoun(order);
+    const worker = order.orderType === 'TAXI' ? 'driver' : 'rider';
+    return customerCancelAnswer(order, noMoverFree
+      ? `${noun} cancelled — no ${worker} was found.`
+      : tooLateFree ? `${noun} cancelled because it was running very late.` : null);
   }
 
   /** [L07 · Opus S3] The first delivery attempt of a committed rider
@@ -3130,7 +3142,7 @@ export class OrderService {
     const target = status as OrderStatus;
     const allowedFrom = opts?.allowedFrom ?? ORDER_TRANSITIONS[target];
     if (!allowedFrom || allowedFrom.length === 0) {
-      throw new AppError(409, 'INVALID_TRANSITION', `No order may transition into ${status}`);
+      throw new AppError(409, 'INVALID_TRANSITION', orderStageRefusal(status, STEP_GONE));
     }
 
     // Status, timestamps, terminal mover/float release, stock, earnings, and
@@ -3153,7 +3165,7 @@ export class OrderService {
       invalidStatus: (current) => new AppError(
         409,
         'INVALID_TRANSITION',
-        `Cannot move order from ${current} to ${status}`,
+        orderStageRefusal(current, STEP_GONE),
       ),
     });
 
@@ -3219,7 +3231,7 @@ export class OrderService {
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         break;
       case 'READY_FOR_PICKUP':
-        await this.notifications.orderReady(order.customerId, order.orderNumber, orderId);
+        await this.notifications.orderReady(order.customerId, order.orderNumber, orderId, order);
         break;
       case 'RIDER_ASSIGNED':
         await this.notifications.riderAssigned(order.customerId, order.orderNumber, riderName, orderId);
@@ -3230,7 +3242,7 @@ export class OrderService {
         break;
       }
       case 'DELIVERED':
-        if (!opts?.handover) await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
+        if (!opts?.handover) await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType, order.vendor?.vendorType);
         break;
     }
 

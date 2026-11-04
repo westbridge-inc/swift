@@ -1,9 +1,11 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
+import type { Server } from 'socket.io';
 import { ownerWallSystem } from '../../lib/owner-rls';
 import { upsertNoticeFor } from '../../lib/owner-wall-notices';
 import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import type { NotificationService } from '../notification/notification.service';
 import { checkoutOutboxId } from '../order/checkout-outbox';
+import { orderDeliveredWords } from '../order/order-notice-words';
 
 export const HANDOVER_NOTICE_KIND = 'handover-completed-notice';
 /** [REVIEW-B 14 Oct S2-1] A failing push is retried for this long, then closed
@@ -12,7 +14,7 @@ export const HANDOVER_NOTICE_WINDOW_MS = 30 * 60_000;
 
 /** Terminal proof and its customer-facing obligation share the same commit. */
 export async function persistHandoverNotice(tx: Prisma.TransactionClient, order: {
-  id: string; tenantId: string; customerId: string; orderNumber: string; status: string;
+  id: string; tenantId: string; customerId: string; orderNumber: string; status: string; vendor?: { vendorType?: string | null } | null;
 }): Promise<void> {
   const dedupeKey = `order:${order.id}:${HANDOVER_NOTICE_KIND}`;
   const id = checkoutOutboxId(dedupeKey);
@@ -22,7 +24,7 @@ export async function persistHandoverNotice(tx: Prisma.TransactionClient, order:
   await upsertNoticeFor(tx, {
     id: notificationId, userId: order.customerId, dedupeKey, type: 'ORDER_UPDATE',
     title: pickup ? 'Order collected' : 'Delivered!',
-    body: pickup ? `Your order ${order.orderNumber} has been collected.` : `Your order ${order.orderNumber} has been delivered. Enjoy your meal!`,
+    body: pickup ? `Your order ${order.orderNumber} has been collected.` : orderDeliveredWords(order.orderNumber, order.vendor?.vendorType),
     data: { orderId: order.id, orderNumber: order.orderNumber, status: order.status, audience: 'customer' },
   });
   await tx.orderOutbox.upsert({ where: { id }, update: {}, create: {
@@ -31,12 +33,24 @@ export async function persistHandoverNotice(tx: Prisma.TransactionClient, order:
   } });
 }
 
+/** [BUG-HUNT F18] The rider's side of a completed delivery: a custody suspension over goods lifts. */
+export const liftAfterDelivery = (prisma: PrismaClient, io: Server) => async (orderId: string): Promise<void> => {
+  const { IncidentService } = await import('../safety/incident.service');
+  await new IncidentService(prisma, io).liftAfterGoodsDelivered(orderId);
+};
+
 /** One inbox row; retry push submission after outages or a lost response.
  *  Every row ends: delivered once when the customer has no push channel (the
  *  inbox row IS the channel), delivered when push confirms, or closed
  *  unconfirmed after HANDOVER_NOTICE_WINDOW_MS. */
 export async function drainHandoverNotices(
-  deps: { prisma: PrismaClient; notifications: Pick<NotificationService, 'publishPersisted'>; now?: () => Date },
+  deps: {
+    prisma: PrismaClient;
+    notifications: Pick<NotificationService, 'publishPersisted'>;
+    now?: () => Date;
+    /** [BUG-HUNT F18] What the completion owes the rider, on this same durable row: a failure leaves it pending. */
+    afterCompletion?: (orderId: string) => Promise<unknown>;
+  },
   options: { orderId?: string; limit?: number } = {},
 ): Promise<{ delivered: number; pending: number; expired: number }> {
   const system = <T>(fn: () => Promise<T>) => runAsSystem('handover-notice-drain', fn);
@@ -73,6 +87,7 @@ export async function drainHandoverNotices(
       const payload = row.payload as Record<string, unknown>;
       if (typeof payload['notificationId'] === 'string' && typeof payload['customerUserId'] === 'string' && payload['orderId'] === row.orderId) {
         sent = await runWithTenant(row.tenantId, async () => {
+          await deps.afterCompletion?.(row.orderId);
           // [item 20] The customer's notice, read by the job bound to the order's tenant: the named capability under the owner wall.
           const notice = await ownerWallSystem('handover:customer-notice', () => deps.prisma.notification.findFirst({ where: {
             id: payload['notificationId'] as string, user: { tenantId: row.tenantId }, userId: payload['customerUserId'] as string,

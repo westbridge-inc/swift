@@ -691,7 +691,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
         {!paused && isDelivery && !selfDelivery && !riderAssigned && ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(s) && (
           <section aria-label="No rider yet" className="w-full rounded-lg bg-[var(--swift-subtle)] p-3">
             <p className="text-sm font-semibold">No rider yet</p>
-            <p className="mt-1 text-sm text-[var(--swift-muted)]">Swift searches nearby movers automatically — retry if nobody took it.</p>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">Swift searches nearby riders automatically — retry if nobody took it.</p>
             <button
               onClick={() => act.mutate('retry-dispatch')}
               disabled={act.isPending}

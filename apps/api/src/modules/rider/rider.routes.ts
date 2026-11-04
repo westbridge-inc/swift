@@ -83,6 +83,7 @@ import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-ra
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { withCounterpartPhones } from '../calls/counterpart-phone';
 import { kickWaitingOrdersNear, type KickEnqueue } from '../dispatch/supply-kick';
+import { orderStageRefusal, STEP_GONE } from '../order/order-status-words';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -1406,7 +1407,7 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!dispatchHoldExpired(order)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
     const acceptableStatuses: OrderStatus[] = riderDispatchableStatusesFor(order.orderType);
     if (!acceptableStatuses.includes(order.status)) {
-      throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be accepted'));
     }
 
     // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] A taxi car takes no goods work while the
@@ -1549,7 +1550,7 @@ export async function riderRoutes(app: FastifyInstance) {
         throw new AppError(
           400,
           'INVALID_TRANSITION',
-          `Cannot transition from ${order.status} to ${to}. Expected current status: ${from.join(' or ')}.`,
+          orderStageRefusal(order.status, STEP_GONE),
         );
       }
 
@@ -1997,7 +1998,7 @@ export async function riderRoutes(app: FastifyInstance) {
           { recovery: { action: 'REPORT_PROBLEM', path: `/api/v1/rider/orders/${id}/recovery` } });
       }
       if (!PRE_CUSTODY.includes(order.status)) {
-        throw new AppError(409, 'INVALID_STATUS', `This order can no longer be handed back (${order.status}).`);
+        throw new AppError(409, 'INVALID_STATUS', orderStageRefusal(order.status, 'it can no longer be handed back'));
       }
 
       const reopenStatus = await reopenPreCustodyLeg(tx, order, request.user.userId, `Rider handback: ${reason}`);

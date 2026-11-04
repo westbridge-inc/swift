@@ -266,7 +266,7 @@ describe('[FOOD-PERMIT] a registered restaurant never goes live without the tick
     expect(await store(o)).toEqual({ status: 'PENDING_APPROVAL', isVerified: true });
     const told = await notices(o);
     expect(told).toHaveLength(1);
-    expect(told[0]!.body).toMatch(/has everything else it needs/);
+    expect(told[0]!.body).toMatch(/is nearly ready/);
     expect((await tick(o)).statusCode).toBe(201);
     expect(await store(o)).toEqual({ status: 'ACTIVE', isVerified: true });
   });

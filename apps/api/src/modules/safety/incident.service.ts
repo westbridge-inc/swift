@@ -193,8 +193,7 @@ export async function persistMoverCustodyLossIncidentInTransaction(
       id: input.subjectNotificationId,
       userId: input.subjectUserId,
       type: 'SAFETY',
-      title: 'Account suspended pending review',
-      body: 'Your session ended while an active passenger or order remained in your custody. You are offline while our safety team reviews it — contact Swift support to respond.',
+      ...custodyLossNotice(input),
       data: {
         kind: 'incident_interim_suspension',
         eventId: input.eventId,
@@ -209,6 +208,29 @@ export async function persistMoverCustodyLossIncidentInTransaction(
 
   return kase;
 }
+
+/**
+ * [BUG-HUNT F18 · COORD 4 Nov 2026] What the person told. Goods in the bag: finishing the delivery ends the suspension
+ * by itself (IncidentService.liftAfterGoodsDelivered). A passenger in the car, or goods on their way back, stay with a
+ * person. The phone's log-out box says the same (apps/mobile lib/moverLogoutWords).
+ */
+function custodyLossNotice(input: { pool: 'RIDER' | 'DRIVER'; status: string }): { title: string; body: string } {
+  if (input.pool === 'RIDER' && input.status !== 'RETURNING') {
+    return {
+      title: 'Account suspended until your delivery is finished',
+      body: 'Your session ended while an order was in your care. Sign in and finish the delivery, and your account comes back by itself. If you cannot finish it, contact Swift support.',
+    };
+  }
+  return {
+    title: 'Account suspended pending review',
+    body: input.pool === 'DRIVER'
+      ? 'Your session ended while a passenger was in your car. You are offline until a person at Swift has reviewed it — contact Swift support to respond.'
+      : 'Your session ended while an order was in your care. You are offline until a person at Swift has reviewed it — contact Swift support to respond.',
+  };
+}
+
+/** Who lifted it, on the case's own record: no person, the delivery itself. */
+export const DELIVERY_COMPLETED_LIFT = 'system:delivery-completed';
 
 export class IncidentService {
   private notifications: NotificationService;
@@ -555,6 +577,32 @@ export class IncidentService {
       },
     });
     return updated;
+  }
+
+  /**
+   * [BUG-HUNT F18 · COORD 4 Nov 2026] A rider whose session ended with goods in the bag is suspended until the goods get
+   * there. This runs once the delivery is done: only for goods, only when the person who held them delivered them, and
+   * never over a decision a person has made. The case itself stays on the queue for ops. A passenger's case never lifts
+   * here. Runs after the delivery commits, on its durable outbox row, so a failure is retried; lifting twice is a no-op.
+   */
+  async liftAfterGoodsDelivered(orderId: string): Promise<number> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { status: true, orderType: true, rider: { select: { userId: true } } },
+    });
+    if (order?.status !== 'DELIVERED' || order.orderType === 'TAXI' || !order.rider) return 0;
+    const held = await this.prisma.incidentCase.findMany({
+      where: {
+        orderId,
+        subjectUserId: order.rider.userId,
+        category: 'MOVER_SESSION_LOST_IN_CUSTODY',
+        interimAction: 'SUSPENDED_PENDING_REVIEW',
+        status: { in: ['OPEN', 'TRIAGED', 'INVESTIGATING'] },
+      },
+      select: { id: true },
+    });
+    for (const kase of held) await this.liftInterim(kase.id, DELIVERY_COMPLETED_LIFT);
+    return held.length;
   }
 
   /** §8.3 S2 option — SHADOW_RESTRICTED: the subject STAYS online but is
