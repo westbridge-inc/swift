@@ -173,7 +173,7 @@ const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIE
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
-  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired', 'brandListedAlone'] },
+  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired', 'brandListedAlone', 'vendorType', 'name'] },
   // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
   // lives in `documentsVerified*`, and a safety suspension is a timestamp.
   rider: { model: 'rider', fields: ['documentsVerified', 'documentsVerifiedAt', 'isAvailable', 'isOnline', 'safetySuspendedAt'] },
@@ -271,6 +271,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [BOOK-FU2 · owner B3] Repeat "Customer didn't come" records for a person to review: counts and dates, numbers masked.
   'GET /missed-appointments': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
+  // [BUG-HUNT F22] A person's number is their sign-in: its own capability, never in a support grant. The code goes to the new number.
+  'POST /users/:id/phone-change': c('C3', 'user.phone.change', E.user),
+  'POST /users/:id/phone-change/confirm': c('C3', 'user.phone.change', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
   'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
@@ -287,6 +290,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /vendors/:id/approve': c('C3', 'vendor.approve', E.vendor),
   'PUT /vendors/:id/suspend': c('C3', 'vendor.suspend', E.vendor),
   'PUT /vendors/:id/feature': c('C2', 'vendor.feature', E.vendor),
+  // [BUG-HUNT F22] What the screens tell a store to ask support for: a type picked by mistake, a checked name.
+  'PUT /vendors/:id/type': c('C3', 'vendor.edit', E.vendor),
+  'PUT /vendors/:id/name': c('C3', 'vendor.edit', E.vendor),
 
   // ── Movers ──────────────────────────────────────────────────────────────
   'GET /riders': c('C1', 'mover.read'),

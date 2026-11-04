@@ -10,6 +10,7 @@ import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { PhoneChangeAction } from './phone-change-action';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
@@ -150,6 +151,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           ) : u.status !== 'BANNED' ? (
             <button type="button" className="mc-btn" onClick={suspend}>Suspend…</button>
           ) : null}
+          <PhoneChangeAction userId={id} name={name} onResult={show} />
           {u.status !== 'BANNED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={ban}>Ban…</button> : null}
         </div>
       </header>

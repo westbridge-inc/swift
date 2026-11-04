@@ -75,7 +75,9 @@ import {
   approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
   startSoloApproval,
 } from './solo-approval';
-import { sanitizeUser } from '../auth/auth.service';
+import { AuthService, sanitizeUser } from '../auth/auth.service';
+import { confirmPhoneChange, lastFour, startPhoneChange, tellOldNumber } from './phone-change';
+import { getChannels } from '../../providers/notifications/channels';
 import { startOfDayGY, GUYANA_UTC_OFFSET_HOURS } from '../../utils/time-gy';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
@@ -106,7 +108,7 @@ import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCas
 import { maskSubscription, maskUserPhone } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
-import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
+import { assertNameNotReserved, FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { assertNotBannedGoods, catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
@@ -174,6 +176,11 @@ const vendorsQuerySchema = z.object({
 });
 
 // Riders/drivers list filters use UI keywords, not DB enums
+const storeTypeChangeSchema = z.object({ vendorType: z.nativeEnum(VendorType) });
+const storeNameChangeSchema = z.object({ name: z.string().trim().min(2).max(100) });
+const phoneChangeSchema = z.object({ phone: z.string().trim().min(7).max(20) });
+const phoneChangeCodeSchema = z.object({ code: z.string().trim().regex(/^\d{6}$/) });
+
 const moverFilterQuerySchema = z.object({
   status: z.enum(['online', 'offline', 'verified', 'unverified']).optional(),
   type: z.nativeEnum(RiderType).optional(),
@@ -481,6 +488,7 @@ function catalogueCheckSummary(check: Exclude<CatalogueCheck, { state: 'CLEAR' }
 
 export async function adminRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
+  const phoneChangeDeps = () => ({ prisma: app.prisma, redis: app.redis, channels: getChannels(), log: app.log });
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const discoveryGovernance = new DiscoveryGovernanceService(app.prisma);
 
@@ -1423,6 +1431,31 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await riskScoreFor(app.prisma, id) };
   });
 
+  /** [BUG-HUNT F22] Move an account to a new number: the code goes to the new number (admin/phone-change.ts). */
+  app.post('/users/:id/phone-change', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { phone } = phoneChangeSchema.parse(request.body ?? {});
+    const answer = await startPhoneChange(phoneChangeDeps(), { userId: id, phone, ip: request.ip });
+    await audit(request.user.userId, 'START_USER_PHONE_CHANGE', 'User', id, { toLastFour: lastFour(phone) }, request);
+    return { success: true, data: answer };
+  });
+
+  /** [BUG-HUNT F22] The person read the code back. Every session ends: the number is the sign-in. */
+  app.post('/users/:id/phone-change/confirm', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { code } = phoneChangeCodeSchema.parse(request.body ?? {});
+    const deps = phoneChangeDeps();
+    const moved = await confirmPhoneChange(deps, { userId: id, code });
+    await audit(request.user.userId, 'CHANGE_USER_PHONE', 'User', id, { fromLastFour: lastFour(moved.from), toLastFour: lastFour(moved.to) }, request);
+    await new AuthService(app).logoutAll(id);
+    await tellOldNumber(deps, moved.from);
+    await notifications.send({
+      userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your number was changed',
+      body: 'Swift support moved your account to a new number. Sign in with it from now on. If this was not you, contact Swift support right away.',
+    });
+    return { success: true, data: { moved: true } };
+  });
+
   app.put('/users/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
@@ -2058,6 +2091,57 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, data: { ...updated, vatRegistrationNumber: undefined } };
+  });
+
+  /**
+   * [BUG-HUNT F22] A wrong type at sign-up had no door: the documents then ask for a licence the store will never hold.
+   * Only before the store has ever been live. After that its fee and its papers rest on the type, so it is not a
+   * correction any more; say so instead of quietly repricing a working store.
+   */
+  app.put('/vendors/:id/type', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { vendorType } = storeTypeChangeSchema.parse(request.body ?? {});
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id }, include: { owner: { select: { userId: true } }, subscription: { select: { id: true } } },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    if (vendor.vendorType === vendorType) throw new AppError(409, 'NOTHING_TO_CHANGE', `${vendor.name} is already that type.`);
+    if (vendor.firstLiveAt || vendor.subscription) {
+      throw new AppError(409, 'STORE_HAS_BEEN_LIVE', `${vendor.name} has been live, so its weekly fee and documents rest on its type. It cannot be changed here.`);
+    }
+    const updated = await app.prisma.vendor.update({ where: { id }, data: { vendorType } });
+    await audit(request.user.userId, 'CHANGE_VENDOR_TYPE', 'Vendor', id, { from: vendor.vendorType, to: vendorType }, request);
+    await verification.reprojectVendorActivation(vendor.owner.userId);
+    scheduleVendorSearchSync(app, id);
+    await notifications.send({
+      userId: vendor.owner.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your store type was changed',
+      body: `Swift changed the type of ${vendor.name}. Your documents list follows it: check Documents to see what is needed now.`,
+      data: { vendorId: id },
+    });
+    return { success: true, data: updated };
+  });
+
+  /** [BUG-HUNT F22] "To use a new name, contact Swift support: we check the new name first" (CHECKED_NAME_RENAME). This is that door. */
+  app.put('/vendors/:id/name', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { name } = storeNameChangeSchema.parse(request.body ?? {});
+    const vendor = await app.prisma.vendor.findUnique({
+      where: { id }, select: { name: true, tradesUnderOwnName: true, owner: { select: { userId: true, user: { select: { phone: true } } } } },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', id);
+    if (vendor.name.trim() === name) throw new AppError(409, 'NOTHING_TO_CHANGE', 'The store already has that name.');
+    assertNameNotReserved(name, vendor.owner.user.phone, vendor.name);
+    if (vendor.tradesUnderOwnName) {
+      throw new AppError(409, 'OWN_NAME_RENAME', 'This store trades under its owner’s own name, which a person checked. A different name has to be registered as a business name first.');
+    }
+    const updated = await app.prisma.vendor.update({ where: { id }, data: { name } });
+    await audit(request.user.userId, 'CHANGE_VENDOR_NAME', 'Vendor', id, { from: vendor.name, to: name }, request);
+    scheduleVendorSearchSync(app, id);
+    await notifications.send({
+      userId: vendor.owner.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your store name was changed',
+      body: `Swift changed your store’s name to ${name}.`, data: { vendorId: id },
+    });
+    return { success: true, data: updated };
   });
 
   app.put('/vendors/:id/feature', { preHandler: [adminGuard] }, async (request) => {

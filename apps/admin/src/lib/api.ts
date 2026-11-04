@@ -390,6 +390,16 @@ export const fetchMoverActivationChecklist = (kind: 'rider' | 'driver', id: stri
   apiFetch(`/api/v1/admin/${kind}s/${id}/activation-checklist`);
 export const banUser = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/users/${id}/ban`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+/** [BUG-HUNT F22] What the screens tell a store to ask support for: a type picked by mistake, a checked name. */
+export const changeStoreType = (id: string, vendorType: string, reason: string) =>
+  apiFetch(`/api/v1/admin/vendors/${id}/type`, { method: 'PUT', body: JSON.stringify({ vendorType }), reason });
+export const changeStoreName = (id: string, name: string, reason: string) =>
+  apiFetch(`/api/v1/admin/vendors/${id}/name`, { method: 'PUT', body: JSON.stringify({ name }), reason });
+/** [BUG-HUNT F22] Move an account to a new number: a code goes to the new number, the person reads it back. */
+export const startPhoneChange = (id: string, phone: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/phone-change`, { method: 'POST', body: JSON.stringify({ phone }), reason });
+export const confirmPhoneChange = (id: string, code: string, reason: string) =>
+  apiFetch(`/api/v1/admin/users/${id}/phone-change/confirm`, { method: 'POST', body: JSON.stringify({ code }), reason });
 export const suspendVendor = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/vendors/${id}/suspend`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
 export const featureVendor = (id: string, featured: boolean) =>
