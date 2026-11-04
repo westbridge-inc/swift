@@ -40,6 +40,11 @@ const OBLIGATION_SELECT = {
   orderId: true, vendorId: true, customerId: true, kind: true,
 } as const satisfies Prisma.MmgRefundObligationSelect;
 
+/** A case for a person on this rail: support's queue, on the order, in the caller's commit. */
+function openRefundCase(tx: Tx, input: { userId: string; orderId: string; subject: string; message: string }) {
+  return insertTicketFor(tx, { ...input, category: 'PAYMENT' as const });
+}
+
 /** The order's row lock, then the order. Every command here starts with it. */
 async function lockedOrder(tx: Tx, orderId: string) {
   await bindTenantTransaction(tx);
@@ -145,8 +150,8 @@ export async function answerMmgRefund(prisma: PrismaClient, input: { orderId: st
     for (const obligation of covered) {
       await applyToObligation(tx, obligation, { event: input.received ? 'CUSTOMER_RECEIVED' : 'CUSTOMER_NOT_RECEIVED', actorId: input.customerId }, now);
     }
-    const ticket = input.received ? null : await insertTicketFor(tx, {
-      userId: input.customerId, orderId: order.id, category: 'PAYMENT', subject: MMG_REFUND_DISPUTE_SUBJECT,
+    const ticket = input.received ? null : await openRefundCase(tx, {
+      userId: input.customerId, orderId: order.id, subject: MMG_REFUND_DISPUTE_SUBJECT,
       message: `The store marked a refund of GY$${send.amount.toNumber().toLocaleString('en-US')} sent for order ${order.orderNumber}. The customer says it did not arrive.`,
     });
     await writeSend(tx, send, { answer, answeredAt: now, ...(ticket ? { supportTicketId: ticket.id } : {}) });
@@ -212,9 +217,10 @@ export async function markMmgRefundMissed(prisma: PrismaClient, obligationId: st
  * money: that is owed, and until now nothing said so. Called on the locked row, in the commit that closes the return, or in
  * the commit of support's finding when a dispute held it. An open dispute records nothing yet: support's finding decides.
  * What it records is what the store attested, less what is already owed on the order; one per order, by its cause key.
+ * With nothing attested no figure is known, so none is invented: a case goes to a person instead [COORD 4 Nov 2026].
  * Record only, like the rest of the rail: the order's payment and total stay as they are.
  */
-export async function openMmgRefundOnReturn(tx: Tx, orderId: string, actorId: string | null, now: Date): Promise<ReturnRefund | null> {
+export async function openMmgRefundOnReturn(tx: Tx, orderId: string, actorId: string | null, now: Date): Promise<ReturnOutcome> {
   const order = await tx.order.findUniqueOrThrow({
     where: { id: orderId },
     select: { id: true, orderNumber: true, tenantId: true, vendorId: true, customerId: true, paymentMethod: true, paymentStatus: true, mmgAttestedAmount: true, mmgClaimMismatchAt: true },
@@ -223,6 +229,13 @@ export async function openMmgRefundOnReturn(tx: Tx, orderId: string, actorId: st
   if (order.paymentMethod !== 'MOBILE_MONEY' || !order.vendorId || !paid || order.mmgClaimMismatchAt) return null;
   const held = await tx.mmgRefundObligation.findMany({ where: { orderId }, select: { kind: true, status: true, amount: true } });
   if (held.some((row) => row.kind === 'CANCELLATION')) return null;
+  if (order.mmgAttestedAmount === null) {
+    const ticket = await openRefundCase(tx, {
+      userId: order.customerId, orderId, subject: MMG_RETURN_NO_FIGURE_SUBJECT,
+      message: `Order ${order.orderNumber} came back after it was marked paid by MMG, and no amount is on record: the store never stated what it received. Check the MMG records with the store and the customer. No refund has been recorded.`,
+    });
+    return { kind: 'NO_FIGURE', ticketId: ticket.id, orderId, orderNumber: order.orderNumber, tenantId: order.tenantId };
+  }
   const amount = mmgRefundRemainder(order.mmgAttestedAmount, held);
   if (!amount.gt(0)) return null;
   const obligation = await tx.mmgRefundObligation.create({
@@ -232,12 +245,16 @@ export async function openMmgRefundOnReturn(tx: Tx, orderId: string, actorId: st
     }, await mmgRefundPolicy(tx), now),
     select: { id: true, dueAt: true },
   });
-  return { obligationId: obligation.id, orderId, orderNumber: order.orderNumber, customerId: order.customerId, vendorId: order.vendorId, amount, dueAt: obligation.dueAt };
+  return { kind: 'OWED', obligationId: obligation.id, orderId, orderNumber: order.orderNumber, customerId: order.customerId, vendorId: order.vendorId, amount, dueAt: obligation.dueAt };
 }
 
 export const MMG_RETURN_REFUND_REASON = 'The order came back to the store after the customer paid by MMG.';
+export const MMG_RETURN_NO_FIGURE_SUBJECT = 'Paid MMG order came back: no amount on record';
 
-export type ReturnRefund = { obligationId: string; orderId: string; orderNumber: string; customerId: string; vendorId: string; amount: Prisma.Decimal; dueAt: Date };
+export type ReturnOutcome =
+  | { kind: 'OWED'; obligationId: string; orderId: string; orderNumber: string; customerId: string; vendorId: string; amount: Prisma.Decimal; dueAt: Date }
+  | { kind: 'NO_FIGURE'; ticketId: string; orderId: string; orderNumber: string; tenantId: string }
+  | null;
 
 // ─── The words ──────────────────────────────────────────────────────────────
 
@@ -345,7 +362,15 @@ export async function customerMmgRefund(prisma: PrismaClient, orderId: string, s
 }
 
 /** [BUG-HUNT-2 G22] Both sides read what the return left owing, once each, after the commit. The order screens say it too. */
-export async function tellOfReturnRefund(prisma: PrismaClient, notifications: NotificationService, refund: ReturnRefund): Promise<void> {
+export async function tellOfReturnRefund(prisma: PrismaClient, notifications: NotificationService, refund: NonNullable<ReturnOutcome>): Promise<void> {
+  if (refund.kind === 'NO_FIGURE') {
+    await notifyAdmins(prisma, notifications, {
+      tenantId: refund.tenantId, title: 'Paid MMG order came back, no amount known',
+      body: `Order ${refund.orderNumber}: it was marked paid by MMG and no amount is on record. A person must check it.`,
+      data: { kind: 'support_ticket', ticketId: refund.ticketId, orderId: refund.orderId },
+    });
+    return;
+  }
   const store = await prisma.vendor.findUnique({ where: { id: refund.vendorId }, select: { name: true, owner: { select: { userId: true } } } });
   const storeName = store?.name ?? 'The store';
   await notifications.send({

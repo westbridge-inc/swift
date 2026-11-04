@@ -1,5 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
-import { openMmgRefundOnReturn, tellOfReturnRefund, type ReturnRefund } from '../order/mmg-refund-rail';
+import { openMmgRefundOnReturn, tellOfReturnRefund, type ReturnOutcome } from '../order/mmg-refund-rail';
 import { randomInt, timingSafeEqual } from 'node:crypto';
 import type { CustodyIncidentReason, CustodyRecoveryCase, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -764,7 +764,7 @@ export async function confirmReturn(
     where: { orderId: input.orderId, state: 'RETURN_REQUIRED' },
   });
   if (!pre) throw new AppError(409, 'NO_RETURN_PENDING', 'This order has no return waiting to be confirmed.');
-  let owed = null as ReturnRefund | null;
+  let owed = null as ReturnOutcome;
   const committed = await deps.orderService.transitionOrderAtomically({
     orderId: input.orderId,
     target: 'RETURNED',

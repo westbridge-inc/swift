@@ -13,7 +13,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { purgeAuditLogs } from '../lib/audit-immutability';
-import { MMG_RETURN_REFUND_REASON } from '../modules/order/mmg-refund-rail';
+import { MMG_RETURN_NO_FIGURE_SUBJECT, MMG_RETURN_REFUND_REASON } from '../modules/order/mmg-refund-rail';
 import { walkOrderStatus } from './helpers/order-status-walk';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
@@ -98,6 +98,7 @@ afterAll(async () => {
     await app.prisma.mmgRefundObligation.deleteMany({ where: { orderId: { in: orderIds } } });
     await app.prisma.mmgRefundSend.deleteMany({ where: { orderId: { in: orderIds } } });
     await app.prisma.custodyRecoveryCase.deleteMany({ where: { orderId: { in: orderIds } } });
+    await app.prisma.supportTicket.deleteMany({ where: { orderId: { in: orderIds } } });
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
     await app.prisma.rider.deleteMany({ where: { id: riderId } });
     await app.prisma.vendor.deleteMany({ where: { id: vendorId } });
@@ -181,7 +182,6 @@ describe('[G22] a paid MMG order came back, no dispute', () => {
   it.each([
     ['a cash order', {}],
     ['an MMG order nobody paid', { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' }],
-    ['a payment with nothing attested', { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' }],
     ['a payment support ruled never came, with the store\'s old word still on the row', { ...paidByStore(), paymentStatus: 'PENDING' }],
     ['a cash order, whatever the row says', { ...paidByStore(), paymentMethod: 'CASH', paymentStatus: 'CAPTURED' }],
   ])('%s owes nothing here', async (_label, over) => {
@@ -189,6 +189,48 @@ describe('[G22] a paid MMG order came back, no dispute', () => {
     expect((await goodsBack(o.id)).statusCode).toBe(200);
     expect(await owedOn(o.id)).toEqual([]);
     expect(await told(customer.id, o.id, 'mmg_refund_owed')).toEqual([]);
+  });
+});
+
+describe('[G22 · COORD 4 Nov 2026] a paid MMG order came back and no figure is known', () => {
+  const noFigure = { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' };
+  const cases = (id: string) => sys(() => app.prisma.supportTicket.findMany({ where: { orderId: id } }));
+
+  it('opens a case for a person, says no figure is known, and invents no amount', async () => {
+    const o = await returning(noFigure);
+    expect((await goodsBack(o.id)).statusCode).toBe(200);
+    expect(await owedOn(o.id)).toEqual([]);
+    expect(await told(customer.id, o.id, 'mmg_refund_owed')).toEqual([]);
+    const [kase, ...more] = await cases(o.id);
+    expect(more).toEqual([]);
+    expect(kase).toMatchObject({ category: 'PAYMENT', subject: MMG_RETURN_NO_FIGURE_SUBJECT, userId: customer.id, status: 'OPEN' });
+    expect(kase!.message).toContain('no amount is on record');
+    expect(kase!.message).toContain('No refund has been recorded.');
+    expect(kase!.message).not.toMatch(/GY\$|1,?500/);
+    const page = await sys(() => app.prisma.notification.findMany({ where: { userId: admin.id, title: 'Paid MMG order came back, no amount known', data: { path: ['orderId'], equals: o.id } } }));
+    expect(page).toHaveLength(1);
+    expect(page[0]!.data).toMatchObject({ kind: 'support_ticket', ticketId: kase!.id });
+  });
+
+  it('a finding that the customer paid does the same, and the store is not sent to a button that is not there', async () => {
+    const o = await returning({ ...paidByStore(), mmgAttestedAmount: null, customerMmgClaim: 'NOT_PAID', customerMmgClaimAt: new Date(), mmgClaimMismatchAt: new Date(), mmgClaimRevision: 2 });
+    expect((await goodsBack(o.id)).statusCode).toBe(200);
+    expect(await cases(o.id)).toEqual([]);
+    const held = await row(o.id);
+    expect((await resolve(o.id, 'CUSTOMER_PAID', held.mmgClaimRevision)).statusCode).toBe(200);
+    expect(await owedOn(o.id)).toEqual([]);
+    expect(await cases(o.id)).toHaveLength(1);
+    const store = await sys(() => app.prisma.notification.findMany({ where: { userId: owner.id, title: 'Payment review finished', data: { path: ['orderId'], equals: o.id } } }));
+    expect(store[0]!.body).toContain('you owe the customer that money back.');
+    expect(store[0]!.body).not.toContain('Refund sent');
+    const page = await sys(() => app.prisma.notification.findMany({ where: { userId: admin.id, title: 'Paid MMG order came back, no amount known', data: { path: ['orderId'], equals: o.id } } }));
+    expect(page).toHaveLength(1);
+  });
+
+  it('with a figure there is no case: the record is the follow-up', async () => {
+    const o = await returning(paidByStore());
+    expect((await goodsBack(o.id)).statusCode).toBe(200);
+    expect(await cases(o.id)).toEqual([]);
   });
 });
 
