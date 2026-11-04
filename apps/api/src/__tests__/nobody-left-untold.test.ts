@@ -188,6 +188,18 @@ describe('[G07] Swift suspends a store with live orders', () => {
     expect(told).toHaveLength(1);
     expect(told[0]!.body).toContain('Swift support');
     expect(told[0]!.body).not.toContain('cancel it for free');
+    expect(told[0]!.body).toContain('Swift support closes it and records the refund the store owes you');
+  });
+
+  it('a payment MMG itself confirmed cannot be closed that way, so the notice never promises it', async () => {
+    const buyer = await actor(['CUSTOMER'], 'CUSTOMER');
+    vendorId = await shop();
+    const ready = await storeOrder(buyer, 'READY_FOR_PICKUP', { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED', mmgAttestedRef: `PAY${nanoid(12).replace(/[^a-zA-Z0-9]/g, '0')}`, mmgAttestedAt: new Date(), mmgAttestedAmount: 1000 });
+    expect((await suspend()).statusCode).toBe(200);
+    const [told] = await notices(buyer.id, ready.id);
+    expect(told!.body).not.toContain('Swift support closes it');
+    expect(told!.body).toContain('the store refunds you directly');
+    expect(told!.body).toContain('contact Swift support');
   });
 });
 

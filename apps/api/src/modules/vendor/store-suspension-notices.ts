@@ -13,15 +13,20 @@ const LIVE_AT_STORE: Prisma.OrderWhereInput = {
 };
 
 /** The customer's words for one order. */
-export function storeSuspendedCustomerNotice(order: { orderNumber: string; status: string; fulfillment: string; paymentMethod: string | null }, storeName: string): { title: string; body: string } {
+export function storeSuspendedCustomerNotice(order: { orderNumber: string; status: string; fulfillment: string; paymentMethod: string | null; paymentStatus: string | null }, storeName: string): { title: string; body: string } {
   const readyPickup = order.fulfillment === 'PICKUP' && order.status === 'READY_FOR_PICKUP';
   const title = `About your order at ${storeName}`;
   if (readyPickup) {
+    if (order.paymentMethod === 'CASH') {
+      return { title, body: `Swift paused ${storeName}, so it cannot hand over your order ${order.orderNumber}. You can cancel it for free.` };
+    }
+    // Support's close covers a payment the store reported (mmg-store-close.ts); it refuses one MMG itself confirmed.
+    if (order.paymentStatus !== 'CLAIMED') {
+      return { title, body: `Swift paused ${storeName}, so it cannot hand over your order ${order.orderNumber}. If you already paid by MMG, the store refunds you directly. If it does not, contact Swift support.` };
+    }
     return {
       title,
-      body: order.paymentMethod === 'CASH'
-        ? `Swift paused ${storeName}, so it cannot hand over your order ${order.orderNumber}. You can cancel it for free.`
-        : `Swift paused ${storeName}, so it cannot hand over your order ${order.orderNumber}. Swift support closes it and records the refund the store owes you. Contact Swift support if you have a question.`,
+      body: `Swift paused ${storeName}, so it cannot hand over your order ${order.orderNumber}. Swift support closes it and records the refund the store owes you. Contact Swift support if you have a question.`,
     };
   }
   return { title, body: `Swift paused ${storeName}, so your order ${order.orderNumber} may not be finished. If you can't reach the store, contact Swift support.` };
@@ -31,7 +36,7 @@ export function storeSuspendedCustomerNotice(order: { orderNumber: string; statu
 export async function tellCustomersOfStoreSuspension(prisma: PrismaClient, notifications: NotificationService, vendorId: string, storeName: string): Promise<number> {
   const orders = await prisma.order.findMany({
     where: { vendorId, ...LIVE_AT_STORE },
-    select: { id: true, orderNumber: true, customerId: true, status: true, fulfillment: true, paymentMethod: true },
+    select: { id: true, orderNumber: true, customerId: true, status: true, fulfillment: true, paymentMethod: true, paymentStatus: true },
   });
   for (const order of orders) {
     await notifications.send({
