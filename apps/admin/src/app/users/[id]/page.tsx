@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction } from '@/lib/api';
+import { changeLegalName, fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction } from '@/lib/api';
 import { label } from '@/lib/labels';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
@@ -105,6 +105,19 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
   // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] After repeated failed cash payments ordering is paused until the
   // strikes are 90 days old; a person who reviewed the account (from Help) can open it sooner. The server says whether
   // there is a restriction to lift; the strikes stay on the record and still count toward a ban.
+  // [BUG-HUNT F21] A partner's name is locked in the apps once a person has checked it: the door the refusal points at.
+  const changeName = async () => show(await dialog.run({
+    title: `Change the name of ${name}?`,
+    body: <p>Check the new name against a current ID before you change it. Stores and passengers see this name, and they are told it was checked.</p>,
+    confirmLabel: 'Change name',
+    fields: [
+      { kind: 'text', name: 'firstName', label: 'First name', required: true, minLength: 1, maxLength: 80 },
+      { kind: 'text', name: 'lastName', label: 'Last name', required: true, minLength: 1, maxLength: 80 },
+    ],
+    reason: { hint: 'How the new name was checked. Kept on the permanent record.' },
+    submit: ({ reason, values }) => changeLegalName(id, String(values['firstName']).trim(), String(values['lastName']).trim(), reason),
+    success: () => 'The name is changed and the person is told.',
+  }));
   const liftRestriction = async () => show(await dialog.run({
     title: `Open ordering again for ${name}?`,
     body: <p>Their strikes stay on the record and still count toward a ban, but the ones given until now stop pausing their orders and rides. Use this after you have reviewed the account with them through Help.</p>,
@@ -150,6 +163,7 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           ) : u.status !== 'BANNED' ? (
             <button type="button" className="mc-btn" onClick={suspend}>Suspend…</button>
           ) : null}
+          <button type="button" className="mc-btn" onClick={changeName}>Change name…</button>
           {u.status !== 'BANNED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={ban}>Ban…</button> : null}
         </div>
       </header>

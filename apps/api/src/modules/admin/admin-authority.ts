@@ -271,6 +271,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [BOOK-FU2 · owner B3] Repeat "Customer didn't come" records for a person to review: counts and dates, numbers masked.
   'GET /missed-appointments': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
+  // [BUG-HUNT F21] A checked legal name changes only through a person: the door the refusal points at.
+  'PUT /users/:id/name': c('C3', 'user.name.change', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
   'PUT /users/:id/unban': c('C3', 'user.ban', E.user),

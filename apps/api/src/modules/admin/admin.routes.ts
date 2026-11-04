@@ -106,7 +106,7 @@ import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCas
 import { maskSubscription, maskUserPhone } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
-import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
+import { assertNameNotReserved, FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { assertNotBannedGoods, catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
@@ -174,6 +174,8 @@ const vendorsQuerySchema = z.object({
 });
 
 // Riders/drivers list filters use UI keywords, not DB enums
+const legalNameChangeSchema = z.object({ firstName: z.string().trim().min(1).max(80), lastName: z.string().trim().min(1).max(80) });
+
 const moverFilterQuerySchema = z.object({
   status: z.enum(['online', 'offline', 'verified', 'unverified']).optional(),
   type: z.nativeEnum(RiderType).optional(),
@@ -1423,6 +1425,27 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await riskScoreFor(app.prisma, id) };
   });
 
+  /**
+   * [BUG-HUNT F21] An approved partner's name is locked in the apps: "verified" must keep meaning a person checked it.
+   * This is the person. The trail names what changed, never the names: an audit row is never erased, a name must be.
+   */
+  app.put('/users/:id/name', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const { firstName, lastName } = legalNameChangeSchema.parse(request.body ?? {});
+    const person = await app.prisma.user.findUnique({ where: { id }, select: { firstName: true, lastName: true, phone: true } });
+    if (!person) throw new NotFoundError('User', id);
+    const changed = [...(firstName !== person.firstName ? ['firstName'] : []), ...(lastName !== person.lastName ? ['lastName'] : [])];
+    if (changed.length === 0) throw new AppError(409, 'NOTHING_TO_CHANGE', 'That is already the name on this account.');
+    assertNameNotReserved(firstName, person.phone, person.firstName);
+    await app.prisma.user.update({ where: { id }, data: { firstName, lastName } });
+    await audit(request.user.userId, 'CHANGE_LEGAL_NAME', 'User', id, { changed }, request);
+    await notifications.send({
+      userId: id, type: 'SYSTEM_ANNOUNCEMENT', title: 'Your name was changed',
+      body: 'Swift support changed the name on your account after checking it. Contact Swift support if this looks wrong.',
+    });
+    return { success: true, data: { changed } };
+  });
+
   app.put('/users/:id/suspend', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { reason } = reasonSchema.parse(request.body ?? {});
@@ -2052,7 +2075,7 @@ export async function adminRoutes(app: FastifyInstance) {
     await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Vendor Suspended',
+      title: 'Store suspended',
       body: reason || `${vendor.name} has been suspended. Please contact support.`,
       data: { vendorId: id },
     });
