@@ -195,6 +195,13 @@ case "$(env_value WEB_ORDERING)" in
   "" | live) ;;
   *) die "WEB_ORDERING must be live or empty" ;;
 esac
+# [BUG-HUNT F23] The brake on approving partners (verification/approval-brake.ts): 1 opens it, 0 or nothing leaves it
+# closed in production. Anything else also reads as closed, so a near miss on ordering day would hold every partner
+# with no word to anyone: it is refused here.
+case "$(env_value PARTNER_APPROVALS_OPEN)" in
+  "" | 0 | 1) ;;
+  *) die "PARTNER_APPROVALS_OPEN must be 1, 0 or empty" ;;
+esac
 # [G11] The website's App Store and Google Play links switch, read by the site
 # while it runs: `live` (only once both stores show the app live), or nothing
 # (no store link). A near miss would quietly keep the links off, so it is refused.

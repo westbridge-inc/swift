@@ -12,6 +12,7 @@ import { CountryConfigService, partnerRateFor, type PartnerRate } from '../count
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
 import { previewTrial } from '../integrity/enforcement';
 import { TRIAL_DAYS, trialDaysFor } from './trial-length';
+import { noTrialBeforeOrderingDay, partnerApprovalsOpen } from '../verification/approval-brake';
 import { assertStoreFeeTicked, chargedFor, storeFeeQuote } from '../partner/store-fee';
 import { log } from '../../utils/logger';
 
@@ -360,6 +361,8 @@ export class SubscriptionService {
     // [REVIEW-PARTNER · DL-5] No weekly fee is ever born for the store-review fiction: it has no
     // money rail, so a subscription would only be a bill nobody can or should pay.
     if (await this.isFiction(entity, tx)) throw new ReviewDemoMoneyRefusedError();
+    // [BUG-HUNT F23] The one place a weekly fee row is born: no door starts a trial before ordering day.
+    if (!partnerApprovalsOpen()) throw noTrialBeforeOrderingDay();
     await requireIdentityAuthority(tx, human.userId);
     // decide also records explainable denials. Every read and write uses the
     // same locked transaction, so quarantine cannot race a punishment or grant.

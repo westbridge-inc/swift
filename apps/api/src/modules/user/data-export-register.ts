@@ -233,7 +233,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'userId', 'platform', 'isActive', 'createdAt', 'alertsVersion'],
   },
   {
-    category: 'verificationDocuments', model: 'VerificationDocument', by: ['userId'], key: 'id',
+    category: 'verificationDocuments', model: 'VerificationDocument', by: ['userId'], key: 'id', omit: { approvalHeldAt: 'SYSTEM' },
     fields: ['id', 'userId', 'role', 'docType', 'status', 'state', 'expiresAt', 'reviewNote', 'reviewedAt', 'insurerName', 'policyNumber', 'coverageClass', 'hireClassConfirmed', 'plateCrossChecked', 'consentAt', 'privacyNoticeVersion', 'retentionExpiresAt', 'purgedAt', 'createdAt', 'updatedAt', 'subjectId', 'imagePurgedAt'],
   },
   {
