@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { NAME_CHECKED_DOC_TYPES } from '../verification/doc-registry';
 
 /**
  * [BUG-HUNT F21 · COORD 4 Nov 2026] A verified driver could type another name and stay verified: passengers are told
@@ -7,9 +8,12 @@ import { AppError } from '../../utils/errors';
  * line prints the owner's name. GUARDRAILS s.8 rule 4: nothing is labelled verified unless a person checked it. Once a
  * person has approved a paper that carries the name, it changes only through a person (PUT /admin/users/:id/name).
  */
-export const NAME_CHECKED_DOC_TYPES: readonly string[] = ['national_id', 'owner_national_id', 'drivers_licence', 'hire_car_driver_licence', 'own_name_declaration'];
-
 export const NAME_LOCKED_WORDS = 'A person at Swift checked your name against your documents, so it can’t be changed here. To change it, contact Swift support: a person checks the new name first.';
+
+/** Support's door reads the current name, and the number the reserved-name rule needs. The number stops here. */
+export const personForNameChange = (db: Pick<PrismaClient, 'user'>, id: string) => db.user.findUnique({
+  where: { id }, select: { firstName: true, lastName: true, phone: true },
+});
 
 const sameName = (next: string | undefined, current: string | null) => next === undefined || next.trim() === (current ?? '').trim();
 

@@ -106,6 +106,7 @@ import { contactSearchHint, CUSTODY_CONTACT_PARTIES, holdsPersonContact, maskCas
 import { maskSubscription, maskUserPhone } from './person-contact';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
+import { personForNameChange } from '../user/legal-name';
 import { assertNameNotReserved, FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
@@ -1432,7 +1433,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.put('/users/:id/name', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const { firstName, lastName } = legalNameChangeSchema.parse(request.body ?? {});
-    const person = await app.prisma.user.findUnique({ where: { id }, select: { firstName: true, lastName: true, phone: true } });
+    const person = await personForNameChange(app.prisma, id);
     if (!person) throw new NotFoundError('User', id);
     const changed = [...(firstName !== person.firstName ? ['firstName'] : []), ...(lastName !== person.lastName ? ['lastName'] : [])];
     if (changed.length === 0) throw new AppError(409, 'NOTHING_TO_CHANGE', 'That is already the name on this account.');
