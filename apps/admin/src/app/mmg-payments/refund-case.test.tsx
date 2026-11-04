@@ -118,6 +118,20 @@ describe('recording a request on a payment', () => {
   });
 });
 
+describe('every read is recorded on the server, so it happens when asked', () => {
+  it('closing a payment and opening it again reads nothing twice', async () => {
+    const { fetchMock, user } = await openPayment({ one: refundCase() });
+    await screen.findByRole('region', { name: 'Refund request' });
+    const reads = () => requestsByMethod(fetchMock, 'GET').filter(([url]) => String(url).endsWith('/refund-case')).length;
+    expect(reads()).toBe(1);
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Refund request' })).toBeNull());
+    await user.click(await screen.findByRole('button', { name: `Open payment ${row.swiftReference}` }));
+    await screen.findByRole('region', { name: 'Refund request' });
+    expect(reads()).toBe(1);
+  });
+});
+
 describe('a request already recorded', () => {
   it('open: the due date, no form, and no way to close it here', async () => {
     await openPayment({ one: refundCase() });

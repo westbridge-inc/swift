@@ -341,7 +341,7 @@ const OVERDUE = <span className="mc-badge mc-tone-warn">Overdue</span>;
 
 /** [Row 156] What is waiting, so the page an overdue alert points to can show it. Read when the page opens, never on a timer. */
 function RefundCases({ onOpen }: { onOpen: (_checkoutId: string) => void }) {
-  const cases = useQuery({ queryKey: ['fee-refund-cases'], queryFn: () => fetchFeeRefundCases('OPEN'), refetchOnWindowFocus: false });
+  const cases = useQuery({ queryKey: ['fee-refund-cases'], queryFn: () => fetchFeeRefundCases('OPEN'), refetchOnWindowFocus: false, staleTime: Infinity });
   if (cases.isPending) return null;
   if (cases.isError) return <div className="mb-6"><QueryFailed error={cases.error} what="the refund requests" onRetry={() => void cases.refetch()} retrying={cases.isFetching} /></div>;
   const rows = cases.data.data;
@@ -370,7 +370,8 @@ function RefundCasePanel({ checkoutId }: { checkoutId: string }) {
   const qc = useQueryClient();
   const [kind, setKind] = useState<FeeRefundKind | null>(null);
   const [reason, setReason] = useState('');
-  const view = useQuery({ queryKey: ['fee-refund-case', checkoutId], queryFn: () => fetchFeeRefundCase(checkoutId), refetchOnWindowFocus: false });
+  // Every read is recorded on the server, as the payment detail's is: read when asked.
+  const view = useQuery({ queryKey: ['fee-refund-case', checkoutId], queryFn: () => fetchFeeRefundCase(checkoutId), refetchOnWindowFocus: false, staleTime: Infinity });
   const record = useMutation({
     mutationFn: () => openFeeRefundCase(checkoutId, kind as FeeRefundKind, reason.trim()),
     onSuccess: () => {

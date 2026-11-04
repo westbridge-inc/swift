@@ -476,8 +476,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /billing/mmg-fee-reversals/:id/check': c('C2', 'billing.mmg.reverse.check'),
   // [Row 156] A partner asked for a weekly-fee payment back: a clock and a record, no money. A reason, one person; the
   // return itself stays the C4 above. A case closes only on a REVERSED reversal, never from here.
-  'GET /billing/fee-refund-cases': c('C0', 'billing.read'),
-  'GET /billing/mmg-checkouts/:id/refund-case': c('C0', 'billing.read'),
+  'GET /billing/fee-refund-cases': c('C1', 'billing.mmg.read'),
+  'GET /billing/mmg-checkouts/:id/refund-case': c('C1', 'billing.mmg.read'),
   'POST /billing/mmg-checkouts/:id/refund-case': c('C3', 'billing.mmg.refund.case'),
   // [DS1112] A person closes a HELD return on MMG's evidence: money (C4).
   'POST /billing/mmg-fee-reversals/:id/resolve': c('C4', 'billing.mmg.reverse.resolve', E.feeReversal),

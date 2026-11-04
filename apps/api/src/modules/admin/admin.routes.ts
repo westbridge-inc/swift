@@ -6080,13 +6080,22 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/billing/fee-refund-cases', { preHandler: [adminGuard] }, async (request) => {
     const tenantId = requireTenantId();
     const { state } = z.object({ state: z.enum(['OPEN', 'REFUNDED']).optional() }).parse(request.query);
-    return { success: true, data: await listFeeRefundCases(app.prisma, { tenantId, ...(state ? { state } : {}) }) };
+    const rows = await listFeeRefundCases(app.prisma, { tenantId, ...(state ? { state } : {}) });
+    // A partner's payment and what they said, as the payment detail is: every read recorded, ids only, never the words.
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: { queryType: 'REFUND_CASES', matchedIds: rows.map((row) => row.id).join(','), matchedCount: rows.length, stateFilter: state ?? null },
+    });
+    return { success: true, data: rows };
   });
 
   app.get('/billing/mmg-checkouts/:id/refund-case', { preHandler: [adminGuard] }, async (request) => {
     const tenantId = requireTenantId();
     const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
-    return { success: true, data: await feeRefundCaseOf(app.prisma, { tenantId, checkoutId: id }) };
+    const row = await feeRefundCaseOf(app.prisma, { tenantId, checkoutId: id });
+    await auditWithin(app.prisma, request as unknown as AuditRequestLike, app.prefix, {
+      extra: { queryType: 'REFUND_CASE', checkoutId: id, matchedIds: row?.id ?? '', matchedCount: row ? 1 : 0 },
+    });
+    return { success: true, data: row };
   });
 
   app.post('/billing/mmg-checkouts/:id/refund-case', { preHandler: [adminGuard] }, async (request) => {

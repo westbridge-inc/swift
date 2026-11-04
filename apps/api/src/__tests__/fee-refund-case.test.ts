@@ -13,6 +13,7 @@ import { runWithTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
+import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
@@ -302,6 +303,28 @@ describe('[Row 156 2] recording the ask', () => {
     expect(list.json().data.map((c: { checkoutId: string }) => c.checkoutId)).toContain(p.checkoutId);
     const none = await paidCheckout();
     expect((await app.inject({ method: 'GET', url: ROUTE(none.checkoutId), headers: headers() })).json().data).toBeNull();
+  });
+
+  it('reading one is a sensitive read: on the payment-detail capability, recorded with ids only, never what the partner said', async () => {
+    expect(ADMIN_ROUTE_AUTHORITY['GET /billing/fee-refund-cases']).toMatchObject({ cls: 'C1', capability: 'billing.mmg.read' });
+    expect(ADMIN_ROUTE_AUTHORITY['GET /billing/mmg-checkouts/:id/refund-case']).toMatchObject({ cls: 'C1', capability: 'billing.mmg.read' });
+    const p = await paidCheckout();
+    await open(p.checkoutId);
+    const row = await caseOf(p.checkoutId);
+    const read = { authorization: `Bearer ${admin.token}` };
+    expect((await app.inject({ method: 'GET', url: ROUTE(p.checkoutId), headers: read })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/admin/billing/fee-refund-cases?state=OPEN', headers: read })).statusCode).toBe(200);
+    const rowsOf = (queryType: string) => runWithoutTenant(() => app.prisma.auditLog.findMany({ where: { userId: admin.userId, changes: { path: ['queryType'], equals: queryType } }, orderBy: { createdAt: 'desc' }, take: 1 }), 'test-read:fee-refund-case');
+    const [one] = await rowsOf('REFUND_CASE');
+    const [list] = await rowsOf('REFUND_CASES');
+    expect(one!.changes).toMatchObject({ checkoutId: p.checkoutId, matchedIds: row.id, matchedCount: 1 });
+    expect((list!.changes as { matchedIds: string }).matchedIds).toContain(row.id);
+    for (const audit of [one!, list!]) expect(JSON.stringify(audit.changes)).not.toContain(REASON);
+
+    const none = await paidCheckout();
+    expect((await app.inject({ method: 'GET', url: ROUTE(none.checkoutId), headers: read })).json().data).toBeNull();
+    const [empty] = await rowsOf('REFUND_CASE');
+    expect(empty!.changes).toMatchObject({ checkoutId: none.checkoutId, matchedIds: '', matchedCount: 0 });
   });
 
   it('one case per payment, even at the same moment', async () => {
