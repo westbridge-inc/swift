@@ -117,7 +117,10 @@ describe('an advertiser team grows by invitation and acceptance, never by a type
     expect(mine.statusCode).toBe(200);
     expect(mine.json().data).toEqual([expect.objectContaining({ advertiserId: a.id, companyName: a.companyName, role: 'ANALYST' })]);
     const notified = await app.prisma.notification.findMany({ where: { userId: invitee.userId } });
-    expect(notified.some((n) => (n.data as { kind?: string } | null)?.kind === 'ad_team_invite')).toBe(true);
+    const notice = notified.find((n) => (n.data as { kind?: string } | null)?.kind === 'ad_team_invite');
+    expect(notice).toBeTruthy();
+    // [ADS-ON · owner ruling, 3 Nov] Invitations are answered on the website, so the notice says where.
+    expect(notice?.body).toContain('Accept or decline at swiftgy.com/advertiser.');
 
     const accepted = await post(`/api/v1/ads/advertiser/${a.id}/members/accept`, {}, invitee.token);
     expect(accepted.statusCode).toBe(200);
