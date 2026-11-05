@@ -229,46 +229,46 @@ export const RIDE_04: Journey<Ctx> = {
     rec.require('three riders online', riders(ctx).length >= 3, riders(ctx).join(','));
 
     // paid at the door, with the premature and foreign attempts refused
-    const g1 = await assignedExpress(rec, ctx, 'C1', 'ride04-paid');
+    const g1 = await assignedExpress(rec, ctx, 'C3', 'ride04-paid');
     rec.require('a rider holds the paid-case order', !!g1, '');
     const a = mover(ctx, g1!.riderId);
-    const C1 = ctx.roster.customers.C1!;
-    rec.deny('a handover before reaching the door', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'paid', gps: { lat: C1.lat, lng: C1.lng } }, a.session.token), [409], ['NOT_AT_DOOR']);
+    const C3 = ctx.roster.customers.C3!;
+    rec.deny('a handover before reaching the door', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'paid', gps: { lat: C3.lat, lng: C3.lng } }, a.session.token), [409], ['NOT_AT_DOOR']);
     await storeReadies(ctx, 'R1', g1!.orderId);
     rec.expect('rider travels to the door (5 transitions)', await riderToDoor(a.session, g1!.orderId), 200);
     const otherId = riders(ctx).find((id) => id !== g1!.riderId)!;
-    rec.deny('another rider cannot close this handover', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'paid', gps: { lat: C1.lat, lng: C1.lng } }, mover(ctx, otherId).session.token), [403, 404], ['NOT_YOUR_ORDER', 'NOT_FOUND']);
+    rec.deny('another rider cannot close this handover', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'paid', gps: { lat: C3.lat, lng: C3.lng } }, mover(ctx, otherId).session.token), [403, 404], ['NOT_YOUR_ORDER', 'NOT_FOUND']);
     rec.deny('a handover without GPS proof', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'paid' }, a.session.token), [400], ['VALIDATION_ERROR']);
-    rec.deny('a no-show claimed the moment the rider arrives', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'no_show', gps: { lat: C1.lat, lng: C1.lng } }, a.session.token), [409], ['NO_SHOW_TOO_EARLY']);
+    rec.deny('a no-show claimed the moment the rider arrives', await POST(`/rider/orders/${g1!.orderId}/handover`, { outcome: 'no_show', gps: { lat: C3.lat, lng: C3.lng } }, a.session.token), [409], ['NO_SHOW_TOO_EARLY']);
     rec.deny('cash orders cannot use the MMG completion path', await PUT(`/rider/orders/${g1!.orderId}/delivered`, {}, a.session.token), [409], ['PAYMENT_NOT_CAPTURED']);
     // [MKT-F057] The door PIN: the customer holds it while the goods are on
     // their way; the rider must be given it. Missing and wrong are refused
     // (a wrong try burns one of the five attempts).
-    const pin = await doorPin(C1.session, g1!.orderId);
+    const pin = await doorPin(C3.session, g1!.orderId);
     rec.check('the customer holds a 6-digit door PIN while the goods are on their way', !!pin && /^\d{6}$/.test(pin), `pin ${pin ? 'present' : 'absent'}`);
-    rec.deny('a paid handover without the customer’s PIN', await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng }), [400], ['MISSING_PIN']);
-    rec.deny('a paid handover with the wrong PIN', await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng }, pin === '000000' ? '111111' : '000000'), [400], ['INVALID_PIN']);
-    const paid = await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng }, pin);
+    rec.deny('a paid handover without the customer’s PIN', await handoverPaid(a.session, g1!.orderId, { lat: C3.lat, lng: C3.lng }), [400], ['MISSING_PIN']);
+    rec.deny('a paid handover with the wrong PIN', await handoverPaid(a.session, g1!.orderId, { lat: C3.lat, lng: C3.lng }, pin === '000000' ? '111111' : '000000'), [400], ['INVALID_PIN']);
+    const paid = await handoverPaid(a.session, g1!.orderId, { lat: C3.lat, lng: C3.lng }, pin);
     rec.expect('cash paid at the door with GPS and the PIN', paid, 200, undefined, `status=${paid.json?.data?.status}`);
-    const done = await customerOrder(C1.session, g1!.orderId);
+    const done = await customerOrder(C3.session, g1!.orderId);
     rec.check('the customer sees DELIVERED and a captured cash payment', done?.status === 'DELIVERED' && done?.paymentStatus === 'CAPTURED', `status=${done?.status} payment=${done?.paymentStatus}`);
-    const replay = await handoverPaid(a.session, g1!.orderId, { lat: C1.lat, lng: C1.lng }, pin);
-    const afterReplay = await customerOrder(C1.session, g1!.orderId);
+    const replay = await handoverPaid(a.session, g1!.orderId, { lat: C3.lat, lng: C3.lng }, pin);
+    const afterReplay = await customerOrder(C3.session, g1!.orderId);
     rec.check('a repeated handover answers the same facts and changes nothing', (replay.ok || [400, 409].includes(replay.status)) && afterReplay?.status === 'DELIVERED' && afterReplay?.paymentStatus === 'CAPTURED' && afterReplay?.deliveredAt === done?.deliveredAt,
       `→ ${brief(replay)} status=${afterReplay?.status} payment=${afterReplay?.paymentStatus} deliveredAt unchanged=${afterReplay?.deliveredAt === done?.deliveredAt}`);
     const earn = await GET('/rider/earnings/today', a.session.token);
     rec.check('the delivery fee is in the rider’s earnings', earn.ok && JSON.stringify(earn.json?.data ?? '').length > 2, `→ ${brief(earn)}`);
 
     // cash refusal (a fresh customer: a refusal strikes the account)
-    const cust = await freshCustomer(ctx, 'ride04-refuser', C1.lat, C1.lng);
+    const cust = await freshCustomer(ctx, 'ride04-refuser', C3.lat, C3.lng);
     rec.require('a fresh customer for the refusal case', !!cust, '');
-    ctx.roster.customers['RX'] = { id: 'RX', phone: '', session: cust!, lat: C1.lat, lng: C1.lng };
+    ctx.roster.customers['RX'] = { id: 'RX', phone: '', session: cust!, lat: C3.lat, lng: C3.lng };
     const g2 = await assignedExpress(rec, ctx, 'RX', 'ride04-refused');
     rec.require('a rider holds the refusal-case order', !!g2, '');
     const b = mover(ctx, g2!.riderId);
     await storeReadies(ctx, 'R1', g2!.orderId);
     rec.expect('rider reaches the door', await riderToDoor(b.session, g2!.orderId), 200);
-    const refused = await POST(`/rider/orders/${g2!.orderId}/handover`, { outcome: 'refused', gps: { lat: C1.lat, lng: C1.lng } }, b.session.token);
+    const refused = await POST(`/rider/orders/${g2!.orderId}/handover`, { outcome: 'refused', gps: { lat: C3.lat, lng: C3.lng } }, b.session.token);
     rec.expect('the customer refuses the cash handover', refused, 200, undefined, `status=${refused.json?.data?.status} claim=${JSON.stringify(refused.json?.data?.claim ?? null)}`);
     const failed = await customerOrder(cust!, g2!.orderId);
     rec.check('the order ends FAILED', failed?.status === 'FAILED', `status=${failed?.status}`);

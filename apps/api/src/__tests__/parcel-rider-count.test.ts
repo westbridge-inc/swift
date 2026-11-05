@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -186,6 +188,13 @@ describe('[FULL-LAUNCH] a parcel and the riders online', () => {
     expect(await count()).toBe(0);
     await rider(at, 1_200, { riderType: 'DELIVERY' });
     expect(await count()).toBe(1);
+  });
+
+  it('the phone counts both new refusals as "nothing was written", so they do not pile up unresolved attempts', () => {
+    const hook = readFileSync(join(process.cwd(), '../mobile/src/hooks/courier.ts'), 'utf8');
+    const refused = hook.slice(hook.indexOf('COURIER_REFUSED_WROTE_NOTHING = new Set(['), hook.indexOf(']);', hook.indexOf('COURIER_REFUSED_WROTE_NOTHING = new Set([')));
+    expect(refused).toContain("'DELIVERY_NO_RIDERS'");
+    expect(refused).toContain("'VELOCITY_LIMIT'");
   });
 
   it('a read that fails says nothing: the parcel goes ahead', async () => {

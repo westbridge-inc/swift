@@ -56,7 +56,7 @@ export const NOTIF_02: Journey<Ctx> = {
   cases: 'push; unread realert; SMS fallback; provider failure/retry',
   async run(rec, ctx) {
     const R1 = ctx.roster.vendors.R1!;
-    const placed = await placeExpress(ctx, 'C6', 'R1', 'R1', 'notif02');
+    const placed = await placeExpress(ctx, 'C8', 'R1', 'R1', 'notif02');
     rec.expect('an express order raises a new-order alert for the store', placed.res, [200, 201]);
     const id = placed.id!;
     const pending = await waitFor(async () => {
@@ -73,7 +73,7 @@ export const NOTIF_02: Journey<Ctx> = {
     rec.expect('the store acknowledges by accepting', await storeAccepts(ctx, 'R1', id), 200);
     const cleared = await GET('/vendor/alerts/pending', R1.session.token);
     rec.check('accepting clears the pending alert', !JSON.stringify(cleared.json?.data ?? []).includes(id), '');
-    await POST(`/customer/orders/${id}/cancel`, { reason: 'journey cleanup' }, ctx.roster.customers.C6!.session.token);
+    await POST(`/customer/orders/${id}/cancel`, { reason: 'journey cleanup' }, ctx.roster.customers.C8!.session.token);
     void customerOrder; void brief;
     rec.skipAll('the defining cases — push delivery, the SMS fallback and provider failure/retry — are not observable here: NOTIFICATION_PROVIDER=dev and PUSH_PROVIDER dev/expo keep sends in process memory (no delivery log, no DB row), so only the alert’s pending state and the operator health counts can be proven. Phase B (Twilio + push credentials) and physical phones prove the rest');
   },
