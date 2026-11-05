@@ -2,7 +2,7 @@ import {
   Activity, FileCheck2, Stamp, Flag, LifeBuoy, PackageOpen, ShieldAlert,
   Users, Store, Bike, Car, ShoppingCart,
   RefreshCw, DollarSign, Receipt, Banknote, Tag, ShieldCheck,
-  Radar, Headphones, Scale, ListRestart, Megaphone, BellRing,
+  Radar, Headphones, Scale, ListRestart, Megaphone, BellRing, Siren,
   FileText, Globe, Map, Settings, Compass, Fingerprint, Megaphone as AdsIcon, Truck,
   type LucideIcon,
 } from 'lucide-react';
@@ -88,6 +88,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Live Ops', href: '/ops', icon: Radar, blurb: 'Movers and orders on the road now', keywords: 'live map dispatch' },
       // [RIDER-SAFE 5/6] When riders run short: free riders vs waiting orders, Swift's delivery pause, late orders.
       { label: 'Delivery', href: '/delivery', icon: Truck, blurb: 'Riders vs waiting orders, the delivery pause, and late orders', keywords: 'riders short pause sla late backlog' },
+      // [SAFETY BOARD] Who asked for help and where; the cases, and the only lift for a safety suspension.
+      { label: 'Safety', href: '/safety', icon: Siren, blurb: 'Open SOS alerts and safety cases', keywords: 'sos emergency incident case suspended lift interim war room' },
       // [DRILL-STORM] An SOS or ops page keeps re-paging until a person acknowledges it here.
       { label: 'Ops alerts', href: '/ops-alerts', icon: BellRing, blurb: 'SOS and operations pages waiting for a person to acknowledge them', keywords: 'sos page acknowledge drill on-call escalation paging' },
       { label: 'Support', href: '/support', icon: Headphones, blurb: 'Help tickets from customers and partners', keywords: 'tickets help' },

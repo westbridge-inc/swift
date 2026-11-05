@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { beforeEach, describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { Order, UserRole } from '@prisma/client';
@@ -15,6 +15,7 @@ import { OrderService, SCHEDULED_PREP_LEAD_MINUTES, preparationMayStart } from '
 import { ORDER_TRANSITIONS, STORE_ACCEPT_PATH } from '../modules/order/order-status';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { freshOrderPlaceBudget } from './helpers/order-place-budget';
 
 // ---------------------------------------------------------------------------
 // [O-3 · owner 22 Oct 2026] "After Accept they should not have to tap again for
@@ -150,6 +151,8 @@ async function purgeFixtures() {
     } while (cursor !== '0');
   });
 }
+
+beforeEach(() => freshOrderPlaceBudget(app.redis));
 
 beforeAll(async () => {
   vi.stubEnv('STORE_MMG_PAY_LINK', '');

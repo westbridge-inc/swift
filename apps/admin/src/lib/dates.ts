@@ -27,6 +27,7 @@ const fmt = (options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat('en
 const DAY = fmt({ day: 'numeric', month: 'short', year: 'numeric' });
 const DAY_TIME = fmt({ day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const TIME = fmt({ hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const CLOCK = fmt({ hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const LONG_DAY = fmt({ weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 const CALENDAR_DAY = new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', day: 'numeric', month: 'short', year: 'numeric' });
 
@@ -44,6 +45,8 @@ export const gyDate = (value: DateInput): string => {
 export const gyDateTime = (value: DateInput): string => { const d = instant(value); return d ? DAY_TIME.format(d) : '—'; };
 /** "15:04" */
 export const gyTime = (value: DateInput): string => { const d = instant(value); return d ? TIME.format(d) : '—'; };
+/** "15:04:32": when a read that a person relies on came back. */
+export const gyClock = (value: DateInput): string => { const d = instant(value); return d ? CLOCK.format(d) : '—'; };
 /** "Tuesday 27 October 2026" — the Today page's heading. */
 export const gyLongDate = (value: DateInput): string => { const d = instant(value); return d ? LONG_DAY.format(d) : '—'; };
 /** A Guyana calendar day the server sent as "YYYY-MM-DD" (DASH-06 buckets): "23 Aug 2026" in every zone. Anchored at

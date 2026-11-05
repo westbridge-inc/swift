@@ -121,19 +121,19 @@ export const ADMIN_03: Journey<Ctx> = {
   title: 'Admin cancel / refund-settled',
   cases: 'cancel/refund obligation; duplicate refusal; reconciliation',
   async run(rec, ctx) {
-    const C5 = ctx.roster.customers.C5!, OV1 = ctx.roster.vendors.OV1!, item = ctx.world.items.OV1;
+    const C7 = ctx.roster.customers.C7!, OV1 = ctx.roster.vendors.OV1!, item = ctx.world.items.OV1;
     rec.require('OV1 orderable', !!item, '');
-    const placed = await placeOrder(C5.session, OV1.vendorId!, item!.itemId, OV1.lat, OV1.lng, { pickup: true, key: idemKey(ctx.runId, 'admin03') });
+    const placed = await placeOrder(C7.session, OV1.vendorId!, item!.itemId, OV1.lat, OV1.lng, { pickup: true, key: idemKey(ctx.runId, 'admin03') });
     const id = orderIdsOf(placed)[0];
     rec.require('an order to cancel', !!id, brief(placed));
-    rec.deny('a customer cannot use the admin cancel', await req('PUT', `/admin/orders/${id}/cancel`, { token: C5.session.token, body: { reason: 'x' } }), [403]);
+    rec.deny('a customer cannot use the admin cancel', await req('PUT', `/admin/orders/${id}/cancel`, { token: C7.session.token, body: { reason: 'x' } }), [403]);
     rec.deny('an admin cancel without a stated reason (ADM-006)', await req('PUT', `/admin/orders/${id}/cancel`, { token: ctx.admin.token, body: {} }), [400], ['VALIDATION_ERROR']);
     const cancel = await asAdmin(ctx.admin.token, 'cancel a synthetic order and record the refund owed', 'PUT', `/admin/orders/${id}/cancel`, { reason: 'Store could not fulfil (journey)', refund: true });
     rec.expect('the operator cancels and records a refund obligation', cancel, 200, undefined, `refundOwed=${cancel.json?.data?.refundOwed}`);
     const o = (await GET(`/admin/orders/${id}`, ctx.admin.token)).json?.data;
     rec.check('the obligation is on the order (amount = total)', Number(o?.refundOwedAmount) > 0 && Number(o?.refundOwedAmount) === Number(o?.totalAmount) && !!o?.refundOwedAt,
       `refundOwedAmount=${o?.refundOwedAmount} total=${o?.totalAmount} refundOwedAt=${o?.refundOwedAt}`);
-    const cust = await customerOrder(C5.session, id!);
+    const cust = await customerOrder(C7.session, id!);
     rec.check('the customer sees the cancellation', cust?.status === 'CANCELLED', `status=${cust?.status}`);
     rec.deny('a second cancel of the same order', await asAdmin(ctx.admin.token, 'cancel the synthetic order again', 'PUT', `/admin/orders/${id}/cancel`, { reason: 'duplicate', refund: true }), [400], ['INVALID_STATUS']);
 
@@ -210,7 +210,7 @@ export const ADMIN_05: Journey<Ctx> = {
     rec.check('the user reads BANNED', (u?.status ?? u?.user?.status) === 'BANNED', `status=${u?.status ?? u?.user?.status}`);
 
     // active-job denial: a rider holding a delivery cannot be suspended
-    const placed = await placeExpress(ctx, 'C4', 'R1', 'R1', 'admin05-job');
+    const placed = await placeExpress(ctx, 'C7', 'R1', 'R1', 'admin05-job');
     if (rec.expect('an express delivery for the active-job case', placed.res, [200, 201]) && placed.id) {
       await storeAccepts(ctx, 'R1', placed.id);
       const got = await pollOffer(ctx, placed.id, onlineOf(ctx, 'rider'));
@@ -229,8 +229,8 @@ export const ADMIN_05: Journey<Ctx> = {
       rec.expect('the operator features the store', await asAdmin(ctx.admin.token, 'feature a synthetic store', 'PUT', `/admin/vendors/${R3.vendorId}/feature`, { featured: true }), 200);
       rec.expect('and un-features it', await asAdmin(ctx.admin.token, 'unfeature a synthetic store', 'PUT', `/admin/vendors/${R3.vendorId}/feature`, { featured: false }), 200);
       rec.expect('the operator suspends the store', await asAdmin(ctx.admin.token, 'suspend a synthetic store', 'PUT', `/admin/vendors/${R3.vendorId}/suspend`, { reason: 'Journey: store suspension drill' }), 200);
-      const C6 = ctx.roster.customers.C6!;
-      const blocked = await placeOrder(C6.session, R3.vendorId, item.itemId, R3.lat, R3.lng, { pickup: true });
+      const C8 = ctx.roster.customers.C8!;
+      const blocked = await placeOrder(C8.session, R3.vendorId, item.itemId, R3.lat, R3.lng, { pickup: true });
       rec.deny('customers cannot order from a suspended store', blocked, [400], ['VENDOR_UNAVAILABLE', 'VENDOR_CLOSED']);
       // A suspension leaves the doors flag as it was: closing is always allowed, OPENING needs an ACTIVE store.
       let flip = await req('PUT', '/vendor/vendor/toggle-open', { token: R3.session.token, body: {} });
@@ -248,9 +248,9 @@ export const ADMIN_05: Journey<Ctx> = {
         let r = await PUT(path, {}, t);
         if (r.json?.data?.[field] === false) r = await PUT(path, {}, t);
       }
-      const ok = await placeOrder(C6.session, R3.vendorId, item.itemId, R3.lat, R3.lng, { pickup: true, key: idemKey(ctx.runId, 'admin05-after') });
+      const ok = await placeOrder(C8.session, R3.vendorId, item.itemId, R3.lat, R3.lng, { pickup: true, key: idemKey(ctx.runId, 'admin05-after') });
       rec.expect('customers can order again after reinstatement', ok, [200, 201]);
-      for (const oid of orderIdsOf(ok)) await POST(`/customer/orders/${oid}/cancel`, { reason: 'journey cleanup' }, C6.session.token);
+      for (const oid of orderIdsOf(ok)) await POST(`/customer/orders/${oid}/cancel`, { reason: 'journey cleanup' }, C8.session.token);
     } else {
       rec.check('R3 provisioned for the store case', false, ctx.world.notReady.R3 ?? '');
     }

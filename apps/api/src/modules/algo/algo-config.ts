@@ -150,6 +150,9 @@ export const ALGO_DEFAULTS = {
     // [SEC-TRUST F16] a referral code is redeemed once per person: a few tries an hour is generous
     'referral.redeem': { max: 10, perSeconds: 3_600, clusterMax: 30 },
     'return.request': { max: 5, perSeconds: 86_400, clusterMax: 10 },
+    // [FULL-LAUNCH · owner ruling 5 Nov 2026] Orders placed, a store order or a parcel alike: 6 an hour for one person,
+    // 12 an hour across a linked identity cluster. Never the IP: Guyana's carriers put many customers behind one address.
+    'order.place': { max: 6, perSeconds: 3_600, clusterMax: 12 },
     // [R048-007] the money surfaces: a pay link is changed a handful of times a day at most,
     // and these fail CLOSED when the control is unavailable (integrity/velocity.ts)
     'money.mmg-link': { max: 5, perSeconds: 86_400, clusterMax: 10 },

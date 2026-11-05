@@ -1082,7 +1082,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
             tenantId: stuck.tenantId,
             title: 'URGENT: SOS ACTIVE with no ops page delivered',
-            body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
+            body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the Safety page in Mission Control and respond now; the worker keeps retrying.`,
             data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
           }),
         ).catch(() => {});

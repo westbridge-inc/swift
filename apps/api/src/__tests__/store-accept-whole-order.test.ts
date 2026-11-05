@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { beforeEach, describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -18,6 +18,7 @@ import { OrderService } from '../modules/order/order.service';
 import { ONLY_ITEM_LEFT_COPY } from '../modules/order/substitution-view';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { freshOrderPlaceBudget } from './helpers/order-place-budget';
 
 // ---------------------------------------------------------------------------
 // [O-4 · owner 22 Oct 2026] "Accept the whole order without ticking each item;
@@ -173,6 +174,8 @@ async function purgeFixtures() {
     } while (cursor !== '0');
   });
 }
+
+beforeEach(() => freshOrderPlaceBudget(app.redis));
 
 beforeAll(async () => {
   vi.stubEnv('STORE_MMG_PAY_LINK', '');

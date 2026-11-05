@@ -110,6 +110,8 @@ export function vehicleCanCarry(vehicleType: string, size: string | null | undef
 const BASE_RADIUS_KM = 5;
 const RADIUS_STEP_KM = 5;
 const MAX_ROUNDS = 3;
+/** The farthest a search reaches: its last round's radius. */
+export const DISPATCH_WIDEST_RADIUS_KM = BASE_RADIUS_KM + (MAX_ROUNDS - 1) * RADIUS_STEP_KM;
 /** One automatic re-sweep after exhaustion — supply changes by the minute. */
 export const REDISPATCH_DELAY_MS = 90_000;
 /** Express orders retry the sweep sooner too. */

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { beforeEach, describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { OrderStatus, UserRole } from '@prisma/client';
@@ -15,6 +15,7 @@ import { BookingService } from '../modules/booking/booking.service';
 import { vendorResponseSlaMinutes } from '../modules/order/response-sla';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { RatingService } from '../modules/rating/rating.service';
+import { freshOrderPlaceBudget } from './helpers/order-place-budget';
 
 // ---------------------------------------------------------------------------
 // the locked order lifecycle. Hardest paths: the state
@@ -144,6 +145,8 @@ function nextGuyana(dayOfWeek: number, hours: number, minutes: number): Date {
 }
 
 let customer: { userId: string; token: string };
+
+beforeEach(() => freshOrderPlaceBudget(app.redis));
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';

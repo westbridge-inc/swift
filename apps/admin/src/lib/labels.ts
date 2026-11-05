@@ -147,6 +147,19 @@ export const ENUM_LABELS = {
   AdCreativeStatus: {
     PENDING: 'Waiting for review', APPROVED: 'Approved', REJECTED: 'Rejected',
   },
+  SosStatus: {
+    TRIGGER_PENDING: 'In the grace window', ACTIVE: 'Live', ACKNOWLEDGED: 'Acknowledged', RESOLVED: 'Resolved', CANCELLED: 'Cancelled',
+  },
+  SosTriggerSource: {
+    BUTTON: 'SOS button', CHECKIN_TIMEOUT: 'Missed safety check-in', GUARDIAN_ESCALATION: 'Trip monitoring', OPS_MANUAL: 'Raised by staff',
+  },
+  SosResolutionCode: {
+    SAFE_CONFIRMED: 'Confirmed safe', POLICE_INVOLVED: 'Police involved', MEDICAL: 'Medical help', FALSE_ALARM: 'False alarm', ABUSE: 'Abuse by the other person',
+    UNREACHABLE_CLOSED: 'Could not reach them',
+  },
+  IncidentStatus: {
+    OPEN: 'Waiting for acknowledgement', TRIAGED: 'Acknowledged', INVESTIGATING: 'Being investigated', DECIDED: 'Decided', CLOSED: 'Closed',
+  },
 } as const satisfies Record<string, Record<string, string>>;
 
 export type EnumName = keyof typeof ENUM_LABELS;
@@ -186,6 +199,8 @@ const TONES: Partial<Record<EnumName, Record<string, Tone>>> = {
   AdvertiserStatus: { PENDING_REVIEW: 'warn', APPROVED: 'good', REJECTED: 'bad', SUSPENDED: 'bad' },
   AdCreativeStatus: { PENDING: 'warn', APPROVED: 'good', REJECTED: 'bad' },
   ReportStatus: { PENDING: 'warn', REVIEWING: 'info', ACTIONED: 'good', DISMISSED: 'neutral' },
+  SosStatus: { TRIGGER_PENDING: 'warn', ACTIVE: 'bad', ACKNOWLEDGED: 'info', RESOLVED: 'good', CANCELLED: 'neutral' },
+  IncidentStatus: { OPEN: 'warn', TRIAGED: 'info', INVESTIGATING: 'info', DECIDED: 'good', CLOSED: 'neutral' },
 };
 
 export function statusTone(group: EnumName, value: string | null | undefined): Tone {
