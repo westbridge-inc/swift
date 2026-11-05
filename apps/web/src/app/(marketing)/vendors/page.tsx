@@ -26,7 +26,7 @@ const DASHBOARD = [
   {
     icon: Boxes,
     title: 'Inventory that keeps up',
-    body: 'Add items one at a time, import a spreadsheet, or upload a PDF menu (a typed one, not a photo or a scan). Sold-out hides instantly and comes back when you restock — and a live order holding that item asks the customer to swap rather than silently dropping it.',
+    body: 'Add items one at a time or import a spreadsheet. In the Swift app you can also upload a typed PDF menu (not a photo or a scan). Sold-out hides instantly and comes back when you restock — and a live order holding that item asks the customer to swap rather than silently dropping it.',
   },
   {
     icon: LineChart,

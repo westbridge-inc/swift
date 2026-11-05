@@ -22,10 +22,11 @@ function sources(dir: string, out: string[] = []): string[] {
 }
 
 describe('[FULL-LAUNCH] the public words are true on the day', () => {
-  it('For businesses claims only the menu import that exists: a PDF with real text, never a photo', () => {
+  it('For businesses claims only the menu import that exists, where it exists: a typed PDF in the app, never a photo', () => {
     const page = read('app/(marketing)/vendors/page.tsx');
     expect(page).not.toMatch(/photograph a paper menu|let Swift read it/i);
-    expect(page).toContain('upload a PDF menu (a typed one, not a photo or a scan)');
+    // The list is headed "runs today on the web"; the PDF import is the phone's, so the sentence says where it works.
+    expect(page).toContain('Add items one at a time or import a spreadsheet. In the Swift app you can also upload a typed PDF menu (not a photo or a scan).');
   });
 
   it('no customer or partner page says "during the pilot"', () => {

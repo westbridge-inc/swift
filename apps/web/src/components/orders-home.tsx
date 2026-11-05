@@ -282,7 +282,7 @@ export function NotLiveGuide({ store, manager, owner }: { store: HubStore; manag
             <GuideRow key={step.words} index={i + 1} label={step.words} href={step.where === 'documents' ? '/dashboard/documents' : '/dashboard/settings'}
               detail={step.where === 'documents' ? 'A person at Swift checks each one' : 'In your store’s Settings'} />
           ))}
-          {emptyCatalogue && <GuideRow index={steps.length + 1} label="Add your menu once you’re approved" detail={`Your ${catalogue} opens for items then`} />}
+          {emptyCatalogue && <GuideRow index={steps.length + 1} label={`Add your ${catalogue} once you’re approved`} detail="You can add items then" />}
         </div>
       )}
       <p className="mt-4 text-sm opacity-90">{NOT_LIVE.wait}</p>

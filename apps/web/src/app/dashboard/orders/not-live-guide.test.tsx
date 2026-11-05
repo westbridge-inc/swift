@@ -13,18 +13,18 @@ import { NOT_LIVE } from '@/lib/first-steps';
 // ---------------------------------------------------------------------------
 
 type Role = 'OWNER' | 'MANAGER' | 'STAFF';
-interface Opts { role?: Role; status?: string; goLive?: unknown; items?: unknown[] }
+interface Opts { role?: Role; status?: string; goLive?: unknown; items?: unknown[]; vendorType?: string }
 
-function storeApi({ role = 'OWNER', status = 'PENDING_APPROVAL', goLive = { waitingFor: 'OWNER', steps: ['DOCUMENTS', 'PUBLISHED_PHONE'] }, items = [] }: Opts = {}) {
+function storeApi({ role = 'OWNER', status = 'PENDING_APPROVAL', goLive = { waitingFor: 'OWNER', steps: ['DOCUMENTS', 'PUBLISHED_PHONE'] }, items = [], vendorType = 'RESTAURANT' }: Opts = {}) {
   return mockApi(({ method, url }: ApiRequest) => {
     const path = url.pathname.replace('/api/v1', '');
     if (method !== 'GET') return { body: { success: true, data: {} } };
     if (path === '/vendor/stores') {
-      return { body: { success: true, data: { stores: [{ id: 'store-1', name: 'Sample Kitchen', vendorType: 'RESTAURANT', isCurrentlyOpen: false, acceptingOrders: false, city: null, isVerified: false }], selectedId: 'store-1', myRole: role } } };
+      return { body: { success: true, data: { stores: [{ id: 'store-1', name: 'Sample Kitchen', vendorType, isCurrentlyOpen: false, acceptingOrders: false, city: null, isVerified: false }], selectedId: 'store-1', myRole: role } } };
     }
     if (path === '/vendor/profile') {
       return { body: { success: true, data: { id: 'owner-1', userId: 'user-1', myRole: role, vendors: [{
-        id: 'store-1', name: 'Sample Kitchen', vendorType: 'RESTAURANT', status, isVerified: false, isCurrentlyOpen: false, acceptingOrders: false,
+        id: 'store-1', name: 'Sample Kitchen', vendorType, status, isVerified: false, isCurrentlyOpen: false, acceptingOrders: false,
         selfDeliveryEnabled: false, operatingHours: [], _count: { orders: 0, items: items.length }, goLive,
       }] } } };
     }
@@ -52,11 +52,20 @@ describe('[WEB-ONBOARDING] a store not live yet is told what is left, not that t
     expect(within(guide).getByText(NOT_LIVE.wait)).toBeTruthy();
     // [FULL-LAUNCH 5 Nov 2026] Items need an approved store (the API answers 403 before that): no door to the menu yet.
     expect(await within(guide).findByText('Add your menu once you’re approved')).toBeTruthy();
+    expect(within(guide).getByText('You can add items then')).toBeTruthy();
     expect(within(guide).queryByRole('link', { name: /menu|item/i })).toBeNull();
     expect(screen.queryByText('Add your first item')).toBeNull();
     expect(screen.queryByText('The board is live.')).toBeNull();
     expect(screen.queryByText('Use the switch below to start taking orders')).toBeNull();
     expect(screen.queryByText('Share your store link')).toBeNull();
+  });
+
+  it('a store with no menu is told its own word', async () => {
+    storeApi({ vendorType: 'SUPERMARKET' });
+    renderWithQuery(<OrdersPage />);
+    const guide = await screen.findByRole('region', { name: 'Your store is not live yet' });
+    expect(await within(guide).findByText('Add your products once you’re approved')).toBeTruthy();
+    expect(within(guide).queryByText(/your menu/i)).toBeNull();
   });
 
   it('Swift’s turn: everything is in, a person checks the store; no steps', async () => {
