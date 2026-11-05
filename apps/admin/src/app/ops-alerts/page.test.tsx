@@ -1,7 +1,11 @@
-import { screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { useState } from 'react';
+import { act, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider, focusManager, onlineManager } from '@tanstack/react-query';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import OpsAlertsPage from './page';
-import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
+import { retryUnlessRefused } from '@/lib/query-retry';
+import { CUT_BODIES, cutReads } from '@/test/cut-reads';
+import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiReply, type ApiRequest } from '@/test/test-utils';
 
 // ---------------------------------------------------------------------------
 // [DRILL-STORM · S-19] Ops alerts: the console's place to acknowledge a page.
@@ -182,5 +186,176 @@ describe('Ops alerts', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Run the drill' }));
     await waitFor(() => expect(ran).toBe(true));
     expect(await screen.findByText('The drill is out. Acknowledge it above when it reaches you.')).toBeTruthy();
+  });
+});
+
+// [REVIEW-M11] The page that stops the re-pages takes the Safety board's read rules. "Nothing is waiting for acknowledgement."
+// over a live SOS page is the same false all-clear: it is said only on a read of this visit, under 45 seconds old.
+describe('[LIVE READ] “Nothing is waiting” needs a recent read', () => {
+  const NONE = 'Nothing is waiting for acknowledgement.';
+  const PATH = '/api/v1/safety/ops-alerts';
+  type Read = unknown[] | ApiReply | 'network-down' | 'hangs';
+  const board = (ui = <OpsAlertsPage />) => renderWithQuery(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: retryUnlessRefused } } })}>{ui}</QueryClientProvider>,
+  );
+  const answer = (v: Read): ApiReply | Promise<ApiReply> => {
+    if (v === 'network-down') throw new TypeError('Failed to fetch');
+    if (v === 'hangs') return new Promise<ApiReply>(() => undefined);
+    return Array.isArray(v) ? { body: { success: true, data: v } } : v;
+  };
+  function serve(pages: Read = [], drills: Read = []) {
+    const state = { pages, drills };
+    const fetchMock = mockApi((r) => (r.url.pathname === PATH ? answer(state.pages) : answer(state.drills)));
+    return { fetchMock, state };
+  }
+  const reads = (fetchMock: ReturnType<typeof mockApi>) => fetchMock.mock.calls.filter(([url]) => new URL(String(url)).pathname === PATH);
+  const page = () => screen.findByRole('listitem', { name: 'URGENT: SOS ACTIVE' });
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+
+  describe.each(CUT_BODIES)('%s', (_name, cut) => {
+    it('with a page on screen: it stays, Acknowledge stays, and the screen says it was not read', async () => {
+      const { fetchMock } = serve([SOS]);
+      const cutting = cutReads(fetchMock, PATH, cut);
+      const { queryClient } = renderWithQuery(<OpsAlertsPage />);
+      await page();
+      cutting.on = true;
+      await act(() => queryClient.invalidateQueries({ queryKey: ['ops-alerts'] }));
+      expect(await screen.findByText(/Not read since/)).toBeTruthy();
+      expect(screen.queryByText(NONE)).toBeNull();
+      expect(within(await page()).getByRole('button', { name: 'Acknowledge…' })).toBeTruthy();
+    });
+    it('on the first read: a failed read, never “Nothing is waiting”', async () => {
+      const { fetchMock } = serve();
+      cutReads(fetchMock, PATH, cut).on = true;
+      renderWithQuery(<OpsAlertsPage />);
+      expect(await screen.findByText(/Couldn't load the ops alerts/)).toBeTruthy();
+      expect(screen.queryByText(NONE)).toBeNull();
+    });
+    it('failed drills: a failed read, never “No drill has failed.”', async () => {
+      const { fetchMock } = serve();
+      cutReads(fetchMock, '/api/v1/safety/ops-alerts/failed-drills', cut).on = true;
+      renderWithQuery(<OpsAlertsPage />);
+      expect(await screen.findByText(/Couldn't load the failed drills/)).toBeTruthy();
+      expect(screen.queryByText('No drill has failed.')).toBeNull();
+    });
+  });
+
+  it('a failed refresh keeps the pages and their button: an outage must not take away the way to stop a re-page', async () => {
+    const { state } = serve([SOS]);
+    const { queryClient } = renderWithQuery(<OpsAlertsPage />);
+    await page();
+    state.pages = { status: 500, body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred' } } };
+    await act(() => queryClient.invalidateQueries({ queryKey: ['ops-alerts'] }));
+    expect(await screen.findByText(/Not read since \d\d:\d\d:\d\d\. There may be a page waiting\./)).toBeTruthy();
+    expect(within(await page()).getByRole('button', { name: 'Acknowledge…' })).toBeTruthy();
+  });
+
+  it('a 429 keeps them too; a 403 takes them away, so no button stays', async () => {
+    const { state } = serve([SOS]);
+    const { queryClient } = renderWithQuery(<OpsAlertsPage />);
+    await page();
+    state.pages = { status: 429, body: { success: false, error: { code: 'RATE_LIMITED', message: 'Too many requests' } } };
+    await act(() => queryClient.invalidateQueries({ queryKey: ['ops-alerts'] }));
+    expect(await screen.findByText(/Not read since/)).toBeTruthy();
+    await page();
+    state.pages = { status: 403, body: { success: false, error: { code: 'FORBIDDEN', message: 'Only ops can list alerts.' } } };
+    await act(() => queryClient.invalidateQueries({ queryKey: ['ops-alerts'] }));
+    await waitFor(() => expect(screen.queryByRole('listitem', { name: 'URGENT: SOS ACTIVE' })).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Acknowledge…' })).toBeNull();
+    expect(screen.getByText('Only ops can list alerts.')).toBeTruthy();
+  });
+
+  describe('with the clock and the network under test', () => {
+    beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] }); });
+    afterEach(() => { vi.useRealTimers(); onlineManager.setOnline(true); focusManager.setFocused(undefined); });
+
+    it('prints when it was read, to the second', async () => {
+      serve();
+      board();
+      await screen.findByText(NONE);
+      expect(screen.getByText(/^Read at \d\d:\d\d:\d\d$/)).toBeTruthy();
+    });
+
+    it('the Wi-Fi drops after a good read: the read still runs, fails, and the line goes', async () => {
+      const { fetchMock, state } = serve();
+      board();
+      await screen.findByText(NONE);
+      const before = reads(fetchMock).length;
+      state.pages = 'network-down';
+      act(() => { onlineManager.setOnline(false); });
+      await advance(15_000);
+      expect(reads(fetchMock).length).toBeGreaterThan(before);
+      expect(screen.queryByText(NONE)).toBeNull();
+      expect(screen.getByText(/Not read since/)).toBeTruthy();
+    });
+
+    it('offline at first load: says so', async () => {
+      act(() => { onlineManager.setOnline(false); });
+      serve('network-down', 'network-down');
+      board();
+      expect(await screen.findByText(/Couldn't load the ops alerts/)).toBeTruthy();
+      expect(await screen.findByText(/Couldn't load the failed drills/)).toBeTruthy();
+    });
+
+    it('a read that hangs is given up on at 10 seconds', async () => {
+      const { fetchMock, state } = serve();
+      board();
+      await screen.findByText(NONE);
+      state.pages = 'hangs';
+      await advance(15_000);
+      const hung = reads(fetchMock).at(-1)!;
+      await advance(10_500);
+      expect((hung[1]?.signal as AbortSignal).aborted).toBe(true);
+      expect(screen.queryByText(NONE)).toBeNull();
+      expect(screen.getByText(/Not read since/)).toBeTruthy();
+    });
+
+    it('a hidden tab keeps reading, and a tab coming back reads at once', async () => {
+      const { fetchMock } = serve();
+      board();
+      await screen.findByText(NONE);
+      act(() => { focusManager.setFocused(false); });
+      const before = reads(fetchMock).length;
+      await advance(15_000);
+      expect(reads(fetchMock).length).toBe(before + 1);
+      act(() => { focusManager.setFocused(true); });
+      await waitFor(() => expect(reads(fetchMock).length).toBe(before + 2));
+    });
+
+    it('coming back to the page: no “Nothing is waiting” until this visit’s own read answers', async () => {
+      const { state } = serve();
+      let show: (_on: boolean) => void = () => undefined;
+      function Doors() { const [on, set] = useState(true); show = set; return on ? <OpsAlertsPage /> : null; }
+      board(<Doors />);
+      await screen.findByText(NONE);
+      act(() => show(false));
+      state.pages = 'hangs';
+      act(() => show(true));
+      expect(screen.queryByText(NONE)).toBeNull();
+      expect(screen.getByText('Reading the ops alerts…')).toBeTruthy();
+    });
+
+    it.each(['focus', 'pageshow', 'visibilitychange'])('a laptop waking on %s: the line goes at once', async (event) => {
+      const { state } = serve();
+      board();
+      await screen.findByText(NONE);
+      state.pages = 'hangs';
+      vi.setSystemTime(Date.now() + 60_000);
+      act(() => { (event === 'visibilitychange' ? document : window).dispatchEvent(new Event(event, { bubbles: true })); });
+      expect(screen.queryByText(NONE)).toBeNull();
+      expect(screen.getByText(/Not read since/)).toBeTruthy();
+    });
+
+    it('the page’s own clock takes the line away with no read and no event, and overdue runs on it', async () => {
+      const { state } = serve([{ ...SOS, ackDeadlineAt: new Date(Date.now() + 30_000).toISOString() }]);
+      board();
+      const card = await page();
+      expect(card.textContent).not.toContain('Overdue');
+      state.pages = 'hangs';
+      vi.setSystemTime(Date.now() + 60_000);
+      await advance(1_000);
+      expect(screen.getByText(/Not read since/)).toBeTruthy();
+      expect((await page()).textContent).toContain('Overdue since');
+    });
   });
 });

@@ -14,9 +14,11 @@ import {
 } from '@/lib/api';
 import { succeeded, type Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
+import { BOARD_READ, ListState, refusedRead, useNow } from '@/components/mc/LiveRead';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
-import { gyDateTime } from '@/lib/dates';
+import { gyClock, gyDateTime } from '@/lib/dates';
+import { sosReadFresh } from '@/lib/safetyView';
 
 // ---------------------------------------------------------------------------
 // [DRILL-STORM · S-19 · GUARDRAILS §3] OPS ALERTS — where a page is acknowledged.
@@ -108,13 +110,16 @@ export default function OpsAlertsPage() {
   const qc = useQueryClient();
   const dialog = useActionDialog();
   const [result, setResult] = useState<Outcome | null>(null);
-  const alerts = useQuery({ queryKey: ['ops-alerts'], queryFn: fetchOpsAlerts, refetchInterval: 15_000 });
-  const failed = useQuery({ queryKey: ['ops-alerts-failed-drills'], queryFn: fetchFailedDrills, retry: false });
-  const open: OpsAlertRow[] = alerts.data?.data ?? [];
+  const alerts = useQuery({ ...BOARD_READ, queryKey: ['ops-alerts'], queryFn: ({ signal }) => fetchOpsAlerts(signal), refetchInterval: 15_000 });
+  const failed = useQuery({ ...BOARD_READ, queryKey: ['ops-alerts-failed-drills'], queryFn: ({ signal }) => fetchFailedDrills(signal) });
+  const alertsRefused = alerts.isError && refusedRead(alerts.error);
+  // No rows once the server refuses the read, so no button; the last good rows if a refresh only failed.
+  const open: OpsAlertRow[] = alertsRefused ? [] : alerts.data?.data ?? [];
   const failedDrills: FailedDrillRow[] = failed.data?.data ?? [];
   // A tenant ADMIN is refused the platform's drills: the section is simply not theirs.
   const failedRefused = failed.isError && (failed.error as { status?: number }).status === 403;
-  const now = alerts.dataUpdatedAt || Date.now();
+  const now = useNow();
+  const readRecently = sosReadFresh(alerts.dataUpdatedAt, now);
 
   const done = (outcome: Outcome | null) => {
     if (!outcome) return;
@@ -149,17 +154,23 @@ export default function OpsAlertsPage() {
       <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-5" />
       <section aria-label="Waiting for acknowledgement" className="mb-6">
         <h2 className="text-lg font-semibold mb-2">Waiting for acknowledgement</h2>
-        {alerts.isLoading ? (
-          <div className="mc-card" aria-busy="true">Loading the pages…</div>
-        ) : alerts.isError ? (
-          <QueryFailed error={alerts.error} what="the ops alerts" onRetry={() => void alerts.refetch()} retrying={alerts.isFetching} />
-        ) : open.length === 0 ? (
-          <div className="mc-card">Nothing is waiting for acknowledgement.</div>
+        {alerts.dataUpdatedAt > 0 && !alertsRefused && (alerts.isError || !readRecently) ? (
+          <p role="alert" className="mc-note mc-note-bad mb-3">Not read since {gyClock(alerts.dataUpdatedAt)}. There may be a page waiting.</p>
         ) : (
+          <ListState query={alerts} what="the ops alerts" onRetry={() => void alerts.refetch()} />
+        )}
+        {alerts.isSuccess && readRecently && open.length === 0 ? (
+          <div className="mc-card" aria-busy={!alerts.isFetchedAfterMount || undefined}>
+            {/* An answer from before this visit is not an all-clear: this visit's own read has to come back. */}
+            {alerts.isFetchedAfterMount ? <><p>Nothing is waiting for acknowledgement.</p><p className="mc-muted text-xs">Read at {gyClock(alerts.dataUpdatedAt)}</p></> : <p>Reading the ops alerts…</p>}
+          </div>
+        ) : null}
+        {open.length > 0 ? (
           <ul className="space-y-3">
             {open.map((a) => <AlertRow key={a.id} alert={a} now={now} onDone={done} />)}
           </ul>
-        )}
+        ) : null}
+        {alerts.isSuccess && readRecently && open.length > 0 ? <p className="mc-muted text-xs mt-2">Read at {gyClock(alerts.dataUpdatedAt)}</p> : null}
       </section>
       {failedRefused ? null : (
         <section aria-label="Failed drills">

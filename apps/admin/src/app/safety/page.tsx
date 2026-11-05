@@ -1,21 +1,20 @@
 'use client';
 
-import { useEffect, useReducer, useRef, useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
-import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   SAFETY_LIST_LIMIT, acknowledgeSos, decideSafetyCase, errorStatus, fetchOrderDetail, fetchSafetyCases, fetchSafetySos, fetchUserDetail, resolveSos, revealUserPhone, workSafetyCase,
-  type Envelope,
 } from '@/lib/api';
 import { ENUM_LABELS, label } from '@/lib/labels';
 import { gyClock, gyDateTime, gyTime } from '@/lib/dates';
 import { succeeded } from '@/lib/outcome';
 import {
-  DECISION_WORDS, SOS_RESOLUTION_CODES, caseActions, categoryWords, clocksFor, interimWords, queueOrder, sosActions, sosGraceOver, sosNeedsYou, sosNotes, sosPosition, sosPressesNotShown, sosReadFresh, worstSla,
+  CASE_READ_FRESH_MS, DECISION_WORDS, SOS_RESOLUTION_CODES, caseActions, categoryWords, clocksFor, interimWords, queueOrder, sosActions, sosGraceOver, sosNeedsYou, sosNotes, sosPosition, sosPressesNotShown, sosReadFresh, worstSla,
   type CaseScope, type DecisionCode, type IncidentRow, type SlaClock, type SosResolutionCode, type SosRow,
 } from '@/lib/safetyView';
+import { BOARD_READ, ListState, refusedRead, useNow } from '@/components/mc/LiveRead';
 import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
-import { QueryFailed } from '@/components/mc/QueryFailed';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 
@@ -32,51 +31,7 @@ import { useActionRunner } from '@/components/mc/useActionRunner';
 // ---------------------------------------------------------------------------
 
 const PERSON_READ_MS = 5 * 60_000;
-/** The server said this account may not read: the cards go. Anything else (a 429, a 5xx, no network) leaves them on screen. */
-const refusedRead = (error: unknown) => { const status = errorStatus(error); return status === 401 || status === 403; };
-
-/** Keep reading: offline, behind a hidden tab, and at once on opening or coming back. A failure shows at once, not after retries. */
-const BOARD_READ = { networkMode: 'always', retry: false, staleTime: 0, refetchOnWindowFocus: 'always', refetchIntervalInBackground: true } as const;
-
-/** Now, kept current every second, and on the events a waking page may fire: which of them fires depends on the browser. */
-function useNow(): number {
-  const [, tick] = useReducer((n: number) => n + 1, 0);
-  useEffect(() => {
-    const timer = setInterval(tick, 1_000);
-    document.addEventListener('visibilitychange', tick);
-    window.addEventListener('focus', tick);
-    window.addEventListener('pageshow', tick);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', tick);
-      window.removeEventListener('focus', tick);
-      window.removeEventListener('pageshow', tick);
-    };
-  }, []);
-  return Date.now();
-}
-
 type Reveal = ReturnType<typeof usePhoneReveal>;
-type ListQuery<T> = UseQueryResult<Envelope<T[]>>;
-
-/** A list's first read, a refusal, a failed refresh, or the cap: said in words, never as an empty list. */
-function ListState<T>({ query, what, onRetry }: { query: ListQuery<T>; what: string; onRetry: () => void }) {
-  // With no data, each new read clears the error: the failure stays up while it runs, instead of flickering back to Loading.
-  const lastError = useRef<unknown>(null);
-  if (query.error) lastError.current = query.error;
-  if (query.isPending && !lastError.current) return <div className="mc-card" aria-busy="true">Loading {what}…</div>;
-  if (query.isPending || (query.isError && (refusedRead(query.error) || !query.data))) {
-    return <QueryFailed error={query.error ?? lastError.current} what={what} onRetry={onRetry} retrying={query.isFetching} className="mb-3" />;
-  }
-  if (query.isError) {
-    return <p role="alert" className="mc-note mc-note-bad mb-3">This list could not refresh. It shows what it last read at {gyTime(query.dataUpdatedAt)}.</p>;
-  }
-  if ((query.data?.data.length ?? 0) >= SAFETY_LIST_LIMIT) {
-    return <p className="mc-note mc-note-warn mb-3">Showing the first {SAFETY_LIST_LIMIT}. There may be more.</p>;
-  }
-  return null;
-}
-
 /** The person behind an alert. GET /admin/users/:id writes a sensitive-read row, so one card reads it once, not on every refresh. */
 function Person({ id, role, reveal }: { id: string; role?: string; reveal: Reveal }) {
   const person = useQuery({ queryKey: ['safety-person', id], queryFn: () => fetchUserDetail(id), staleTime: PERSON_READ_MS });
@@ -317,6 +272,7 @@ export default function SafetyPage() {
   const openAlerts = alertsRefused ? [] : alerts.data?.data ?? [];
   const readRecently = sosReadFresh(alerts.dataUpdatedAt, now);
   const queue = queueOrder(cases.isError && refusedRead(cases.error) ? [] : cases.data?.data ?? []);
+  const casesRecent = sosReadFresh(cases.dataUpdatedAt, now, CASE_READ_FRESH_MS);
 
   return (
     <div className="mc-page">
@@ -330,7 +286,7 @@ export default function SafetyPage() {
         {alerts.dataUpdatedAt > 0 && !alertsRefused && (alerts.isError || !readRecently) ? (
           <p role="alert" className="mc-note mc-note-bad mb-3">Not read since {gyClock(alerts.dataUpdatedAt)}. There may be an open SOS.</p>
         ) : (
-          <ListState query={alerts} what="the open SOS alerts" onRetry={() => void alerts.refetch()} />
+          <ListState query={alerts} what="the open SOS alerts" cap={SAFETY_LIST_LIMIT} onRetry={() => void alerts.refetch()} />
         )}
         {alerts.isSuccess && readRecently && openAlerts.length === 0 ? (
           <div className="mc-card" aria-busy={!alerts.isFetchedAfterMount || undefined}>
@@ -350,8 +306,13 @@ export default function SafetyPage() {
             ))}
           </div>
         </div>
-        <ListState key={scope} query={cases} what="the safety cases" onRetry={() => void cases.refetch()} />
-        {cases.isSuccess && queue.length === 0 ? <div className="mc-card">No cases in this view.</div> : null}
+        <ListState key={scope} query={cases} what="the safety cases" cap={SAFETY_LIST_LIMIT} onRetry={() => void cases.refetch()} />
+        {cases.isSuccess && !casesRecent ? <p role="alert" className="mc-note mc-note-bad mb-3">Cases not read since {gyClock(cases.dataUpdatedAt)}.</p> : null}
+        {cases.isSuccess && casesRecent && queue.length === 0 ? (
+          <div className="mc-card" aria-busy={!cases.isFetchedAfterMount || undefined}>
+            {cases.isFetchedAfterMount ? <><p>No cases in this view.</p><p className="mc-muted text-xs">Read at {gyClock(cases.dataUpdatedAt)}</p></> : <p>Reading the safety cases…</p>}
+          </div>
+        ) : null}
         {queue.length > 0 ? <ul className="space-y-3">{queue.map((c) => <CaseCard key={c.id} item={c} run={actions.run} />)}</ul> : null}
       </section>
     </div>

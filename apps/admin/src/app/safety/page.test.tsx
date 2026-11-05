@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider, focusManager, onlineManager } from '@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SafetyPage from './page';
 import { retryUnlessRefused } from '@/lib/query-retry';
+import { CUT_BODIES, cutReads } from '@/test/cut-reads';
 import { mockApi, renderWithQuery, requestsByMethod, type ApiReply, type ApiRequest } from '@/test/test-utils';
 
 // ---------------------------------------------------------------------------
@@ -36,22 +37,6 @@ function asReply(v: Read): ApiReply | Promise<ApiReply> {
   if (v === 'hangs') return new Promise<ApiReply>(() => undefined);
   return Array.isArray(v) ? ok(v) : v;
 }
-/** A read that answered 200 and then died: the body never finishes, or it holds no list. Either way nothing was read. */
-const CUT_BODIES: Array<[string, () => Response]> = [
-  ['a link that dies mid-body', () => new Response('{"success":true,"data":[{"id":"sos', { status: 200, headers: { 'Content-Type': 'application/json' } })],
-  ['a 200 with an empty object', () => new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })],
-  ['a 200 with no list', () => new Response('{"success":true}', { status: 200, headers: { 'Content-Type': 'application/json' } })],
-  ['a 200 with something that is not a list', () => new Response('{"success":true,"data":{"rows":[]}}', { status: 200, headers: { 'Content-Type': 'application/json' } })],
-];
-function cutReads(fetchMock: ReturnType<typeof mockApi>, path: string, cut: () => Response) {
-  const state = { on: false };
-  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
-    const reply = await fetchMock(input, init);
-    return state.on && new URL(String(input)).pathname === path ? cut() : reply;
-  });
-  return state;
-}
-
 function serve(replies: Replies = {}) {
   const state = { ...replies };
   const fetchMock = mockApi((r) => {
@@ -416,7 +401,7 @@ describe('[SAFETY BOARD] “No open SOS.” needs a recent read', () => {
     serve();
     board();
     await screen.findByText(NONE);
-    expect(screen.getByText(/^Read at \d\d:\d\d:\d\d$/)).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Open SOS alerts' })).getByText(/^Read at \d\d:\d\d:\d\d$/)).toBeTruthy();
   });
 
   it('the Wi-Fi drops after a good read: the read still runs, fails, and the all-clear goes', async () => {
@@ -543,6 +528,59 @@ describe('[SAFETY BOARD] “No open SOS.” needs a recent read', () => {
     await advance(15_000);
     expect(screen.queryByText(/Loading the open SOS alerts/)).toBeNull();
     expect(screen.getByText(/Couldn't load the open SOS alerts/)).toBeTruthy();
+  });
+
+  it('cases print when they were read', async () => {
+    serve();
+    board();
+    const none = await screen.findByText('No cases in this view.');
+    expect(none.parentElement!.textContent).toMatch(/Read at \d\d:\d\d:\d\d/);
+  });
+
+  it('coming back to the page: no “No cases in this view.” until this visit’s own read answers', async () => {
+    const { state } = serve();
+    let show: (_on: boolean) => void = () => undefined;
+    function Doors() { const [on, set] = useState(true); show = set; return on ? <SafetyPage /> : null; }
+    board(<Doors />);
+    await screen.findByText('No cases in this view.');
+    act(() => show(false));
+    state.cases = 'hangs';
+    act(() => show(true));
+    expect(screen.queryByText('No cases in this view.')).toBeNull();
+    expect(screen.getByText('Reading the safety cases…')).toBeTruthy();
+  });
+
+  it('switching to a view with a cached answer: the same', async () => {
+    const { state } = serve();
+    const { user } = board();
+    await screen.findByText('No cases in this view.');
+    await user.click(screen.getByRole('button', { name: 'All' }));
+    await screen.findByText('No cases in this view.');
+    state.cases = 'hangs';
+    await user.click(screen.getByRole('button', { name: 'Open' }));
+    expect(screen.queryByText('No cases in this view.')).toBeNull();
+    expect(screen.getByText('Reading the safety cases…')).toBeTruthy();
+  });
+
+  it('a read of cases over 90 seconds old is not “No cases in this view.”: a laptop waking', async () => {
+    const { state } = serve();
+    board();
+    await screen.findByText('No cases in this view.');
+    state.cases = 'hangs';
+    vi.setSystemTime(Date.now() + 91_000);
+    act(() => { window.dispatchEvent(new Event('pageshow')); });
+    expect(screen.queryByText('No cases in this view.')).toBeNull();
+    expect(screen.getByText(/Cases not read since \d\d:\d\d:\d\d\./)).toBeTruthy();
+  });
+
+  it('a read of cases under 90 seconds old still counts: one poll is 60 seconds', async () => {
+    const { state } = serve();
+    board();
+    await screen.findByText('No cases in this view.');
+    state.cases = 'hangs';
+    vi.setSystemTime(Date.now() + 89_000);
+    act(() => { window.dispatchEvent(new Event('pageshow')); });
+    expect(screen.getByText('No cases in this view.')).toBeTruthy();
   });
 
   it('a failure in one view of the cases is not carried into the next while it loads', async () => {
