@@ -534,7 +534,7 @@ describe('deleting a menu item archives its order and booking references', () =>
   });
 
   it('does not erase an existing booking when the service listing is deleted', async () => {
-    // Far from the fixed slot an earlier case books tomorrow: at now + 1 day this collided for an hour each day.
+    // Far from the next-Friday slot an earlier case holds: at now + 1 day this collided for an hour every Thursday.
     const category = await app.prisma.category.create({ data: { vendorId, name: `Archive service ${wordFreeTag(8)}` } });
     const item = await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Booked fixture', basePrice: 500, fulfillment: 'APPOINTMENT' } });
     const held = await app.prisma.booking.create({ data: { itemId: item.id, vendorId, customerId, slotStart: new Date(Date.now() + 20 * DAY), slotEnd: new Date(Date.now() + 20 * DAY + 1800000) } });
