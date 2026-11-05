@@ -17,6 +17,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { BillingService } from './billing.service';
 import { MmgCheckoutService, type CheckoutStatus, type CheckoutView, type ReturnState } from './mmg-checkout.service';
+import { inPersonFeeView, type InPersonFeeView } from './in-person-payment';
 import { clientPlatform, feePayActions, mmgCheckoutLive, mmgReopenSwitchedOn, type ClientPlatform, type PayAction } from './fee-pay-actions';
 import { readReopenableMmgCheckout, type ReopenableMmgCheckout } from './mmg-checkout-reopen';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
@@ -134,6 +135,8 @@ export interface FeeCheckoutPayload {
   latestMmgCheckout: CheckoutView | null;
   recentCheckouts: CheckoutView[];
   reopenableMmgCheckout: ReopenableMmgCheckout | null;
+  /** [OWNER 5 Nov 2026] Paying in person: shown only where the door accepts, and said while a record waits. */
+  inPerson: InPersonFeeView;
 }
 
 function checkoutView(row: MmgCheckoutIntent, subscriptionStatus: SubscriptionStatus): CheckoutView {
@@ -218,11 +221,14 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
   };
 
   const feePayload = async (sub: Subscription, headers: Record<string, unknown>, now: Date = new Date()): Promise<FeeCheckoutPayload> => {
-    if (!mmgCheckoutEnabled()) return { payActions: OFF_ACTIONS, latestMmgCheckout: null, recentCheckouts: [], reopenableMmgCheckout: null };
-    const [payActions, rows] = await Promise.all([
+    const inPerson = await inPersonFeeView(app.prisma, sub.id, now);
+    if (!mmgCheckoutEnabled()) return { payActions: OFF_ACTIONS, latestMmgCheckout: null, recentCheckouts: [], reopenableMmgCheckout: null, inPerson };
+    const [offered, rows] = await Promise.all([
       payActionsFor(app.prisma, sub, clientPlatform(headers), rt().checkout),
       app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: sub.id }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: RECENT_CHECKOUTS }),
     ]);
+    // While a payment made in person waits to be recorded, the page offers no second one.
+    const payActions = inPerson.waitingGyd === null ? offered : offered.map((action): PayAction => (action.id === 'MMG_CHECKOUT' ? { id: 'MMG_CHECKOUT', state: 'off' } : action));
     const recentCheckouts = rows.map((row) => checkoutView(row, sub.status));
     const latestMmgCheckout = recentCheckouts.find((c) => Date.parse(c.createdAt) >= now.getTime() - LATEST_WINDOW_MS) ?? null;
     let reopenableMmgCheckout: ReopenableMmgCheckout | null = null;
@@ -238,7 +244,7 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
         );
       }
     }
-    return { payActions, latestMmgCheckout, recentCheckouts, reopenableMmgCheckout };
+    return { payActions, latestMmgCheckout, recentCheckouts, reopenableMmgCheckout, inPerson };
   };
 
   /** POST …/subscription/mmg-checkout — the server prices it; the body is ignored. */

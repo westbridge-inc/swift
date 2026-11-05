@@ -2,28 +2,29 @@
 
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { fetchFeeReceipt, fetchInPersonPayments } from '@/lib/api';
+import { fetchInPersonPayments, fetchInPersonReceipt } from '@/lib/api';
+import { printReceipt } from '@/lib/print-receipt';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { gyDateTime } from '@/lib/dates';
 
 const METHOD: Record<string, string> = { CASH: 'Cash', CHEQUE: 'Cheque', BANK_TRANSFER: 'Bank transfer' };
 const money = (n: number) => `$${n.toLocaleString()}`;
 
-/** One receipt as the partner reads it, for the screen or for paper. */
+/** One receipt as the partner reads it. Print sends these lines alone to paper, never the page around them. */
 function ReceiptLines({ number }: { number: string }) {
-  const q = useQuery({ queryKey: ['fee-receipt', number], queryFn: () => fetchFeeReceipt(number) });
+  const q = useQuery({ queryKey: ['fee-receipt', number], queryFn: () => fetchInPersonReceipt(number) });
   if (q.isLoading) return <p className="mc-muted text-xs">Loading the receipt…</p>;
   if (q.isError) return <QueryFailed error={q.error} what="the receipt" onRetry={() => void q.refetch()} retrying={q.isFetching} />;
   return (
     <div className="text-xs">
       {(q.data?.data.lines ?? []).map((line) => <p key={line}>{line}</p>)}
-      <button type="button" className="mc-btn mt-2" onClick={() => window.print()}>Print</button>
+      <button type="button" className="mc-btn mt-2" onClick={() => printReceipt(q.data?.data.lines ?? [])}>Print this receipt</button>
     </div>
   );
 }
 
 /**
- * [OWNER 5 Nov 2026] Weekly fees paid directly to Westbridge Inc. in person, apart from MMG. Account numbers, no names.
+ * [OWNER 5 Nov 2026] Weekly fees paid directly to the company in person, apart from MMG. Account numbers, no names.
  * Cash on hand is the ledger's cash taken less cash paid back: taking it to the bank is not recorded in Swift.
  */
 export function InPersonPayments() {
@@ -33,7 +34,7 @@ export function InPersonPayments() {
   return (
     <div className="mc-card mb-6">
       <h2 className="text-lg font-semibold mb-1">Weekly fees paid in person</h2>
-      <p className="mc-muted text-xs mb-4">Paid directly to Westbridge Inc. by cash, cheque or bank transfer. Not MMG money.</p>
+      <p className="mc-muted text-xs mb-4">Paid directly to the company by cash, cheque or bank transfer. Not MMG money.</p>
       {q.isLoading ? (
         <p className="mc-muted text-sm">Loading…</p>
       ) : q.isError ? (

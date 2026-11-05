@@ -393,7 +393,7 @@ describe('[owner 8 Oct] recording a fee payment by hand', () => {
     renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Record fee payment' })).toBeNull();
-    expect(screen.getByText(/The agent and top-up routes are on hold/)).toBeTruthy();
+    expect(screen.getByText(/The agent route and the old Record fee payment button are on hold/)).toBeTruthy();
   });
 
   it('shows the server’s words when it refuses one', async () => {
@@ -416,8 +416,10 @@ describe('[owner 5 Nov] recording a fee paid in person', () => {
     expect(describeAction('POST /subscriptions/:id/in-person-payment')).toBe('Record a weekly fee paid in person');
   });
 
-  const server = (posts: ApiRequest[], reply: { body: unknown; status?: number } = { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens.', details: { approvalId: 'apr_7' } } } }, offered = true) => (request: ApiRequest) => {
+  const OPEN_DOOR = { open: true, refused: null, mostGyd: 10_000, leastGyd: 5000 };
+  const server = (posts: ApiRequest[], reply: { body: unknown; status?: number } = { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens.', details: { approvalId: 'apr_7' } } } }, offered = true, door: unknown = OPEN_DOOR) => (request: ApiRequest) => {
     if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [subscription], manualFeeRecording: 'held', inPersonRecording: offered } };
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/subscriptions/sub-1/in-person-payment') return { body: { success: true, data: door } };
     if (request.method === 'POST' && request.url.pathname === '/api/v1/admin/subscriptions/sub-1/in-person-payment') { posts.push(request); return reply; }
     throw new Error(`Unexpected request: ${request.method} ${request.url}`);
   };
@@ -437,6 +439,48 @@ describe('[owner 5 Nov] recording a fee paid in person', () => {
     const panel = await choose(user, 'Cheque');
     expect(panel.textContent).toContain('A cheque counts only once it has cleared');
     expect(panel.textContent).toContain('never through an agent or a Swift Number');
+    expect(panel.textContent).toContain('An MMG payment is never recorded here');
+    expect(panel.textContent).toContain('At most GY$10,000 can be recorded now, and at least GY$5,000 is due');
+  });
+
+  it('the first panel says the limits before anyone chooses how to pay', async () => {
+    mockApi(server([]));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const first = await answerPanel(user, 'Record in-person payment', {});
+    expect(first.textContent).toContain('At most GY$10,000 can be recorded now, and at least GY$5,000 is due');
+  });
+
+  it('a closed door says why before any money is taken, and asks for nothing', async () => {
+    const posts: ApiRequest[] = [];
+    mockApi(server(posts, undefined, true, { open: false, refused: 'The weekly fee is paused, so nothing is owed right now.', mostGyd: 0, leastGyd: 0 }));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Record in-person payment' }));
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('Do not take money from Shanta Kitchen now');
+    expect(panel.textContent).toContain('The weekly fee is paused');
+    expect(within(panel).queryByLabelText('Cash')).toBeNull();
+  });
+
+  it('the fields ask for no names, and the steps after sending are spelled out', async () => {
+    const posts: ApiRequest[] = [];
+    mockApi(server(posts));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await choose(user, 'Cash');
+    expect(panel.textContent).toContain('numbered slip from your receipt book');
+    expect(panel.textContent).toContain("Swift's own receipt is issued on Execute");
+    expect(panel.textContent).toContain('Not a card, account or phone number, and no names');
+    expect(within(panel).queryByRole('textbox', { name: /who paid/i })).toBeNull();
+    await user.type(within(panel).getByLabelText('Amount received (GYD)'), '5000');
+    await user.type(within(panel).getByLabelText('Slip number'), 'RCPT-0042');
+    await user.click(within(panel).getByLabelText('I will print it from Finance and hand it over'));
+    await user.type(within(panel).getByRole('textbox', { name: /why this is being recorded/i }), REASON_TYPED);
+    await confirmPanel(user, panel, 'Record in-person payment');
+    const told = await screen.findByText(/press Start there/);
+    expect(told.textContent).toContain('it waits 12 hours by default');
+    expect(told.textContent).toContain('it lapses');
   });
 
   it('is not offered to a role the server does not name', async () => {
@@ -454,7 +498,7 @@ describe('[owner 5 Nov] recording a fee paid in person', () => {
     const panel = await choose(user, 'Cheque');
     await user.type(within(panel).getByLabelText('Amount received (GYD)'), '5000');
     await user.type(within(panel).getByLabelText('Cheque number'), 'GBTI-004512');
-    await user.type(within(panel).getByRole('textbox', { name: /who paid/i }), REASON_TYPED);
+    await user.type(within(panel).getByRole('textbox', { name: /why this is being recorded/i }), REASON_TYPED);
     await confirmPanel(user, panel, 'Record in-person payment');
     expect(posts).toHaveLength(0);
     await user.click(within(panel).getByLabelText('Yes, it has cleared and the money is in the bank'));
@@ -472,9 +516,9 @@ describe('[owner 5 Nov] recording a fee paid in person', () => {
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
     const panel = await choose(user, 'Cash');
     await user.type(within(panel).getByLabelText('Amount received (GYD)'), '5000');
-    await user.type(within(panel).getByLabelText('Receipt number'), 'RCPT-0042');
-    await user.click(within(panel).getByLabelText('Sent to them'));
-    await user.type(within(panel).getByRole('textbox', { name: /who paid/i }), REASON_TYPED);
+    await user.type(within(panel).getByLabelText('Slip number'), 'RCPT-0042');
+    await user.click(within(panel).getByLabelText('On their fee page, sent with the payment notice'));
+    await user.type(within(panel).getByRole('textbox', { name: /why this is being recorded/i }), REASON_TYPED);
     await confirmPanel(user, panel, 'Record in-person payment');
     expect((await within(panel).findByRole('alert')).textContent).toContain('One reference credits once');
     expect(bodyOf(posts)).toEqual({ method: 'CASH', amount: 5000, reference: 'RCPT-0042', receipt: 'SENT' });
@@ -488,8 +532,8 @@ describe('[owner 5 Nov] recording a fee paid in person', () => {
     const panel = await choose(user, 'Bank transfer');
     await user.type(within(panel).getByLabelText('Amount received (GYD)'), '5000');
     await user.type(within(panel).getByLabelText('Bank reference'), 'FT-77120');
-    await user.click(within(panel).getByLabelText('Yes, it is in the Westbridge Inc. bank account'));
-    await user.type(within(panel).getByRole('textbox', { name: /who paid/i }), REASON_TYPED);
+    await user.click(within(panel).getByLabelText('Yes, it is in the company bank account'));
+    await user.type(within(panel).getByRole('textbox', { name: /why this is being recorded/i }), REASON_TYPED);
     await confirmPanel(user, panel, 'Record in-person payment');
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(bodyOf(posts)).toEqual({ method: 'BANK_TRANSFER', amount: 5000, reference: 'FT-77120', seenInBank: true });

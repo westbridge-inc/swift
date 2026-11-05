@@ -50,7 +50,7 @@ const V2_CHANGED: Record<string, string> = {
 };
 const V2_ITEMS = V1_ITEMS.map((i) => (V2_CHANGED[i.heading] ? { ...i, text: V2_CHANGED[i.heading]! } : i));
 /** [OWNER 5 Nov 2026] The words served now: v2 with "How you pay" adding the partner paying Westbridge Inc. in person. */
-const V3_HOW_YOU_PAY = 'In the Swift app or on swiftgy.com, on MMG\u2019s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, and you get a receipt. Never through an agent or anyone else. Paying by card is not offered yet.';
+const V3_HOW_YOU_PAY = 'In the Swift app or on swiftgy.com, on MMG\u2019s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.';
 const V3_ITEMS = V2_ITEMS.map((i) => (i.heading === 'How you pay' ? { ...i, text: V3_HOW_YOU_PAY } : i));
 const V3_TEXT = [...V3_ITEMS.map((i) => `${i.heading}: ${i.text}`), V1_TICK].join('\n');
 

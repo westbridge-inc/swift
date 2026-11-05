@@ -2,7 +2,7 @@
 
 **DRAFT — owner-reviewed, not lawyer-confirmed.** Owner rulings of 14 Oct 2026 (#62, "no paying ahead"), 8 Oct 2026 ("NO wallet", points 2–4) and 7 Oct 2026 (unused credit at deletion).
 
-**In person (owner 5 Nov 2026).** Anyone (a business, a rider, a driver) may pay directly to Westbridge Inc. by cash, cheque or bank transfer, recorded by a person (section 6). MMG checkout stays. Never through an agent or a Swift Number.
+**In person (owner 5 Nov 2026).** Anyone (a business, a rider, a driver) may pay directly to the company by cash, cheque or bank transfer, recorded by a person (section 6). MMG checkout stays. Never through an agent or a Swift Number.
 
 Swift holds no money for anyone. Partners pay **only the current week's fee** (owner #62, 14 Oct; it was up to four weeks ahead from 8 Oct). While a week runs, the coming week may be paid; never a second one. Money received before its week starts is Swift's own fee paid early: it is spent only on that weekly fee and never withdrawn or sent on. Partners see **"Next weekly fee already paid"** (or the amount paid toward it); the action is **"Pay weekly fee"**. Never call it a wallet, a balance or a top-up, and never offer to pay ahead or to cover several weeks.
 
@@ -59,22 +59,22 @@ Until the admin refund action for fee credit is live, a refund at closing is don
 
 Before card payments are switched on: the deletion blocker counts `prepaidBalance` only; a week paid ahead by card (a moved `nextBillingDate`) must be added to it first, and an open card Pay now must count toward the one week at the door (today a capture that lands past the cap is kept and paged, section 1).
 
-## 6. Paid in person, directly to Westbridge Inc. (owner 5 Nov 2026)
+## 6. Paid in person, directly to the company (owner 5 Nov 2026)
 
-Subscriptions > **Record in-person payment**. SUPER_ADMIN only, and a second admin approves it. While the owner is the only admin, the solo approval applies: 12 hours by default, then a sign-in code, then Execute in Approvals. The money counts only then, so a partner who is suspended stays suspended until it is executed. Finance > **Weekly fees paid in person** lists every one, apart from MMG, with its receipt to print.
+Subscriptions > **Record in-person payment**. SUPER_ADMIN only. The first panel reads the account **before you take any money**: if the door is closed it says why; if open it says the most, and the least while a week is due. A second admin approves it. While the owner is the only admin: press Start in Approvals, wait (12 hours by default), enter the sign-in code, then Execute. An ask nobody starts lapses after 24 hours; hand the money back or ask again. The money counts only when it is executed, so a partner who is suspended stays suspended until then. Their fee page says the payment is waiting and offers no second one.
 
 | Paid by | Before you record it | Reference | Books |
 | --- | --- | --- | --- |
-| Cash | Give a printed receipt or send one. Taking the cash is not the record: this is. | The receipt number | `CASH_ON_HAND` |
+| Cash | Take the cash and give a numbered slip from the receipt book. Swift's own receipt is issued on Execute: print it from Finance, or it reaches them on their fee page and by notice. | The slip number | `CASH_ON_HAND` |
 | Cheque | **Wait until it has cleared.** A cheque not yet cleared is not recorded. | The cheque number (add the bank if numbers could repeat) | `BANK_LOCAL` |
-| Bank transfer | See it in the Westbridge Inc. bank account. | The bank's reference | `BANK_LOCAL` |
+| Bank transfer | See it in the company bank account. | The bank's reference | `BANK_LOCAL` |
 
-The amount is in whole Guyana dollars. One reference credits once, whichever account or method it is tried on, and a reference Swift has on record for any other money is refused. A cheque covering several branches needs one reference per branch (add a suffix such as `-1`, `-2`); there is no way to split one reference.
+The amount is in whole Guyana dollars. One reference credits once, whichever account or method it is tried on, and a reference Swift has on record for any other money is refused. A cheque covering several branches needs one reference per branch (add a suffix such as `-1`, `-2`); there is no way to split one reference. Never type a card, account or phone number, or a name, as a reference or in the reason: these rows are never erased. An MMG payment is never recorded here.
 
-It follows the MMG page's rules: the one-week limit (section 1), the free trial (trial weeks do not count as ahead), a waived or stopped fee has nothing to pay, nothing beside a payment being confirmed, and no money is taken while the fee is paused. It never counts as a way to pay for the fee pause. If the door refuses, **do not take the money**, or hand it back.
+It follows the MMG page's rules: the one-week limit (section 1), the free trial (trial weeks do not count as ahead), a waived or stopped fee has nothing to pay, nothing beside a payment being confirmed, and no money is taken while the fee is paused. While a week is due it takes at least what is due. It never counts as a way to pay for the fee pause. If the door refuses, **do not take the money**, and hand back any you took.
 
-**Refund.** Money not yet used on a week goes back through **Refund credit** (section 2): set aside, pay it back by cash, cheque, bank transfer or MMG, then record the payout with its own reference, never the one the money came in on. A signed receipt number is the reference for cash. A week that has started is not refunded.
+**Refund.** Money not yet used on a week goes back through **Refund credit** (section 2): set aside, really pay it back by cash, cheque, bank transfer or MMG, then record that payout with its own reference, never the one the money came in on. A week that has started is not refunded.
 
-**A record made by mistake** (the wrong account or amount) has no undo. If the money is unused, refund it from that account and record the right payment. If a week has already used it, escalate to the owner: do not edit the database.
+**A record made by mistake** (the wrong account or amount): stop and go to the owner. Do not use the refund for it, because a payout that never happened cannot be recorded truthfully, and the reference stays used. There is no correction action, and never edit the database.
 
 Moving cash to the bank is not recorded in Swift: Finance shows cash taken less cash paid back, not what is in the drawer.

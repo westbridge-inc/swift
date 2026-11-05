@@ -17,8 +17,10 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { beginConfirmationInTx } from '../modules/billing/dunning-clock';
 import { noLivePayPath } from '../modules/billing/fee-pause';
+import { FEE_RESTORE_LINE } from '../modules/billing/fee-notice-copy';
 import { feeReceiptDocument } from '../modules/billing/fee-receipt';
-import { validateInPersonAsk } from '../modules/billing/in-person-payment';
+import { lockFeePaymentDecision } from '../modules/billing/fee-payment-authority';
+import { inPersonDoor, inPersonFeeView, inPersonReferenceOf, validateInPersonAsk } from '../modules/billing/in-person-payment';
 import { ensureLedgerAccounts } from '../modules/billing/ledger';
 import { runWithTenant } from '../plugins/tenant-context';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -188,7 +190,7 @@ describe('one command: credit, receipt, ledger, audit, a notice', () => {
     expect(receipt).toMatchObject({ channel: 'IN_PERSON_CASH', mmgRef: body.reference });
     expect(res.json().data.receiptNumber).toBe(receipt.receiptNumber);
     const doc = await feeReceiptDocument(app.prisma, receipt.receiptNumber);
-    expect(doc?.lines).toContain(`Paid in person to Westbridge Inc. by cash. Reference: ${body.reference}`);
+    expect(doc?.lines).toContain(`Paid directly to Westbridge Inc. by cash. Reference: ${body.reference}`);
     expect(doc?.lines).toContain('Not a VAT invoice');
     const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entityId: sub.id, action: 'ADMIN POST /api/v1/admin/subscriptions/:id/in-person-payment', changes: { path: ['billingEventId'], equals: event.id } } });
     expect(audit.changes).toMatchObject({ method: 'CASH', amount: 5000, reference: body.reference, receipt: 'PRINTED', receiptNumber: receipt.receiptNumber });
@@ -222,7 +224,11 @@ describe('one command: credit, receipt, ledger, audit, a notice', () => {
     expect(first.statusCode).toBe(202);
     const id = first.json().error.details.approvalId as string;
     await approve(id);
-    expect((await execute(id)).statusCode).toBe(200);
+    const done = await execute(id);
+    expect(done.statusCode).toBe(200);
+    // The receipt exists only now: the person pressing Execute is told its number.
+    const receipt = await app.prisma.feeReceipt.findFirstOrThrow({ where: { subscriptionId: sub.id } });
+    expect(done.json().data.receiptNumber).toBe(receipt.receiptNumber);
     expect(await balance(sub.id)).toBe(5000);
   });
 
@@ -309,6 +315,117 @@ describe('an ask that could never be recorded is refused when it is asked', () =
   });
 });
 
+describe('the reference and the reason never become personal data', () => {
+  it.each([
+    ['a card number', '4111111111111111', 'IN_PERSON_REFERENCE_CARD'],
+    ['a card number with spaces taken as dashes', '4111-1111-1111-1111', 'IN_PERSON_REFERENCE_CARD'],
+    ['a 13-digit card number', '4222222222222', 'IN_PERSON_REFERENCE_CARD'],
+    ['a Guyana phone number', '592-600-0000', 'IN_PERSON_REFERENCE_PHONE'],
+    ['a Guyana phone number run together', '5926000000', 'IN_PERSON_REFERENCE_PHONE'],
+  ])('%s is refused, and no ask is written', async (_name, reference, expected) => {
+    expect(() => inPersonReferenceOf(reference)).toThrow(expect.objectContaining({ code: expected }));
+    const sub = await makeSub();
+    const res = await ask(sub.id, cash({ reference }));
+    expect(res.statusCode).toBe(400);
+    expect(code(res)).toBe(expected);
+    expect(await asks(sub.id)).toBe(0);
+  });
+
+  it.each([
+    ['a long number that fails the check digit', '4111111111111112'],
+    ['a cheque number', '004512'],
+    ['a bank reference with letters', 'FT-4111111111111111'],
+    ['a slip', 'RCPT-42'],
+  ])('%s stands', (_name, reference) => {
+    expect(inPersonReferenceOf(reference)).toBe(reference);
+  });
+});
+
+describe('the door, read before anyone takes money', () => {
+  const door = (id: string) => app.inject({ method: 'GET', url: url(id), headers: headers() });
+  // The fee's clock, as the first payment attempt or billing run makes it: a read never makes one.
+  const settle = (id: string) => app.prisma.$transaction((tx) => lockFeePaymentDecision(tx, id, new Date()));
+
+  it('says the most, and the least while a week is due, and changes nothing', async () => {
+    const coming = await makeSub();
+    await settle(coming.id);
+    expect((await door(coming.id)).json().data).toEqual({ open: true, refused: null, mostGyd: 5000, leastGyd: 0 });
+    const behind = await makeSub({ status: 'PAST_DUE', nextBillingDate: new Date(Date.now() - 3_600_000) });
+    await settle(behind.id);
+    expect((await door(behind.id)).json().data).toEqual({ open: true, refused: null, mostGyd: 10_000, leastGyd: 5000 });
+    expect(await credits(behind.id)).toBe(0);
+    expect(await asks(behind.id)).toBe(0);
+  });
+
+  it('a plain admin cannot read it', async () => {
+    const sub = await makeSub();
+    expect((await door(sub.id)).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: url(sub.id), headers: headers(plainAdminToken) })).statusCode).toBe(403);
+  });
+
+  it.each([
+    ['a waived fee', { feeWaived: true }, 'its fee is waived'],
+    ['stopped billing', { status: 'PAUSED' }, 'stopped or closed'],
+    ['a closed account', { status: 'CANCELLED' }, 'stopped or closed'],
+    ['another currency', { currencyCode: 'USD' }, 'Guyana dollars'],
+  ] as const)('%s is closed, in words, and says to hand back what was taken', async (_name, over, words) => {
+    const sub = await makeSub(over as SubOverrides);
+    const read = (await door(sub.id)).json().data;
+    expect(read.open).toBe(false);
+    expect(read.refused).toContain(words);
+    expect(read.refused).toContain('If you already took it, hand it back.');
+    expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: false, waitingGyd: null });
+  });
+
+  it('the partner sees the offer only while the door accepts: never paused, never with the next week paid', async () => {
+    const sub = await makeSub();
+    await settle(sub.id);
+    expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: true, waitingGyd: null });
+    process.env['MMG_DRIVER'] = 'disabled';
+    expect((await inPersonDoor(app.prisma, sub.id)).open).toBe(false);
+    expect((await inPersonFeeView(app.prisma, sub.id)).open).toBe(false);
+    delete process.env['MMG_DRIVER'];
+    expect((await pay(sub.id, cash())).statusCode).toBe(200);
+    expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: false, waitingGyd: null });
+    expect((await door(sub.id)).json().data.refused).toContain('already paid');
+  });
+
+  it('while a record waits the partner is told, with the amount, and the offer is gone; it ends with the ask', async () => {
+    const sub = await makeSub();
+    const res = await ask(sub.id, cash({ amount: 4000 }));
+    expect(res.statusCode).toBe(202);
+    expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: false, waitingGyd: 4000 });
+    const id = res.json().error.details.approvalId as string;
+    await app.prisma.privilegedApproval.update({ where: { id }, data: { status: 'CANCELLED' } });
+    expect((await inPersonFeeView(app.prisma, sub.id)).waitingGyd).toBeNull();
+  });
+
+  it('an approved record that lapsed is not waiting any more', async () => {
+    const sub = await makeSub();
+    const id = (await ask(sub.id, cash())).json().error.details.approvalId as string;
+    await app.prisma.privilegedApproval.update({ where: { id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    expect((await inPersonFeeView(app.prisma, sub.id)).waitingGyd).toBeNull();
+  });
+
+  it('the console offers the button only to a grant that can use it', async () => {
+    const list = async () => (await app.inject({ method: 'GET', url: '/api/v1/admin/subscriptions?limit=1', headers: headers() })).json().inPersonRecording;
+    expect(await list()).toBe(true);
+    const plain = await app.inject({ method: 'GET', url: '/api/v1/admin/subscriptions?limit=1', headers: headers(plainAdminToken) });
+    expect(plain.json().inPersonRecording).toBe(false);
+    const narrowed = await app.prisma.user.create({ data: { phone: `+${PHONE_BASE + 910_000}`, firstName: 'Narrow', lastName: 'Grant', roles: ['SUPER_ADMIN'], activeRole: 'SUPER_ADMIN', isPhoneVerified: true, admin: { create: { permissions: ['subscription.read'] } } } });
+    userIds.push(narrowed.id);
+    const token = app.jwt.sign({ userId: narrowed.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
+    await app.prisma.session.create({ data: { userId: narrowed.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: 'in-person-narrow', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
+    const res = await app.inject({ method: 'GET', url: '/api/v1/admin/subscriptions?limit=1', headers: headers(token) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().inPersonRecording).toBe(false);
+  });
+
+  it('a suspended partner is told their access returns when the payment is recorded, not when it is handed over', () => {
+    expect(FEE_RESTORE_LINE).toBe('Your access comes back as soon as your payment is recorded.');
+  });
+});
+
 describe('an ask names a real account of this market', () => {
   it('an account that does not exist is not found, and nothing is asked', async () => {
     const res = await ask('no-such-subscription', cash());
@@ -349,6 +466,15 @@ describe('the MMG door\'s rules', () => {
     expect(JSON.stringify(applied.json())).toContain('already paid');
     expect(await balance(sub.id)).toBe(5000);
     expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `in-person:${body.reference}` } })).toBe(0);
+  });
+
+  it('while a week is due, less than what is due is refused: a part payment would bill, fail and tell them it failed', async () => {
+    const sub = await makeSub({ status: 'PAST_DUE', nextBillingDate: new Date(Date.now() - 3_600_000) });
+    const res = await ask(sub.id, cash({ amount: 4999 }));
+    expect(res.statusCode).toBe(409);
+    expect(code(res)).toBe('IN_PERSON_LESS_THAN_DUE');
+    expect(JSON.stringify(res.json())).toContain('5,000');
+    expect(await asks(sub.id)).toBe(0);
   });
 
   it('a week that is due is not ahead: it fits on top of the limit', async () => {
@@ -510,6 +636,21 @@ describe('finance reads them apart from MMG', () => {
     expect(data.totals.map((t: { method: string }) => t.method)).toEqual(expect.arrayContaining(['CASH', 'BANK_TRANSFER']));
     expect(data.cashOnHandGyd).toBe(before + 5000);
     expect(JSON.stringify(data)).not.toContain('Counter Kitchen');
+  });
+
+  it('Finance reads one in-person receipt on its own grant, and nothing else through that door', async () => {
+    const sub = await makeSub();
+    const res = await pay(sub.id, cheque());
+    const number = res.json().data.receiptNumber as string;
+    const read = await app.inject({ method: 'GET', url: `/api/v1/admin/finance/in-person-payments/${number}`, headers: headers() });
+    expect(read.statusCode).toBe(200);
+    expect(read.json().data.lines.join('\n')).toContain('by cheque (cleared)');
+    const other = await makeSub();
+    const event = await app.prisma.billingEvent.create({ data: { subscriptionId: other.id, type: 'PREPAID_TOPUP', amount: 100, currencyCode: 'GYD', idempotencyKey: `mmg-checkout:test:${nanoid(8)}` } });
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: other.id, balance: 100, currencyCode: 'GYD' } });
+    const mmg = `SWF-TEST-${nanoid(8)}`;
+    await app.prisma.feeReceipt.create({ data: { receiptNumber: mmg, subscriptionId: other.id, billingEventId: event.id, amount: 100, channel: 'MMG_CHECKOUT', mmgRef: ref('MMG') } });
+    expect((await app.inject({ method: 'GET', url: `/api/v1/admin/finance/in-person-payments/${mmg}`, headers: headers() })).statusCode).toBe(404);
   });
 
   it('an MMG receipt never appears in the list, and the cash journal names the channel', async () => {

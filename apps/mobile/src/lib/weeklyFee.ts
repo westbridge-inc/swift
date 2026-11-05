@@ -26,6 +26,8 @@ export interface FeeSubscription {
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
   /** [owner legal plan R12] The weekly-fee receipts, printed by the API (one source for every screen). */
   feeReceipts?: FeeReceipt[];
+  /** [OWNER 5 Nov 2026] Paying in person: `open` only where the door accepts. Absent from an older API: nothing is shown. */
+  inPerson?: { open: boolean; waitingGyd: number | null };
   /** The partner's newest card session of the last day (CARD-CHECKOUT-API section 4), read by the card lib only. */
   latestCardSession?: unknown;
 }
@@ -34,9 +36,14 @@ export interface CheckoutStart { ref: string; status: CheckoutState; checkoutUrl
 export function liveMmg(sub?: FeeSubscription | null) {
   return sub?.payActions?.find((a): a is Extract<PayAction, { state: 'live' }> => a.id === 'MMG_CHECKOUT' && a.state === 'live');
 }
+/** [OWNER 5 Nov 2026] The other way to pay, shown only where the server's `inPerson.open` says the door accepts. */
+export const PAY_IN_PERSON = 'You can also pay Swift directly, in person, by cash, cheque or bank transfer. A cheque counts once it clears. A payment counts once Swift records it, and your status here changes then. You get a receipt. Never give it to anyone else.';
+export const PAY_IN_PERSON_ASK = 'Ask Swift to arrange it';
+/** Said while a person's record of that payment waits. */
+export function inPersonWaiting(amountGyd: number | null): string {
+  return `Swift has your in-person payment${amountGyd === null ? '' : ` of ${feeMoney(amountGyd)}`} and is recording it. It counts once it is recorded, and your status here changes then. Do not pay again.`;
+}
 /** A Back tap the server refused, or answered with anything but that checkout's open page. */
-/** [OWNER 5 Nov 2026] The other way to pay, said on the fee page: recorded by a person in the console, nothing to tap. */
-export const PAY_IN_PERSON = 'You can also pay Swift directly, in person, by cash, cheque or bank transfer: open Get help to arrange it. A cheque counts once it clears, and you get a receipt. Never pay through an agent or anyone else.';
 export const REOPEN_REFUSED = "We couldn't reopen that MMG page. Its latest status is shown here.";
 export function subscriptionWords(status: string): string {
   return ({ TRIAL: 'Free trial', ACTIVE: 'Active', PAST_DUE: 'Weekly fee overdue', SUSPENDED: 'Account suspended', CHURNED: 'Account inactive', PAUSED: 'Weekly billing paused', CANCELLED: 'Subscription closed' } as Record<string, string>)[status] ?? 'Status unavailable';

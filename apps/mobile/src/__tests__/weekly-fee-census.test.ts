@@ -28,11 +28,16 @@ describe('partner checkout surface census', () => {
     expect(source('src/modules/vendor/screens/VendorPayAllScreen.tsx')).toContain("WebBrowser.openAuthSessionAsync(url, 'swift://pay/mmg/return')");
     expect(source('src/services/api.ts')).toContain("config.headers['x-client-platform'] = Platform.OS");
   });
-  it('[owner 5 Nov 2026] the phone says paying in person on the fee screen and in the FAQ, in the same words as the web', () => {
-    expect(source('src/modules/billing/screens/WeeklyFeeScreen.tsx')).toContain('{PAY_IN_PERSON}');
+  it('[owner 5 Nov 2026] the phone offers paying in person only where the door accepts, with a door to ask, and says when one waits', () => {
+    const screen = source('src/modules/billing/screens/WeeklyFeeScreen.tsx');
+    expect(screen).toMatch(/\{sub\.inPerson\?\.open \? <View testID="pay-in-person">[\s\S]{0,120}\{PAY_IN_PERSON\}/);
+    expect(screen).toMatch(/testID="pay-in-person-ask"[\s\S]{0,240}navigate\?\.\('GetHelp', \{ category: 'PAYMENT'/);
+    expect(screen).toContain('testID="in-person-waiting"');
+    expect(screen).toContain('inPersonWaiting(sub.inPerson.waitingGyd)');
     const faq = source('src/modules/profile/screens/FaqScreen.tsx');
     expect(faq).toContain('directly to Westbridge Inc., by cash, cheque or bank transfer');
-    expect(faq).toContain('Never pay through an agent or anyone else');
+    expect(faq).toContain('a payment counts once Swift records it');
+    expect(faq).toContain('Never give it to anyone else');
   });
   it('the mobile and web state machines cannot drift', () => {
     expect(source('src/lib/weeklyFee.ts')).toBe(source('../web/src/lib/weekly-fee.ts'));

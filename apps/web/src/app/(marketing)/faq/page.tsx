@@ -51,8 +51,12 @@ const FAQ: QA[] = [
     a: (
       <>
         In the Swift app or on swiftgy.com, on MMG&apos;s checkout page. Or in person, directly to Westbridge Inc., by
-        cash, cheque or bank transfer: open Get help to arrange it. A cheque counts once it clears, and you get a
-        receipt. Never pay through an agent or anyone else.
+        cash, cheque or bank transfer:{' '}
+        <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/contact">
+          contact Swift
+        </Link>{' '}
+        to arrange it. A cheque counts once it clears, a payment counts once Swift records it, and you get a receipt.
+        Never give it to anyone else.
       </>
     ),
   },

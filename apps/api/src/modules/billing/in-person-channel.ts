@@ -1,9 +1,10 @@
+import { OPERATOR } from '../legal/operator';
 import type { TopupRail } from './ledger';
 
 // ---------------------------------------------------------------------------
-// [OWNER 5 Nov 2026] The three ways a weekly fee is paid directly to Westbridge
-// Inc. in person, and how each one reads on a receipt and in the books. Plain
-// data, so a receipt can read it without loading the payment door.
+// [OWNER 5 Nov 2026] The three ways a weekly fee is paid directly to the company
+// in person, and how each one reads on a receipt and in the books. Plain data, so
+// a receipt can read it without loading the payment door.
 // ---------------------------------------------------------------------------
 
 export const IN_PERSON_METHODS = ['CASH', 'CHEQUE', 'BANK_TRANSFER'] as const;
@@ -26,5 +27,5 @@ export const inPersonMethodOf = (channel: string | null): InPersonMethod | null 
 export function inPersonReceiptLine(channel: string | null, reference: string | null): string[] {
   const method = inPersonMethodOf(channel);
   if (!method) return [];
-  return [`Paid in person to Westbridge Inc. by ${WAYS[method].words}${reference ? `. Reference: ${reference}` : ''}`];
+  return [`Paid directly to ${OPERATOR.name} by ${WAYS[method].words}${reference ? `. Reference: ${reference}` : ''}`];
 }

@@ -20,8 +20,9 @@ export const LEDGER_ACCOUNTS: Record<string, { name: string; type: LedgerAccount
   CLEARING_MMG: { name: 'MMG clearing — confirmed, not yet bank-settled', type: 'ASSET' },
   CLEARING_CARD: { name: 'Card provider clearing', type: 'ASSET' },
   BANK_LOCAL: { name: 'Local bank deposits', type: 'ASSET' },
-  // [OWNER 5 Nov 2026] A weekly fee paid in person in cash: Westbridge Inc.'s fee money, never order money, never MMG's.
-  CASH_ON_HAND: { name: 'Weekly-fee cash received in person by Westbridge Inc., not yet banked', type: 'ASSET' },
+  // [OWNER 5 Nov 2026] A weekly fee paid in person in cash: the company's fee money, never order money, never MMG's.
+  // Moving the cash to the bank is not recorded in Swift, so this is cash taken less cash paid back, not a drawer count.
+  CASH_ON_HAND: { name: 'Weekly-fee cash received in person, less cash paid back in person', type: 'ASSET' },
   // [owner Q-1654-BOOKS A] MMG returned money that had already paid for a week: that week's fee is owed again.
   FEE_RECEIVABLE: { name: 'Weekly fees a partner owes again (MMG returned the money that paid them; subledger = subscriptionId)', type: 'ASSET' },
   WALLET_LIABILITY: { name: 'Payer fee-wallet balances (subledger = subscriptionId)', type: 'LIABILITY' },
@@ -147,7 +148,7 @@ export async function postLedger(
 // ---------------------------------------------------------------------------
 
 /** Which account money from outside lands in: EXTERNAL is MMG; IN_PERSON_CASH and IN_PERSON_BANK are a weekly fee
- *  paid directly to Westbridge Inc. (in-person-payment.ts), so they never read as MMG money. */
+ *  paid directly to the company (in-person-payment.ts), so they never read as MMG money. */
 export type TopupRail = 'EXTERNAL' | 'CARD' | 'IN_PERSON_CASH' | 'IN_PERSON_BANK';
 const TOPUP_ACCOUNT: Record<TopupRail, string> = {
   EXTERNAL: 'CLEARING_MMG', CARD: 'CLEARING_CARD', IN_PERSON_CASH: 'CASH_ON_HAND', IN_PERSON_BANK: 'BANK_LOCAL',

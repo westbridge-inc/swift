@@ -29,7 +29,7 @@ const HOW_YOU_PAY_V2 = 'In the Swift app or on swiftgy.com, on MMG’s checkout 
  */
 const WHEN_IT_STARTS_V2 = 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one. A new partner\u2019s free trial lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it, counted from the day Swift approves you (for a service provider, from the day the Pro Agreement says). A new branch has no trial of its own: it shares its business\u2019s. Each person gets one free trial for each kind of partner, and none while an earlier Swift subscription of theirs is overdue, paused or ended.';
 /** [OWNER 5 Nov 2026] v3 adds paying Westbridge Inc. directly, in person; nothing about the fee changed. */
-const HOW_YOU_PAY_V3 = 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, and you get a receipt. Never through an agent or anyone else. Paying by card is not offered yet.';
+const HOW_YOU_PAY_V3 = 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.';
 const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V3, 'When it starts': WHEN_IT_STARTS_V2 };
 
 describe('[D3] the weekly fee words v2', () => {

@@ -90,7 +90,7 @@ import { executeTenantBoundServiceJobTransaction } from '../services/service-job
 import { transitionServiceJob } from '../services/service-job-transition';
 import { AppError, NotFoundError, ForbiddenError, ValidationError, ConflictError, UnauthorizedError } from '../../utils/errors';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
-import { inPersonReferenceOf, listInPersonPayments, parseInPersonBody, recordInPersonPayment } from '../billing/in-person-payment';
+import { IN_PERSON_ACTION, inPersonDoor, inPersonReceipt, inPersonReferenceOf, listInPersonPayments, parseInPersonBody, recordInPersonPayment } from '../billing/in-person-payment';
 import { AccountService, ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT } from '../user/account.service';
 import { LIVE_SOS_STATUSES } from '../safety/sos.service';
 import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
@@ -4320,14 +4320,23 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { id: closed.id, closedAt: closed.closedAt, disposition: SETTLEMENT_CLOSED_DISPOSITION } };
   });
 
-  /** MMG-vs-cash mix, last 30 days of completed orders, plus MMG confirmation
-   *  health (UNPAID after delivery = vendor never confirmed / never paid). */
   /** [OWNER 5 Nov 2026] Weekly fees paid in person, apart from MMG (billing/in-person-payment.ts). */
   app.get('/finance/in-person-payments', { preHandler: [adminGuard] }, async () => {
     requireDefaultTenantBilling();
     return { success: true, data: await listInPersonPayments(app.prisma, requireTenantId()) };
   });
 
+  /** One of those receipts, on Finance's own grant, to print. */
+  app.get('/finance/in-person-payments/:receiptNumber', { preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantBilling();
+    const { receiptNumber } = request.params as { receiptNumber: string };
+    const doc = await inPersonReceipt(app.prisma, requireTenantId(), receiptNumber);
+    if (!doc) throw new NotFoundError('Receipt', receiptNumber);
+    return { success: true, data: doc };
+  });
+
+  /** MMG-vs-cash mix, last 30 days of completed orders, plus MMG confirmation
+   *  health (UNPAID after delivery = vendor never confirmed / never paid). */
   app.get('/finance/payment-mix', { preHandler: [adminGuard] }, async () => {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -4878,7 +4887,7 @@ export async function adminRoutes(app: FastifyInstance) {
     }));
     // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
     // [OWNER 5 Nov 2026] The in-person button is offered to the role that may use it; the route decides.
-    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open', inPersonRecording: request.user.role === 'SUPER_ADMIN' };
+    return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open', inPersonRecording: request.user.role === 'SUPER_ADMIN' && holdsCapability(capabilitiesOf({ role: request.user.role, permissions: (request as { adminPermissions?: string[] | null }).adminPermissions ?? null }), 'subscription.inperson') };
   });
 
   /** [CHAINS · owner 29 Oct 2026] GET /vendor-owners/:id/chain — one owner's stores and what each pays a week, with
@@ -5131,12 +5140,20 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   /**
-   * [OWNER 5 Nov 2026] A weekly fee paid directly to Westbridge Inc. in person,
+   * [OWNER 5 Nov 2026] A weekly fee paid directly to the company in person,
    * by cash, cheque or bank transfer. Its own door (billing/in-person-payment.ts):
    * SUPER_ADMIN only, a second person or the owner's solo wait, and it does not
    * read BILLING_TOPUP_HOLD, which stays on and keeps agent cash off. The guard is
    * onRequest so a plain admin never reaches the approval gate.
    */
+  app.get('/subscriptions/:id/in-person-payment', { onRequest: [founderGuard], preHandler: [adminGuard] }, async (request) => {
+    requireDefaultTenantBilling();
+    const { id } = request.params as { id: string };
+    const subscription = await app.prisma.subscription.findFirst({ where: { id, ...subscriptionTenantScope(requireTenantId()) }, select: { id: true } });
+    if (!subscription) throw new NotFoundError('Subscription', id);
+    return { success: true, data: await inPersonDoor(app.prisma, id) };
+  });
+
   app.post('/subscriptions/:id/in-person-payment', { onRequest: [founderGuard], preHandler: [adminGuard] }, async (request) => {
     requireDefaultTenantBilling();
     const tenantId = requireTenantId();
@@ -7898,7 +7915,9 @@ export async function adminRoutes(app: FastifyInstance) {
         where: { id: approval.id },
         select: { status: true, appliedAt: true },
       });
-      return { success: true, data: { id: approval.id, status: applied?.status ?? 'APPLIED', appliedAt: applied?.appliedAt ?? null } };
+      // [OWNER 5 Nov 2026] The receipt exists only now: the person executing is told its number.
+      const receiptNumber = approval.action === IN_PERSON_ACTION ? (replay.json() as { data?: { receiptNumber?: string } }).data?.receiptNumber : undefined;
+      return { success: true, data: { id: approval.id, status: applied?.status ?? 'APPLIED', appliedAt: applied?.appliedAt ?? null, ...(receiptNumber ? { receiptNumber } : {}) } };
     }
 
     let error: { code?: string; message?: string } | undefined;

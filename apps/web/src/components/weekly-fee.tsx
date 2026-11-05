@@ -5,7 +5,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } f
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, PAY_IN_PERSON, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, inPersonWaiting, liveMmg, PAY_IN_PERSON, PAY_IN_PERSON_ASK, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -90,6 +90,7 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
         <button className="min-h-11 text-sm font-semibold underline underline-offset-4 disabled:opacity-50" disabled={checked.busy} aria-busy={checked.busy} onClick={() => void refreshStatus()}>{checked.busy ? 'Checking…' : 'Refresh status'}</button>
         {checked.at ? <span role="status" className="text-sm text-[var(--swift-muted)]">{`Checked at ${new Date(checked.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Guyana' })}`}</span> : null}
       </div>
+      {sub.inPerson && sub.inPerson.waitingGyd !== null ? <p role="status" data-testid="in-person-waiting" className="mt-3 font-semibold">{inPersonWaiting(sub.inPerson.waitingGyd)}</p> : null}
     </div>
     {aside}
     {action && !blocked && card && <h2 className="text-lg font-bold">Choose how to pay</h2>}
@@ -110,7 +111,10 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
       <CardPay family={family} storeId={storeId} card={card} latestSession={sub.latestCardSession} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
-    <p className="text-sm text-[var(--swift-muted)]" data-testid="pay-in-person">{PAY_IN_PERSON}</p>
+    {sub.inPerson?.open ? <div data-testid="pay-in-person" className="space-y-2 text-sm text-[var(--swift-muted)]">
+      <p>{PAY_IN_PERSON}</p>
+      <Link className="font-semibold underline underline-offset-4" href={family === 'vendor' ? '/dashboard/help' : '/portal/help'}>{PAY_IN_PERSON_ASK}</Link>
+    </div> : null}
     <h2 className="text-lg font-bold">Recent checkouts</h2>
     {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {
       const shown = c.ref === view.checkout?.ref ? view.checkout : c;

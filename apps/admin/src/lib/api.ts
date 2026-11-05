@@ -745,8 +745,12 @@ export interface InPersonPayments {
 }
 export const fetchInPersonPayments = (): Promise<Envelope<InPersonPayments>> =>
   apiFetch('/api/v1/admin/finance/in-person-payments');
-export const fetchFeeReceipt = (receiptNumber: string): Promise<Envelope<{ receiptNumber: string; lines: string[] }>> =>
-  apiFetch(`/api/v1/admin/billing/receipts/${encodeURIComponent(receiptNumber)}`);
+export const fetchInPersonReceipt = (receiptNumber: string): Promise<Envelope<{ receiptNumber: string; lines: string[] }>> =>
+  apiFetch(`/api/v1/admin/finance/in-person-payments/${encodeURIComponent(receiptNumber)}`);
+export interface InPersonDoor { open: boolean; refused: string | null; mostGyd: number; leastGyd: number }
+/** Read before anyone takes money: can this account pay in person now, and how much. */
+export const fetchInPersonDoor = (id: string): Promise<Envelope<InPersonDoor>> =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/in-person-payment`);
 export const fetchPromos = (): Promise<Envelope<Promo[]>> => apiFetch('/api/v1/admin/promos');
 
 export interface CreatePromoInput {

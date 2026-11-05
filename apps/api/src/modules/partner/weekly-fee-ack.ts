@@ -6,6 +6,7 @@ import { browserClientOf } from '../auth/browser-session';
 import { moverRoleFor } from '../../config/vehicle-classes';
 import { partnerRateFor, PricingConfigError, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
 import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../subscription/trial-length';
+import { OPERATOR } from '../legal/operator';
 
 /**
  * [COORD ruling 22 Oct 2026 · row 628 · GUARDRAILS §1 + §7 standing rule 2] The weekly fee at partner sign-up.
@@ -93,13 +94,13 @@ export const WEEKLY_FEE_ACK_TEXT_V2 = [
 ].join('\n');
 
 /**
- * [OWNER 5 Nov 2026] The v3 words, one line changed from v2: "How you pay" adds paying Westbridge Inc. directly, in
+ * [OWNER 5 Nov 2026] The v3 words, one line changed from v2: "How you pay" adds paying the company directly, in
  * person. Everything else is v2's, word for word. Card-rail switch-on checklist: before card payment is offered, "How
  * you pay" must change again, and that is v4.
  */
 export const WEEKLY_FEE_TERMS_V3 = {
   items: WEEKLY_FEE_TERMS_V2.items.map((item) => (item.heading === 'How you pay'
-    ? { heading: item.heading, text: 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, and you get a receipt. Never through an agent or anyone else. Paying by card is not offered yet.' }
+    ? { heading: item.heading, text: `In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Or in person, directly to ${OPERATOR.name}, by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.` }
     : item)),
   tick: WEEKLY_FEE_TERMS_V2.tick,
 } as const;

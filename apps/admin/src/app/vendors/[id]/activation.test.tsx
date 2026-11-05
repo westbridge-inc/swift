@@ -161,7 +161,7 @@ describe('[MC-PR2] when the server says the rules are met', () => {
   it('a store held for an unpaid weekly fee is not reinstated from here: it comes back when the fee is paid through MMG', async () => {
     serve('SUSPENDED', checklistOf('FEE_UNPAID', { storeStatus: 'SUSPENDED', suspensionSource: 'BILLING', subscriptionStatus: 'SUSPENDED', feeOperable: false, ready: true }));
     page();
-    expect(await screen.findByText(/Suspended, and its weekly fee is unpaid or its billing is stopped\. It comes back by itself when the fee is paid through MMG checkout/)).toBeTruthy();
+    expect(await screen.findByText(/Suspended, and its weekly fee is unpaid or its billing is stopped\. It comes back by itself when the fee is paid, on MMG checkout or recorded in person/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
   });
 

@@ -26,4 +26,4 @@ export function manualFeeCreditHeld(env: Record<string, string | undefined> = pr
 
 /** The words an operator sees when the hold refuses a credit by hand. */
 export const MANUAL_FEE_CREDIT_HELD_MESSAGE =
-  'This way of recording a fee payment is on hold by operations — nothing was recorded. Money paid directly to Westbridge Inc. by cash, cheque or bank transfer is recorded with Record in-person payment. Refund a payment that came through an agent or a Swift Number.';
+  'This way of recording a fee payment is on hold by operations — nothing was recorded. Money paid directly to the company by cash, cheque or bank transfer is recorded with Record in-person payment. Refund a payment that came through an agent or a Swift Number.';
