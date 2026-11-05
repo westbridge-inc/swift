@@ -36,7 +36,7 @@ import { withCounterpartPhones } from '../calls/counterpart-phone';
 import { courierRiderAnswer } from './courier-rider-answer';
 import { assertParcelHasRiders } from '../dispatch/delivery-capacity';
 import { DISPATCH_LOCATION_FRESH_SECONDS, DISPATCH_WIDEST_RADIUS_KM } from '../dispatch/dispatch.service';
-import { assertOrderPlacementAllowed } from '../integrity/velocity';
+import { readOrderPlacementBudget, refundOrderPlacement, reserveOrderPlacement, type OrderPlacementReservation } from '../integrity/velocity';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -305,19 +305,24 @@ export default async function courierRoutes(app: FastifyInstance) {
     }
 
     await assertParcelHasRiders(app.prisma, body.pickup, customer.tenantId, body.packageSize, DISPATCH_LOCATION_FRESH_SECONDS, DISPATCH_WIDEST_RADIUS_KM);
-    await assertOrderPlacementAllowed({ redis: app.redis, prisma: app.prisma }, userId);
+    const placementBudget = await readOrderPlacementBudget({ prisma: app.prisma }, userId);
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayCount = await app.prisma.order.count({ where: { placedAt: { gte: today } } });
 
     const trackingToken = randomBytes(32).toString('base64url');
+    // [FULL-LAUNCH] The order limit is charged under the customer's lock, after the replay: a racing retry of one
+    // parcel waits here and is answered by the receipt, so it spends nothing and is never told "too many orders".
+    let reservation = null as OrderPlacementReservation | null;
+    let bodyFinished = false;
     const committed = await app.prisma.$transaction(async (tx) => {
       await lockActiveOrderCustomer(tx, userId, customer.tenantId);
       // A racing retry observes the first commit under the same customer lock.
       const existing = await replay(tx);
       if (existing) return existing;
       await assertCashAllowed(tx);
+      reservation = await reserveOrderPlacement(app.redis, placementBudget);
       const order = await tx.order.create({
         data: {
           tenantId: customer.tenantId,
@@ -382,7 +387,13 @@ export default async function courierRoutes(app: FastifyInstance) {
         userId, tenantId: order.tenantId, idempotencyKey: receiptKey, requestHash,
         orderIds: [order.id], result: await sealCourierAnswer(answer, receiptContext),
       });
+      bodyFinished = true;
       return { answer, orderId: order.id };
+    }).catch(async (err: unknown) => {
+      // The body threw, so nothing committed and the reservation comes back. An error at the commit itself is an unknown
+      // outcome, and keeps the spend.
+      if (!bodyFinished) await refundOrderPlacement(app.redis, reservation);
+      throw err;
     });
 
     // The existing worker sweep recovers a crash or outage after commit.

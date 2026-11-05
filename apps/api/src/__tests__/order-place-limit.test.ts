@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -12,7 +14,10 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { customerRoutes } from '../modules/user/customer.routes';
 import courierRoutes from '../modules/courier/courier.routes';
 import { ALGO_DEFAULTS } from '../modules/algo/algo-config';
-import { assertOrderPlacementAllowed, checkVelocity, ORDER_PLACE_ACTION } from '../modules/integrity/velocity';
+import { checkVelocity, ORDER_PLACE_ACTION, ORDER_RESERVE_LUA, readOrderPlacementBudget, refundOrderPlacement, reserveOrderPlacement, velocityKey } from '../modules/integrity/velocity';
+import { holdTillSyncLock } from '../modules/inventory/till-sync-lock';
+import { CheckoutOutcomeUnknownError } from '../modules/order/checkout-outbox';
+import { OrderService, type CheckoutCommit } from '../modules/order/order.service';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { testPhone } from './helpers/fixture-ids';
 
@@ -98,6 +103,14 @@ const PARCEL = {
   packageSize: 'SMALL', packageDescription: 'A box of spare parts', speed: 'STANDARD', recipientName: 'Test Recipient', recipientPhone: '+5926001234', payer: 'SENDER',
 };
 const sendParcel = (c: Actor, key?: string) => call('POST', '/api/v1/courier/order', c.token, PARCEL, key ? { 'idempotency-key': key } : {});
+
+/** What this hour has spent, read from the keys themselves. */
+const hourStart = () => { const s = Math.floor(Date.now() / 1000); return Math.floor(s / LIMIT.perSeconds) * LIMIT.perSeconds; };
+const spentBy = async (dimension: 'actor' | 'cluster', id: string) => Number(await app.redis.get(velocityKey(dimension, id, ORDER_PLACE_ACTION, hourStart())) ?? 0);
+const spent = (c: Actor) => spentBy('actor', c.userId);
+const clearCart = (c: Actor) => sys(() => app.prisma.cart.deleteMany({ where: { customerId: c.userId } }));
+const pickupBody = (at = store) => ({ paymentMethod: 'CASH', fulfillmentSelections: { [at.vendorId]: 'PICKUP' } });
+const REDIS_FAILS_AFTER_MS = 4_000; // plugins/redis.ts: how long a command waits while Redis is down.
 
 async function dropVelocity() {
   const keys = await app.redis.keys('vel:*');
@@ -211,7 +224,7 @@ describe('[FULL-LAUNCH] one person', () => {
     expect(later.json().replayed).toBeUndefined();
   });
 
-  it('a multi-store cart counts one order per store, and a cart that would pass the limit places nothing', async () => {
+  it('a multi-store cart that would pass the limit places nothing and spends nothing: the order that fits still goes', async () => {
     const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
     for (let i = 0; i < LIMIT.max - 1; i++) expect((await pickupCheckout(c)).statusCode).toBe(200);
     for (const at of [store, otherStore]) {
@@ -221,6 +234,96 @@ describe('[FULL-LAUNCH] one person', () => {
     const both = await call('POST', '/api/v1/customer/checkout', c.token, { paymentMethod: 'CASH', fulfillmentSelections: { [store.vendorId]: 'PICKUP', [otherStore.vendorId]: 'PICKUP' } });
     expect(both.statusCode, both.body).toBe(429);
     expect(await placed(c)).toBe(LIMIT.max - 1);
+    expect(await spent(c)).toBe(LIMIT.max - 1);
+    await clearCart(c);
+    const single = await pickupCheckout(c);
+    expect(single.statusCode, single.body).toBe(200);
+    expect(await spent(c)).toBe(LIMIT.max);
+  });
+
+  it('a multi-store cart that fits counts one order per store', async () => {
+    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    for (const at of [store, otherStore]) {
+      expect([200, 201]).toContain((await call('POST', '/api/v1/customer/cart/items', c.token, { vendorId: at.vendorId, itemId: at.itemId, quantity: 1 })).statusCode);
+    }
+    const both = await call('POST', '/api/v1/customer/checkout', c.token, { paymentMethod: 'CASH', fulfillmentSelections: { [store.vendorId]: 'PICKUP', [otherStore.vendorId]: 'PICKUP' } });
+    expect(both.statusCode, both.body).toBe(200);
+    expect(await spent(c)).toBe(2);
+  });
+
+  it('a store busy applying a file: the same key retried and refused again and again spends nothing, then spends once', async () => {
+    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const key = `pl-busy-${nanoid(10)}`;
+    expect([200, 201]).toContain((await call('POST', '/api/v1/customer/cart/items', c.token, { vendorId: otherStore.vendorId, itemId: otherStore.itemId, quantity: 1 })).statusCode);
+    let release = () => {};
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let held = () => {};
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const holder = app.prisma.$transaction(async (tx) => {
+      await holdTillSyncLock(tx, otherStore.vendorId);
+      held();
+      await released;
+    }, { timeout: 30_000 });
+    await holding;
+    try {
+      for (let i = 0; i < LIMIT.max + 2; i++) {
+        const busy = await call('POST', '/api/v1/customer/checkout', c.token, pickupBody(otherStore), { 'idempotency-key': key });
+        expect(busy.statusCode, busy.body).toBe(409);
+        expect(busy.json().error.code).toBe('STORE_BUSY');
+      }
+    } finally {
+      release();
+      await holder;
+    }
+    expect(await spent(c)).toBe(0);
+    const placedNow = await call('POST', '/api/v1/customer/checkout', c.token, pickupBody(otherStore), { 'idempotency-key': key });
+    expect(placedNow.statusCode, placedNow.body).toBe(200);
+    expect(await spent(c)).toBe(1);
+  }, 60_000);
+
+  it('a price that moved inside the commit gives its reservation back', async () => {
+    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    expect([200, 201]).toContain((await call('POST', '/api/v1/customer/cart/items', c.token, { vendorId: store.vendorId, itemId: store.itemId, quantity: 1 })).statusCode);
+    for (let i = 0; i < LIMIT.max + 2; i++) {
+      const moved = await call('POST', '/api/v1/customer/checkout', c.token, { ...pickupBody(), expectedTotal: 1 });
+      expect(moved.statusCode, moved.body).toBe(409);
+      expect(moved.json().error.code).toBe('PRICE_CHANGED');
+    }
+    expect(await spent(c)).toBe(0);
+    expect((await call('POST', '/api/v1/customer/checkout', c.token, pickupBody())).statusCode).toBe(200);
+    expect(await spent(c)).toBe(1);
+  });
+
+  it('an unknown outcome keeps the spend: it may be an order', async () => {
+    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const spy = vi.spyOn(OrderService.prototype, 'checkout').mockImplementationOnce(async (input) => {
+      await input.reservePlacement!(1);
+      throw new CheckoutOutcomeUnknownError(null);
+    });
+    try {
+      const res = await call('POST', '/api/v1/customer/checkout', c.token, pickupBody());
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json().error.code).toBe('CHECKOUT_OUTCOME_UNKNOWN');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await spent(c)).toBe(1);
+  });
+
+  it('after its commit an order keeps the spend, whatever is thrown next', async () => {
+    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const answer = { orders: [] } as unknown as CheckoutCommit['answer'];
+    const spy = vi.spyOn(OrderService.prototype, 'checkout').mockImplementationOnce(async (input) => {
+      await input.reservePlacement!(1);
+      input.onCommitted!({ receiptId: null, answer });
+      throw new Error('a failure after the commit point');
+    });
+    try {
+      expect((await call('POST', '/api/v1/customer/checkout', c.token, pickupBody())).statusCode).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await spent(c)).toBe(1);
   });
 
   it('a parcel spends the same budget, and the seventh order of any kind is refused before anything is written', async () => {
@@ -243,6 +346,63 @@ describe('[FULL-LAUNCH] one person', () => {
       vi.unstubAllEnvs();
     }
     for (let i = 0; i < LIMIT.max; i++) expect((await sendParcel(c)).statusCode, `parcel ${i + 1}`).toBe(201);
+  });
+
+  it('one parcel sent three times at once spends once: the retries wait for the lock and read the receipt', async () => {
+    vi.stubEnv('MASTER_KEK', randomBytes(32).toString('base64'));
+    resetKeyProviderForTests();
+    try {
+      const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      for (let i = 0; i < LIMIT.max - 1; i++) expect((await pickupCheckout(c)).statusCode).toBe(200);
+      const key = `pl-race-${nanoid(10)}`;
+      const answers = await Promise.all([sendParcel(c, key), sendParcel(c, key), sendParcel(c, key)]);
+      // The last slot, three sends: nobody is told "too many orders" for a parcel that exists.
+      expect(answers.map((a) => a.statusCode)).toEqual([201, 201, 201]);
+      expect(await placed(c)).toBe(LIMIT.max);
+      expect(await spent(c)).toBe(LIMIT.max);
+    } finally {
+      vi.unstubAllEnvs();
+      resetKeyProviderForTests();
+    }
+  });
+
+  it('a parcel rolled back inside its transaction gives its reservation back', async () => {
+    vi.stubEnv('MASTER_KEK', '');
+    resetKeyProviderForTests();
+    try {
+      const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const res = await sendParcel(c, `pl-back-${nanoid(10)}`);
+      expect(res.statusCode, res.body).toBe(503);
+      expect(res.json().error.code).toBe('COURIER_RETRY_UNAVAILABLE');
+      expect(await placed(c)).toBe(0);
+      expect(await spent(c)).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      resetKeyProviderForTests();
+    }
+  });
+
+  it('a parcel whose commit gives no answer keeps the spend: it may exist', async () => {
+    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const real = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementationOnce((async (...args: unknown[]) => {
+      await real(...args);
+      throw new Error('the connection dropped at the commit');
+    }) as never);
+    try {
+      expect((await sendParcel(c)).statusCode).toBe(500);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await spent(c)).toBe(1);
+  });
+
+  it('the parcel route reads the budget before its transaction: on the wall a non-tenant read must not run inside one', () => {
+    const route = readFileSync(join(process.cwd(), 'src/modules/courier/courier.routes.ts'), 'utf8');
+    const read = route.indexOf('await readOrderPlacementBudget(');
+    const opened = route.indexOf('await app.prisma.$transaction(async (tx) => {\n      await lockActiveOrderCustomer(tx, userId, customer.tenantId);');
+    expect(read).toBeGreaterThan(0);
+    expect(opened).toBeGreaterThan(read);
   });
 
   it('a parcel replay answers past the limit and spends nothing', async () => {
@@ -281,7 +441,7 @@ describe('[FULL-LAUNCH] never the IP', () => {
   it('writes no counter but the person’s and the cluster’s', async () => {
     const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await link(c);
-    await assertOrderPlacementAllowed({ redis: app.redis, prisma: app.prisma }, c.userId);
+    await reserveOrderPlacement(app.redis, await readOrderPlacementBudget({ prisma: app.prisma }, c.userId));
     const keys = await app.redis.keys(`vel:${ORDER_PLACE_ACTION}:*`);
     expect(keys.map((k) => k.split(':')[2]).sort()).toEqual(['actor', 'cluster']);
   });
@@ -301,6 +461,21 @@ describe('[FULL-LAUNCH] one identity cluster', () => {
     const refused = await pickupCheckout(b);
     expect(refused.statusCode, refused.body).toBe(429);
     expect(await placed(b)).toBe(0);
+    // All or nothing: a full cluster charges the person nothing either.
+    expect(await spent(b)).toBe(0);
+  });
+
+  it('one person’s refused taps leave the cluster’s budget alone: a linked account still orders', async () => {
+    const a = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const b = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const clusterId = await link(a, b);
+    for (let i = 0; i < LIMIT.max; i++) expect((await pickupCheckout(a)).statusCode).toBe(200);
+    for (let i = 0; i < LIMIT.max; i++) {
+      const res = i === 0 ? await pickupCheckout(a) : await call('POST', '/api/v1/customer/checkout', a.token, pickupBody());
+      expect(res.statusCode, res.body).toBe(429);
+    }
+    expect(await spentBy('cluster', clusterId)).toBe(LIMIT.max);
+    expect((await pickupCheckout(b)).statusCode).toBe(200);
   });
 
   it('an account whose cluster needs a person’s review keeps its own limit and charges nobody else', async () => {
@@ -314,10 +489,75 @@ describe('[FULL-LAUNCH] one identity cluster', () => {
   });
 });
 
-describe('[FULL-LAUNCH] a control that is down', () => {
-  it('Redis unavailable: the order goes ahead', async () => {
-    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    const broken = { eval: async () => { throw new Error('redis down'); } } as unknown as FastifyInstance['redis'];
-    await expect(assertOrderPlacementAllowed({ redis: broken, prisma: app.prisma }, c.userId)).resolves.toBeUndefined();
+describe('[FULL-LAUNCH] a reservation given back', () => {
+  const budget = () => ({ limit: LIMIT, userId: `pl-${nanoid(8)}`, clusterId: `pl-${nanoid(8)}` });
+
+  it('comes off both keys, and never goes below zero', async () => {
+    const b = budget();
+    const first = await reserveOrderPlacement(app.redis, b, 2);
+    const second = await reserveOrderPlacement(app.redis, b, 1);
+    await refundOrderPlacement(app.redis, first);
+    expect(await spentBy('actor', b.userId)).toBe(1);
+    expect(await spentBy('cluster', b.clusterId)).toBe(1);
+    await refundOrderPlacement(app.redis, first);
+    expect(await spentBy('actor', b.userId)).toBe(1);
+    await refundOrderPlacement(app.redis, second);
+    expect(await spentBy('actor', b.userId)).toBe(0);
   });
+
+  it('does not bring back a window that has ended', async () => {
+    const b = budget();
+    const reservation = await reserveOrderPlacement(app.redis, b);
+    await app.redis.del(...reservation!.keys);
+    await refundOrderPlacement(app.redis, reservation);
+    expect(await app.redis.exists(...reservation!.keys)).toBe(0);
+  });
+
+  it('every key dies with its window', async () => {
+    const reservation = await reserveOrderPlacement(app.redis, budget());
+    for (const key of reservation!.keys) {
+      const ttl = await app.redis.ttl(key);
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(LIMIT.perSeconds);
+    }
+  });
+
+  it('no limit configured: nothing is reserved', async () => {
+    expect(await reserveOrderPlacement(app.redis, null)).toBeNull();
+  });
+});
+
+describe('[FULL-LAUNCH] a control that is down', () => {
+  // Only the reservation fails. A keyed checkout refuses earlier, on its own claim, which is older than this limit.
+  const reserveFails = (ms = 0) => {
+    const real = app.redis.eval.bind(app.redis) as (...args: unknown[]) => Promise<unknown>;
+    return vi.spyOn(app.redis, 'eval').mockImplementation((async (...args: unknown[]) => {
+      if (args[0] !== ORDER_RESERVE_LUA) return real(...args);
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      throw new Error('redis down');
+    }) as never);
+  };
+
+  it('a checkout with no key goes ahead', async () => {
+    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const spy = reserveFails();
+    try {
+      expect((await pickupCheckout(c)).statusCode).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await placed(c)).toBe(1);
+  });
+
+  it('a parcel goes ahead, even when the refusal takes as long as a dead Redis takes', async () => {
+    const c = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const spy = reserveFails(REDIS_FAILS_AFTER_MS);
+    try {
+      const res = await sendParcel(c);
+      expect(res.statusCode, res.body).toBe(201);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await placed(c)).toBe(1);
+  }, 30_000);
 });
