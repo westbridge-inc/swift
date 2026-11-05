@@ -371,11 +371,22 @@ describe('[case by case] a person decides each one', () => {
 
   it('rejecting an approved case says to confirm nothing was sent; rejecting an undecided one does not', async () => {
     const approved = { ...firstClaim, id: 'claim-sent', status: 'APPROVED', evidenceNow: { complete: true, missing: [] } };
-    mockApi(queue([approved], 'APPROVED'));
+    const fetchMock = mockApi((request) => {
+      if (request.method === 'PUT') return { body: { success: true, data: { ...approved, status: 'REJECTED' } } };
+      return queue([approved], 'APPROVED')(request);
+    });
     const { user } = renderWithQuery(<ClaimsPage />);
     await approvedTab(user);
     await user.click(await screen.findByRole('button', { name: 'Reject' }));
-    expect((await screen.findByRole('dialog')).textContent).toContain('Confirm nothing was sent');
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('Confirm nothing was sent');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Nothing was sent, the case is closed');
+    await user.click(within(panel).getByRole('button', { name: 'Reject request' }));
+    expect(requestsByMethod(fetchMock, 'PUT'), 'no statement, nothing sent').toHaveLength(0);
+    await user.click(within(panel).getByRole('radio', { name: 'No money was sent' }));
+    await user.click(within(panel).getByRole('button', { name: 'Reject request' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[0]![1]!.body))).toMatchObject({ nothingSent: true });
   });
 
   it('an undecided case asks no such thing', async () => {

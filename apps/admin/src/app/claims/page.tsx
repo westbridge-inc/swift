@@ -69,7 +69,8 @@ export default function ClaimsPage() {
     title: `Reject this ${gyd(c.amount)} payment request?`,
     body: <p>Order {c.orderId}. The rider is told a person decided not to help, and reads your reason.{c.status === 'APPROVED' ? ' This closes a case that was approved and never paid. Confirm nothing was sent. If money left, record the payment instead.' : ''}</p>,
     confirmLabel: 'Reject request',
-    submit: ({ reason }) => rejectClaim(c.id, reason),
+    fields: c.status === 'APPROVED' ? [{ kind: 'choice', name: 'sent', label: 'Was any money sent?', options: [{ value: 'none', label: 'No money was sent' }] }] : [],
+    submit: ({ reason }) => rejectClaim(c.id, reason, c.status === 'APPROVED'),
     success: () => 'Request rejected.',
   }).then(lockIfQueued(c.id));
   // [A-11] The reference must be unique — one transfer settles one claim — and

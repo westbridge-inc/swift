@@ -7597,9 +7597,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/cash-rules/claims/:id/reject', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = rejectDocSchema.parse(request.body);
+    // `nothingSent` is in the body, so the C4 fingerprint covers it and the second admin approves that statement.
+    const body = rejectDocSchema.extend({ nothingSent: z.boolean().optional() }).parse(request.body);
     const claim = await cashRules.rejectClaim(id, request.user.userId, body.reason,
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }), { nothingSent: body.nothingSent });
     return { success: true, data: claim };
   });
 

@@ -13,6 +13,7 @@ import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
 import { identityAuthority } from '../integrity/identity-review';
 import { OPEN_APPROVAL_STATUSES, PAY_ASK_ACTION } from '../admin/admin-approval';
+import { lockClaimPaymentAsks } from './claim-payout';
 import { CUSTOMER_ID_DOC_TYPE } from '../verification/retention-rules';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
 import { assertTripMayEndUnpaidOn } from '../rides/taxi-stop-rules';
@@ -949,18 +950,26 @@ export class CashRulesService {
     }));
   }
 
-  async rejectClaim(claimId: string, adminId: string, note: string, onAudit?: OnAudit) {
-    // On this rail the money leaves before the record, so a standing ask to record a payment may mean it already left.
-    // Withdrawn or lapsed, the case can be closed: no ask holds a case open for good.
-    const payAsk = await this.prisma.privilegedApproval.findFirst({
-      where: { action: PAY_ASK_ACTION, entityId: claimId, status: { in: [...OPEN_APPROVAL_STATUSES] }, expiresAt: { gt: new Date() } },
-      select: { id: true },
-    });
-    if (payAsk) throw new AppError(409, 'CLAIM_PAYMENT_ASK_OPEN', 'Someone has asked to record a payment on this. Finish or withdraw that ask first: the money may already have been sent.');
+  async rejectClaim(claimId: string, adminId: string, note: string, onAudit?: OnAudit, opts: { nothingSent?: boolean } = {}) {
+    let wasApproved = false;
     // No case is ever stuck: until it is paid a person can close it, so an open case cannot block a deletion for good.
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'], {
       status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
-    }, onAudit);
+    }, onAudit, async () => (wasApproved ? { nothingSent: true } : {}), async (tx) => {
+      // On this rail the money leaves before the record. The lock is the one the approval gate writes a payment ask
+      // under, so this check and that ask cannot pass each other. Withdrawn or lapsed, an ask holds nothing open.
+      await lockClaimPaymentAsks(tx, claimId);
+      const payAsk = await tx.privilegedApproval.findFirst({
+        where: { action: PAY_ASK_ACTION, entityId: claimId, status: { in: [...OPEN_APPROVAL_STATUSES] }, expiresAt: { gt: new Date() } },
+        select: { id: true },
+      });
+      if (payAsk) throw new AppError(409, 'CLAIM_PAYMENT_ASK_OPEN', 'Someone has asked to record a payment on this. Finish or withdraw that ask first: the money may already have been sent.');
+      // A spent ask whose payment was refused leaves the row here too, so an approved case never closes silently.
+      wasApproved = (await tx.reimbursementClaim.findUnique({ where: { id: claimId }, select: { status: true } }))?.status === 'APPROVED';
+      if (wasApproved && opts.nothingSent !== true) {
+        throw new AppError(409, 'CLAIM_CONFIRM_NOTHING_SENT', 'This was approved, so money may have left. State that nothing was sent, or record the payment.');
+      }
+    });
     await this.notifyClaim(updated, 'Not approved', `A person at Swift decided not to help with this one: ${note}`, claimId);
     return updated;
   }

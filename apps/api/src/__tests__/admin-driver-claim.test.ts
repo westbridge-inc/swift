@@ -304,11 +304,11 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     const whyId = approvalIdOf(whyAsk);
     // The real ask carries the action the reject check reads, and a reject that goes all the way through is refused.
     expect((await runWithoutTenant(() => app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: whyId! } }))).action).toBe(PAY_ASK_ACTION);
-    const rejectAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON });
+    const rejectAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON, nothingSent: true });
     expect(rejectAsk.statusCode, rejectAsk.body).toBe(202);
     const rejectId = approvalIdOf(rejectAsk);
     expect((await call(approver.token, 'POST', `/api/v1/admin/approvals/${rejectId}/decide`, { approve: true, reason: REASON })).statusCode).toBe(200);
-    const rejected = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON }, { [APPROVAL_HEADER]: rejectId! });
+    const rejected = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON, nothingSent: true }, { [APPROVAL_HEADER]: rejectId! });
     expect(rejected.statusCode, rejected.body).toBe(409);
     expect(rejected.json().error.code).toBe('CLAIM_PAYMENT_ASK_OPEN');
     expect((await claimState(claim.id)).status).toBe('APPROVED');
@@ -323,6 +323,12 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     const done = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, written, { [APPROVAL_HEADER]: whyId2! });
     expect(done.statusCode, done.body).toBe(200);
     expect((await claimState(claim.id)).status).toBe('PAID');
+    // Another operator's admin learns nothing about the case from the refusal: its ask is answered as before.
+    expect((await call(foreign.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference: `${reference}F`, amount: 2000 })).statusCode).toBe(202);
+    // The same operator's admin is refused before anything is written.
+    const closedAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference: `${reference}G`, amount: 2000 });
+    expect(closedAsk.statusCode, closedAsk.body).toBe(400);
+    expect(closedAsk.json().error.code).toBe('INVALID_CLAIM_STATE');
     const entry = await runWithoutTenant(() => app.prisma.rlpReserveEntry.findUnique({ where: { claimId: claim.id } }));
     expect(entry?.note).toContain('The passenger admitted it');
     const audit = await runWithoutTenant(() => app.prisma.auditLog.findMany({ where: { entityId: claim.id }, orderBy: { createdAt: 'desc' }, take: 5 }));
