@@ -1,3 +1,4 @@
+import { PAY_ASK_ACTION } from '../modules/admin/admin-approval';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -301,6 +302,16 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     const whyAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, written);
     expect(whyAsk.statusCode, whyAsk.body).toBe(202);
     const whyId = approvalIdOf(whyAsk);
+    // The real ask carries the action the reject check reads, and a reject that goes all the way through is refused.
+    expect((await runWithoutTenant(() => app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: whyId! } }))).action).toBe(PAY_ASK_ACTION);
+    const rejectAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON });
+    expect(rejectAsk.statusCode, rejectAsk.body).toBe(202);
+    const rejectId = approvalIdOf(rejectAsk);
+    expect((await call(approver.token, 'POST', `/api/v1/admin/approvals/${rejectId}/decide`, { approve: true, reason: REASON })).statusCode).toBe(200);
+    const rejected = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON }, { [APPROVAL_HEADER]: rejectId! });
+    expect(rejected.statusCode, rejected.body).toBe(409);
+    expect(rejected.json().error.code).toBe('CLAIM_PAYMENT_ASK_OPEN');
+    expect((await claimState(claim.id)).status).toBe('APPROVED');
     expect((await call(approver.token, 'POST', `/api/v1/admin/approvals/${whyId}/decide`, { approve: true, reason: REASON })).statusCode).toBe(200);
     // The approval covers the reason: a different one cannot use it.
     const swapped = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { ...written, evidenceReason: 'Some other words entirely, long enough.' }, { [APPROVAL_HEADER]: whyId! });

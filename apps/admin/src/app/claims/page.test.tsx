@@ -369,6 +369,22 @@ describe('[case by case] a person decides each one', () => {
     expect(within(await screen.findByRole('dialog')).queryByRole('textbox', { name: /Why this is paid/ })).toBeNull();
   });
 
+  it('rejecting an approved case says to confirm nothing was sent; rejecting an undecided one does not', async () => {
+    const approved = { ...firstClaim, id: 'claim-sent', status: 'APPROVED', evidenceNow: { complete: true, missing: [] } };
+    mockApi(queue([approved], 'APPROVED'));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await approvedTab(user);
+    await user.click(await screen.findByRole('button', { name: 'Reject' }));
+    expect((await screen.findByRole('dialog')).textContent).toContain('Confirm nothing was sent');
+  });
+
+  it('an undecided case asks no such thing', async () => {
+    mockApi(queue([{ ...firstClaim, id: 'claim-new', status: 'PENDING_REVIEW', evidenceComplete: true }], 'PENDING_REVIEW'));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Reject' }));
+    expect((await screen.findByRole('dialog')).textContent).not.toContain('Confirm nothing was sent');
+  });
+
   it('Mark paid is offered only when it can be recorded: a short line says so, and Reject stays', async () => {
     const big = { ...firstClaim, id: 'claim-big', status: 'APPROVED', amount: 90000, evidenceNow: { complete: true, missing: [] } };
     mockApi(queue([big], 'APPROVED'));

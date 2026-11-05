@@ -67,7 +67,7 @@ export default function ClaimsPage() {
   }).then(lockIfQueued(c.id));
   const reject = (c: any) => void actions.run({
     title: `Reject this ${gyd(c.amount)} payment request?`,
-    body: <p>Order {c.orderId}. The rider is told a person decided not to help, and reads your reason.{c.status === 'APPROVED' ? ' This closes a case that was approved and never paid.' : ''}</p>,
+    body: <p>Order {c.orderId}. The rider is told a person decided not to help, and reads your reason.{c.status === 'APPROVED' ? ' This closes a case that was approved and never paid. Confirm nothing was sent. If money left, record the payment instead.' : ''}</p>,
     confirmLabel: 'Reject request',
     submit: ({ reason }) => rejectClaim(c.id, reason),
     success: () => 'Request rejected.',

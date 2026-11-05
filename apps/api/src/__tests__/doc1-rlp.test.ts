@@ -27,6 +27,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { NotificationService } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService, DEFAULT_CASH_RULES } from '../modules/cash/cash-rules.service';
+import { PAY_ASK_ACTION } from '../modules/admin/admin-approval';
 import {
   LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, assembleClaimEvidence, reserveBalance,
   moverClaims, rlpReserveDdl, sweepLossProtection,
@@ -626,6 +627,40 @@ describe('[case by case] every unpaid door goes to a person, and nothing promise
     await system(() => app.prisma.reimbursementClaim.update({ where: { id: claim!.id }, data: { evidenceComplete: true } }));
     const [row] = await system(async () => cash.withEvidenceNow([await claimRow(claim!.id)]));
     expect(row!.evidenceNow).toEqual({ complete: false, missing: ['door_photo'] });
+  });
+
+  it('a closed case carries no late flag to the mover, on any phone; a decided, open one does', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(64, door);
+    const late = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'APPROVED', flags: [LOSS_PROTECTION_FLAGS.slaBreached, 'gps_far'] });
+    const closed = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'REJECTED', flags: [LOSS_PROTECTION_FLAGS.slaBreached, 'gps_far'] });
+    const paid = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'PAID', flags: [LOSS_PROTECTION_FLAGS.slaBreached] });
+    const view = await system(() => moverClaims(app.prisma, { riderId: pair.riderId, driverId: null }));
+    const flagsOf = (id: string) => view.claims.find((c) => c.id === id)!.flags;
+    expect(flagsOf(late.id)).toContain(LOSS_PROTECTION_FLAGS.slaBreached);
+    expect(flagsOf(closed.id)).toEqual(['gps_far']);
+    expect(flagsOf(paid.id)).toEqual([]);
+    expect((await claimRow(closed.id)).flags, 'the record keeps the fact').toContain(LOSS_PROTECTION_FLAGS.slaBreached);
+  });
+
+  it('reject refuses while a payment ask stands on the case: on this rail the money may already have left', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(66, door);
+    const { claim } = await file(await atDoorOrder({ food: 800, pair, door }), 'no_show', { pair, door });
+    await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
+    const ask = (status: string, expiresAt: Date) => system(() => app.prisma.privilegedApproval.create({ data: {
+      action: PAY_ASK_ACTION, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim!.id, fingerprint: `fixture-${RUN}-${status}`, status, requestedBy: 'admin-pay', reason: 'fixture', expiresAt,
+    } }));
+    const later = new Date(Date.now() + HOUR);
+    const pending = await ask('PENDING', later);
+    await expect(system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help'))).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_OPEN' });
+    await system(() => app.prisma.privilegedApproval.update({ where: { id: pending.id }, data: { status: 'APPROVED' } }));
+    await expect(system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help'))).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_OPEN' });
+    expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    // Withdrawn or lapsed, the case can always be closed.
+    await system(() => app.prisma.privilegedApproval.update({ where: { id: pending.id }, data: { status: 'CANCELLED' } }));
+    await ask('PENDING', new Date(Date.now() - HOUR));
+    expect((await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help'))).status).toBe('REJECTED');
   });
 
   it('the mover view carries no pay-by date, and an old automatic row reads as waiting for a person', async () => {

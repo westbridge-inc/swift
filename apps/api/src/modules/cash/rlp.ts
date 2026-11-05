@@ -474,7 +474,9 @@ export async function moverClaims(
   const claims = rows.map((c) => {
     const ev = c.evidence as { complete?: boolean; missing?: string[]; items?: Array<{ key: string; present: boolean; required: boolean }> } | null;
     return {
-      id: c.id, orderId: c.orderId, amount: String(c.amount), status: c.status, reason: c.reason, flags: c.flags,
+      id: c.id, orderId: c.orderId, amount: String(c.amount), status: c.status, reason: c.reason,
+      // A closed case is never told it is late, on any phone: that reads as money still on its way.
+      flags: c.status === 'PAID' || c.status === 'REJECTED' ? c.flags.filter((f) => f !== LOSS_PROTECTION_FLAGS.slaBreached) : c.flags,
       filedAt: c.createdAt.toISOString(), paidAt: c.paidAt ? c.paidAt.toISOString() : null, paymentRef: c.paymentRef ?? null,
       evidence: ev ? { complete: Boolean(ev.complete), missing: ev.missing ?? [], items: (ev.items ?? []).map((i) => ({ key: i.key, present: i.present, required: i.required })) } : null,
       underReview: c.status === 'PENDING_REVIEW' || c.status === 'AUTO_APPROVED',

@@ -218,6 +218,8 @@ export type ApprovalRefusal =
  * stands in for one. Executing an approved ask is never refused by this.
  */
 export const OPEN_APPROVAL_STATUSES = ['PENDING', 'APPROVED'] as const;
+/** The ask that records a payment on an unpaid-door case, as its approval row names it. */
+export const PAY_ASK_ACTION = 'PUT /cash-rules/claims/:id/paid';
 export type OpenApprovalStatus = (typeof OPEN_APPROVAL_STATUSES)[number];
 
 function canonicalParams(params: Record<string, unknown>): string {

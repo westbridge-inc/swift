@@ -26,7 +26,7 @@ export function claimStatus(status: string, evidenceComplete = true): { label: s
 const EVIDENCE_LABEL: Record<string, string> = {
   handover_not_completed: 'Handover was not completed',
   rider_at_door: 'You were at the door',
-  elapsed_wait: 'Your wait was recorded',
+  elapsed_wait: 'Wait at the door',
   customer_contacted: 'You contacted the customer in the app',
   door_photo: 'Photo at the door',
   pickup_proof: 'Pickup recorded',
@@ -52,6 +52,12 @@ export function flagHint(flag: string): string | null {
       return 'Reviewed by a person.';
     default: return null;
   }
+}
+
+/** The hints for one case. A closed case is never told it is late: that reads as money still on its way. */
+export function claimHints(flags: string[], status: string): string[] {
+  const open = status !== 'PAID' && status !== 'REJECTED';
+  return flags.filter((f) => open || f !== 'sla_breached').map(flagHint).filter((h): h is string => Boolean(h));
 }
 
 export function reasonLabel(reason: string): string {

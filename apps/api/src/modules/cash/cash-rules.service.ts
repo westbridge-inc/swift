@@ -12,6 +12,7 @@ import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
 import { identityAuthority } from '../integrity/identity-review';
+import { OPEN_APPROVAL_STATUSES, PAY_ASK_ACTION } from '../admin/admin-approval';
 import { CUSTOMER_ID_DOC_TYPE } from '../verification/retention-rules';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
 import { assertTripMayEndUnpaidOn } from '../rides/taxi-stop-rules';
@@ -949,6 +950,13 @@ export class CashRulesService {
   }
 
   async rejectClaim(claimId: string, adminId: string, note: string, onAudit?: OnAudit) {
+    // On this rail the money leaves before the record, so a standing ask to record a payment may mean it already left.
+    // Withdrawn or lapsed, the case can be closed: no ask holds a case open for good.
+    const payAsk = await this.prisma.privilegedApproval.findFirst({
+      where: { action: PAY_ASK_ACTION, entityId: claimId, status: { in: [...OPEN_APPROVAL_STATUSES] }, expiresAt: { gt: new Date() } },
+      select: { id: true },
+    });
+    if (payAsk) throw new AppError(409, 'CLAIM_PAYMENT_ASK_OPEN', 'Someone has asked to record a payment on this. Finish or withdraw that ask first: the money may already have been sent.');
     // No case is ever stuck: until it is paid a person can close it, so an open case cannot block a deletion for good.
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'], {
       status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
