@@ -177,7 +177,7 @@ function alert(kind: OpsAlertKind, title: string, body: string, level: number, c
 /** The backup posture page's body with both of its findings (backup-freshness.ts checkBackupPosture). */
 const BACKUP_BODY = "Backups still use the API's storage key: whoever obtains it can read, overwrite or delete every off-site backup. Create a key limited to the backup bucket and store it on the host (owner sheet BACKUP-KEY-SETUP). The last backup was not signed: restores refuse it. Install the backup store and the current backup unit on the host (sudo swift-secrets backup init).";
 const SOS_TITLE = 'URGENT: SOS ACTIVE \u2014 respond now';
-const SOS_BODY = 'CUSTOMER raised an SOS on order cmh1x2y3z4a5b6c7d8e9f0g1h. Open the war room now.';
+const SOS_BODY = 'CUSTOMER raised an SOS on order cmh1x2y3z4a5b6c7d8e9f0g1h. Open the Safety page in Mission Control now.';
 /** Parts a text costs as UCS-2 (70 in one, 67 per part beyond), counted in UTF-16 units as carriers do. */
 const ucs2Parts = (text: string) => (text.length <= 70 ? 1 : Math.ceil(text.length / 67));
 /** What a phone is billed for a text: GSM-7 parts, or UCS-2 parts when any character is outside GSM-7. */

@@ -204,8 +204,8 @@ describe('a failed emergency-contact text pages on-call operations', () => {
 
 describe('ANY failed row pages, each in its own plain words', () => {
   it.each([
-    ['OPS_PAGE', 'URGENT: SOS page failed — open the war room now'],
-    ['WAR_ROOM', 'URGENT: SOS live board update failed — open the war room now'],
+    ['OPS_PAGE', 'URGENT: SOS page failed — open the Safety page now'],
+    ['WAR_ROOM', 'URGENT: SOS live board update failed — open the Safety page now'],
     ['EVIDENCE', 'SOS evidence record failed — check the alert'],
   ] as const)('%s', async (channel, title) => {
     const { alert, row } = await alertWithFailedRow({ channel, rowStatus: 'PENDING', attempts: 3, lastError: 'boom' });

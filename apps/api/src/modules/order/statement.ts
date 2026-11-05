@@ -36,6 +36,8 @@ export type StatementInput = {
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const day = (d: Date) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+/** A row is an instant, so it reads Guyana's date on any server. A period's label keeps `day`: it is the dates asked for. */
+const rowDay = (d: Date) => new Date(d).toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: '2-digit', month: 'short', year: 'numeric' });
 
 export function renderStatementHtml(input: StatementInput): string {
   // [M-36] Rendered through the registry in the statement's own currency.
@@ -43,7 +45,7 @@ export function renderStatementHtml(input: StatementInput): string {
   const rows = input.lines
     .map(
       (l) => `<tr>
-        <td class="date">${day(l.date)}</td>
+        <td class="date">${rowDay(l.date)}</td>
         <td>${esc(l.label)}</td>
         <td class="num">${money(l.amount)}</td>
       </tr>`,

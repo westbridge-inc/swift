@@ -95,6 +95,13 @@ async function claimNext(prisma: PrismaClient, leaseMs: number, alertIds?: strin
   return rows[0] ?? null;
 }
 
+/** [FULL-LAUNCH] What ops reads and the on-call text repeats: who raised it, on what job, and where to go. It takes
+ *  only these three fields, so a person's name, words or location cannot reach it: those are on the Safety page. */
+export function sosPageBody(alert: { actorRole: string; orderId: string | null; serviceJobId: string | null }): string {
+  const job = alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : '';
+  return `${alert.actorRole} raised an SOS${job}. Open the Safety page in Mission Control now.`;
+}
+
 const TERMINAL = new Set(['RESOLVED', 'CANCELLED']);
 
 /** [SMS-COST] The longest name an SOS text to an emergency contact carries (as the contact's code text). */
@@ -125,7 +132,7 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       const page = await openOpsAlert(prisma, notifications, {
         kind: 'SOS', tenantId: alert.tenantId, sosAlertId: alert.id,
         title: 'URGENT: SOS ACTIVE — respond now',
-        body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : ''}. Open the war room now.`,
+        body: sosPageBody(alert),
         data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId },
       });
       // [AUD-L8b-008 · AUD-G7-003] opsPaged is what REACHED a person: pushes
@@ -342,12 +349,12 @@ const FAILURE_PAGE_WORDS: Record<SosEscalationChannel, { title: string; body: (s
     body: (id) => `The text to the contact for SOS alert ${id} failed (number hidden). Call the person who raised it now.`,
   },
   OPS_PAGE: {
-    title: 'URGENT: SOS page failed — open the war room now',
-    body: (id) => `The page for SOS alert ${id} did not go through. Open the war room and respond now.`,
+    title: 'URGENT: SOS page failed — open the Safety page now',
+    body: (id) => `The page for SOS alert ${id} did not go through. Open the Safety page and respond now.`,
   },
   WAR_ROOM: {
-    title: 'URGENT: SOS live board update failed — open the war room now',
-    body: (id) => `The live war-room update for SOS alert ${id} did not go through. Open the alert and respond now.`,
+    title: 'URGENT: SOS live board update failed — open the Safety page now',
+    body: (id) => `The live update for SOS alert ${id} did not go through. Open the Safety page and respond now.`,
   },
   EVIDENCE: {
     title: 'SOS evidence record failed — check the alert',
