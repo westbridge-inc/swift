@@ -33,7 +33,7 @@ describe('[ADMIN-AUDIT S4-1] status tabs in plain words', () => {
     empty();
     renderWithQuery(<ClaimsPage />);
     expect(await screen.findByText('No payment requests under “Waiting for review”.')).toBeTruthy();
-    expect(tabs()).toEqual(expect.arrayContaining(['Waiting for review', 'Approved automatically', 'Approved', 'Paid', 'Rejected']));
+    expect(tabs()).toEqual(expect.arrayContaining(['Waiting for review', 'Old rule, needs a person', 'Approved', 'Paid', 'Rejected']));
     expect(document.body.textContent).not.toMatch(/pending review|auto approved/);
   });
   it('Support (REVIEW-F #2154 S4-3): the tabs say what the rows say', async () => {

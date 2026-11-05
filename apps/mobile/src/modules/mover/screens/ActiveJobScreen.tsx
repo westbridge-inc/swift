@@ -533,11 +533,10 @@ export function ActiveJobScreen({ navigation }: any) {
         active.refetch?.();
         return;
       }
-      toast.show(
-        claim === 'AUTO_APPROVED' ? `${recorded} — Swift will pay you.`
-          : claim === 'PENDING_REVIEW' ? `${recorded} — this is being reviewed.`
-            : `${recorded}.`,
-      );
+      // [Coordinator ruling, 5 Nov 2026] Case by case, and never a promise. An older server can still answer AUTO_APPROVED.
+      toast.show(claim === 'AUTO_APPROVED' || claim === 'PENDING_REVIEW'
+        ? `${recorded} — a person will review this, and Swift may help.`
+        : `${recorded}.`);
       navigation?.goBack?.();
     };
     const onError = (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the outcome — try again or call support.");
@@ -1298,7 +1297,7 @@ export function ActiveJobScreen({ navigation }: any) {
       {/* [M-29] The unpaid sheet: the failed fare outcome at the destination
           (driver) or the failed handover at the door (rider). The choice names
           what happened; the server records the GPS evidence, the strike and
-          the guarantee claim together. */}
+          the case for a person together. */}
       <PopupCard visible={unpaidSheet} onClose={() => setUnpaidSheet(false)}>
         <PopupTitle variant="title" center>{isDriver ? 'The passenger didn’t pay?' : isCourier ? 'The recipient didn’t pay?' : 'The customer didn’t pay?'}</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>

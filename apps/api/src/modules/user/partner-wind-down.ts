@@ -11,9 +11,8 @@ import { SUBSCRIPTION_OWNER_JOINS_SQL, subscriptionPaidBySql, subscriptionsPaidB
 
 /** Account closure preserves financial history. Earnings describe direct payments
  * between participants; Swift holds no balance to pay out. Open cash obligations
- * block erasure, and so does an open loss-protection claim: money Swift itself
- * owes the mover, which support pays or decides (coordinator ruling 2026-10-05,
- * Q1a). Rescue incentives deliberately do not block: they have no payout path
+ * block erasure, and so does an open case at the door: a person has not finished
+ * deciding it, and support pays or closes it (coordinator ruling 2026-10-05, Q1a). Rescue incentives deliberately do not block: they have no payout path
  * and ship switched off (rescue-incentive-deletion-rule.unit.test.ts). The
  * caller also checks live work under authority locks.
  *
@@ -50,7 +49,7 @@ export interface PartnerObligations {
   partialCashReturnReleaseAt?: Date | null;
   /** Historical direct-payment earnings; not a Swift payout obligation. */
   earningsOwed: number;
-  /** Loss-protection claims for this mover that Swift has neither paid nor rejected. */
+  /** Unpaid-door cases for this mover that Swift has neither paid nor rejected. */
   openClaimCount?: number;
   /** Fee checkouts MMG can still confirm, plus unresolved payment confirmation holds. */
   pendingFeePaymentCount?: number;
@@ -104,7 +103,7 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
   PARTIAL_CASH_RETURN:
     'You hold {amount} of a customer\u2019s cash from a delivery they could not pay in full, and the goods went back to the store. This partial cash still needs to be returned to the customer. Open Get help to arrange and confirm the cash return with operations, then return here to delete your account. If operations has not recorded it resolved by {date}, you can delete your account from that day; the record of the cash is kept.',
   OPEN_CLAIM:
-    'Swift still owes you a payment for a no-show. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
+    'A person at Swift has not finished reviewing an unpaid cash order of yours. Open Get help to have it decided, then return here to delete your account.',
   FEE_PAYMENT_PENDING:
     'A weekly-fee payment is still in progress or being confirmed with MMG. Wait for it to finish, or open Get help to have it resolved, then return here to delete your account.',
   // [Owner ruling 2026-10-07] Unused credit is refunded by support (recorded

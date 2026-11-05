@@ -184,7 +184,7 @@ describe('[M-28] the recipient pays — with the proof', () => {
     const refused = await inject('POST', `/api/v1/courier/order/${job.orderId}/proof`, { proofPhotoUrl: job.issued, outcome: 'refused', gps: job.drop }, job.rider.token);
     expect(refused.statusCode).toBe(200);
     expect(refused.json().data.status).toBe('RETURNING');
-    expect(refused.json().data.claim).toMatchObject({ status: 'AUTO_APPROVED' });
+    expect(refused.json().data.claim).toMatchObject({ status: 'PENDING_REVIEW' });
     expect(await facts(job.orderId, job.sender.userId)).toMatchObject({ status: 'RETURNING', payment: 'FAILED', strikes: 1, claims: 1, fees: 0 });
     const claim = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { orderId: job.orderId } });
     expect({ riderId: claim.riderId, reason: claim.reason, photo: claim.photoUrl }).toEqual({ riderId: job.rider.riderId, reason: 'refused', photo: job.issued });

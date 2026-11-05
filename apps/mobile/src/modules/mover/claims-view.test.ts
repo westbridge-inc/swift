@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { claimStatus, evidenceLine, flagHint, reasonLabel } from './claims-view';
 
-describe('claims view helpers — the rider\'s words for the policy', () => {
-  it('status labels: approved says Swift pays, review says a person, rejected says not covered', () => {
-    expect(claimStatus('AUTO_APPROVED')).toEqual({ label: 'Approved — Swift pays you', tone: 'success' });
-    expect(claimStatus('PENDING_REVIEW')).toEqual({ label: 'Under review', tone: 'brand' });
+describe('claims view helpers — the rider\'s words, case by case', () => {
+  it('status labels: a person reviews, a person approves, an old automatic row waits for a person, nothing promises', () => {
+    expect(claimStatus('PENDING_REVIEW')).toEqual({ label: 'A person will review this', tone: 'brand' });
+    expect(claimStatus('AUTO_APPROVED')).toEqual({ label: 'A person will review this', tone: 'brand' });
+    expect(claimStatus('APPROVED')).toEqual({ label: 'Approved by a person', tone: 'success' });
     expect(claimStatus('PAID').label).toBe('Paid');
     expect(claimStatus('REJECTED')).toEqual({ label: 'Not approved', tone: 'error' });
   });
@@ -14,8 +15,12 @@ describe('claims view helpers — the rider\'s words for the policy', () => {
     expect(evidenceLine({ key: 'customer_contacted', present: false, required: false }).state).toBe('optional');
   });
   it('flags become plain hints; internal names never reach the rider; unknown flags say nothing', () => {
-    expect(flagHint('over_monthly_cap')).toContain('30-day limit');
+    expect(flagHint('over_monthly_cap')).toContain('last 30 days');
+    expect(flagHint('over_monthly_cap')).not.toMatch(/limit/i); // a limit reads as a right up to it
+    expect(flagHint('over_gate')).toContain('closer look');
     expect(flagHint('protection_suspended')).toContain('suspended');
+    expect(flagHint('evidence_incomplete')).toContain('cannot pay');
+    expect(flagHint('sla_breached')).not.toMatch(/payment to you/i);
     expect(flagHint('collusion_pair_cluster')).toBe('Reviewed by a person.');
     expect(flagHint('some_new_flag')).toBeNull();
     expect(reasonLabel('no_show')).toBe('Customer did not show');

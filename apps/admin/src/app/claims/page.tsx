@@ -13,10 +13,13 @@ import { useStatusFromUrl } from '@/lib/status-from-url';
 
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
 
+/** What a flag reads as. A flag with no line here reads as its own words. */
+const FLAG_WORDS: Record<string, string> = { protection_suspended: 'help suspended', over_gate: 'over the ID gate', sla_breached: 'past the staff deadline' };
+
 /**
- * The under-$50 guarantee queue: failed cash handovers (no-show / refused)
- * with GPS + photo evidence. Deterministic guardrail flags (over_cap,
- * outlier, collusion_*) surface what needs a harder look.
+ * [Coordinator ruling, 5 Nov 2026] Case by case: failed cash handovers (no-show / refused) with GPS + photo evidence.
+ * Swift MAY help, at its discretion, from company money, and a person decides each one. Nothing here is owed, and no
+ * row is decided by a machine. Deterministic flags (over_cap, outlier, collusion_*) surface what needs a harder look.
  */
 export default function ClaimsPage() {
   const qc = useQueryClient();
@@ -39,14 +42,19 @@ export default function ClaimsPage() {
   };
   const approve = (c: any) => void actions.run({
     title: `Approve this ${gyd(c.amount)} payment request?`,
-    body: <p>Order {c.orderId}. Approving makes it payable from the set-aside.</p>,
+    body: (
+      <>
+        <p>Order {c.orderId}. Nobody is owed this: you are deciding that Swift helps on this order only, from company money. The rider is told so.</p>
+        {c.evidenceComplete ? null : <p className="mc-text-bad mt-2">Evidence is missing, so this cannot be paid even if you approve it. The rider is told that.</p>}
+      </>
+    ),
     confirmLabel: 'Approve request',
     submit: ({ reason }) => approveClaim(c.id, reason),
     success: () => 'Request approved.',
   }).then(lockIfQueued(c.id));
   const reject = (c: any) => void actions.run({
     title: `Reject this ${gyd(c.amount)} payment request?`,
-    body: <p>Order {c.orderId}. The rider is not paid for it.</p>,
+    body: <p>Order {c.orderId}. The rider is told a person decided not to help, and reads your reason.</p>,
     confirmLabel: 'Reject request',
     submit: ({ reason }) => rejectClaim(c.id, reason),
     success: () => 'Request rejected.',
@@ -66,12 +74,13 @@ export default function ClaimsPage() {
     success: () => 'Payout recorded.',
   }).then(lockIfQueued(c.id));
 
-  // [DOC-1 §31.4 · P31-1] The reserve line every payout is drawn from: balance, floor, this month's provisioning.
+  // [DOC-1 §31.4 · P31-1] The line every payment is drawn from: balance, floor, the latest entries. It only holds what
+  // a person records: no share of fees feeds it (coordinator ruling, 5 Nov 2026).
   const reserveQ = useQuery({ queryKey: ['rlp-reserve'], queryFn: () => fetchRlpReserve('GY') });
   const reserveActions = useActionRunner(() => { qc.invalidateQueries({ queryKey: ['rlp-reserve'] }); });
   const adjust = () => void reserveActions.run({
     title: 'Record an entry on the GY set-aside?',
-    body: <p>A positive amount adds to the set-aside; a negative one corrects it downwards. A second admin approves it.</p>,
+    body: <p>Record plain company money only, never a share of fees. A positive amount adds to the set-aside; a negative one corrects it downwards. A second admin approves it.</p>,
     confirmLabel: 'Record entry',
     fields: [
       { kind: 'amount', name: 'amount', label: 'Adjust the set-aside by (GYD)', signed: true },
@@ -88,7 +97,7 @@ export default function ClaimsPage() {
   return (
     <div className="mc-page">
       <p className="mc-muted text-sm mb-6">
-        Failed cash handovers Swift pays for — GPS-evidenced, guardrail-flagged. Approve, reject, or mark the payment done.
+        Failed cash handovers, with GPS evidence and flags. A person decides each one: Swift may help from company money, and nobody is owed it. Approve, reject, or mark the payment done.
       </p>
 
       {actions.banner}
@@ -126,7 +135,7 @@ export default function ClaimsPage() {
             <p className="text-2xl font-bold">{reserveQ.isLoading ? '—' : reserve ? gyd(reserve.balance) : '—'}</p>
             {reserve ? (
               <p className="mc-muted text-xs">
-                floor {gyd(reserve.floor)} · {reserve.provisionedThisPeriod ? 'provisioned this month' : 'not yet provisioned this month'}
+                floor {gyd(reserve.floor)}
                 {reserve.low ? ' · BELOW FLOOR — payments are refused once it is empty' : ''}
               </p>
             ) : null}
@@ -186,7 +195,7 @@ export default function ClaimsPage() {
                 </span>
                 {(c.flags ?? []).map((f: string) => (
                   <span key={f} className="px-2.5 py-1 rounded-full text-xs bg-[var(--mc-bad-soft)] mc-text-bad">
-                    {f.replaceAll('_', ' ')}
+                    {FLAG_WORDS[f] ?? f.replaceAll('_', ' ')}
                   </span>
                 ))}
                 <span className="text-xs mc-muted ml-auto">{gyDateTime(c.createdAt)}</span>
@@ -218,7 +227,7 @@ export default function ClaimsPage() {
                     </span>
                   ))}
                   {c.evidenceComplete ? null : (
-                    <span className="text-xs mc-text-bad">bundle incomplete — a payout is refused until a person approves with the missing items on record</span>
+                    <span className="text-xs mc-text-bad">evidence incomplete — this cannot be paid, even if a person approves it</span>
                   )}
                 </div>
               ) : null}
@@ -228,9 +237,14 @@ export default function ClaimsPage() {
                   <Link href="/approvals" className="underline">Approvals</Link>.
                 </p>
               ) : null}
+              {c.status === 'AUTO_APPROVED' ? (
+                <p className="mt-3 text-xs mc-text-warn" data-testid={`old-rule-${c.id}`}>
+                  Approved automatically under the old rule, and the rider was told Swift would pay. Nobody decided it, so it cannot be paid until a person does.
+                </p>
+              ) : null}
               {(c.status === 'PENDING_REVIEW' || c.status === 'AUTO_APPROVED' || c.status === 'APPROVED') && (
                 <div className="flex gap-2 mt-4">
-                  {c.status === 'PENDING_REVIEW' && (
+                  {(c.status === 'PENDING_REVIEW' || c.status === 'AUTO_APPROVED') && (
                     <>
                       <button
                         type="button"
@@ -250,7 +264,7 @@ export default function ClaimsPage() {
                       </button>
                     </>
                   )}
-                  {(c.status === 'APPROVED' || c.status === 'AUTO_APPROVED') && (
+                  {c.status === 'APPROVED' && (
                     <button
                       type="button"
                       onClick={() => pay(c)}

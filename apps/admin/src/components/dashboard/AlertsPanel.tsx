@@ -30,7 +30,7 @@ const QUEUES: Record<WaitingKey, { one: string; many: string; href: string; leve
   custody: { one: 'custody case open', many: 'custody cases open', href: '/custody', level: 'warning' },
   claimsToDecide: { one: 'unpaid cash order to decide', many: 'unpaid cash orders to decide', href: '/claims', level: 'warning' },
   claimsToPay: { one: 'approved unpaid cash order to pay', many: 'approved unpaid cash orders to pay', href: '/claims?status=APPROVED', level: 'warning' },
-  claimsAutoToPay: { one: 'unpaid cash order approved automatically, to pay', many: 'unpaid cash orders approved automatically, to pay', href: '/claims?status=AUTO_APPROVED', level: 'warning' },
+  claimsAutoToPay: { one: 'older unpaid cash order, a person to decide', many: 'older unpaid cash orders, a person to decide', href: '/claims?status=AUTO_APPROVED', level: 'warning' },
   returnsToDecide: { one: 'return to decide', many: 'returns to decide', href: '/returns', level: 'warning' },
   refundsOwed: { one: 'refund owed', many: 'refunds owed', href: '/returns?status=REFUND_DUE', level: 'warning' },
   moderation: { one: 'report or held review to moderate', many: 'reports or held reviews to moderate', href: '/moderation', level: 'warning' },

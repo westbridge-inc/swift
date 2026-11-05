@@ -11,10 +11,9 @@ import { dateLabel } from '../shared';
 import { claimStatus, evidenceLine, flagHint, reasonLabel, type ClaimView } from '../claims-view';
 
 /**
- * [DOC-1 §31.4 · P31-1] Guarantee claims — the rider's own view of a policy that is
- * written, funded and capped: each claim's status, the evidence bundle as it was filed,
- * when Swift pays an approved claim, and whether their protection is suspended. Everything
- * shown is the server's; the screen decides nothing.
+ * [DOC-1 §31.4 · P31-1] The rider's own view of their unpaid cash orders: each one's status, the evidence bundle as it
+ * was filed, and any suspension. Everything shown is the server's; the screen decides nothing. [Coordinator ruling,
+ * 5 Nov 2026] Case by case: a person decides each one, Swift may help, and nothing here is a promise.
  */
 export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: string, p?: Record<string, unknown>) => void } }) {
   const { kind } = useMoverKind();
@@ -28,13 +27,18 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
       <ScrollView contentContainerStyle={{ padding: space.lg, gap: space.md }} refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}>
         {q.isLoading ? <LoadingBlock /> : null}
         {q.isError ? <ErrorState onRetry={() => void q.refetch()} message="Couldn't load these orders." /> : null}
+        {data ? (
+          <T variant="caption" style={{ color: color.text.secondary }}>
+            A person at Swift looks at each one. Swift may help, but it does not promise to, and no amount is set until a person decides.
+          </T>
+        ) : null}
         {data?.suspended ? (
           <Card style={{ borderColor: color.error, borderWidth: 1 }}>
-            <T variant="body" style={{ fontWeight: '700' }}>Automatic payment is suspended for you</T>
+            <T variant="body" style={{ fontWeight: '700' }}>Swift&apos;s help is suspended for you</T>
             <T variant="caption" style={{ color: color.text.secondary }}>
-              A person reviews each one before Swift pays it. You can ask for a review of this decision.
+              A person still looks at each one, but do not expect help while this stands. You can ask for a review of this decision.
             </T>
-            <LinkText label="Get help" onPress={() => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Automatic payment suspended' })} />
+            <LinkText label="Get help" onPress={() => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Help suspended' })} />
           </Card>
         ) : null}
         {data && data.claims.length === 0 ? (
@@ -50,7 +54,6 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
                 <TonePill label={st.label} tone={st.tone} />
               </View>
               <T variant="caption" style={{ color: color.text.secondary }}>{reasonLabel(c.reason)} · recorded {dateLabel(c.filedAt)}</T>
-              {c.settleBy && c.status !== 'PAID' ? <T variant="caption">Swift pays you by {dateLabel(c.settleBy)}</T> : null}
               {c.paidAt ? <T variant="caption">Paid {dateLabel(c.paidAt)}{c.paymentRef ? ` · ref ${c.paymentRef}` : ''}</T> : null}
               {c.evidence ? (
                 <View style={{ marginTop: space.sm, gap: 4 }}>

@@ -1,40 +1,38 @@
 /**
- * [DOC-1 §31.4 · DOC-INV-47 · P31-1] Rider Loss Protection — the promise, written, funded and capped.
+ * [DOC-1 §31.4 · DOC-INV-47 · P31-1] What happens when a customer does not pay at the door.
  *
- * Below the ID gate the rider fronts the food cost out of his own pocket, and when the
- * customer bails at the door Swift covers the loss. §31.4 says that promise must be a
- * POLICY, not a sentence: covered amount and cap per claim (the gate), a cap per rider
- * per rolling 30 days, a pay-out SLA, a named reserve line provisioned from fee revenue,
- * and — DOC-INV-47 — no payout without a complete evidence bundle assembled from the
- * artefacts the platform already holds, never typed by the rider.
+ * [Coordinator ruling, 5 Nov 2026] CASE BY CASE. Swift MAY help a mover who loses money at the door, at its
+ * discretion, from general company money. A person decides each case: there is no advance promise, no entitlement,
+ * no link to fees, and nothing here is insurance. So nothing is approved by a machine, nothing tells a mover that
+ * Swift will pay, and no share of fees is set aside. The line below holds only what a person records into it. The
+ * code names (`ReimbursementClaim`, `RLP_*`, `/claims`) are older than the ruling and no person reads them.
  *
- * This file is the ONE author of: the evidence bundle, the reserve ledger (balance,
- * draw, provisioning) and the daily sweep. cash-rules.service.ts files and pays claims
- * and calls in here; nothing else re-expresses any of it.
+ * A decided payment still needs the complete evidence bundle (DOC-INV-47), assembled from the artefacts the platform
+ * already holds and never typed by the rider, and a line that can pay it.
+ *
+ * This file is the ONE author of: the evidence bundle, the set-aside ledger (balance, draw, entries) and the daily
+ * sweep. cash-rules.service.ts files and pays cases and calls in here; nothing else re-expresses any of it.
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { admittedHandoverEvidence } from './handover-evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { ownerWallSystem } from '../../lib/owner-rls';
-import { subscriptionTenantWhere } from '../subscription/subscription-owner';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
 // ---------------------------------------------------------------------------
-// Policy tunables — merged into CashRulesConfig (CountryConfig.cashRules overrides).
-// Expressed RELATIVE to the ID gate so they carry the gate's USD anchor and need no
+// Tunables — merged into CashRulesConfig (CountryConfig.cashRules overrides). What a reviewer is told and when, never
+// a cap on what a mover may expect. Expressed RELATIVE to the ID gate so they carry the gate's USD anchor and need no
 // second currency constant (FD-DOC-30 defaults, delegated ruling 2026-09-06).
 // ---------------------------------------------------------------------------
 export interface LossProtectionRules {
-  /** Cap per rider per rolling 30 days, as a multiple of the ID gate (2 = twice the gate). */
+  /** A case past this total per rider per rolling 30 days is flagged, as a multiple of the ID gate (2 = twice the gate). */
   rlpMonthlyCapMultiple: number;
-  /** Every claim above this fraction of the gate is human-reviewed with the full bundle. */
+  /** A case above this fraction of the gate is flagged for a closer look. */
   rlpReviewFraction: number;
-  /** Pay-out SLA: an approved claim unpaid for longer is flagged and the admins told. */
+  /** Staff deadline, never told to a mover: a case a person approved and nobody paid for longer is flagged and the admins told. */
   rlpSlaHours: number;
-  /** Monthly provisioning: this percentage of the previous month's paid fee revenue. */
-  rlpReserveRatePct: number;
   /** The reserve is "low" below this multiple of the gate; the sweep says so. */
   rlpReserveFloorMultiple: number;
 }
@@ -43,7 +41,6 @@ export const LOSS_PROTECTION_DEFAULTS: LossProtectionRules = {
   rlpMonthlyCapMultiple: 2,
   rlpReviewFraction: 0.5,
   rlpSlaHours: 48,
-  rlpReserveRatePct: 2,
   rlpReserveFloorMultiple: 5,
 };
 
@@ -51,6 +48,8 @@ export const LOSS_PROTECTION_DEFAULTS: LossProtectionRules = {
 export const LOSS_PROTECTION_FLAGS = {
   overMonthlyCap: 'over_monthly_cap',
   overReviewThreshold: 'over_review_threshold',
+  /** At or over the ID gate: it used to write no row at all. Now a person decides it like any other. */
+  overGate: 'over_gate',
   protectionSuspended: 'protection_suspended',
   evidenceIncomplete: 'evidence_incomplete',
   slaBreached: 'sla_breached',
@@ -302,96 +301,21 @@ export interface ReserveStatement {
   balance: number;
   floor: number;
   low: boolean;
-  provisionedThisPeriod: boolean;
   entries: Array<{ id: string; kind: string; amount: string; periodKey: string | null; claimId: string | null; note: string | null; createdAt: string }>;
 }
 
 export async function reserveStatement(
   db: Db,
   countryCode: string,
-  ctx: { gateLocal: number; rules: LossProtectionRules; now?: Date; take?: number },
+  ctx: { gateLocal: number; rules: LossProtectionRules; take?: number },
 ): Promise<ReserveStatement> {
-  const now = ctx.now ?? new Date();
   const balance = await reserveBalance(db, countryCode);
   const floor = ctx.gateLocal * ctx.rules.rlpReserveFloorMultiple;
-  const period = periodKeyOf(now);
-  const provisioned = await db.rlpReserveEntry.findFirst({ where: { countryCode, kind: 'PROVISION', periodKey: period }, select: { id: true } });
   const rows = await db.rlpReserveEntry.findMany({ where: { countryCode }, orderBy: { createdAt: 'desc' }, take: ctx.take ?? 50 });
   return {
-    countryCode, balance, floor, low: balance < floor, provisionedThisPeriod: Boolean(provisioned),
+    countryCode, balance, floor, low: balance < floor,
     entries: rows.map((r) => ({ id: r.id, kind: r.kind, amount: String(r.amount), periodKey: r.periodKey, claimId: r.claimId, note: r.note, createdAt: r.createdAt.toISOString() })),
   };
-}
-
-/** The calendar month a provisioning row belongs to (UTC), e.g. "2026-09". */
-export function periodKeyOf(d: Date): string { return d.toISOString().slice(0, 7); }
-
-/**
- * Monthly provisioning: PREVIOUS month's PAID subscription revenue, by the payer's
- * country, times the provisioning rate — one PROVISION row per country per month,
- * idempotent by the (country, kind, periodKey) unique. A month with no revenue
- * provisions nothing and says so. Re-running is safe; it adds nothing twice.
- */
-export async function provisionReserveForPreviousMonth(
-  prisma: PrismaClient,
-  opts: { now?: Date; rulesFor: (countryCode: string) => Promise<LossProtectionRules>; notifications?: NotificationService },
-): Promise<Array<{ countryCode: string; periodKey: string; revenue: number; provisioned: number; created: boolean }>> {
-  const now = opts.now ?? new Date();
-  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const periodKey = periodKeyOf(monthStart);
-  const payments = await prisma.subscriptionPayment.findMany({
-    where: {
-      status: 'CAPTURED', paidAt: { gte: monthStart, lt: monthEnd },
-      // Only Swift's own partners' fees provision Swift's reserve (RLP_TENANT). [BILL-PRO] The one owner-tenant
-      // scope (subscription-owner.ts), so a pro's paid fee counts like a store's or a mover's.
-      subscription: subscriptionTenantWhere(RLP_TENANT),
-    },
-    select: {
-      amount: true,
-      subscription: { select: {
-        rider: { select: { user: { select: { countryCode: true } } } },
-        driver: { select: { user: { select: { countryCode: true } } } },
-        vendor: { select: { owner: { select: { user: { select: { countryCode: true } } } } } },
-        serviceProvider: { select: { user: { select: { countryCode: true } } } },
-      } },
-    },
-  });
-  const revenue = new Map<string, number>();
-  for (const p of payments) {
-    const s = p.subscription;
-    const country = s.rider?.user.countryCode ?? s.driver?.user.countryCode ?? s.vendor?.owner.user.countryCode
-      ?? s.serviceProvider?.user.countryCode ?? null;
-    if (!country) continue;
-    revenue.set(country, (revenue.get(country) ?? 0) + Number(p.amount));
-  }
-  const out: Array<{ countryCode: string; periodKey: string; revenue: number; provisioned: number; created: boolean }> = [];
-  for (const [countryCode, total] of revenue) {
-    const rules = await opts.rulesFor(countryCode);
-    const provisioned = Math.round(total * rules.rlpReserveRatePct) / 100;
-    let created = false;
-    if (provisioned > 0) {
-      try {
-        await prisma.rlpReserveEntry.create({ data: {
-          countryCode, kind: 'PROVISION', amount: provisioned, periodKey, note: `${rules.rlpReserveRatePct}% of ${periodKey} paid fee revenue (${total.toLocaleString()})`,
-        } });
-        created = true;
-      } catch (err) {
-        if (!(typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002')) throw err;
-      }
-    }
-    out.push({ countryCode, periodKey, revenue: total, provisioned, created });
-    if (created && opts.notifications) {
-      const balance = await reserveBalance(prisma, countryCode);
-      await notifyAdmins(prisma, opts.notifications, {
-        tenantId: RLP_TENANT,
-        title: `Set-aside provisioned (${countryCode})`,
-        body: `${provisioned.toLocaleString()} added for ${periodKey} (${rules.rlpReserveRatePct}% of ${total.toLocaleString()} paid fee revenue). The set-aside now holds ${balance.toLocaleString()}.`,
-        data: { kind: 'rlp_reserve_provisioned', countryCode, periodKey, provisioned, balance },
-      });
-    }
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +331,8 @@ export interface LossProtectionSweep {
 }
 
 /**
- * Every approved claim older than the SLA and unpaid is flagged ONCE (`sla_breached`)
+ * Every approved case older than the staff deadline and unpaid (and any older row the old rule approved, which waits
+ * for a person) is flagged ONCE (`sla_breached`)
  * and listed; every country whose reserve stands below the floor is listed. One audit
  * row per run, at most one admin notice per day per finding kind.
  */
@@ -467,8 +392,8 @@ export async function sweepLossProtection(
     if (breached.length > 0 && !(await noticedToday(prisma, 'rlp_sla_breached', today))) {
       await notifyAdmins(prisma, opts.notifications, {
         tenantId: RLP_TENANT,
-        title: `${breached.length} set-aside payment${breached.length === 1 ? '' : 's'} past the SLA`,
-        body: `Approved payments unpaid beyond the pay-out SLA: ${breached.map((b) => `${b.amount} (${b.ageHours} h)`).slice(0, 5).join(', ')}${breached.length > 5 ? ', …' : ''}. A rider who is owed money and waiting stops taking cash orders — pay from the set-aside today.`,
+        title: `${breached.length} set-aside payment${breached.length === 1 ? '' : 's'} past the staff deadline`,
+        body: `Approved payments unpaid past the staff deadline: ${breached.map((b) => `${b.amount} (${b.ageHours} h)`).slice(0, 5).join(', ')}${breached.length > 5 ? ', …' : ''}. A rider left waiting after a person decided stops taking cash orders. Pay or close these today.`,
         data: { kind: 'rlp_sla_breached', breached: breached.length, date: today },
       });
     }
@@ -520,15 +445,13 @@ export interface MoverClaimView {
   filedAt: string; paidAt: string | null; paymentRef: string | null;
   /** The bundle as it stood at filing: what a reviewer needs and what is missing. */
   evidence: { complete: boolean; missing: string[]; items: Array<{ key: string; present: boolean; required: boolean }> } | null;
-  /** For an approved, unpaid claim: when the pay-out SLA runs out. */
-  payoutDueBy: string | null;
+  /** Waiting for a person: a new case, or a row the old rule approved automatically. */
   underReview: boolean;
 }
 
 export async function moverClaims(
   db: Db,
   mover: { riderId: string | null; driverId: string | null },
-  rules: LossProtectionRules,
   opts: { take?: number } = {},
 ): Promise<{ claims: MoverClaimView[]; suspended: boolean; suspendedAt: string | null }> {
   const mine = mover.riderId ? { riderId: mover.riderId } : { driverId: mover.driverId };
@@ -541,13 +464,11 @@ export async function moverClaims(
   ]);
   const claims = rows.map((c) => {
     const ev = c.evidence as { complete?: boolean; missing?: string[]; items?: Array<{ key: string; present: boolean; required: boolean }> } | null;
-    const approvedUnpaid = c.status === 'AUTO_APPROVED' || c.status === 'APPROVED';
     return {
       id: c.id, orderId: c.orderId, amount: String(c.amount), status: c.status, reason: c.reason, flags: c.flags,
       filedAt: c.createdAt.toISOString(), paidAt: c.paidAt ? c.paidAt.toISOString() : null, paymentRef: c.paymentRef ?? null,
       evidence: ev ? { complete: Boolean(ev.complete), missing: ev.missing ?? [], items: (ev.items ?? []).map((i) => ({ key: i.key, present: i.present, required: i.required })) } : null,
-      payoutDueBy: approvedUnpaid ? new Date(c.createdAt.getTime() + rules.rlpSlaHours * 3_600_000).toISOString() : null,
-      underReview: c.status === 'PENDING_REVIEW',
+      underReview: c.status === 'PENDING_REVIEW' || c.status === 'AUTO_APPROVED',
     };
   });
   return { claims, suspended: Boolean(account?.lossProtectionSuspendedAt), suspendedAt: account?.lossProtectionSuspendedAt?.toISOString() ?? null };

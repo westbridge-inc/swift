@@ -46,7 +46,7 @@ function claimsHandler(
       };
     }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/rlp/reserve') {
-      return { body: { success: true, data: { countryCode: 'GY', balance: 12000, floor: 52250, low: true, provisionedThisPeriod: false, entries: [{ id: 'e1', kind: 'ADJUSTMENT', amount: '12000', periodKey: null, claimId: null, note: 'seed', createdAt: '2026-09-01T00:00:00.000Z' }] } } };
+      return { body: { success: true, data: { countryCode: 'GY', balance: 12000, floor: 52250, low: true, entries: [{ id: 'e1', kind: 'ADJUSTMENT', amount: '12000', periodKey: null, claimId: null, note: 'seed', createdAt: '2026-09-01T00:00:00.000Z' }] } } };
     }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/metrics') {
       return {
@@ -142,7 +142,7 @@ describe('claim payout mutation', () => {
               success: false,
               error: {
                 code: 'INVALID_CLAIM_STATE',
-                message: 'This is PAID; expected AUTO_APPROVED/APPROVED',
+                message: 'This is PAID; expected APPROVED',
               },
             },
           };
@@ -160,7 +160,7 @@ describe('claim payout mutation', () => {
     await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Payout matches the claim evidence');
     await user.click(within(panel).getByRole('button', { name: 'Mark paid' }));
 
-    expect((await within(panel).findByRole('alert')).textContent).toContain('This is PAID; expected AUTO_APPROVED/APPROVED');
+    expect((await within(panel).findByRole('alert')).textContent).toContain('This is PAID; expected APPROVED');
     expect(screen.queryByText('Payout recorded.')).toBeNull();
     expect(screen.getByText('$3,400')).toBeTruthy();
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
@@ -275,6 +275,61 @@ describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
     expect(bundle.textContent).toContain('door photo — missing');
     expect(bundle.textContent).toContain('rider at door ✓');
     expect(bundle.textContent).toContain('customer contacted (optional)');
-    expect(bundle.textContent).toContain('bundle incomplete');
+    expect(bundle.textContent).toContain('evidence incomplete');
+    expect(bundle.textContent).toContain('cannot be paid, even if a person approves it');
+  });
+
+  it('the set-aside says what it holds: no line about a monthly share, and an entry is company money', async () => {
+    mockApi(claimsHandler(() => ({ body: { success: true, data: {} } })));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    const reserve = await screen.findByTestId('rlp-reserve');
+    await waitFor(() => expect(reserve.textContent).toContain('12,000'));
+    expect(reserve.textContent).not.toMatch(/provisioned/i);
+    await user.click(within(reserve).getByRole('button', { name: 'Adjust set-aside' }));
+    expect((await screen.findByRole('dialog')).textContent).toContain('plain company money only, never a share of fees');
+  });
+});
+
+describe('[case by case] a person decides each one', () => {
+  function queue(rows: unknown[], status: string) {
+    return (request: ApiRequest): ApiReply => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/claims') {
+        return { body: { success: true, data: request.url.searchParams.get('status') === status ? rows : [] } };
+      }
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/rlp/reserve') {
+        return { body: { success: true, data: { countryCode: 'GY', balance: 0, floor: 0, low: false, entries: [] } } };
+      }
+      return { body: { success: true, data: {} } };
+    };
+  }
+
+  it('an old automatic row cannot be marked paid: it says why and offers a person the decision', async () => {
+    mockApi(queue([{ ...firstClaim, id: 'claim-old', status: 'AUTO_APPROVED', evidenceComplete: true }], 'AUTO_APPROVED'));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await user.click(within(await screen.findByRole('group', { name: 'Show payment requests' })).getByRole('button', { name: 'Old rule, needs a person' }));
+    const note = await screen.findByTestId('old-rule-claim-old');
+    expect(note.textContent).toContain('cannot be paid until a person does');
+    expect(screen.queryByRole('button', { name: 'Mark paid' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
+  });
+
+  it('the reviewer reads that nobody is owed this, and is warned when evidence means it cannot be paid', async () => {
+    mockApi(queue([{ ...firstClaim, id: 'claim-gap', status: 'PENDING_REVIEW', evidenceComplete: false, flags: ['protection_suspended', 'over_gate'] }], 'PENDING_REVIEW'));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Approve' }));
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('Nobody is owed this');
+    expect(panel.textContent).toContain('this cannot be paid even if you approve it');
+    expect(document.body.textContent).toContain('help suspended');
+    expect(document.body.textContent).toContain('over the ID gate');
+    expect(document.body.textContent).not.toMatch(/protection suspended/);
+  });
+
+  it('a complete case carries no such warning', async () => {
+    mockApi(queue([{ ...firstClaim, id: 'claim-ok', status: 'PENDING_REVIEW', evidenceComplete: true }], 'PENDING_REVIEW'));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Approve' }));
+    expect((await screen.findByRole('dialog')).textContent).not.toContain('cannot be paid');
   });
 });

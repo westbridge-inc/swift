@@ -564,21 +564,13 @@ export class CashRulesService {
           staged = await this.stageClaim(tx, { ...source, customer: order.customer }, mover,
             { ...input, outcome: failureOutcome }, addressKey, filing.id);
           // No strike from a declaration alone. Taxi remains incomplete while
-          // the owner-defined destination wait requirement is unresolved. An
-          // order at or over the ID gate stages no guarantee claim, so its
-          // filing is assessed on the same durable bundle directly: complete
-          // evidence still strikes (spec §I #4), a declaration still does not.
-          strikeCustomer = staged.claim
-            ? staged.claim.evidenceComplete === true
-            : (await assembleClaimEvidence(tx, {
-              handoverEvidenceId: filing.id, customerId: order.customer.id, reason: input.outcome, orderId,
-              riderId: mover.riderId, driverId: mover.driverId, gpsLat: input.gps.lat, gpsLng: input.gps.lng,
-              photoUrl: input.photoUrl ?? input.courierProofPhotoUrl ?? null, createdAt: new Date(),
-            }, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm })).complete;
-          // [AF-MOB-001] The MOVER is always made whole (stageClaim below);
-          // the CUSTOMER's strike waits for evidence that supports it. A
-          // punishment on a stale or distant fix is a wrong punishment, and
-          // unlike a missing payout it cannot be noticed and corrected later.
+          // the owner-defined destination wait requirement is unresolved.
+          // Complete evidence strikes (spec §I #4), a declaration does not.
+          strikeCustomer = staged.claim?.evidenceComplete === true;
+          // [AF-MOB-001] The MOVER's case always reaches a person (stageClaim
+          // above); the CUSTOMER's strike waits for evidence that supports it.
+          // A punishment on a stale or distant fix is a wrong punishment, and
+          // unlike a missing payment it cannot be noticed and corrected later.
           if (strikeCustomer) {
             await tx.strike.create({
               data: {
@@ -729,9 +721,8 @@ export class CashRulesService {
   // Claims + guardrails
   // -------------------------------------------------------------------------
 
-  /** [M-24] The guarantee claim, staged on the handover's transaction. The
-   *  rider's notice is returned, not sent — the caller sends it after the
-   *  commit. */
+  /** [M-24] The case, staged on the handover's transaction. The rider's notice is returned, not sent: the caller
+   *  sends it after the commit. [Coordinator ruling, 5 Nov 2026] Every case waits for a person; see rlp.ts. */
   private async stageClaim(
     tx: Prisma.TransactionClient,
     order: {
@@ -748,36 +739,25 @@ export class CashRulesService {
     addressKey: string,
     handoverEvidenceId: string,
   ): Promise<StagedClaim> {
-    // [DOC-1 §31.3/§31.4 · P31-1] The policy covers what the rider FRONTED — the food
-    // cost on a delivery, never the delivery fee — and the cap per claim is the ID gate,
-    // measured on that same figure: above it the claim is outside the automatic guarantee and
-    // support follows up. [Owner ruling 24 Oct 2026] Such an order no longer needs the customer's
-    // ID on file (owner accepted: rider float caps bound the exposure).
+    // [DOC-1 §31.3/§31.4 · P31-1] The figure on the case is what the rider FRONTED: the food cost on a delivery,
+    // never the delivery fee. At or over the ID gate, measured on that same figure, the case is flagged for a closer
+    // look; a person decides it like any other. [Owner ruling 24 Oct 2026] Such an order no longer needs the
+    // customer's ID on file (owner accepted: rider float caps bound the exposure).
     const amount = coveredAmountFor(order);
     const moverUserId = (await this.moverUser(mover)).userId;
     const gateLocal = await this.countryConfig.getIdGateThresholdLocal(order.customer.countryCode);
-    if (amount >= gateLocal) {
-      return {
-        claim: null,
-        riderNotice: {
-          userId: moverUserId,
-          type: 'SYSTEM_ANNOUNCEMENT',
-          title: 'Swift does not pay this one automatically',
-          body: `Orders of $${Math.round(gateLocal).toLocaleString()} or more are not paid automatically. Support will follow up.`,
-          data: { kind: 'claim_over_gate', orderId: order.id },
-        },
-      };
-    }
     const rules = await this.configFor(order.customer.countryCode);
     const flags = await this.guardrailFlags(mover, order.customer.id, order.customer.phone, addressKey, rules, tx);
+    if (amount >= gateLocal) {
+      flags.push(LOSS_PROTECTION_FLAGS.overGate);
+    }
     if (order.deliveryLat != null && order.deliveryLng != null) {
       const km = haversineDistance(input.gps.lat, input.gps.lng, order.deliveryLat, order.deliveryLng);
       if (km > rules.maxHandoverDistanceKm) flags.push('gps_far');
     }
-    // [DOC-1 §31.4 · P31-1] The policy's own guardrails: the rolling 30-day cap per
-    // mover, the human-review threshold, a suspended protection, and — DOC-INV-47 — the
-    // evidence bundle, assembled here from the artefacts and stored for the reviewer.
-    // Each routes the claim to a person; none refuses it. The evidence is kept either way.
+    // [DOC-1 §31.4 · P31-1] What the reviewer should see: the rolling 30-day total per mover, the size of the case, a
+    // suspension, and — DOC-INV-47 — the evidence bundle, assembled here from the artefacts and stored for the reviewer.
+    // None of these refuses the case, and none decides it: a person does. The evidence is kept either way.
     const now = new Date();
     const already = await rollingClaimTotal(tx, mover, now);
     if (already + amount > gateLocal * rules.rlpMonthlyCapMultiple) flags.push(LOSS_PROTECTION_FLAGS.overMonthlyCap);
@@ -806,7 +786,7 @@ export class CashRulesService {
         gpsLng: input.gps.lng,
         photoUrl: doorPhoto,
         flags,
-        status: flags.length === 0 ? 'AUTO_APPROVED' : 'PENDING_REVIEW',
+        status: 'PENDING_REVIEW',
         evidence: evidence as unknown as Prisma.InputJsonValue,
         evidenceComplete: evidence.complete,
         createdAt: now,
@@ -817,12 +797,11 @@ export class CashRulesService {
       riderNotice: {
         userId: moverUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: claim.status === 'AUTO_APPROVED' ? 'Swift will pay you' : 'Being reviewed',
-        body: claim.status === 'AUTO_APPROVED'
-          ? `Swift will pay you $${amount.toLocaleString()}.`
-          : suspended
-            ? 'Automatic payment is suspended for you, so a person reviews this one. Support has the reason and the review route.'
-            : 'This needs a quick review. We will get back to you.',
+        title: 'A person will review this',
+        // No figure and no date: nothing here is a promise. The suspended line stays true and plain.
+        body: suspended
+          ? 'Swift\'s help is suspended for you, so do not expect it on this one. A person will still look at it. Contact support to ask for a review of this decision.'
+          : 'A person at Swift will look at what happened. Swift may help, but this is not a promise, and no amount is set.',
         data: { kind: 'claim', claimId: claim.id },
       },
     };
@@ -931,18 +910,25 @@ export class CashRulesService {
   // -------------------------------------------------------------------------
 
   async approveClaim(claimId: string, adminId: string, note?: string, onAudit?: OnAudit) {
-    const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
+    // [Coordinator ruling, 5 Nov 2026] A row the old rule approved automatically waits for a person like a new one.
+    const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW', 'AUTO_APPROVED'], {
       status: 'APPROVED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     }, onAudit);
-    await this.notifyClaim(updated, 'Payment approved', `Swift approved your $${Number(updated.amount).toLocaleString()} and will pay you.`, claimId);
+    // One decision about one order, told as that. DOC-INV-47 still refuses a payment without the bundle, so an
+    // approval over missing evidence says what will happen.
+    if (updated.evidenceComplete) {
+      await this.notifyClaim(updated, 'Swift decided to help', `A person at Swift decided to help with $${Number(updated.amount).toLocaleString()}, for this order only. You will get a message when it is sent.`, claimId);
+    } else {
+      await this.notifyClaim(updated, 'Reviewed', 'A person at Swift reviewed this, but some evidence is missing, so Swift cannot pay it. Get help if you think this is wrong.', claimId);
+    }
     return updated;
   }
 
   async rejectClaim(claimId: string, adminId: string, note: string, onAudit?: OnAudit) {
-    const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
+    const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW', 'AUTO_APPROVED'], {
       status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     }, onAudit);
-    await this.notifyClaim(updated, 'Not approved', `This payment was not approved: ${note}`, claimId);
+    await this.notifyClaim(updated, 'Not approved', `A person at Swift decided not to help with this one: ${note}`, claimId);
     return updated;
   }
 
@@ -969,24 +955,19 @@ export class CashRulesService {
     // [#2079 follow-up] Swift's reserve pays Swift's claims only: another operator's is refused first.
     assertRlpOperator(claimOrder.tenantId);
 
-    // [DOC-1 §31.4 · DOC-INV-47 · P31-1] Nobody pays without the bundle, and nobody
-    // auto-pays a suspended mover. The bundle is re-derived from the artefacts NOW —
-    // the stored copy is the reviewer's record, not the gate — and an AUTO_APPROVED
-    // claim of a suspended mover must first be APPROVED by a person.
+    // [DOC-1 §31.4 · DOC-INV-47 · P31-1] Nobody pays without the bundle, re-derived from the artefacts inside the
+    // transaction below: the stored copy is the reviewer's record, not the gate. [Coordinator ruling, 5 Nov 2026] And
+    // nobody pays what no person decided: a row the old rule approved automatically waits for a person.
     const countryCode = claimOrder.customer.countryCode;
     if (existing.status === 'AUTO_APPROVED') {
-      const mover = await this.moverUser(existing);
-      const account = await this.prisma.user.findUnique({ where: { id: mover.userId }, select: { lossProtectionSuspendedAt: true } });
-      if (account?.lossProtectionSuspendedAt) {
-        throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'Automatic payment is suspended for this mover; a person must review and approve this one before it is paid.');
-      }
+      throw new AppError(409, 'RLP_PERSON_MUST_DECIDE', 'Nobody has decided this one yet. A person must approve it before it is paid.');
     }
     const rules = await this.configFor(countryCode);
 
 
     // The payout is DRAWN from the reserve line inside the same transaction as the
     // CAS and the audit row: a claim is paid from a funded line or not at all.
-    const updated = await this.transitionClaim(claimId, ['AUTO_APPROVED', 'APPROVED'], {
+    const updated = await this.transitionClaim(claimId, ['APPROVED'], {
       status: 'PAID', paidAt: new Date(), paymentRef: reference, paidAmount: attested,
       paidById: adminId, reviewedBy: existing?.reviewedBy ?? adminId,
     }, onAudit, async (tx) => {
@@ -1004,17 +985,6 @@ export class CashRulesService {
       if (fresh.handoverEvidenceId) {
         await tx.$queryRaw`SELECT id FROM cash_handover_evidence WHERE id = ${fresh.handoverEvidenceId} FOR SHARE`;
         await tx.$queryRaw`SELECT p.id FROM handover_photo_proofs p JOIN cash_handover_evidence e ON e."photoProofId" = p.id WHERE e.id = ${fresh.handoverEvidenceId} FOR SHARE OF p`;
-      }
-      if (fresh.status === 'AUTO_APPROVED') {
-        if ((await identityAuthority(tx, fresh.customerId)).status === 'REVIEW_REQUIRED') {
-          throw new AppError(409, 'RLP_IDENTITY_REVIEW_REQUIRED', 'A person must review this before it is paid.');
-        }
-        const profile = fresh.driverId ? await tx.driver.findUnique({ where: { id: fresh.driverId }, select: { userId: true } })
-          : await tx.rider.findUnique({ where: { id: fresh.riderId! }, select: { userId: true } });
-        if (!profile) throw new AppError(409, 'RLP_EVIDENCE_INCOMPLETE', 'The assigned mover is missing.');
-        await tx.$queryRaw`SELECT id FROM users WHERE id = ${profile.userId} FOR SHARE`;
-        const account = await tx.user.findUnique({ where: { id: profile.userId }, select: { lossProtectionSuspendedAt: true } });
-        if (account?.lossProtectionSuspendedAt) throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'Automatic payment is suspended for this mover; a person must review this before it is paid.');
       }
       assertEvidenceComplete(await assembleClaimEvidence(tx, fresh, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm }));
     }).catch((err) => {
@@ -1090,8 +1060,8 @@ export class CashRulesService {
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Automatic payment suspended',
-      body: 'Automatic payment is suspended for you following a review. A person now reviews each unpaid cash order before Swift pays it; contact support to request a review of this decision.',
+      title: 'Swift\'s help is suspended',
+      body: 'After a review, a person suspended Swift\'s help on unpaid cash orders for you. Each one is still recorded and a person still looks at it, but do not expect help while this stands. Contact support to ask for a review of this decision.',
       data: { kind: 'rlp_suspended' },
     }).catch(() => {});
     return updated;
@@ -1113,8 +1083,8 @@ export class CashRulesService {
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Automatic payment is back on',
-      body: 'Automatic payment is back on for you. Unpaid cash orders under the limit are handled as before.',
+      title: 'Suspension lifted',
+      body: 'The suspension is lifted. A person looks at each unpaid cash order, and Swift may help. This is not a promise.',
       data: { kind: 'rlp_reinstated' },
     }).catch(() => {});
     return updated;

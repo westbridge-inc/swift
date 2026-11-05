@@ -1153,7 +1153,7 @@ export const riderApi = {
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/rider/earnings', { params }),
-  /** [DOC-1 §31.4] The rider's guarantee claims with the evidence bundle and the pay-out SLA. */
+  /** [DOC-1 §31.4] The rider's unpaid cash orders with the evidence bundle. */
   claims: () => api.get('/rider/claims'),
   earningsDaily: (days = 7) => api.get('/rider/earnings/daily', { params: { days } }),
   earningsStatement: (session?: AuthSessionSnapshot) =>

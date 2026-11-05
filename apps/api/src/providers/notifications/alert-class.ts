@@ -126,7 +126,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'provider_fee_fx_change', 'provider_fee_rate_change', 'provider_fee_usd_migration', 'provider_fee_notice',
     // [REVIEW-M #2229 N2] The store fee that covered a pro ended: their own fee applies again.
     'provider_fee_cover_ended',
-    'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
+    'claim', 'claim_update', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
     // [PAYMENT-SIMPLIFY] the store's MMG NUMBER change notices, exactly like the link's (ALG-34 parity)
     'mmg_number_change_staged', 'mmg_number_change_applied', 'mmg_number_change_cancelled',
@@ -164,7 +164,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'ops_places_failing',
     // [COORD R1 · #1997 S4-1] a flood of wrong answers to the texted safety check-in link (the high ceiling tripped)
     'ops_checkin_link_flood',
-    'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low', 'rlp_reserve_provisioned',
+    'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low',
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
     // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)
     'vat_threshold',

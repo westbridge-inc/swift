@@ -7628,7 +7628,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ─── [DOC-1 §31.4 · P31-1] Rider loss protection: the reserve line and suspension ──
 
-  /** The named reserve line for a country: balance, floor, this month's provisioning, latest entries. */
+  /** The set-aside for a country: balance, floor, latest entries. */
   app.get('/cash-rules/rlp/reserve', { preHandler: [canonicalTenantGuard] }, async (request) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
     return { success: true, data: await cashRules.lossProtectionReserve(country.toUpperCase()) };

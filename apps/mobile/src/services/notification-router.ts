@@ -423,9 +423,9 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
     return { screen: 'Claims' };
   }
   if (kind === 'claim_over_gate') {
-    // The body says "Support will follow up" — this is the door for the person
-    // who would rather not wait. PAYMENT, not the orderId default of
-    // ORDER_ISSUE: the dispute is about the guarantee, not the delivery.
+    // An older notice still in someone's inbox: the server no longer sends this kind (a large order is a
+    // case like any other). Its body said "Support will follow up", so it keeps this door. PAYMENT, not the
+    // orderId default of ORDER_ISSUE: the question is about the money, not the delivery.
     return {
       screen: 'GetHelp',
       params: { category: 'PAYMENT', subject: 'Unpaid cash order', ...(orderId ? { orderId } : {}) },

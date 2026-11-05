@@ -22,9 +22,9 @@ const FILES = [
 const LINES: Array<[file: string, starts: RegExp]> = [
   ['apps/api/src/jobs/queue.ts', /vendor–rider pair/],
   ['apps/api/src/modules/admin/admin.routes.ts', /identity can only be opened against an order/],
-  ['apps/api/src/modules/user/partner-wind-down.ts', /Swift has not finished|Swift still owes you/],
+  ['apps/api/src/modules/user/partner-wind-down.ts', /has not finished|Swift still owes you/],
   ['apps/api/src/modules/user/data-export-register.ts', /a mover made about an order of yours/],
-  ['apps/mobile/src/modules/mover/screens/ActiveJobScreen.tsx', /Swift guarantee|Swift will pay you|under review|being reviewed|Your evidence and/],
+  ['apps/mobile/src/modules/mover/screens/ActiveJobScreen.tsx', /Swift guarantee|Swift will pay you|under review|being reviewed|will review|Your evidence and/],
   ['apps/mobile/src/modules/mover/screens/MoverAccountScreen.tsx', /[Gg]uarantee|Unpaid cash/],
   ['apps/mobile/src/services/notification-router.ts', /[Gg]uarantee|Unpaid cash/],
   ['apps/admin/src/components/layout/nav.ts', /decide and pay/],
@@ -36,6 +36,16 @@ const SUSPENSION_WORDS = [
   'apps/mobile/src/modules/mover/claims-view.ts',
   'apps/mobile/src/modules/mover/screens/ClaimsScreen.tsx',
 ];
+
+/** [Coordinator ruling, 5 Nov 2026] Case by case: what a rider or driver reads never promises payment, states a
+ *  right to it, or says anything is automatic. "Swift paid you" is a fact and stays. */
+const RIDER_FACING = [
+  'apps/api/src/modules/cash/cash-rules.service.ts',
+  'apps/mobile/src/lib/parcelUnpaidWords.ts',
+  'apps/mobile/src/modules/mover/claims-view.ts',
+  'apps/mobile/src/modules/mover/screens/ClaimsScreen.tsx',
+];
+const PROMISES = /\b(will pay|pays? you|Swift (still )?owes|owed to you|entitled|automatic\w*)\b/i;
 
 const BANNED = /\b(insur\w*|guarantee\w*|loss[- ]protection|protection|protected|covers?|covered|cover\w*|premiums?|claims?|policy|policies|reserve)\b/i;
 /** A sentence, so a data key or a code such as 'claim' or 'over_cap' is not read as words. */
@@ -63,9 +73,19 @@ describe('[owner rule] Swift-backed promises never say or imply insurance', () =
   });
   // A suspension is a person's decision after a finding, and it lasts until a person lifts it. Softer words are untrue.
   it.each(SUSPENSION_WORDS)('%s says suspended, never paused', (file) => {
-    const strings = stringsIn(file).filter((s) => /automatic payment/i.test(s) && !/back on/i.test(s));
+    const strings = stringsIn(file);
+    expect(strings.filter((s) => /\bsuspended\b/i.test(s)).length).toBeGreaterThan(0);
+    expect(strings.filter((s) => /\b(paused|on hold)\b/i.test(s) && /\b(help|payment)\b/i.test(s))).toEqual([]);
+  });
+  it.each(RIDER_FACING)('%s promises no payment', (file) => {
+    const strings = stringsIn(file);
     expect(strings.length).toBeGreaterThan(0);
-    expect(strings.filter((s) => !/suspended/i.test(s))).toEqual([]);
+    expect(strings.filter((s) => PROMISES.test(s))).toEqual([]);
+  });
+  it.each(LINES)('%s: no promise either: %s', (file, starts) => {
+    const strings = stringsIn(file).filter((s) => starts.test(s));
+    expect(strings.length).toBeGreaterThan(0);
+    expect(strings.filter((s) => PROMISES.test(s))).toEqual([]);
   });
   it.each(LINES)('%s: %s', (file, starts) => {
     const strings = stringsIn(file).filter((s) => starts.test(s));
