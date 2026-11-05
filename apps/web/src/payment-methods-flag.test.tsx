@@ -62,7 +62,7 @@ describe('[Q36] the card methods follow launch.cardPayments', () => {
     view.unmount();
     withCards('soon');
     render(<RefundsPage />);
-    expect(document.body.textContent).toContain('Today the fee is paid by MMG, or directly to Westbridge Inc. in person by cash, cheque or bank transfer');
+    expect(document.body.textContent).toContain('Today the fee is paid by MMG, or directly to Westbridge Inc., in person by cash or cheque, or by bank transfer; a cheque counts once it clears, and a payment counts once Swift records it.');
     expect(document.body.textContent).not.toMatch(/visa|mastercard|coming soon/i);
   });
 });

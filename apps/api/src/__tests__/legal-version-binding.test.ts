@@ -377,8 +377,8 @@ const PUBLISHED: Record<
   '2026-11-05': {
     terms: '2365859aa57a5777914aa76208eae63f69f66ae915731ecb677c67ae3a4cb625',
     privacy: '387335ef2d9a1d7d84f332e0ec46360a804841bc1712d9387d652b4785d46023',
-    driver_agreement: 'c6e142cd24cfeb6eff3d20d1551415b03aea376d511fcb764e833e58063c6b35',
-    vendor_agreement: '2559cc295d9159ee1b56041cc96b2202c61066123499793a9486b4e80f9bb461',
+    driver_agreement: '25d51d7e642d7986ef409ebd9c84baf7c37990e7304d32a7677918b5435db9b0',
+    vendor_agreement: '34271e4cde4a38af83c44cea9aeb5ac6e2bad50d29ac40329881363c826c776a',
   },
 };
 
@@ -389,7 +389,7 @@ describe('legal version binding [F-035-08]', () => {
   ])('%s directs weekly-fee payment to checkout in the Swift app or on swiftgy.com', (_name, agreement) => {
     expect(agreement).not.toMatch(/MMG\s+agent|Swift\s+Number|account\s+number/i);
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
-    expect(feeParagraph).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, by card where the app offers it, or directly to Westbridge Inc. in person by cash, cheque or bank transfer.");
+    expect(feeParagraph).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, by card where the app offers it, or directly to Westbridge Inc., in person by cash or cheque, or by bank transfer.");
   });
 
   it.each([

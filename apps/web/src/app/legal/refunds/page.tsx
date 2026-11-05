@@ -148,7 +148,8 @@ export default function RefundsPage() {
       <ul>
         <li>
           <b>Paid in advance.</b> Each payment covers the week that starts on its due date. Today the fee is paid by
-          MMG, or directly to {site.legalEntityName} in person by cash, cheque or bank transfer; a cheque counts once it clears.
+          MMG, or directly to {site.legalEntityName}, in person by cash or cheque, or by bank transfer; a cheque counts once it clears,
+          and a payment counts once {site.tradeName} records it.
           You get a receipt for every payment. Never pay the fee through an agent or anyone else.{' '}
           {cardsLive ? 'It can also be paid by Visa or Mastercard, through our bank’s card payment page.' : null}
         </li>

@@ -41,7 +41,7 @@ describe('the Business Agreement covers Providers (section 12)', () => {
 
   it("states the owner's fee rulings: MMG checkout in the app or on the website, never before acceptance, trial, one fee, the 48-hour block", () => {
     expect(s12.length).toBeGreaterThan(500);
-    expect(s12).toContain('through MMG\'s checkout page in the Swift app or on the Swift website, or directly to Westbridge Inc. in person by cash, cheque or bank transfer');
+    expect(s12).toContain('through MMG\'s checkout page in the Swift app or on the Swift website, or directly to Westbridge Inc., in person by cash or cheque, or by bank transfer. A cheque counts only once it has cleared. A payment counts once Swift records it.');
     expect(s12).toContain('Nothing is charged until you have accepted this Agreement and confirmed in the app that you understand the weekly fee');
     expect(s12).toContain('once the weekly fee has started for Providers, you are not listed and cannot take new requests or bookings');
     // [REVIEW-F #2225 S3-2 · owner 30 Oct 00:14Z] The trial starts on the LATER of switch-on and the pro's own steps.

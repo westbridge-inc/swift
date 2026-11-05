@@ -79,10 +79,13 @@ describe('[COORD 5 Nov 15:18Z] Mover Agreement: help when a customer does not pa
 describe('[row 658] the weekly fee is payable in the app or on swiftgy.com', () => {
   it.each([['Mover', DRIVER_AGREEMENT], ['Business', VENDOR_AGREEMENT]])('%s section 2', (_name, doc) => {
     const fee = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(doc)?.[0];
-    expect(fee).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, by card where the app offers it, or directly to Westbridge Inc. in person by cash, cheque or bank transfer. A cheque counts only once it has cleared. You get a receipt for every payment. Never pay the weekly fee through an agent or anyone else.");
+    expect(fee).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, by card where the app offers it, or directly to Westbridge Inc., in person by cash or cheque, or by bank transfer. A cheque counts only once it has cleared. A payment counts once Swift records it. You get a receipt for every payment. Never pay the weekly fee through an agent or anyone else.");
     expect(fee).toContain('If you pay twice or pay too much through MMG, Swift may return');
     expect(fee).toContain('within 14 days, to the account you paid from or, if you paid in person, by a way you and Swift agree, records the refund');
-    expect(fee).toContain('A fee that goes down applies from your next weekly fee, with a notice in the app.');
+    // [REVIEW-G18 S3-2 + S4-3] the rise and the cut are told apart where the change is first named; a cut never reaches a week paid or charged.
+    expect(fee).toContain('Swift may change the weekly fee. If it goes up, we will tell you in the app at least 14 days before the change, and the new fee applies from your first weekly fee due after that date.');
+    expect(fee).toContain('If it goes down, the lower fee applies from your next weekly fee not yet paid or charged, with a notice in the app.');
+    expect(fee).not.toMatch(/We will tell you in the app at least 14 days before the change\./);
   });
 });
 
@@ -180,10 +183,10 @@ describe('[5 Nov read] what ships now, in the words', () => {
     expect(section(TERMS, /<h2>4\. /)).toContain('The waiting charge is never more than GY$1,800 for a ride.');
   });
   it('in person, on every door that names how the fee is paid', () => {
-    expect(section(VENDOR_AGREEMENT, /<h2>12\. /)).toContain('or directly to Westbridge Inc. in person by cash, cheque or bank transfer. A cheque counts only once it has cleared. Never pay the weekly fee through an agent or anyone else.');
+    expect(section(VENDOR_AGREEMENT, /<h2>12\. /)).toContain('or directly to Westbridge Inc., in person by cash or cheque, or by bank transfer. A cheque counts only once it has cleared. A payment counts once Swift records it. Never pay the weekly fee through an agent or anyone else.');
     expect(VENDOR_AGREEMENT).not.toMatch(/only through MMG/);
     const refunds = read('apps/web/src/app/legal/refunds/page.tsx');
-    expect(refunds).toMatch(/directly to \{site\.legalEntityName\} in person by cash, cheque or bank transfer; a cheque counts once it clears\./);
+    expect(refunds).toMatch(/directly to \{site\.legalEntityName\}, in person by cash or cheque, or by bank transfer; a cheque counts once it clears,\s+and a payment counts once \{site\.tradeName\} records it\./);
     expect(refunds).toMatch(/if you paid in person, by a way you and \{site\.tradeName\} agree/);
     expect(PRIVACY).toContain('if you pay in person, how you paid, the reference and the receipt');
   });

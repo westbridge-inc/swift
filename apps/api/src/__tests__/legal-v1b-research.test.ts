@@ -105,7 +105,8 @@ describe('Privacy Policy (Part 4)', () => {
 });
 
 describe('Mover and Business Agreements (Part 4)', () => {
-  const F2 = 'Swift may change the weekly fee. We will tell you in the app at least 14 days before the change. The new fee applies from your first weekly fee due after that date. If you do not accept it, stop your plan before then; you will not pay the new fee.';
+  // [REVIEW-G18 S4-3 · 2026-11-05] F2 names the rise as a rise where the change is first named; the cut is its own sentence.
+  const F2 = 'Swift may change the weekly fee. If it goes up, we will tell you in the app at least 14 days before the change, and the new fee applies from your first weekly fee due after that date. If you do not accept it, stop your plan before then; you will not pay the new fee.';
   it.each([['Mover', DRIVER_AGREEMENT], ['Business', VENDOR_AGREEMENT]])('%s: the seller, the F2 price-change clause, refund timing, the 48-hour grace and reversals', (_n, doc) => {
     expect(doc).toContain(`<p>The weekly subscription is sold by Swift's operator, Westbridge Inc. (registration no. 17703), ${OPERATOR_ADDRESS}.</p>`);
     expect(doc).toContain(F2);
