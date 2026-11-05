@@ -229,7 +229,7 @@ describe('[SAFETY BOARD] an open SOS', () => {
   });
 
   it('in the grace window the server refuses both moves, so neither is offered, and the card says why', async () => {
-    serve({ alerts: [sos({ status: 'TRIGGER_PENDING', graceEndsAt: '2026-11-05T14:05:00.000Z' })] });
+    serve({ alerts: [sos({ status: 'TRIGGER_PENDING', graceEndsAt: '2099-01-01T00:00:00.000Z' })] });
     renderWithQuery(<SafetyPage />);
     const card = await alertCard();
     expect(card.textContent).toMatch(/can still cancel/);
