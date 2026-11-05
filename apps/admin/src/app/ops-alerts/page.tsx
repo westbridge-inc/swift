@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   acknowledgeOpsAlert,
@@ -26,8 +27,9 @@ import { gyDateTime } from '@/lib/dates';
 // a few times an hour per person). Until this screen there was nowhere in the
 // console to acknowledge one, so nothing ever stopped them. Acknowledging says
 // "I have seen this and I am handling it": it stops the re-pages for everyone
-// and records who did it and when. It does not resolve an SOS — the person in
-// trouble is still handled by phone and the war room.
+// and records who did it and when. It does not resolve an SOS: the person in
+// trouble is handled on the Safety board (/safety). The page's own words, pushed
+// and texted by the API, still say "war room": that sentence is the API's to change.
 //
 // A drill nobody acknowledged within its window is closed as a FAILED drill and
 // stops paging; it stays listed below, because it is evidence the paging path
@@ -52,7 +54,7 @@ function AlertRow({ alert, now, onDone }: { alert: OpsAlertRow; now: number; onD
     body: (
       <p>
         You are saying you have seen this page and are handling it. Swift stops re-paging everyone about it and records
-        that you acknowledged it.{alert.kind === 'SOS' ? ' This does not close the SOS: keep handling the person who asked for help.' : ''}
+        that you acknowledged it.{alert.kind === 'SOS' ? ' This does not close the SOS: keep handling the person who asked for help on the Safety board.' : ''}
       </p>
     ),
     confirmLabel: 'Acknowledge',
@@ -85,6 +87,7 @@ function AlertRow({ alert, now, onDone }: { alert: OpsAlertRow; now: number; onD
       </dl>
       <div className="flex flex-wrap items-center gap-2 mt-3">
         <button type="button" className="mc-btn mc-btn-primary" onClick={() => void acknowledge()}>Acknowledge…</button>
+        {alert.kind === 'SOS' ? <Link href="/safety" className="mc-btn">Open the Safety board</Link> : null}
       </div>
     </li>
   );
@@ -140,7 +143,8 @@ export default function OpsAlertsPage() {
       <p className="mc-muted mb-4 text-sm">
         An SOS, an operations page and the weekly drill keep re-paging the responders and texting the on-call phones
         until someone acknowledges them here. Acknowledge one when you have seen it and are handling it: the re-pages
-        stop for everyone, and Swift records who acknowledged it and when. Refreshes every 15 seconds.
+        stop for everyone, and Swift records who acknowledged it and when. Handle the person on the Safety board.
+        Refreshes every 15 seconds.
       </p>
       <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-5" />
       <section aria-label="Waiting for acknowledgement" className="mb-6">

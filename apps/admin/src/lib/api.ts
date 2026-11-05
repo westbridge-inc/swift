@@ -1,5 +1,6 @@
 import type { MmgCheckoutSupportDetail, MmgCheckoutSupportPage, MmgCheckoutSupportStatus } from '@swift/types';
 import type { RejectionReasonCode } from './rejection-reasons';
+import type { CaseScope, DecisionCode, IncidentRow, SosResolutionCode, SosRow } from './safetyView';
 import { headerSafe, normaliseReason } from './reason-rules';
 
 export const API_URL = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
@@ -586,6 +587,9 @@ export const confirmCustodyReturn = (id: string, reason: string) =>
 /** [BUG-HUNT-2 G05] A new ride code for a ride stuck at the pickup. The passenger reads it in their app; nobody here sees it. */
 export const resetRideCode = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/orders/${id}/handover-secret/reset-ride-pin`, { method: 'POST', body: JSON.stringify({ reason }), reason });
+/** [M2] A new delivery PIN for an order locked at the door. The customer reads it on their order screen; nobody here sees it. */
+export const resetDeliveryPin = (id: string, reason: string) =>
+  apiFetch(`/api/v1/admin/orders/${id}/handover-secret/reset-delivery-pin`, { method: 'POST', body: JSON.stringify({ reason }), reason });
 /** [BUG-HUNT-2 G08] What stores owe customers back by MMG. Swift holds none of it: these are records. */
 export const fetchMmgRefunds = (filter: 'open' | 'overdue' | 'disputed') =>
   apiFetch(`/api/v1/admin/mmg-refunds?limit=50&filter=${filter}`);
@@ -807,6 +811,45 @@ export const acknowledgeOpsAlert = (id: string): Promise<Envelope<{ acknowledged
   apiFetch(`/api/v1/safety/ops-alerts/${encodeURIComponent(id)}/ack`, { method: 'POST', body: '{}' });
 export const runOpsAlertDrill = (): Promise<Envelope<{ opsAlertId: string; recipients: number; reached: number }>> =>
   apiFetch('/api/v1/safety/ops-alerts/drill', { method: 'POST', body: '{}' });
+
+// ─── [SAFETY BOARD] An SOS and a safety case: the routes the desktop console already uses ─────
+export const SAFETY_LIST_LIMIT = 200;
+/** How long the board waits for a read. apiFetch has no timeout, and a read that never comes back must become a failed one. */
+export const SAFETY_READ_MS = 10_000;
+/** A board read counts only if a list came back. apiFetch answers `{}` for a 200 whose body died or could not be parsed, and a
+ *  missing list read as an empty one would tell a responder there is no SOS. */
+function listIn<T>(reply: Envelope<T[]>): Envelope<T[]> {
+  if (!Array.isArray(reply?.data)) throw new Error('The server’s answer was cut off or could not be read.');
+  return reply;
+}
+/** Gives up on its own timer as well as aborting: a read can hang in the session refresh or the body, where the abort does not reach. */
+function readWithin<T>(outer: AbortSignal | undefined, read: (_signal: AbortSignal) => Promise<Envelope<T[]>>): Promise<Envelope<T[]>> {
+  const inner = new AbortController();
+  const stop = () => inner.abort();
+  outer?.addEventListener('abort', stop);
+  return new Promise<Envelope<T[]>>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      stop();
+      reject(new Error(`The server did not answer within ${SAFETY_READ_MS / 1000} seconds.`));
+    }, SAFETY_READ_MS);
+    read(inner.signal).then(listIn).then(resolve, reject).finally(() => {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', stop);
+    });
+  });
+}
+export const fetchSafetySos = (signal?: AbortSignal): Promise<Envelope<SosRow[]>> =>
+  readWithin(signal, (s) => apiFetch(`/api/v1/safety/sos?status=open&limit=${SAFETY_LIST_LIMIT}`, { signal: s }));
+export const acknowledgeSos = (id: string): Promise<Envelope<{ id: string; status: string }>> =>
+  apiFetch(`/api/v1/safety/sos/${encodeURIComponent(id)}/ack`, { method: 'POST', body: '{}' });
+export const resolveSos = (id: string, resolutionCode: SosResolutionCode, notes?: string): Promise<Envelope<{ id: string; status: string }>> =>
+  apiFetch(`/api/v1/safety/sos/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify({ resolutionCode, ...(notes ? { notes } : {}) }) });
+export const fetchSafetyCases = (scope: CaseScope, signal?: AbortSignal): Promise<Envelope<IncidentRow[]>> =>
+  readWithin(signal, (s) => apiFetch(`/api/v1/safety/incidents?status=${scope}&limit=${SAFETY_LIST_LIMIT}`, { signal: s }));
+export const workSafetyCase = (id: string, action: 'ack' | 'close' | 'lift-interim'): Promise<Envelope<IncidentRow>> =>
+  apiFetch(`/api/v1/safety/incidents/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: '{}' });
+export const decideSafetyCase = (id: string, decisionCode: DecisionCode, notes?: string): Promise<Envelope<IncidentRow>> =>
+  apiFetch(`/api/v1/safety/incidents/${encodeURIComponent(id)}/decide`, { method: 'POST', body: JSON.stringify({ decisionCode, ...(notes ? { notes } : {}) }) });
 
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 

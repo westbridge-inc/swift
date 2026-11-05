@@ -49,6 +49,10 @@ const SHOWN: Record<EnumName, string> = {
   CashSettlementStatus: 'finance cash ledger',
   AdvertiserStatus: 'ads review',
   AdCreativeStatus: 'ads review',
+  SosStatus: 'Safety board',
+  SosTriggerSource: 'Safety board',
+  SosResolutionCode: 'Safety board',
+  IncidentStatus: 'Safety board',
 };
 
 function prismaEnums(): Map<string, string[]> {
