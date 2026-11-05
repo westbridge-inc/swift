@@ -61,7 +61,7 @@ describe('[WEB-ONBOARDING] a store not live yet is told what is left, not that t
   });
 
   it('a store with no menu is told its own word', async () => {
-    storeApi({ vendorType: 'SUPERMARKET' });
+    storeApi({ vendorType: 'STORE' });
     renderWithQuery(<OrdersPage />);
     const guide = await screen.findByRole('region', { name: 'Your store is not live yet' });
     expect(await within(guide).findByText('Add your products once you’re approved')).toBeTruthy();
