@@ -500,6 +500,14 @@ export const topUpSubscription = (id: string, amount: number, reference: string,
     headers: { 'Idempotency-Key': idempotencyKey },
     reason,
   });
+// [OWNER 5 Nov 2026] A weekly fee paid directly to Westbridge Inc. in person. No idempotency key: the reference is the
+// identity of the payment and credits once, and what the second admin approves is this exact body.
+export type InPersonPaymentBody =
+  | { method: 'CASH'; amount: number; reference: string; receipt: 'PRINTED' | 'SENT' }
+  | { method: 'CHEQUE'; amount: number; reference: string; cleared: true }
+  | { method: 'BANK_TRANSFER'; amount: number; reference: string; seenInBank: true };
+export const recordInPersonFeePayment = (id: string, body: InPersonPaymentBody, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/in-person-payment`, { method: 'POST', body: JSON.stringify(body), reason });
 // [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded in order:
 // set it aside, pay it outside Swift, then record the payout with its transfer
 // reference. Each step is a money action a second admin approves (the server
@@ -513,7 +521,8 @@ export const setAsideSubscriptionCredit = (id: string, amount: number, reason: s
   });
 // [Sol r2 S1] A payout record and a release name the set-aside they are for
 // (refundSetAsideId from the list), so an approval acts only on that one.
-export const recordSubscriptionRefundPaid = (id: string, amount: number, method: 'MMG' | 'BANK_TRANSFER', reference: string, setAsideId: string, reason: string) =>
+export type RefundPaidMethod = 'MMG' | 'BANK_TRANSFER' | 'CHEQUE' | 'CASH';
+export const recordSubscriptionRefundPaid = (id: string, amount: number, method: RefundPaidMethod, reference: string, setAsideId: string, reason: string) =>
   apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/paid`, {
     method: 'POST',
     body: JSON.stringify({ amount, method, reference, setAsideId }),
@@ -727,6 +736,17 @@ export interface PaymentMix {
 }
 export const fetchPaymentMix = (): Promise<Envelope<PaymentMix>> =>
   apiFetch('/api/v1/admin/finance/payment-mix');
+export interface InPersonPayments {
+  windowDays: number;
+  totals: Array<{ method: string; count: number; totalGyd: number }>;
+  /** Cash taken in person less cash paid back, as the ledger has it. Banking it is not recorded in Swift. */
+  cashOnHandGyd: number;
+  rows: Array<{ receiptNumber: string; method: string; amount: number; reference: string | null; issuedAt: string; san: string | null; type: string | null }>;
+}
+export const fetchInPersonPayments = (): Promise<Envelope<InPersonPayments>> =>
+  apiFetch('/api/v1/admin/finance/in-person-payments');
+export const fetchFeeReceipt = (receiptNumber: string): Promise<Envelope<{ receiptNumber: string; lines: string[] }>> =>
+  apiFetch(`/api/v1/admin/billing/receipts/${encodeURIComponent(receiptNumber)}`);
 export const fetchPromos = (): Promise<Envelope<Promo[]>> => apiFetch('/api/v1/admin/promos');
 
 export interface CreatePromoInput {

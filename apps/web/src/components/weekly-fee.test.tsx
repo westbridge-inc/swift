@@ -155,6 +155,19 @@ describe('rendered weekly fee', () => {
 });
 
 
+describe('[owner 5 Nov 2026] paying in person', () => {
+  it.each(['live', 'off'])('the page says it with MMG %s: directly to Swift, a cheque once cleared, never an agent, and it opens nothing', async (state) => {
+    mockApi(() => ({ body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', payActions: [{ id: 'MMG_CHECKOUT', state, amountGyd: 1200, currencyCode: 'GYD' }, { id: 'CARD', state: 'off' }], recentCheckouts: [] } } }));
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    const words = (await screen.findByTestId('pay-in-person')).textContent!;
+    expect(words).toContain('pay Swift directly, in person, by cash, cheque or bank transfer');
+    expect(words).toContain('A cheque counts once it clears');
+    expect(words).toContain('Never pay through an agent or anyone else');
+    expect(within(screen.getByTestId('pay-in-person')).queryByRole('button')).toBeNull();
+    view.unmount();
+  });
+});
+
 describe('own checkout reopen affordance', () => {
   it('reload with MMG off shows Back and Guyana deadline; same page and fresh keys on two taps', async () => {
     const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});

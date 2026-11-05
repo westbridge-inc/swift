@@ -10,7 +10,7 @@ import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '.
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, PAY_IN_PERSON, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 import { feeExpiry, reopenableMmg, REOPEN_ALREADY_PAID } from '../../../lib/weeklyFeeReopen';
 import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
@@ -150,6 +150,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
         </Card> : null}
         {showCard ? <CardPaySection family={family} card={card} latestSession={sub?.latestCardSession} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>
+        <T variant="caption" testID="pay-in-person">{PAY_IN_PERSON}</T>
         <View>
           <T variant="heading">Recent checkouts</T>
           {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {

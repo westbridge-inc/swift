@@ -3,13 +3,14 @@
 import { Fragment, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, setAsideSubscriptionCredit, recordSubscriptionRefundPaid, releaseSubscriptionRefund, fetchBillingEvents } from '@/lib/api';
+import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, setAsideSubscriptionCredit, recordInPersonFeePayment, recordSubscriptionRefundPaid, releaseSubscriptionRefund, fetchBillingEvents, type InPersonPaymentBody, type RefundPaidMethod } from '@/lib/api';
 import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
 import { StatusPill, gyd } from '@/components/detail';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import type { ReasonAnswer, ReasonField } from '@/components/mc/ReasonDialog';
 import { billDateLabel } from '@/lib/bill-date';
 import { chargedWeeklyFee } from '@/lib/weekly-fee';
 import { gyDate, gyDateTime } from '@/lib/dates';
@@ -44,6 +45,35 @@ function BillingEvents({ id }: { id: string }) {
     </div>
   );
 }
+
+/**
+ * [OWNER 5 Nov 2026] What each way of paying in person asks for. The screen's promises are part of the request the
+ * second admin signs: a cheque counts only once cleared, a transfer once seen in the bank, cash with a receipt in hand.
+ */
+const SAME_RULES = 'Paid directly to Westbridge Inc., never through an agent or a Swift Number. A second admin approves it; while you are the only admin the solo wait applies, and the money counts only once that is done.';
+const IN_PERSON: Record<InPersonPaymentBody['method'], { words: string; body: string; field: ReasonField; reference: ReasonField; request: (_amount: number, _reference: string, _values: ReasonAnswer['values']) => InPersonPaymentBody }> = {
+  CASH: {
+    words: 'Cash',
+    body: 'Cash needs a receipt. Print one or send one, then record it here with its number.',
+    reference: { kind: 'reference', name: 'reference', label: 'Receipt number', hint: 'One receipt credits once. A short number takes a prefix, such as RCPT-42.' },
+    field: { kind: 'choice', name: 'receipt', label: 'The partner has their receipt', options: [{ value: 'PRINTED', label: 'Printed and handed over' }, { value: 'SENT', label: 'Sent to them' }] },
+    request: (amount, reference, values) => ({ method: 'CASH', amount, reference, receipt: values['receipt'] === 'SENT' ? 'SENT' : 'PRINTED' }),
+  },
+  CHEQUE: {
+    words: 'Cheque',
+    body: 'A cheque counts only once it has cleared. Do not record it until the money is in the Westbridge Inc. bank account.',
+    reference: { kind: 'reference', name: 'reference', label: 'Cheque number', hint: 'One cheque credits once. Add the bank if numbers could repeat, such as GBTI-004512.' },
+    field: { kind: 'choice', name: 'cleared', label: 'Has this cheque cleared?', options: [{ value: 'yes', label: 'Yes, it has cleared and the money is in the bank' }], hint: 'If it has not cleared, cancel and record it once it has.' },
+    request: (amount, reference) => ({ method: 'CHEQUE', amount, reference, cleared: true }),
+  },
+  BANK_TRANSFER: {
+    words: 'Bank transfer',
+    body: 'Record a transfer only once you can see it in the Westbridge Inc. bank account.',
+    reference: { kind: 'reference', name: 'reference', label: 'Bank reference', hint: 'One transfer credits once.' },
+    field: { kind: 'choice', name: 'seen', label: 'Have you seen it in the bank?', options: [{ value: 'yes', label: 'Yes, it is in the Westbridge Inc. bank account' }], hint: 'If you have not, cancel and record it once you have.' },
+    request: (amount, reference) => ({ method: 'BANK_TRANSFER', amount, reference, seenInBank: true }),
+  },
+};
 
 const DONE_COPY = {
   'set-aside': 'Set aside. Pay it now outside Swift, then record the payout here.',
@@ -154,7 +184,7 @@ export default function SubscriptionsPage() {
     ...refundStep('set-aside'),
   });
   const recordPaid = useMutation({
-    mutationFn: ({ id, amount, method, reference, setAsideId, reason }: { id: string; amount: number; method: 'MMG' | 'BANK_TRANSFER'; reference: string; setAsideId: string; reason: string }) =>
+    mutationFn: ({ id, amount, method, reference, setAsideId, reason }: { id: string; amount: number; method: RefundPaidMethod; reference: string; setAsideId: string; reason: string }) =>
       recordSubscriptionRefundPaid(id, amount, method, reference, setAsideId, reason),
     ...refundStep('paid'),
   });
@@ -165,10 +195,32 @@ export default function SubscriptionsPage() {
   const refundBusy = setAside.isPending || recordPaid.isPending || release.isPending;
 
   const rows: any[] = data?.data ?? [];
-  // [OWNER 8 Oct (4)] Partners pay the weekly fee only through the MMG checkout
-  // page; production holds recording a payment by hand (BILLING_TOPUP_HOLD),
-  // so the button is not offered while the server says the hold is on.
+  // [OWNER 8 Oct (4)] Production holds the top-up (BILLING_TOPUP_HOLD), so its
+  // button is not offered while the server says the hold is on.
   const recordingHeld = (data as any)?.manualFeeRecording === 'held';
+  // [OWNER 5 Nov 2026] Money paid directly to Westbridge Inc. has its own button, for the role the route allows.
+  const inPersonOffered = (data as any)?.inPersonRecording === true;
+  const recordInPerson = async (s: any, name: string) => {
+    const how = await dialog.askWith({
+      title: `How did ${name} pay?`,
+      body: <p>{SAME_RULES}</p>,
+      confirmLabel: 'Continue',
+      reason: false,
+      fields: [{ kind: 'choice', name: 'method', label: 'Paid by', options: (Object.keys(IN_PERSON) as InPersonPaymentBody['method'][]).map((value) => ({ value, label: IN_PERSON[value].words })) }],
+    });
+    if (!how) return;
+    const way = IN_PERSON[how.values['method'] as InPersonPaymentBody['method']];
+    const outcome = await actions.run({
+      title: `Record ${way.words.toLowerCase()} from ${name}?`,
+      body: <p>{way.body} {SAME_RULES}</p>,
+      confirmLabel: 'Record in-person payment',
+      reason: { label: 'Who paid, and where', hint: 'Kept on the record and read by the second admin.' },
+      fields: [{ kind: 'amount', name: 'amount', label: 'Amount received (GYD)' }, way.reference, way.field],
+      submit: ({ reason, values }) => recordInPersonFeePayment(s.id, way.request(Number(values['amount']), String(values['reference']), values), reason),
+      success: (res) => `Recorded for ${name}. Receipt ${(res as { data?: { receiptNumber?: string } }).data?.receiptNumber ?? ''}: find it under Finance to print it.`,
+    });
+    lockIfQueued(`${s.id}:in-person`)(outcome);
+  };
 
   return (
     <div className="mc-page">
@@ -192,7 +244,7 @@ export default function SubscriptionsPage() {
       </p>
       {recordingHeld ? (
         <p className="mc-muted text-xs -mt-4 mb-6">
-          Recording fee payments by hand is on hold: partners pay through the MMG checkout page. A payment that arrived another way is refunded.
+          The agent and top-up routes are on hold. Money paid directly to Westbridge Inc. in person has its own button. A payment that came through an agent or a Swift Number is refunded.
         </p>
       ) : null}
       {actions.banner}
@@ -273,6 +325,14 @@ export default function SubscriptionsPage() {
                           >
                             {queuedAsks[`${s.id}:fee-payment`] ? 'Payment waiting for approval' : 'Record fee payment'}
                           </button>}
+                          {inPersonOffered && <button
+                            type="button"
+                            onClick={() => void recordInPerson(s, h.name)}
+                            disabled={queuedAsks[`${s.id}:in-person`] === true}
+                            className="mc-btn"
+                          >
+                            {queuedAsks[`${s.id}:in-person`] ? 'Payment waiting for approval' : 'Record in-person payment'}
+                          </button>}
                           {Number(s.refundSetAside ?? 0) > 0 ? (
                             <>
                               <button
@@ -281,15 +341,15 @@ export default function SubscriptionsPage() {
                                   const owed = Number(s.refundSetAside);
                                   const answer = await dialog.askWith({
                                     title: `Record that GY$${owed.toLocaleString()} was paid back to ${h.name}?`,
-                                    body: <p>Only once the refund has really been paid outside Swift. The reference is the proof the money went back. A second admin approves the record.</p>,
+                                    body: <p>Only once the refund has really been paid outside Swift. The reference, cheque number or signed receipt number is the proof the money went back. A second admin approves the record.</p>,
                                     confirmLabel: 'Record payout',
                                     fields: [
-                                      { kind: 'choice', name: 'method', label: 'Paid back by', options: [{ value: 'MMG', label: 'MMG' }, { value: 'BANK_TRANSFER', label: 'Bank transfer' }] },
-                                      { kind: 'reference', name: 'reference', label: 'Reference of the refund you paid' },
+                                      { kind: 'choice', name: 'method', label: 'Paid back by', options: [{ value: 'MMG', label: 'MMG' }, { value: 'BANK_TRANSFER', label: 'Bank transfer' }, { value: 'CHEQUE', label: 'Cheque' }, { value: 'CASH', label: 'Cash' }] },
+                                      { kind: 'reference', name: 'reference', label: 'Reference of the refund you paid', hint: 'Never the reference the money came in on.' },
                                     ],
                                   });
                                   if (!answer) return;
-                                  const method = answer.values['method'] === 'BANK_TRANSFER' ? 'BANK_TRANSFER' : 'MMG';
+                                  const method = answer.values['method'] as RefundPaidMethod;
                                   recordPaid.mutate({ id: s.id, amount: owed, method, reference: String(answer.values['reference']), setAsideId: String(s.refundSetAsideId ?? ''), reason: answer.reason });
                                 }}
                                 disabled={refundBusy || payoutReported}

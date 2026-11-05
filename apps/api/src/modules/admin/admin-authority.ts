@@ -403,6 +403,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // no money moves. It closes a claim about money, so: money class, reason, two admins.
   'POST /finance/cash-settlements/:id/close': c('C4', 'order.refund.settle', E.deliveryCashSettlement),
   'GET /finance/payment-mix': c('C0', 'finance.read'),
+  // [OWNER 5 Nov 2026] Fees paid in person, apart from MMG. Account numbers, no names.
+  'GET /finance/in-person-payments': c('C0', 'finance.read'),
   'PUT /finance/settlements/:id/process': c('C4', 'finance.settlement.process', E.settlement),
   'POST /finance/settlements/:id/adjust': c('C4', 'finance.settlement.adjust', E.settlement),
 
@@ -440,6 +442,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
   'DELETE /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
   'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),
+  // [OWNER 5 Nov 2026] A weekly fee paid directly to Westbridge Inc. in person. SUPER_ADMIN only (founderGuard on the route), works under BILLING_TOPUP_HOLD.
+  'POST /subscriptions/:id/in-person-payment': c('C4', 'subscription.inperson', E.subscription),
   'POST /subscriptions/:id/refund-credit/set-aside': c('C4', 'subscription.refund', E.subscription),
   'POST /subscriptions/:id/refund-credit/paid': c('C4', 'subscription.refund', E.subscription),
   'POST /subscriptions/:id/refund-credit/release': c('C4', 'subscription.refund', E.subscription),

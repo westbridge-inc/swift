@@ -144,7 +144,7 @@ export function vendorActivationRefusal(
       return new AppError(
         409,
         'FEE_UNPAID',
-        `${name} cannot be reinstated while its weekly fee is unpaid or its weekly billing is stopped. The fee must be paid through the MMG checkout page first. Billing suspensions lift automatically after confirmed payment; admin suspensions still need Reinstate. The console cannot lift a fee hold.`,
+        `${name} cannot be reinstated while its weekly fee is unpaid or its weekly billing is stopped. The fee must be paid first, on the MMG checkout page or in person to Westbridge Inc. Billing suspensions lift automatically after confirmed payment; admin suspensions still need Reinstate. The console cannot lift a fee hold.`,
       );
     case 'NEEDS_DOCUMENTS':
       return new AppError(

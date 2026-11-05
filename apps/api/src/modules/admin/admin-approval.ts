@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { ADMIN_ACTION_CLASSES, type AdminActionClass, type AdminRouteAuthority } from './admin-authority';
 import { lockCreditRefundAsks, PAID_ACTION, validatePaidAsk } from '../billing/credit-refund';
+import { IN_PERSON_ACTION, validateInPersonAsk } from '../billing/in-person-payment';
 import { SOLO_ROLE, isSoleApprover } from './solo-approval';
 
 /**
@@ -344,6 +345,8 @@ export async function resolveApproval(
     // it is written under that refund's ask lock, so a release applying at the
     // same moment either sees it or has finished before it.
     const refundEntity = data.action === PAID_ACTION ? data.entityId : null;
+    // [OWNER 5 Nov 2026] A fee paid in person that could never be recorded is refused now, not after the wait.
+    if (data.action === IN_PERSON_ACTION && data.entityId) await validateInPersonAsk(prisma, data.entityId, subject.body);
     const asked: AskResult = await prisma.$transaction(async (tx): Promise<AskResult> => {
       if (refundEntity) await lockCreditRefundAsks(tx, refundEntity);
       // [U06] One ask per act: two presses racing both wait here, and the

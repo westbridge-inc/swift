@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import type userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SubscriptionsPage from './page';
+import { describeAction } from '@/lib/approvals';
 import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
 type User = ReturnType<typeof userEvent.setup>;
@@ -378,10 +379,10 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
 });
 
 // ---------------------------------------------------------------------------
-// [OWNER 8 Oct (4)] Production records no fee payment by hand (BILLING_TOPUP_HOLD):
-// partners pay through the MMG checkout page. The server says when the hold is on,
-// and the console then offers no "Record fee payment" button. When it is offered and
-// the server refuses (the hold, or more than one week ahead, owner #62), its words show.
+// [OWNER 8 Oct (4)] Production holds the top-up and agent routes (BILLING_TOPUP_HOLD).
+// The server says when the hold is on, and the console then offers no "Record fee payment"
+// button. When it is offered and the server refuses (the hold, or more than one week ahead,
+// owner #62), its words show. [OWNER 5 Nov 2026] Money paid in person has its own button.
 // ---------------------------------------------------------------------------
 describe('[owner 8 Oct] recording a fee payment by hand', () => {
   it('is not offered while the server says the hold is on', async () => {
@@ -392,7 +393,7 @@ describe('[owner 8 Oct] recording a fee payment by hand', () => {
     renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Record fee payment' })).toBeNull();
-    expect(screen.getByText(/Recording fee payments by hand is on hold/)).toBeTruthy();
+    expect(screen.getByText(/The agent and top-up routes are on hold/)).toBeTruthy();
   });
 
   it('shows the server’s words when it refuses one', async () => {
@@ -403,5 +404,94 @@ describe('[owner 8 Oct] recording a fee payment by hand', () => {
     const panel = await answerPanel(user, 'Record fee payment', { fields: { 'Amount received (GYD)': '9000', 'Bank or MMG reference of the transfer': 'BANK-9100' }, reason: REASON_TYPED });
     await confirmPanel(user, panel, 'Record payment');
     expect((await within(panel).findByRole('alert')).textContent).toContain('Record at most GY$8,400');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [OWNER 5 Nov 2026] Anyone may pay the weekly fee directly to Westbridge Inc. in person. Under the hold the button
+// stays, for the role the server names. Each way of paying asks for what makes it count.
+// ---------------------------------------------------------------------------
+describe('[owner 5 Nov] recording a fee paid in person', () => {
+  it('the approver reads what it is, not a route', () => {
+    expect(describeAction('POST /subscriptions/:id/in-person-payment')).toBe('Record a weekly fee paid in person');
+  });
+
+  const server = (posts: ApiRequest[], reply: { body: unknown; status?: number } = { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens.', details: { approvalId: 'apr_7' } } } }, offered = true) => (request: ApiRequest) => {
+    if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [subscription], manualFeeRecording: 'held', inPersonRecording: offered } };
+    if (request.method === 'POST' && request.url.pathname === '/api/v1/admin/subscriptions/sub-1/in-person-payment') { posts.push(request); return reply; }
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  };
+  const choose = async (user: User, label: string) => {
+    const first = await answerPanel(user, 'Record in-person payment', { choose: label });
+    await confirmPanel(user, first, 'Continue');
+    return screen.findByRole('dialog');
+  };
+  const bodyOf = (posts: ApiRequest[]) => JSON.parse(String(posts[0]!.init?.body));
+
+  it('stays offered under the hold, and the second panel says what the first answer means', async () => {
+    const posts: ApiRequest[] = [];
+    mockApi(server(posts));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Record fee payment' })).toBeNull();
+    const panel = await choose(user, 'Cheque');
+    expect(panel.textContent).toContain('A cheque counts only once it has cleared');
+    expect(panel.textContent).toContain('never through an agent or a Swift Number');
+  });
+
+  it('is not offered to a role the server does not name', async () => {
+    mockApi(server([], undefined, false));
+    renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Record in-person payment' })).toBeNull();
+  });
+
+  it('a cheque is sent only after the person says it has cleared, and the row locks while it waits', async () => {
+    const posts: ApiRequest[] = [];
+    mockApi(server(posts));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await choose(user, 'Cheque');
+    await user.type(within(panel).getByLabelText('Amount received (GYD)'), '5000');
+    await user.type(within(panel).getByLabelText('Cheque number'), 'GBTI-004512');
+    await user.type(within(panel).getByRole('textbox', { name: /who paid/i }), REASON_TYPED);
+    await confirmPanel(user, panel, 'Record in-person payment');
+    expect(posts).toHaveLength(0);
+    await user.click(within(panel).getByLabelText('Yes, it has cleared and the money is in the bank'));
+    await confirmPanel(user, panel, 'Record in-person payment');
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(bodyOf(posts)).toEqual({ method: 'CHEQUE', amount: 5000, reference: 'GBTI-004512', cleared: true });
+    expect(await screen.findByRole('button', { name: 'Payment waiting for approval' })).toBeTruthy();
+  });
+
+  it('cash names the receipt the partner holds; the server\'s refusal stays in the panel', async () => {
+    const posts: ApiRequest[] = [];
+    const refusal = 'That reference is already on record. One reference credits once, so nothing was recorded.';
+    mockApi(server(posts, { status: 409, body: { success: false, error: { code: 'IN_PERSON_REFERENCE_USED', message: refusal } } }));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await choose(user, 'Cash');
+    await user.type(within(panel).getByLabelText('Amount received (GYD)'), '5000');
+    await user.type(within(panel).getByLabelText('Receipt number'), 'RCPT-0042');
+    await user.click(within(panel).getByLabelText('Sent to them'));
+    await user.type(within(panel).getByRole('textbox', { name: /who paid/i }), REASON_TYPED);
+    await confirmPanel(user, panel, 'Record in-person payment');
+    expect((await within(panel).findByRole('alert')).textContent).toContain('One reference credits once');
+    expect(bodyOf(posts)).toEqual({ method: 'CASH', amount: 5000, reference: 'RCPT-0042', receipt: 'SENT' });
+  });
+
+  it('a transfer says it was seen in the bank', async () => {
+    const posts: ApiRequest[] = [];
+    mockApi(server(posts));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await choose(user, 'Bank transfer');
+    await user.type(within(panel).getByLabelText('Amount received (GYD)'), '5000');
+    await user.type(within(panel).getByLabelText('Bank reference'), 'FT-77120');
+    await user.click(within(panel).getByLabelText('Yes, it is in the Westbridge Inc. bank account'));
+    await user.type(within(panel).getByRole('textbox', { name: /who paid/i }), REASON_TYPED);
+    await confirmPanel(user, panel, 'Record in-person payment');
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(bodyOf(posts)).toEqual({ method: 'BANK_TRANSFER', amount: 5000, reference: 'FT-77120', seenInBank: true });
   });
 });

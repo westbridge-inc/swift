@@ -18,6 +18,11 @@ const FAQS: { q: string; a: string }[] = [
     a: 'No. Menu prices are the store’s own prices. You only pay the delivery fee shown at checkout — stores and riders pay a flat weekly subscription instead.',
   },
   {
+    // [OWNER 5 Nov 2026] MMG checkout stays; in person is recorded by a person, directly to the company.
+    q: 'How do stores, riders and drivers pay the weekly fee?',
+    a: 'In the Swift app or on swiftgy.com, on MMG’s checkout page. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: open Get help to arrange it. A cheque counts once it clears, and you get a receipt. Never pay through an agent or anyone else.',
+  },
+  {
     q: 'Where does Swift deliver?',
     a: 'We’re launching across Guyana, starting with Georgetown and surrounding areas. Stores within range appear automatically.',
   },

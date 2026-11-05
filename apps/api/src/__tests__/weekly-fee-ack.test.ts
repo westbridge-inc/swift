@@ -49,7 +49,10 @@ const V2_CHANGED: Record<string, string> = {
   'How you pay': 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.',
 };
 const V2_ITEMS = V1_ITEMS.map((i) => (V2_CHANGED[i.heading] ? { ...i, text: V2_CHANGED[i.heading]! } : i));
-const V2_TEXT = [...V2_ITEMS.map((i) => `${i.heading}: ${i.text}`), V1_TICK].join('\n');
+/** [OWNER 5 Nov 2026] The words served now: v2 with "How you pay" adding the partner paying Westbridge Inc. in person. */
+const V3_HOW_YOU_PAY = 'In the Swift app or on swiftgy.com, on MMG\u2019s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, and you get a receipt. Never through an agent or anyone else. Paying by card is not offered yet.';
+const V3_ITEMS = V2_ITEMS.map((i) => (i.heading === 'How you pay' ? { ...i, text: V3_HOW_YOU_PAY } : i));
+const V3_TEXT = [...V3_ITEMS.map((i) => `${i.heading}: ${i.text}`), V1_TICK].join('\n');
 
 async function customer(n: number) {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+59274${NUM}${n}`, firstName: 'Fee', lastName: `Tick${n}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, customer: { create: {} } } as never }));
@@ -113,7 +116,7 @@ afterAll(async () => {
 describe('the weekly fee words are the server’s, pinned and served with the price', () => {
   it('GET /auth/pricing serves the v2 words beside the amounts: what it covers, when it starts, how it is paid (the app or the website), the 14-day rule, and the tick', async () => {
     const p = await priceList();
-    expect(p.feeTerms).toEqual({ version: 'v2', items: V2_ITEMS, tick: V1_TICK });
+    expect(p.feeTerms).toEqual({ version: 'v3', items: V3_ITEMS, tick: V1_TICK });
   });
 
   it('[RETIER PR-B] says whether Swift moves existing stores between catalogue steps (off until the owner\'s go) and the notice a rise gets', async () => {
@@ -129,14 +132,14 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     const c = await customer(1);
     const p = await priceList();
     const amount = moverRate(p, 'MOTORCYCLE');
-    const res = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v2', amount, currencyCode: p.currencyCode } }, { 'x-client-platform': 'android' });
+    const res = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v3', amount, currencyCode: p.currencyCode } }, { 'x-client-platform': 'android' });
     expect([200, 201], res.body).toContain(res.statusCode);
     const rows = await feeRows(c.id);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ subjectType: 'driver', documentVersion: 'v2', action: 'granted', surface: 'android', documentContentHash: sha256(V2_TEXT) });
+    expect(rows[0]).toMatchObject({ subjectType: 'driver', documentVersion: 'v3', action: 'granted', surface: 'android', documentContentHash: sha256(V3_TEXT) });
     expect(rows[0]!.evidence).toMatchObject({ control: 'weekly_fee_checkbox', path: 'partner/become', kind: 'RIDER', vehicleType: 'MOTORCYCLE', weeklyFee: { amount, currencyCode: p.currencyCode, tier: 'courier' } });
-    const doc = await system(() => app.prisma.legalDocument.findUniqueOrThrow({ where: { documentType_version_locale: { documentType: 'weekly_fee_acknowledgement', version: 'v2', locale: 'en-GY' } } }));
-    expect(doc.renderedText).toBe(V2_TEXT);
+    const doc = await system(() => app.prisma.legalDocument.findUniqueOrThrow({ where: { documentType_version_locale: { documentType: 'weekly_fee_acknowledgement', version: 'v3', locale: 'en-GY' } } }));
+    expect(doc.renderedText).toBe(V3_TEXT);
     expect(doc.publishedAt).toBeInstanceOf(Date);
   });
 
@@ -162,7 +165,7 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: c.id } }))).toBe(0);
 
     const p = await priceList();
-    const ticked = await becomeFromWeb(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v2', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
+    const ticked = await becomeFromWeb(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v3', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
     expect([200, 201], ticked.body).toContain(ticked.statusCode);
     expect((await feeRows(c.id)).map((r) => r.surface)).toEqual(['web']);
   });
@@ -171,11 +174,11 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     const c = await customer(4);
     const p = await priceList();
     const amount = moverRate(p, 'MOTORCYCLE');
-    const stale = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v2', amount: amount + 500, currencyCode: p.currencyCode } });
+    const stale = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v3', amount: amount + 500, currencyCode: p.currencyCode } });
     expect(stale.statusCode, stale.body).toBe(409);
     expect(stale.json().error.code).toBe('WEEKLY_FEE_CHANGED');
     expect(stale.json().error.details).toMatchObject({ amount, currencyCode: p.currencyCode });
-    const wrongCurrency = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v2', amount, currencyCode: 'USD' } });
+    const wrongCurrency = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v3', amount, currencyCode: 'USD' } });
     expect(wrongCurrency.statusCode, wrongCurrency.body).toBe(409);
     expect(wrongCurrency.json().error.code).toBe('WEEKLY_FEE_CHANGED');
     const after = await provisioned(c.id);
@@ -210,23 +213,23 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     const driver = await customer(7);
     const car = { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: `HB ${NUM}7` };
     const taxiRate = moverRate(p, 'CAR');
-    const wrong = await become(driver.token, { role: 'MOVER', vehicleType: 'CAR', vehicle: car, acceptAgreement: true, weeklyFeeAck: { version: 'v2', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
+    const wrong = await become(driver.token, { role: 'MOVER', vehicleType: 'CAR', vehicle: car, acceptAgreement: true, weeklyFeeAck: { version: 'v3', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
     if (moverRate(p, 'MOTORCYCLE') !== taxiRate) expect(wrong.json().error?.code, wrong.body).toBe('WEEKLY_FEE_CHANGED');
-    const ok = await become(driver.token, { role: 'MOVER', vehicleType: 'CAR', vehicle: car, acceptAgreement: true, weeklyFeeAck: { version: 'v2', amount: taxiRate, currencyCode: p.currencyCode } });
+    const ok = await become(driver.token, { role: 'MOVER', vehicleType: 'CAR', vehicle: car, acceptAgreement: true, weeklyFeeAck: { version: 'v3', amount: taxiRate, currencyCode: p.currencyCode } });
     expect([200, 201], ok.body).toContain(ok.statusCode);
     expect((await feeRows(driver.id))[0]!.evidence).toMatchObject({ kind: 'DRIVER', vehicleType: 'CAR', weeklyFee: { amount: taxiRate, tier: 'taxi' } });
 
     const service = await customer(8);
-    const s = await become(service.token, { role: 'VENDOR', business: store('SERVICE', 8), acceptAgreement: true, weeklyFeeAck: { version: 'v2', amount: p.vendors.service, currencyCode: p.currencyCode } });
+    const s = await become(service.token, { role: 'VENDOR', business: store('SERVICE', 8), acceptAgreement: true, weeklyFeeAck: { version: 'v3', amount: p.vendors.service, currencyCode: p.currencyCode } });
     expect([200, 201], s.body).toContain(s.statusCode);
     const serviceRows = await feeRows(service.id);
     expect(serviceRows).toHaveLength(1);
-    expect(serviceRows[0]).toMatchObject({ subjectType: 'vendor_user', documentVersion: 'v2' });
+    expect(serviceRows[0]).toMatchObject({ subjectType: 'vendor_user', documentVersion: 'v3' });
     expect(serviceRows[0]!.evidence).toMatchObject({ kind: 'VENDOR', vendorType: 'SERVICE', weeklyFee: { amount: p.vendors.service, tier: 'service' } });
 
     const shop = await customer(9);
     const first = p.vendors.catalogue[0]!;
-    const r = await become(shop.token, { role: 'VENDOR', business: store('RESTAURANT', 9), acceptAgreement: true, weeklyFeeAck: { version: 'v2', amount: first.rate, currencyCode: p.currencyCode } });
+    const r = await become(shop.token, { role: 'VENDOR', business: store('RESTAURANT', 9), acceptAgreement: true, weeklyFeeAck: { version: 'v3', amount: first.rate, currencyCode: p.currencyCode } });
     expect([200, 201], r.body).toContain(r.statusCode);
     expect((await feeRows(shop.id))[0]!.evidence).toMatchObject({ kind: 'VENDOR', vendorType: 'RESTAURANT', weeklyFee: { amount: first.rate, tier: first.tier } });
   });

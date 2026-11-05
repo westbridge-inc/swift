@@ -35,6 +35,8 @@ export function liveMmg(sub?: FeeSubscription | null) {
   return sub?.payActions?.find((a): a is Extract<PayAction, { state: 'live' }> => a.id === 'MMG_CHECKOUT' && a.state === 'live');
 }
 /** A Back tap the server refused, or answered with anything but that checkout's open page. */
+/** [OWNER 5 Nov 2026] The other way to pay, said on the fee page: recorded by a person in the console, nothing to tap. */
+export const PAY_IN_PERSON = 'You can also pay Swift directly, in person, by cash, cheque or bank transfer: open Get help to arrange it. A cheque counts once it clears, and you get a receipt. Never pay through an agent or anyone else.';
 export const REOPEN_REFUSED = "We couldn't reopen that MMG page. Its latest status is shown here.";
 export function subscriptionWords(status: string): string {
   return ({ TRIAL: 'Free trial', ACTIVE: 'Active', PAST_DUE: 'Weekly fee overdue', SUSPENDED: 'Account suspended', CHURNED: 'Account inactive', PAUSED: 'Weekly billing paused', CANCELLED: 'Subscription closed' } as Record<string, string>)[status] ?? 'Status unavailable';

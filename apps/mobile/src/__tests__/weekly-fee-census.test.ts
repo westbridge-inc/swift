@@ -28,6 +28,12 @@ describe('partner checkout surface census', () => {
     expect(source('src/modules/vendor/screens/VendorPayAllScreen.tsx')).toContain("WebBrowser.openAuthSessionAsync(url, 'swift://pay/mmg/return')");
     expect(source('src/services/api.ts')).toContain("config.headers['x-client-platform'] = Platform.OS");
   });
+  it('[owner 5 Nov 2026] the phone says paying in person on the fee screen and in the FAQ, in the same words as the web', () => {
+    expect(source('src/modules/billing/screens/WeeklyFeeScreen.tsx')).toContain('{PAY_IN_PERSON}');
+    const faq = source('src/modules/profile/screens/FaqScreen.tsx');
+    expect(faq).toContain('directly to Westbridge Inc., by cash, cheque or bank transfer');
+    expect(faq).toContain('Never pay through an agent or anyone else');
+  });
   it('the mobile and web state machines cannot drift', () => {
     expect(source('src/lib/weeklyFee.ts')).toBe(source('../web/src/lib/weekly-fee.ts'));
     expect(source('src/lib/weeklyFeeReopen.ts')).toBe(source('../web/src/lib/weekly-fee-reopen.ts'));

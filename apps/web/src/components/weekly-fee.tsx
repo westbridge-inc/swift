@@ -5,7 +5,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } f
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, PAY_IN_PERSON, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -110,6 +110,7 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
       <CardPay family={family} storeId={storeId} card={card} latestSession={sub.latestCardSession} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
+    <p className="text-sm text-[var(--swift-muted)]" data-testid="pay-in-person">{PAY_IN_PERSON}</p>
     <h2 className="text-lg font-bold">Recent checkouts</h2>
     {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {
       const shown = c.ref === view.checkout?.ref ? view.checkout : c;

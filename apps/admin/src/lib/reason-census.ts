@@ -118,6 +118,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'POST /users/:id/verified-deletion', helper: 'deleteVerifiedRequest', args: ['usr_1', { identityCheck: 'OWNER_CHECKED', identityNote: 'Owner spoke to the person' }], requiredBodyKeys: ['identityCheck', 'identityNote', 'reason'] },
   { route: 'POST /vendor-owners/:id/deal-change', helper: 'changeChainDeal', args: ['own_1', { kind: 'RAISE', weeklyRate: 17000 }], requiredBodyKeys: ['kind', 'reason'] },
   { route: 'DELETE /vendor-owners/:id/deal-change', helper: 'withdrawChainDealChange', args: ['own_1'] },
+  { route: 'POST /subscriptions/:id/in-person-payment', helper: 'recordInPersonFeePayment', args: ['sub_1', { method: 'CASH', amount: 1000, reference: 'RCPT-1', receipt: 'PRINTED' }], requiredBodyKeys: ['method', 'amount', 'reference'] },
   { route: 'POST /subscriptions/:id/topup', helper: 'topUpSubscription', args: ['sub_1', 1000, 'REF-1', 'idem-1'], requiredBodyKeys: ['amount', 'reference'] },
   { route: 'POST /subscriptions/:id/refund-credit/set-aside', helper: 'setAsideSubscriptionCredit', args: ['sub_1', 1000], requiredBodyKeys: ['amount'] },
   { route: 'POST /subscriptions/:id/refund-credit/paid', helper: 'recordSubscriptionRefundPaid', args: ['sub_1', 1000, 'MMG', 'REF-1', 'evt_aside_1'], requiredBodyKeys: ['amount', 'method', 'reference', 'setAsideId'] },

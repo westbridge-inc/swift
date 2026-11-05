@@ -46,6 +46,17 @@ const FAQ: QA[] = [
     ),
   },
   {
+    // [OWNER 5 Nov 2026] MMG checkout stays; in person is recorded by a person, directly to the company.
+    q: 'How do businesses, riders and drivers pay the weekly fee?',
+    a: (
+      <>
+        In the Swift app or on swiftgy.com, on MMG&apos;s checkout page. Or in person, directly to Westbridge Inc., by
+        cash, cheque or bank transfer: open Get help to arrange it. A cheque counts once it clears, and you get a
+        receipt. Never pay through an agent or anyone else.
+      </>
+    ),
+  },
+  {
     q: 'How do businesses and drivers actually get paid?',
     a: (
       <>

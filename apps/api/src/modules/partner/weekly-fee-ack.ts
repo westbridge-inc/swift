@@ -31,14 +31,15 @@ import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../subscription/trial-length'
  */
 export const WEEKLY_FEE_ACK_TYPE: ConsentDocumentType = 'weekly_fee_acknowledgement';
 /** The words served now, and the only version a NEW tick is taken on (assertWeeklyFeeAck). */
-export const WEEKLY_FEE_ACK_VERSION = 'v2';
+export const WEEKLY_FEE_ACK_VERSION = 'v3';
 /**
  * [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D3)] The versions whose tick still stands. v2 only adds the website as a
  * place to pay ("How you pay"); nothing about the fee changed, so a partner who ticked v1 is not asked again: a store
  * owner's store-fee tick (store-fee.ts latestStoreFeeTick) and a pro's fee tick (services/pro-fee.ts latestProFeeTick)
- * are read across these. The ledger keeps each row anchored to the words it was given to.
+ * are read across these. The ledger keeps each row anchored to the words it was given to. v3 only adds a way to pay
+ * [OWNER 5 Nov 2026]; again nothing about the fee changed.
  */
-export const WEEKLY_FEE_ACK_HONOURED_VERSIONS: readonly string[] = ['v1', 'v2'];
+export const WEEKLY_FEE_ACK_HONOURED_VERSIONS: readonly string[] = ['v1', 'v2', 'v3'];
 
 /**
  * The v1 words, in the order they were shown until 1 Nov 2026. Never edited: rows already in the ledger are anchored
@@ -74,8 +75,7 @@ export const WEEKLY_FEE_ACK_TEXT_V1 = [
  *    per kind of partner (the trial entitlement law: one per person, per role), none while an earlier subscription in
  *    their accounts is overdue, paused or ended (DEBT_REINSTATE_FIRST: PAST_DUE, SUSPENDED, CHURNED). A change to any
  *    of those numbers is a new version (the unit test pins them together).
- * "What it covers", "If the price changes" and the tick are v1's, word for word. Card-rail switch-on checklist: before
- * card payment is offered, "How you pay" must change again, and that is v3.
+ * "What it covers", "If the price changes" and the tick are v1's, word for word.
  */
 export const WEEKLY_FEE_TERMS_V2 = {
   items: [
@@ -92,9 +92,26 @@ export const WEEKLY_FEE_ACK_TEXT_V2 = [
   WEEKLY_FEE_TERMS_V2.tick,
 ].join('\n');
 
+/**
+ * [OWNER 5 Nov 2026] The v3 words, one line changed from v2: "How you pay" adds paying Westbridge Inc. directly, in
+ * person. Everything else is v2's, word for word. Card-rail switch-on checklist: before card payment is offered, "How
+ * you pay" must change again, and that is v4.
+ */
+export const WEEKLY_FEE_TERMS_V3 = {
+  items: WEEKLY_FEE_TERMS_V2.items.map((item) => (item.heading === 'How you pay'
+    ? { heading: item.heading, text: 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, and you get a receipt. Never through an agent or anyone else. Paying by card is not offered yet.' }
+    : item)),
+  tick: WEEKLY_FEE_TERMS_V2.tick,
+} as const;
+
+export const WEEKLY_FEE_ACK_TEXT_V3 = [
+  ...WEEKLY_FEE_TERMS_V3.items.map((item) => `${item.heading}: ${item.text}`),
+  WEEKLY_FEE_TERMS_V3.tick,
+].join('\n');
+
 /** The words of WEEKLY_FEE_ACK_VERSION: what is served, and what a new tick is published and anchored to. */
-export const WEEKLY_FEE_TERMS = WEEKLY_FEE_TERMS_V2;
-export const WEEKLY_FEE_ACK_TEXT = WEEKLY_FEE_ACK_TEXT_V2;
+export const WEEKLY_FEE_TERMS = WEEKLY_FEE_TERMS_V3;
+export const WEEKLY_FEE_ACK_TEXT = WEEKLY_FEE_ACK_TEXT_V3;
 
 export interface WeeklyFeeTerms { version: string; items: { heading: string; text: string }[]; tick: string }
 

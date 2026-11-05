@@ -10,7 +10,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
-  assertWeeklyFeeAck, WEEKLY_FEE_ACK_HONOURED_VERSIONS, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_VERSION, WEEKLY_FEE_TERMS_V1,
+  assertWeeklyFeeAck, WEEKLY_FEE_ACK_HONOURED_VERSIONS, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TEXT_V2, WEEKLY_FEE_ACK_VERSION, WEEKLY_FEE_TERMS_V1,
   weeklyFeeTerms,
 } from '../modules/partner/weekly-fee-ack';
 import { latestStoreFeeTick } from '../modules/partner/store-fee';
@@ -28,13 +28,15 @@ const HOW_YOU_PAY_V2 = 'In the Swift app or on swiftgy.com, on MMG’s checkout 
  * overdue, paused or ended subscription in the same person's accounts, a review hold).
  */
 const WHEN_IT_STARTS_V2 = 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one. A new partner\u2019s free trial lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it, counted from the day Swift approves you (for a service provider, from the day the Pro Agreement says). A new branch has no trial of its own: it shares its business\u2019s. Each person gets one free trial for each kind of partner, and none while an earlier Swift subscription of theirs is overdue, paused or ended.';
-const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V2, 'When it starts': WHEN_IT_STARTS_V2 };
+/** [OWNER 5 Nov 2026] v3 adds paying Westbridge Inc. directly, in person; nothing about the fee changed. */
+const HOW_YOU_PAY_V3 = 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, and you get a receipt. Never through an agent or anyone else. Paying by card is not offered yet.';
+const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V3, 'When it starts': WHEN_IT_STARTS_V2 };
 
 describe('[D3] the weekly fee words v2', () => {
-  it('serves v2: "How you pay" names the website and "When it starts" says the trial; the other lines and the tick are v1’s', () => {
+  it('serves v3: "How you pay" names the website and in person, and "When it starts" says the trial; the other lines and the tick are v1’s', () => {
     const served = weeklyFeeTerms();
-    expect(WEEKLY_FEE_ACK_VERSION).toBe('v2');
-    expect(served.version).toBe('v2');
+    expect(WEEKLY_FEE_ACK_VERSION).toBe('v3');
+    expect(served.version).toBe('v3');
     expect(served.items.map((i) => i.heading)).toEqual(WEEKLY_FEE_TERMS_V1.items.map((i) => i.heading));
     served.items.forEach((item, i) => {
       expect(item.text, item.heading).toBe(CHANGED[item.heading] ?? WEEKLY_FEE_TERMS_V1.items[i]!.text);
@@ -63,17 +65,24 @@ describe('[D3] the weekly fee words v2', () => {
     expect(WEEKLY_FEE_ACK_TEXT_V1).toContain('How you pay: In the Swift app, on MMG’s checkout page, one week at a time.');
   });
 
-  it('a NEW tick is taken on v2 only: a tab that read v1 is asked to read the words again', () => {
-    expect(() => assertWeeklyFeeAck(true, { version: 'v1', amount: 6000, currencyCode: 'GYD' })).toThrow(expect.objectContaining({ code: 'WEEKLY_FEE_TERMS_CHANGED' }));
-    expect(() => assertWeeklyFeeAck(true, { version: 'v2', amount: 6000, currencyCode: 'GYD' })).not.toThrow();
+  it('v2 keeps its exact words (the ledger rows already anchored to them), and they never named in person', () => {
+    expect(WEEKLY_FEE_ACK_TEXT_V2).toContain(`How you pay: ${HOW_YOU_PAY_V2}`);
+    expect(WEEKLY_FEE_ACK_TEXT_V2).not.toContain('in person');
   });
 
-  it('a partner who ticked v1 is not asked again: the store-fee and pro-fee ticks are read across v1 and v2', async () => {
-    expect([...WEEKLY_FEE_ACK_HONOURED_VERSIONS]).toEqual(['v1', 'v2']);
+  it('a NEW tick is taken on the served version only: a tab that read v1 or v2 is asked to read the words again', () => {
+    for (const version of ['v1', 'v2']) {
+      expect(() => assertWeeklyFeeAck(true, { version, amount: 6000, currencyCode: 'GYD' })).toThrow(expect.objectContaining({ code: 'WEEKLY_FEE_TERMS_CHANGED' }));
+    }
+    expect(() => assertWeeklyFeeAck(true, { version: 'v3', amount: 6000, currencyCode: 'GYD' })).not.toThrow();
+  });
+
+  it('a partner who ticked v1 is not asked again: the store-fee and pro-fee ticks are read across every version', async () => {
+    expect([...WEEKLY_FEE_ACK_HONOURED_VERSIONS]).toEqual(['v1', 'v2', 'v3']);
     const seen: unknown[] = [];
     const db = { consentRecord: { findFirst: async (args: { where: unknown }) => { seen.push(args.where); return { action: 'granted', evidence: { weeklyFee: { amount: 15000, currencyCode: 'GYD' } } }; } } } as never;
     expect(await latestStoreFeeTick(db, 'owner-1', 'store-1')).toEqual({ amount: 15000, currencyCode: 'GYD' });
     expect(await latestProFeeTick(db, 'pro-1')).toEqual({ amount: 15000, currencyCode: 'GYD' });
-    for (const where of seen) expect(where).toMatchObject({ documentType: 'weekly_fee_acknowledgement', documentVersion: { in: ['v1', 'v2'] } });
+    for (const where of seen) expect(where).toMatchObject({ documentType: 'weekly_fee_acknowledgement', documentVersion: { in: ['v1', 'v2', 'v3'] } });
   });
 });
