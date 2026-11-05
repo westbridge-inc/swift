@@ -129,6 +129,10 @@ interface CheckoutInput {
    *  PRICE_CHANGED (seen → now) so the customer confirms the new price. An
    *  older app sends neither and is not compared (today's behaviour). */
   expectedPrices?: { total?: number; lines?: Array<{ lineId: string; unitPrice: number }> };
+  /** [FULL-LAUNCH] The limit on placing orders (integrity/velocity assertOrderPlacementAllowed), given how many orders
+   *  this checkout would place. Runs when every check before the transaction has passed, so a refusal costs no budget.
+   *  The route passes it; jobs and scripts have none. */
+  assertPlacementAllowed?: (orders: number) => Promise<void>;
   /** Injectable clock so the risk heuristic is testable */
   now?: Date;
   /** Test seam [REPORT-013 F-013-01/06]: runs after pre-transaction pricing
@@ -1500,6 +1504,7 @@ export class OrderService {
     // commits (notifications are best-effort and never roll an order back).
     const stockEventsByVendor = new Map<string, Array<{ itemId: string; name: string; remaining: number; kind: 'low' | 'out' }>>();
 
+    if (input.assertPlacementAllowed) await input.assertPlacementAllowed(plans.length);
     if (input.beforeTransaction) await input.beforeTransaction();
 
     // [M-11] The two effects every order owes after it commits carry their

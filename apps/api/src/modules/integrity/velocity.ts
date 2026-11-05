@@ -50,6 +50,8 @@ export interface VelocityVerdict {
   controlUnavailable?: boolean;
 }
 
+export const ORDER_PLACE_ACTION = 'order.place';
+
 /** Safety actions are never throttled — a person reaching for help is not a burst. */
 export function isSafetyAction(action: string): boolean {
   return action.startsWith('safety.') || action.startsWith('sos');
@@ -157,6 +159,30 @@ export async function assertVelocity(app: FastifyInstance, request: FastifyReque
   }
   if (!verdict.allowed) {
     throw new AppError(429, 'VELOCITY_LIMIT', `Too many tries — wait ${Math.ceil(verdict.retryAfterS / 60)} minute${verdict.retryAfterS > 90 ? 's' : ''} and try again.`);
+  }
+}
+
+/**
+ * [FULL-LAUNCH · owner ruling 5 Nov 2026] The limit on placing orders: the person and their identity cluster, never
+ * the IP or the device. Guyana's carriers put many customers behind one address, so assertVelocity's IP count would
+ * throttle strangers. Called after the checks that refuse an order for an ordinary reason, so a customer told "no
+ * riders" or "closed" is not spending budget, and after an idempotent replay has answered, so a retry never pays
+ * twice. `orders`: one checkout of a multi-store cart places one order per store, and each one counts. Redis down
+ * fails open like every surface outside MONEY_SURFACE_PREFIXES: the limit does not stop ordering.
+ */
+export async function assertOrderPlacementAllowed(
+  deps: { redis: Redis; prisma: PrismaClient },
+  userId: string,
+  orders = 1,
+): Promise<void> {
+  const authority = await identityAuthority(deps.prisma, userId);
+  const clusterId = authority.status === 'RESOLVED' ? authority.clusterId : null;
+  for (let placed = 0; placed < orders; placed++) {
+    const verdict = await checkVelocity(deps, { action: ORDER_PLACE_ACTION, actor: { userId, clusterId } });
+    if (!verdict.allowed) {
+      const minutes = Math.ceil(verdict.retryAfterS / 60);
+      throw new AppError(429, 'VELOCITY_LIMIT', `Too many orders in a short time — wait ${minutes} minute${minutes === 1 ? '' : 's'} and try again.`);
+    }
   }
 }
 

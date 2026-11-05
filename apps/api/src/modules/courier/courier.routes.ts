@@ -34,6 +34,9 @@ import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibi
 import { POSTAL_REFUSAL, postalItem } from './postal-items';
 import { withCounterpartPhones } from '../calls/counterpart-phone';
 import { courierRiderAnswer } from './courier-rider-answer';
+import { assertParcelHasRiders } from '../dispatch/delivery-capacity';
+import { DISPATCH_LOCATION_FRESH_SECONDS, DISPATCH_WIDEST_RADIUS_KM } from '../dispatch/dispatch.service';
+import { assertOrderPlacementAllowed } from '../integrity/velocity';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -300,6 +303,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(409, 'PRICE_CHANGED', 'The fee for this parcel has changed. Check the new fee, then send it again.',
         { expectedFee: body.expectedFee, fee: estimate.totalFee, currencyCode: estimate.currency });
     }
+
+    await assertParcelHasRiders(app.prisma, body.pickup, customer.tenantId, body.packageSize, DISPATCH_LOCATION_FRESH_SECONDS, DISPATCH_WIDEST_RADIUS_KM);
+    await assertOrderPlacementAllowed({ redis: app.redis, prisma: app.prisma }, userId);
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);

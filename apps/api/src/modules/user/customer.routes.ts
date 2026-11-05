@@ -15,7 +15,7 @@ import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
-import { velocityGuard } from '../integrity/velocity';
+import { assertOrderPlacementAllowed, velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
@@ -2564,6 +2564,7 @@ export async function customerRoutes(app: FastifyInstance) {
           ? { expectedPrices: { total: body.expectedTotal, lines: body.expectedLines } }
           : {}),
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
+        assertPlacementAllowed: (orders) => assertOrderPlacementAllowed({ redis: app.redis, prisma: app.prisma }, userId, orders),
         onCommitted: (committed) => { commit = committed; },
       });
     } catch (err) {
