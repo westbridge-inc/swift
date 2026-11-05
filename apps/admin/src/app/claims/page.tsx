@@ -19,6 +19,12 @@ const FLAG_WORDS: Record<string, string> = {
   review_overdue: 'waiting a week or more', paid_evidence_incomplete: 'paid with evidence missing',
 };
 
+/** What a missing piece of evidence reads as. */
+const EVIDENCE_WORDS: Record<string, string> = {
+  handover_not_completed: 'the handover record', rider_at_door: 'the rider at the door', elapsed_wait: 'the wait at the door',
+  door_photo: 'the door photo', pickup_proof: 'the pickup record', cart_snapshot: 'the order contents', customer_contacted: 'contact with the customer',
+};
+
 /** The evidence as it stands now. An older row or a failed read falls back to what was stored. */
 const evidenceOk = (c: any): boolean => c.evidenceNow?.complete ?? c.evidenceComplete === true;
 
@@ -74,7 +80,7 @@ export default function ClaimsPage() {
     body: (
       <>
         <p>Order {c.orderId}. Type the reference and the amount you actually transferred.</p>
-        {evidenceOk(c) ? null : <p className="mc-text-bad mt-2">Evidence is missing{c.evidenceNow?.missing?.length ? `: ${c.evidenceNow.missing.join(', ').replaceAll('_', ' ')}` : ''}. You may still pay: write why. A second admin approves your reason.</p>}
+        {evidenceOk(c) ? null : <p className="mc-text-bad mt-2">Evidence is missing{c.evidenceNow?.missing?.length ? `: ${c.evidenceNow.missing.map((key: string) => EVIDENCE_WORDS[key] ?? 'other evidence').join(', ')}` : ''}. You may still pay: write why. A second admin approves your reason.</p>}
       </>
     ),
     confirmLabel: 'Mark paid',
