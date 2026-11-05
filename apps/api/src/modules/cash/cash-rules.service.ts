@@ -762,8 +762,8 @@ export class CashRulesService {
         riderNotice: {
           userId: moverUserId,
           type: 'SYSTEM_ANNOUNCEMENT',
-          title: 'Not covered by the guarantee',
-          body: `Orders of $${Math.round(gateLocal).toLocaleString()} or more are outside the automatic guarantee. Support will follow up.`,
+          title: 'Swift does not pay this one automatically',
+          body: `Orders of $${Math.round(gateLocal).toLocaleString()} or more are not paid automatically. Support will follow up.`,
           data: { kind: 'claim_over_gate', orderId: order.id },
         },
       };
@@ -817,12 +817,12 @@ export class CashRulesService {
       riderNotice: {
         userId: moverUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title: claim.status === 'AUTO_APPROVED' ? 'Guarantee approved' : 'Claim under review',
+        title: claim.status === 'AUTO_APPROVED' ? 'Swift will pay you' : 'Being reviewed',
         body: claim.status === 'AUTO_APPROVED'
-          ? `$${amount.toLocaleString()} is covered by the Swift guarantee and will be paid out.`
+          ? `Swift will pay you $${amount.toLocaleString()}.`
           : suspended
-            ? 'Your loss protection is suspended, so this claim goes to a human review. Support has the reason and the review route.'
-            : 'Your claim needs a quick manual review — we will get back to you.',
+            ? 'Automatic payment is paused for you, so a person reviews this one. Support has the reason and the review route.'
+            : 'This needs a quick review. We will get back to you.',
         data: { kind: 'claim', claimId: claim.id },
       },
     };
@@ -934,7 +934,7 @@ export class CashRulesService {
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
       status: 'APPROVED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     }, onAudit);
-    await this.notifyClaim(updated, 'Claim approved', `Your $${Number(updated.amount).toLocaleString()} claim was approved and will be paid out.`, claimId);
+    await this.notifyClaim(updated, 'Payment approved', `Swift approved your $${Number(updated.amount).toLocaleString()} and will pay you.`, claimId);
     return updated;
   }
 
@@ -942,7 +942,7 @@ export class CashRulesService {
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW'], {
       status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     }, onAudit);
-    await this.notifyClaim(updated, 'Claim rejected', `Your claim was rejected: ${note}`, claimId);
+    await this.notifyClaim(updated, 'Not approved', `This payment was not approved: ${note}`, claimId);
     return updated;
   }
 
@@ -978,7 +978,7 @@ export class CashRulesService {
       const mover = await this.moverUser(existing);
       const account = await this.prisma.user.findUnique({ where: { id: mover.userId }, select: { lossProtectionSuspendedAt: true } });
       if (account?.lossProtectionSuspendedAt) {
-        throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'This mover\'s loss protection is suspended; an auto-approved claim must be reviewed and approved by a person before it is paid.');
+        throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'Automatic payment is paused for this mover; a person must review and approve this one before it is paid.');
       }
     }
     const rules = await this.configFor(countryCode);
@@ -999,7 +999,7 @@ export class CashRulesService {
       const fresh = await tx.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
       assertClaimAmountAttested(fresh.amount, paidAmount);
       if (fresh.orderId !== existing.orderId || Number(fresh.amount) !== Number(existing.amount)) {
-        throw new AppError(409, 'RLP_EVIDENCE_INCOMPLETE', 'Claim provenance changed during payout.');
+        throw new AppError(409, 'RLP_EVIDENCE_INCOMPLETE', 'This record changed during payment.');
       }
       if (fresh.handoverEvidenceId) {
         await tx.$queryRaw`SELECT id FROM cash_handover_evidence WHERE id = ${fresh.handoverEvidenceId} FOR SHARE`;
@@ -1007,14 +1007,14 @@ export class CashRulesService {
       }
       if (fresh.status === 'AUTO_APPROVED') {
         if ((await identityAuthority(tx, fresh.customerId)).status === 'REVIEW_REQUIRED') {
-          throw new AppError(409, 'RLP_IDENTITY_REVIEW_REQUIRED', 'This claim requires human review before payout.');
+          throw new AppError(409, 'RLP_IDENTITY_REVIEW_REQUIRED', 'A person must review this before it is paid.');
         }
         const profile = fresh.driverId ? await tx.driver.findUnique({ where: { id: fresh.driverId }, select: { userId: true } })
           : await tx.rider.findUnique({ where: { id: fresh.riderId! }, select: { userId: true } });
         if (!profile) throw new AppError(409, 'RLP_EVIDENCE_INCOMPLETE', 'The assigned mover is missing.');
         await tx.$queryRaw`SELECT id FROM users WHERE id = ${profile.userId} FOR SHARE`;
         const account = await tx.user.findUnique({ where: { id: profile.userId }, select: { lossProtectionSuspendedAt: true } });
-        if (account?.lossProtectionSuspendedAt) throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'A human must review suspended protection before payout.');
+        if (account?.lossProtectionSuspendedAt) throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'Automatic payment is paused for this mover; a person must review this before it is paid.');
       }
       assertEvidenceComplete(await assembleClaimEvidence(tx, fresh, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm }));
     }).catch((err) => {
@@ -1022,12 +1022,12 @@ export class CashRulesService {
         throw new AppError(
           409,
           'PAYMENT_REF_ALREADY_USED',
-          'That reference is already recorded against another claim. One transfer settles one claim — use the reference for THIS payout.',
+          'That reference is already recorded against another payment. One transfer settles one payment — use the reference for THIS one.',
         );
       }
       throw err;
     });
-    await this.notifyClaim(updated, 'Guarantee paid', `$${Number(updated.amount).toLocaleString()} has been paid out to you.`, claimId);
+    await this.notifyClaim(updated, 'Swift paid you', `$${Number(updated.amount).toLocaleString()} has been paid to you.`, claimId);
     return updated;
   }
 
@@ -1059,7 +1059,7 @@ export class CashRulesService {
       if (res.count === 0) {
         const exists = await tx.reimbursementClaim.findUnique({ where: { id: claimId }, select: { status: true } });
         if (!exists) throw new NotFoundError('Claim', claimId);
-        throw new AppError(400, 'INVALID_CLAIM_STATE', `Claim is ${exists.status}; expected ${from.join('/')}`);
+        throw new AppError(400, 'INVALID_CLAIM_STATE', `This is ${exists.status}; expected ${from.join('/')}`);
       }
       const facts = within ? await within(tx) : {};
       const updated = await tx.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
@@ -1090,8 +1090,8 @@ export class CashRulesService {
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Loss protection suspended',
-      body: 'Your loss protection has been suspended following a review. Claims you file will be reviewed by a person before any payout; contact support to request a review of this decision.',
+      title: 'Automatic payment paused',
+      body: 'Automatic payment is paused for you following a review. A person now reviews each unpaid cash order before Swift pays it; contact support to request a review of this decision.',
       data: { kind: 'rlp_suspended' },
     }).catch(() => {});
     return updated;
@@ -1113,8 +1113,8 @@ export class CashRulesService {
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Loss protection reinstated',
-      body: 'Your loss protection is active again. Claims below the gate are covered as before.',
+      title: 'Automatic payment is back on',
+      body: 'Automatic payment is back on for you. Unpaid cash orders under the limit are handled as before.',
       data: { kind: 'rlp_reinstated' },
     }).catch(() => {});
     return updated;
@@ -1267,7 +1267,7 @@ export class CashRulesService {
   private async moverUser(mover: { riderId: string | null; driverId: string | null }) {
     if (mover.riderId) return this.prisma.rider.findUniqueOrThrow({ where: { id: mover.riderId }, select: { userId: true } });
     if (mover.driverId) return this.prisma.driver.findUniqueOrThrow({ where: { id: mover.driverId }, select: { userId: true } });
-    throw new AppError(500, 'CLAIM_WITHOUT_MOVER', 'A guarantee claim must name a rider or a driver.');
+    throw new AppError(500, 'CLAIM_WITHOUT_MOVER', 'A payment request must name a rider or a driver.');
   }
 }
 

@@ -147,7 +147,7 @@ export async function assembleClaimEvidence(
     where: { id: claim.orderId },
     include: { _count: { select: { items: true } } },
   });
-  if (!order) throw new AppError(404, 'ORDER_NOT_FOUND', 'The claim names an order that does not exist.');
+  if (!order) throw new AppError(404, 'ORDER_NOT_FOUND', 'This names an order that does not exist.');
   const rail: ClaimEvidence['rail'] = order.orderType === 'TAXI' ? 'TAXI' : order.orderType === 'COURIER' ? 'COURIER' : 'DELIVERY';
   const filedAt = claim.createdAt;
   const logs = await db.orderStatusLog.findMany({
@@ -173,7 +173,7 @@ export async function assembleClaimEvidence(
     item('handover_not_completed', admitted.bound, 'immutable filing bound to the current unpaid failed order', { status: order.status }),
     item('rider_at_door', withinRadius, 'server-recorded device location at filing; device-reported, not independent event proof',
       { fixAgeMs: admitted.fixAge, distanceKm: admitted.distanceKm }),
-    item('elapsed_wait', admitted.wait, rail === 'TAXI' ? 'taxi destination wait policy unresolved' : 'stored arrival event and exact elapsed wait where required',
+    item('elapsed_wait', admitted.wait, rail === 'TAXI' ? 'taxi destination wait rule unresolved' : 'stored arrival event and exact elapsed wait where required',
       { waitedMs: admitted.evidence?.waitedMs ?? null }),
     item('customer_contacted', contacted > 0, 'in-app chat messages (direct calls may leave no artifact)', { messages: contacted }),
     item('door_photo', admitted.photo, 'server-issued order/tenant/mover-bound image; provenance does not establish refusal'),
@@ -196,7 +196,7 @@ export function assertEvidenceComplete(evidence: ClaimEvidence): void {
   throw new AppError(
     409,
     'RLP_EVIDENCE_INCOMPLETE',
-    `The loss-protection payout needs a complete evidence bundle; missing: ${evidence.missing.join(', ')}. The reviewer decides with the bundle — nobody pays without it.`,
+    `This payment needs a complete evidence bundle; missing: ${evidence.missing.join(', ')}. The reviewer decides with the bundle — nobody pays without it.`,
   );
 }
 
@@ -236,7 +236,7 @@ export const RLP_TENANT = 'swift-default';
 export function assertRlpOperator(tenantId: string | null | undefined): void {
   if (tenantId === RLP_TENANT) return;
   throw new AppError(409, 'RLP_NOT_THIS_OPERATOR',
-    'Loss protection is paid from Swift\'s own reserve, which this operator does not use. Settle this claim through the operator\'s own process.');
+    'This is paid from Swift\'s own set-aside, which this operator does not use. Settle this through the operator\'s own process.');
 }
 
 export async function reserveBalance(db: Db, countryCode: string): Promise<number> {
@@ -261,16 +261,16 @@ export async function drawReserveForPayout(
     throw new AppError(
       409,
       'RLP_RESERVE_UNFUNDED',
-      `The ${input.countryCode} loss-protection reserve holds ${balance.toLocaleString()} against a ${input.amount.toLocaleString()} payout. Provision the reserve line first — a claim is paid from it or not at all.`,
+      `The ${input.countryCode} set-aside holds ${balance.toLocaleString()} against a ${input.amount.toLocaleString()} payment. Add to the set-aside first — a payment comes from it or not at all.`,
     );
   }
   try {
     await tx.rlpReserveEntry.create({ data: {
-      countryCode: input.countryCode, kind: 'PAYOUT', amount: -input.amount, claimId: input.claimId, createdById: input.byId, note: `payout of claim ${input.claimId}`,
+      countryCode: input.countryCode, kind: 'PAYOUT', amount: -input.amount, claimId: input.claimId, createdById: input.byId, note: `payment for request ${input.claimId}`,
     } });
   } catch (err) {
     if (isReserveUnfundedError(err)) {
-      throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `The ${input.countryCode} loss-protection reserve cannot cover this payout.`);
+      throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `The ${input.countryCode} set-aside cannot pay this.`);
     }
     throw err;
   }
@@ -291,7 +291,7 @@ export async function adjustReserve(
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'rlp_reserve:' + input.countryCode}))`;
   const balance = await reserveBalance(tx, input.countryCode);
   if (balance + input.amount < 0) {
-    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (it holds ${balance.toLocaleString()}).`);
+    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} set-aside below zero (it holds ${balance.toLocaleString()}).`);
   }
   const row = await tx.rlpReserveEntry.create({ data: { countryCode: input.countryCode, kind: 'ADJUSTMENT', amount: input.amount, createdById: input.byId, note: input.note } });
   return { id: row.id, balanceAfter: balance + input.amount };
@@ -385,8 +385,8 @@ export async function provisionReserveForPreviousMonth(
       const balance = await reserveBalance(prisma, countryCode);
       await notifyAdmins(prisma, opts.notifications, {
         tenantId: RLP_TENANT,
-        title: `Loss-protection reserve provisioned (${countryCode})`,
-        body: `${provisioned.toLocaleString()} added for ${periodKey} (${rules.rlpReserveRatePct}% of ${total.toLocaleString()} paid fee revenue). The reserve line now holds ${balance.toLocaleString()}.`,
+        title: `Set-aside provisioned (${countryCode})`,
+        body: `${provisioned.toLocaleString()} added for ${periodKey} (${rules.rlpReserveRatePct}% of ${total.toLocaleString()} paid fee revenue). The set-aside now holds ${balance.toLocaleString()}.`,
         data: { kind: 'rlp_reserve_provisioned', countryCode, periodKey, provisioned, balance },
       });
     }
@@ -467,16 +467,16 @@ export async function sweepLossProtection(
     if (breached.length > 0 && !(await noticedToday(prisma, 'rlp_sla_breached', today))) {
       await notifyAdmins(prisma, opts.notifications, {
         tenantId: RLP_TENANT,
-        title: `${breached.length} loss-protection payout${breached.length === 1 ? '' : 's'} past the SLA`,
-        body: `Approved claims unpaid beyond the pay-out SLA: ${breached.map((b) => `${b.amount} (${b.ageHours} h)`).slice(0, 5).join(', ')}${breached.length > 5 ? ', …' : ''}. A rider who is owed money and waiting stops taking cash orders — pay from the reserve line today.`,
+        title: `${breached.length} set-aside payment${breached.length === 1 ? '' : 's'} past the SLA`,
+        body: `Approved payments unpaid beyond the pay-out SLA: ${breached.map((b) => `${b.amount} (${b.ageHours} h)`).slice(0, 5).join(', ')}${breached.length > 5 ? ', …' : ''}. A rider who is owed money and waiting stops taking cash orders — pay from the set-aside today.`,
         data: { kind: 'rlp_sla_breached', breached: breached.length, date: today },
       });
     }
     if (lowReserve.length > 0 && !(await noticedToday(prisma, 'rlp_reserve_low', today))) {
       await notifyAdmins(prisma, opts.notifications, {
         tenantId: RLP_TENANT,
-        title: 'Loss-protection reserve below its floor',
-        body: lowReserve.map((l) => `${l.countryCode}: ${l.balance.toLocaleString()} of a ${l.floor.toLocaleString()} floor`).join('; ') + '. Payouts refuse once the line is empty — provision it.',
+        title: 'Set-aside below its floor',
+        body: lowReserve.map((l) => `${l.countryCode}: ${l.balance.toLocaleString()} of a ${l.floor.toLocaleString()} floor`).join('; ') + '. Payments are refused once it is empty — add to it.',
         data: { kind: 'rlp_reserve_low', countries: lowReserve.map((l) => l.countryCode), date: today },
       });
     }

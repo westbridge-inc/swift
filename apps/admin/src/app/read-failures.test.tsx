@@ -78,8 +78,8 @@ const CASES: Case[] = [
   {
     name: 'claims',
     ui: () => <ClaimsPage />,
-    failure: [/Couldn.t load the claims/, /Couldn.t load the claim numbers/, /Couldn.t load the reserve line/],
-    never: [/No pending review claims/, /GY\$0/, /\b0 approved claims/],
+    failure: [/Couldn.t load the payment requests/, /Couldn.t load the payment numbers/, /Couldn.t load the set-aside/],
+    never: [/No pending review claims/, /No payment requests/, /GY\$0/, /\b0 approved/],
   },
   {
     name: 'subscriptions',

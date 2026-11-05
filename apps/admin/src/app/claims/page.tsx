@@ -38,24 +38,24 @@ export default function ClaimsPage() {
     if (outcome?.tone === 'queued') setQueuedRows((all) => ({ ...all, [id]: true }));
   };
   const approve = (c: any) => void actions.run({
-    title: `Approve this ${gyd(c.amount)} claim?`,
-    body: <p>Order {c.orderId}. Approving makes it payable from the reserve line.</p>,
-    confirmLabel: 'Approve claim',
+    title: `Approve this ${gyd(c.amount)} payment request?`,
+    body: <p>Order {c.orderId}. Approving makes it payable from the set-aside.</p>,
+    confirmLabel: 'Approve request',
     submit: ({ reason }) => approveClaim(c.id, reason),
-    success: () => 'Claim approved.',
+    success: () => 'Request approved.',
   }).then(lockIfQueued(c.id));
   const reject = (c: any) => void actions.run({
-    title: `Reject this ${gyd(c.amount)} claim?`,
+    title: `Reject this ${gyd(c.amount)} payment request?`,
     body: <p>Order {c.orderId}. The rider is not paid for it.</p>,
-    confirmLabel: 'Reject claim',
+    confirmLabel: 'Reject request',
     submit: ({ reason }) => rejectClaim(c.id, reason),
-    success: () => 'Claim rejected.',
+    success: () => 'Request rejected.',
   }).then(lockIfQueued(c.id));
   // [A-11] The reference must be unique — one transfer settles one claim — and
   // the payer states what they actually sent, which the server checks against
   // the claim's own figure before anything closes. Never pre-filled.
   const pay = (c: any) => void actions.run({
-    title: `Mark this ${gyd(c.amount)} claim as paid?`,
+    title: `Mark this ${gyd(c.amount)} payment request as paid?`,
     body: <p>Order {c.orderId}. Type the reference and the amount you actually transferred.</p>,
     confirmLabel: 'Mark paid',
     fields: [
@@ -70,15 +70,15 @@ export default function ClaimsPage() {
   const reserveQ = useQuery({ queryKey: ['rlp-reserve'], queryFn: () => fetchRlpReserve('GY') });
   const reserveActions = useActionRunner(() => { qc.invalidateQueries({ queryKey: ['rlp-reserve'] }); });
   const adjust = () => void reserveActions.run({
-    title: 'Record an entry on the GY reserve line?',
-    body: <p>A positive amount adds to the loss-protection reserve; a negative one corrects it downwards. A second admin approves it.</p>,
+    title: 'Record an entry on the GY set-aside?',
+    body: <p>A positive amount adds to the set-aside; a negative one corrects it downwards. A second admin approves it.</p>,
     confirmLabel: 'Record entry',
     fields: [
-      { kind: 'amount', name: 'amount', label: 'Adjust the reserve by (GYD)', signed: true },
+      { kind: 'amount', name: 'amount', label: 'Adjust the set-aside by (GYD)', signed: true },
       { kind: 'text', name: 'note', label: 'Note recorded with the entry', required: true, minLength: 3 },
     ],
     submit: ({ reason, values }) => adjustRlpReserve('GY', Number(values['amount']), String(values['note']), reason),
-    success: () => 'Reserve entry recorded.',
+    success: () => 'Set-aside entry recorded.',
   });
   const reserve: any = reserveQ.data?.data ?? null;
 
@@ -88,14 +88,14 @@ export default function ClaimsPage() {
   return (
     <div className="mc-page">
       <p className="mc-muted text-sm mb-6">
-        Failed cash handovers under the company guarantee — GPS-evidenced, guardrail-flagged. Approve, reject, or mark the payout done.
+        Failed cash handovers Swift pays for — GPS-evidenced, guardrail-flagged. Approve, reject, or mark the payment done.
       </p>
 
       {actions.banner}
 
       {/* Founder cockpit numbers (cash-rules founderMetrics) */}
       {metricsQ.isError ? (
-        <QueryFailed error={metricsQ.error} what="the claim numbers" onRetry={() => void metricsQ.refetch()} retrying={metricsQ.isFetching} className="mb-6" />
+        <QueryFailed error={metricsQ.error} what="the payment numbers" onRetry={() => void metricsQ.refetch()} retrying={metricsQ.isFetching} className="mb-6" />
       ) : (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="mc-card">
@@ -106,12 +106,12 @@ export default function ClaimsPage() {
           <p className="mc-muted text-xs mt-1">failed handovers vs completed</p>
         </div>
         <div className="mc-card">
-          <p className="mc-muted text-sm">Guarantee payouts (7d)</p>
+          <p className="mc-muted text-sm">Payments (7d)</p>
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : gyd(m.guaranteePayoutsThisWeek?.total ?? 0)}</p>
-          <p className="mc-muted text-xs mt-1">{metricsQ.isLoading ? '—' : m.guaranteePayoutsThisWeek?.count ?? 0} approved claims</p>
+          <p className="mc-muted text-xs mt-1">{metricsQ.isLoading ? '—' : m.guaranteePayoutsThisWeek?.count ?? 0} approved</p>
         </div>
         <div className="mc-card">
-          <p className="mc-muted text-sm">Riders with claims (30d)</p>
+          <p className="mc-muted text-sm">Riders with payment requests (30d)</p>
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : Number((m.claimsByRider ?? []).length).toLocaleString()}</p>
           <p className="mc-muted text-xs mt-1">repeat filers surface first</p>
         </div>
@@ -122,12 +122,12 @@ export default function ClaimsPage() {
       <div className={`rounded-[var(--mc-radius)] border p-5 mb-6 ${reserve?.low ? 'border-[var(--mc-warn)] bg-[var(--mc-warn-soft)]' : 'border-[var(--mc-line)] bg-[var(--mc-card)]'}`} data-testid="rlp-reserve">
         <div className="flex flex-wrap items-center gap-4">
           <div>
-            <p className="mc-muted text-sm">Loss-protection reserve (GY)</p>
+            <p className="mc-muted text-sm">Set-aside (GY)</p>
             <p className="text-2xl font-bold">{reserveQ.isLoading ? '—' : reserve ? gyd(reserve.balance) : '—'}</p>
             {reserve ? (
               <p className="mc-muted text-xs">
                 floor {gyd(reserve.floor)} · {reserve.provisionedThisPeriod ? 'provisioned this month' : 'not yet provisioned this month'}
-                {reserve.low ? ' · BELOW FLOOR — payouts refuse once the line is empty' : ''}
+                {reserve.low ? ' · BELOW FLOOR — payments are refused once it is empty' : ''}
               </p>
             ) : null}
           </div>
@@ -136,11 +136,11 @@ export default function ClaimsPage() {
             onClick={adjust}
             className="ml-auto px-4 py-2 rounded-lg text-sm border border-[var(--mc-line)] hover:bg-[var(--mc-surface)] disabled:opacity-50"
           >
-            Adjust reserve
+            Adjust set-aside
           </button>
         </div>
         {reserveQ.isError ? (
-          <QueryFailed error={reserveQ.error} what="the reserve line" onRetry={() => void reserveQ.refetch()} retrying={reserveQ.isFetching} className="mt-3" />
+          <QueryFailed error={reserveQ.error} what="the set-aside" onRetry={() => void reserveQ.refetch()} retrying={reserveQ.isFetching} className="mt-3" />
         ) : null}
         <div className="mt-3">{reserveActions.banner}</div>
         {reserve?.entries?.length ? (
@@ -152,7 +152,7 @@ export default function ClaimsPage() {
         ) : null}
       </div>
 
-      <div className="flex gap-1 mb-4" role="group" aria-label="Show claims">
+      <div className="flex gap-1 mb-4" role="group" aria-label="Show payment requests">
         {FILTERS.map((f) => (
           <button
             key={f}
@@ -170,10 +170,10 @@ export default function ClaimsPage() {
         {claimsQ.isLoading ? (
           <div className="mc-loading h-24" />
         ) : claimsQ.isError ? (
-          <QueryFailed error={claimsQ.error} what="the claims" onRetry={() => void claimsQ.refetch()} retrying={claimsQ.isFetching} />
+          <QueryFailed error={claimsQ.error} what="the payment requests" onRetry={() => void claimsQ.refetch()} retrying={claimsQ.isFetching} />
         ) : rows.length === 0 ? (
           <div className="mc-empty">
-            No claims under “{label('ClaimStatus', filter)}”.
+            No payment requests under “{label('ClaimStatus', filter)}”.
           </div>
         ) : (
           rows.map((c: any) => (

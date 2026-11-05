@@ -236,7 +236,7 @@ describe('[M-29] the fare outcome at the destination — one rail with the door'
     expect(await app.prisma.strike.count({ where: { orderId: ride.id } })).toBe(0);
     // Notices leave after the commit: the passenger's strike notice, the driver's claim notice.
     expect(await app.prisma.notification.count({ where: { userId: passenger.userId, title: 'Unpaid fare recorded' } })).toBe(1);
-    expect(await app.prisma.notification.count({ where: { userId: driver.userId, title: 'Claim under review' } })).toBe(1);
+    expect(await app.prisma.notification.count({ where: { userId: driver.userId, title: 'Being reviewed' } })).toBe(1);
     const again = await driverCall('POST', driver.token, ride.id, 'handover', { outcome: 'refused', gps: ride.drop });
     expect(again.statusCode).toBe(200);
     expect(again.json().data.claim.id).toBe(claim.id);

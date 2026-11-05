@@ -113,7 +113,7 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
     expect(destinationFor({ kind: 'incident_interim_suspension', orderId: 'o1', caseNumber: 'INC-1' }))
       .toEqual({ screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } });
     expect(destinationFor({ kind: 'claim_over_gate', orderId: 'o1' }))
-      .toEqual({ screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } });
+      .toEqual({ screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Unpaid cash order', orderId: 'o1' } });
   });
 
   it('none of the three still falls through to the customer Delivery screen', () => {
@@ -394,7 +394,7 @@ const CENSUS: Case[] = [
   // `d` must mirror what the API actually SENDS. The drift check compares only
   // `kind` strings, so a payload that grows a field goes unnoticed here and the
   // case then grades a shape nothing produces.
-  { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts' },
+  { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Unpaid cash order', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts' },
   { k: 'guardian_checkin', d: { ...O, sessionId: 's1', level: 'SOFT' }, to: { screen: 'Taxi' }, why: 'passenger mid-RIDE — the check-in card lives on Taxi, which asks the server whether one is outstanding. Was Delivery, a screen a ride never renders on, so the person being asked if they are safe could not answer' },
   { k: 'guardian_driver_confirm', d: { ...O, sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z' }, to: { screen: 'GuardianDriverConfirm', params: { sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z', orderId: 'o1' } }, why: '[TST-001] the DRIVER, on a screen MoverStack mounts. This used to route to Delivery — which MoverStack never mounts — and this census asserted that dead end as passing, on a SAFETY path, while POST /safety/guardian/driver-confirm sat with no caller. It carries the cycle and the nonce so the screen answers THAT check' },
   { k: 'guardian_deescalation', d: { ...O, sessionId: 's1', cycleId: 'cy1' }, to: DELIVERY('o1'), why: 'admins — [S-04] a passenger never answered a hard check and the driver de-escalated; the review is an ops surface, not mobile' },

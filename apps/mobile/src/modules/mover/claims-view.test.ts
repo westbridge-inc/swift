@@ -6,7 +6,7 @@ describe('claims view helpers — the rider\'s words for the policy', () => {
     expect(claimStatus('AUTO_APPROVED')).toEqual({ label: 'Approved — Swift pays you', tone: 'success' });
     expect(claimStatus('PENDING_REVIEW')).toEqual({ label: 'Under review', tone: 'brand' });
     expect(claimStatus('PAID').label).toBe('Paid');
-    expect(claimStatus('REJECTED')).toEqual({ label: 'Not covered', tone: 'error' });
+    expect(claimStatus('REJECTED')).toEqual({ label: 'Not approved', tone: 'error' });
   });
   it('evidence lines: present is ok, required-and-absent is missing, optional-and-absent is optional', () => {
     expect(evidenceLine({ key: 'door_photo', present: true, required: true })).toEqual({ label: 'Photo at the door', state: 'ok' });
@@ -14,8 +14,8 @@ describe('claims view helpers — the rider\'s words for the policy', () => {
     expect(evidenceLine({ key: 'customer_contacted', present: false, required: false }).state).toBe('optional');
   });
   it('flags become plain hints; internal names never reach the rider; unknown flags say nothing', () => {
-    expect(flagHint('over_monthly_cap')).toContain('30 days');
-    expect(flagHint('protection_suspended')).toContain('suspended');
+    expect(flagHint('over_monthly_cap')).toContain('30-day limit');
+    expect(flagHint('protection_suspended')).toContain('paused');
     expect(flagHint('collusion_pair_cluster')).toBe('Reviewed by a person.');
     expect(flagHint('some_new_flag')).toBeNull();
     expect(reasonLabel('no_show')).toBe('Customer did not show');

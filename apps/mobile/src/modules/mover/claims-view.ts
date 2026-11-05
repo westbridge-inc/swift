@@ -14,7 +14,7 @@ export function claimStatus(status: string): { label: string; tone: 'brand' | 's
     case 'AUTO_APPROVED': case 'APPROVED': return { label: 'Approved — Swift pays you', tone: 'success' };
     case 'PAID': return { label: 'Paid', tone: 'success' };
     case 'PENDING_REVIEW': return { label: 'Under review', tone: 'brand' };
-    case 'REJECTED': return { label: 'Not covered', tone: 'error' };
+    case 'REJECTED': return { label: 'Not approved', tone: 'error' };
     // [UI-SWEEP U73] A status this file has not been taught: words, never the code.
     default: return { label: 'Being processed', tone: 'neutral' };
   }
@@ -37,10 +37,10 @@ export function evidenceLine(item: { key: string; present: boolean; required: bo
 /** What a flag means for the rider — never the internal name, never a blame. */
 export function flagHint(flag: string): string | null {
   switch (flag) {
-    case 'over_monthly_cap': return 'You have reached the guarantee limit for the last 30 days, so a person reviews this one.';
-    case 'over_review_threshold': return 'Claims of this size are always reviewed by a person.';
-    case 'over_cap': return 'Several claims this month — a person reviews this one.';
-    case 'protection_suspended': return 'Your loss protection is suspended; a person reviews this claim. Get help to ask for a review.';
+    case 'over_monthly_cap': return 'You have reached your 30-day limit, so a person reviews this one.';
+    case 'over_review_threshold': return 'Orders of this size are always reviewed by a person.';
+    case 'over_cap': return 'Several this month — a person reviews this one.';
+    case 'protection_suspended': return 'Automatic payment is paused; a person reviews this one. Get help to ask for a review.';
     case 'evidence_incomplete': return 'Some evidence is missing (see the checklist). A person can still approve it.';
     case 'gps_far': return 'Your location was recorded far from the delivery address, so a person reviews this one.';
     case 'sla_breached': return 'This payment to you is late. Swift has been told.';

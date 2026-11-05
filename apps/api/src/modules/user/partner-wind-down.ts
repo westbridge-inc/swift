@@ -104,7 +104,7 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
   PARTIAL_CASH_RETURN:
     'You hold {amount} of a customer\u2019s cash from a delivery they could not pay in full, and the goods went back to the store. This partial cash still needs to be returned to the customer. Open Get help to arrange and confirm the cash return with operations, then return here to delete your account. If operations has not recorded it resolved by {date}, you can delete your account from that day; the record of the cash is kept.',
   OPEN_CLAIM:
-    'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
+    'Swift still owes you a payment for a no-show. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
   FEE_PAYMENT_PENDING:
     'A weekly-fee payment is still in progress or being confirmed with MMG. Wait for it to finish, or open Get help to have it resolved, then return here to delete your account.',
   // [Owner ruling 2026-10-07] Unused credit is refunded by support (recorded

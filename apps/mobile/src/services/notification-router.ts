@@ -428,7 +428,7 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
     // ORDER_ISSUE: the dispute is about the guarantee, not the delivery.
     return {
       screen: 'GetHelp',
-      params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', ...(orderId ? { orderId } : {}) },
+      params: { category: 'PAYMENT', subject: 'Unpaid cash order', ...(orderId ? { orderId } : {}) },
     };
   }
 

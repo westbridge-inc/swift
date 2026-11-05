@@ -65,7 +65,7 @@ function claimsHandler(
 }
 
 async function showApprovedClaims(user: ReturnType<typeof renderWithQuery>['user']) {
-  await user.click(within(await screen.findByRole('group', { name: 'Show claims' })).getByRole('button', { name: 'Approved' }));
+  await user.click(within(await screen.findByRole('group', { name: 'Show payment requests' })).getByRole('button', { name: 'Approved' }));
   return screen.findAllByRole('button', { name: 'Mark paid' });
 }
 
@@ -142,7 +142,7 @@ describe('claim payout mutation', () => {
               success: false,
               error: {
                 code: 'INVALID_CLAIM_STATE',
-                message: 'Claim is PAID; expected AUTO_APPROVED/APPROVED',
+                message: 'This is PAID; expected AUTO_APPROVED/APPROVED',
               },
             },
           };
@@ -160,7 +160,7 @@ describe('claim payout mutation', () => {
     await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Payout matches the claim evidence');
     await user.click(within(panel).getByRole('button', { name: 'Mark paid' }));
 
-    expect((await within(panel).findByRole('alert')).textContent).toContain('Claim is PAID; expected AUTO_APPROVED/APPROVED');
+    expect((await within(panel).findByRole('alert')).textContent).toContain('This is PAID; expected AUTO_APPROVED/APPROVED');
     expect(screen.queryByText('Payout recorded.')).toBeNull();
     expect(screen.getByText('$3,400')).toBeTruthy();
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
@@ -242,9 +242,9 @@ describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
       throw new Error(`Unexpected request: ${request.method} ${request.url}`);
     }));
     const { user } = renderWithQuery(<ClaimsPage />);
-    await user.click(await screen.findByRole('button', { name: 'Adjust reserve' }));
+    await user.click(await screen.findByRole('button', { name: 'Adjust set-aside' }));
     const panel = await screen.findByRole('dialog');
-    await user.type(within(panel).getByLabelText(/Adjust the reserve by/), typed);
+    await user.type(within(panel).getByLabelText(/Adjust the set-aside by/), typed);
     await user.type(within(panel).getByLabelText(/Note recorded with the entry/), 'Statement correction');
     await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Reserve matches the bank statement');
     await user.click(within(panel).getByRole('button', { name: 'Record entry' }));
@@ -270,7 +270,7 @@ describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
     const reserve = await screen.findByTestId('rlp-reserve');
     await waitFor(() => expect(reserve.textContent).toContain('12,000'));
     expect(reserve.textContent).toContain('BELOW FLOOR');
-    await user.click(within(await screen.findByRole('group', { name: 'Show claims' })).getByRole('button', { name: 'Approved' }));
+    await user.click(within(await screen.findByRole('group', { name: 'Show payment requests' })).getByRole('button', { name: 'Approved' }));
     const bundle = await screen.findByTestId('evidence-claim-bundle');
     expect(bundle.textContent).toContain('door photo — missing');
     expect(bundle.textContent).toContain('rider at door ✓');

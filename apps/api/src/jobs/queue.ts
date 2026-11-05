@@ -863,7 +863,7 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
         // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
         tenantId: null,
         title: 'Possible vendor–rider collusion',
-        body: `${pairs.length} vendor–rider pair(s) show an unusual concentration of guarantee claims. Review the claims dashboard before the next settlement.`,
+        body: `${pairs.length} vendor–rider pair(s) show an unusual concentration of unpaid cash orders. Review Unpaid cash orders before the next settlement.`,
         data: { kind: 'ops_collusion_affinity', pairs: pairs.slice(0, 20) },
       }),
     );

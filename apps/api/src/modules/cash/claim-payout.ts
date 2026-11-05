@@ -35,10 +35,10 @@ export function normaliseClaimPaymentRef(raw: unknown): string {
  */
 export function assertClaimAmountAttested(claimAmount: unknown, attested: unknown): number {
   return assertAmountAttested(claimAmount, attested, {
-    required: 'State the amount you actually transferred before marking this claim paid.',
-    unreadable: 'This claim has no readable amount and cannot be closed.',
+    required: 'State the amount you actually transferred before marking this paid.',
+    unreadable: 'This record has no readable amount and cannot be closed.',
     mismatch: (owed, sent) =>
-      `This claim is for GY$${owed.toLocaleString()}, not GY$${sent.toLocaleString()}. Pay the claim amount, or reject it and raise a new one.`,
+      `This is for GY$${owed.toLocaleString()}, not GY$${sent.toLocaleString()}. Pay that amount, or reject it and raise a new one.`,
   }, 'PAID_AMOUNT');
 }
 

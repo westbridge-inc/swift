@@ -534,8 +534,8 @@ export function ActiveJobScreen({ navigation }: any) {
         return;
       }
       toast.show(
-        claim === 'AUTO_APPROVED' ? `${recorded} — the Swift guarantee covers it.`
-          : claim === 'PENDING_REVIEW' ? `${recorded} — your claim is under review.`
+        claim === 'AUTO_APPROVED' ? `${recorded} — Swift will pay you.`
+          : claim === 'PENDING_REVIEW' ? `${recorded} — this is being reviewed.`
             : `${recorded}.`,
       );
       navigation?.goBack?.();
@@ -1303,7 +1303,7 @@ export function ActiveJobScreen({ navigation }: any) {
         <PopupTitle variant="title" center>{isDriver ? 'The passenger didn’t pay?' : isCourier ? 'The recipient didn’t pay?' : 'The customer didn’t pay?'}</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {isDriver
-            ? 'Record what happened. Your evidence and fare claim will be reviewed; a missing photo does not stop you recording the outcome.'
+            ? 'Record what happened. Your evidence and the unpaid fare will be reviewed; a missing photo does not stop you recording the outcome.'
             : isCourier
               ? 'Record what happened at the door, then bring the parcel back to the sender. Add a photo if available; incomplete evidence goes to review.'
               : 'Record what happened. Add a photo if available; missing or insufficient evidence goes to review.'}

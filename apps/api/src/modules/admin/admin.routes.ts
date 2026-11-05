@@ -3356,7 +3356,7 @@ export async function adminRoutes(app: FastifyInstance) {
       throw new AppError(
         409,
         'ORDER_NOT_BAILED',
-        'A customer’s identity can only be opened against an order that was cancelled, refunded or failed, or that carries a reimbursement claim — not a live or completed one.',
+        'A customer’s identity can only be opened against an order that was cancelled, refunded or failed, or that has a payment request from its mover — not a live or completed one.',
       );
     }
     const cause = bailed ? `ORDER_${order.status}` : 'REIMBURSEMENT_CLAIM';

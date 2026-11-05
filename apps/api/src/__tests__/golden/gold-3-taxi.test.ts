@@ -860,7 +860,7 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
     const [paid, draw, told] = await Promise.all([
       sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } })),
       sys(() => app.prisma.rlpReserveEntry.findMany({ where: { claimId } })),
-      sys(() => app.prisma.notification.findMany({ where: { userId: driverUserId, title: 'Guarantee paid' } })),
+      sys(() => app.prisma.notification.findMany({ where: { userId: driverUserId, title: 'Swift paid you' } })),
     ]);
     expect({ status: paid.status, paidAmount: Number(paid.paidAmount), paidBy: paid.paidById, ref: paid.paymentRef })
       .toEqual({ status: 'PENDING_REVIEW', paidAmount: 0, paidBy: null, ref: null });

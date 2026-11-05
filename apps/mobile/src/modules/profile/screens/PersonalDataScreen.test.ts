@@ -82,7 +82,7 @@ describe('account deletion confirmation', () => {
   // FEE_CREDIT with its amount filled in, and OPEN_CLAIM), shown as sent.
   it.each([
     'You have GY$1,500 paid for weekly fees that have not started. Open Get help and we\u2019ll refund it, then your account can be deleted.',
-    'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
+    'Swift still owes you a payment for a no-show. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
   ])('shows the deletion refusal in the server words and keeps the session (%s)', async (message) => {
     mocks.deleteAccount.mockRejectedValue({ response: { status: 409, data: { error: { code: 'PARTNER_OBLIGATIONS', message } } } });
     await button(PersonalDataScreen()).props.onPress();

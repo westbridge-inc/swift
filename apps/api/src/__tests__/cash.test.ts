@@ -717,7 +717,7 @@ describe('[A-11] a claim payout carries evidence that holds up', () => {
     await cash.markClaimPaid(first.id, 'admin-a', ref('BANK-REUSE-9'), 2000);
 
     await expect(cash.markClaimPaid(second.id, 'admin-a', ref('BANK-REUSE-9'), 2000))
-      .rejects.toThrow(/already recorded against another claim/i);
+      .rejects.toThrow(/already recorded against another payment/i);
 
     // the refusal changed nothing: the second claim is still payable
     const still = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: second.id } });

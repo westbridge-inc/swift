@@ -272,7 +272,7 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     const payouts = await runWithoutTenant(() => app.prisma.rlpReserveEntry.findMany({ where: { claimId: claim.id } }));
     expect(payouts).toEqual([]);
     const told = await runWithoutTenant(() => app.prisma.notification.findMany({ where: { userId: mover.id }, select: { title: true }, orderBy: { createdAt: 'asc' } }));
-    expect(told.map((n) => n.title)).toEqual(['Claim approved']);
+    expect(told.map((n) => n.title)).toEqual(['Payment approved']);
 
     // The approval was spent at the gate on the refused attempt: it cannot be spent again.
     const replay = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 }, { [APPROVAL_HEADER]: payId! });

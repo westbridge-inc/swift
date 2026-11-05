@@ -484,7 +484,7 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'TripSafetySession.driverUserId': { reason: 'FRAUD_SAFETY', note: 'trip safety monitoring and its risk score' },
   'SosAlert.counterpartyUserId': { reason: 'FRAUD_SAFETY', note: 'emergency alerts other people raised on a trip with you' },
   'SosRetrigger.counterpartyUserId': { reason: 'FRAUD_SAFETY', note: 'emergency alerts other people raised on a trip with you' },
-  'ReimbursementClaim.customerId': { reason: 'OTHER_PEOPLE', note: 'a claim a mover made about an order of yours' },
+  'ReimbursementClaim.customerId': { reason: 'OTHER_PEOPLE', note: 'a payment request a mover made about an order of yours' },
   'HandoverPhotoProof.customerId': { reason: 'OTHER_PEOPLE', note: 'the handover proof a mover filed for an order of yours' },
   'CashHandoverEvidence.customerId': { reason: 'OTHER_PEOPLE', note: 'the cash handover record a mover filed for an order of yours' },
   'Admin.userId': { reason: 'STAFF_WORK', note: 'your Swift staff permissions' },
