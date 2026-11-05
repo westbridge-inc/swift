@@ -17,7 +17,7 @@ import { inPersonChannel, inPersonRail, IN_PERSON_CHANNELS, inPersonMethodOf } f
 import { amountDueNow } from './amount-due';
 import { feePauseHoldsBilling } from './mmg-pause';
 import { referenceOnRecord } from './mmg-fee-reversal';
-import { payAheadRefusal, readPayAhead, type PayAheadPosition } from './pay-ahead';
+import { PAY_AHEAD_LIMIT, PAY_AHEAD_MAX_WEEKS, readPayAhead, type PayAheadPosition } from './pay-ahead';
 import { weeklyFeeAmount } from './subscription-fee';
 
 // ---------------------------------------------------------------------------
@@ -127,6 +127,18 @@ export function inPersonReferenceOf(raw: unknown): string {
 const ALREADY_RECORDED = 'That reference is already on record. One reference credits once, so nothing was recorded. Check it, or check the billing trail of the account it belongs to.';
 const HAND_BACK = 'If you already took it, hand it back.';
 
+/**
+ * [M15-R2 S4-1] Over the one-week limit, in this door's words. The shared admin wording says "refund", which here can
+ * be read as Refund credit: that pays out the partner's real earlier credit and books a payout against cash that never
+ * came in. Nothing was recorded, so the money was never Swift's: hand it back, like every other refusal at this door.
+ */
+function overPayAheadLimit(position: PayAheadPosition): AppError {
+  const details = { maxWeeks: PAY_AHEAD_MAX_WEEKS, roomGyd: position.room, currencyCode: position.currencyCode };
+  return new AppError(409, PAY_AHEAD_LIMIT, position.room > 0
+    ? `This would pay more than one week ahead on this account. Nothing was recorded. Take at most ${formatMoney(Math.floor(position.room), 'GYD', { whole: true })}; if you already took more, hand the rest back.`
+    : `The next weekly fee on this account is already paid, and Swift takes one week at a time. Nothing was recorded: do not take this money. ${HAND_BACK}`, details);
+}
+
 function decisionRefusal(reason: Exclude<FeePaymentDecision['reason'], null>): AppError {
   return new AppError(409, reason, reason === 'PAYMENT_CONFIRMING'
     ? `Another weekly-fee payment on this account is being confirmed. Nothing was recorded: do not take this money until that one is settled. ${HAND_BACK}`
@@ -160,7 +172,7 @@ async function assertDoorOpen(db: DoorDb, subscriptionId: string, now: Date): Pr
 /** Everything but the locks: read when it is asked, and read again under the payer lock when it is applied. */
 async function assertRecordable(tx: Prisma.TransactionClient, subscriptionId: string, amount: number, reference: string, now: Date): Promise<void> {
   const { position, dueGyd } = await assertDoorOpen(tx, subscriptionId, now);
-  if (amount > position.room) throw payAheadRefusal(position, 'admin');
+  if (amount > position.room) throw overPayAheadLimit(position);
   // M15 S4-2: part of what is due would bill, fail and tell someone who just paid that their payment failed.
   if (amount < dueGyd) {
     throw new AppError(409, 'IN_PERSON_LESS_THAN_DUE', `${formatMoney(dueGyd, 'GYD', { whole: true })} is due on this account, and this door takes at least that. Nothing was recorded. ${HAND_BACK}`);
@@ -182,7 +194,7 @@ export async function inPersonDoor(prisma: PrismaClient, subscriptionId: string,
   const closed = (refused: string): InPersonDoor => ({ open: false, refused, mostGyd: 0, leastGyd: 0 });
   try {
     const { position, dueGyd } = await assertDoorOpen(prisma, subscriptionId, now);
-    if (!(position.room > 0)) return closed(payAheadRefusal(position, 'admin').message);
+    if (!(position.room > 0)) return closed(overPayAheadLimit(position).message);
     const decision = await readFeePaymentDecision(prisma, subscriptionId);
     if (!decision.allowed) return closed(decisionRefusal(decision.reason).message);
     return { open: true, refused: null, mostGyd: Math.floor(position.room), leastGyd: Math.min(dueGyd, Math.floor(position.room)) };

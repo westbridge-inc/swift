@@ -387,7 +387,11 @@ describe('the door, read before anyone takes money', () => {
     delete process.env['MMG_DRIVER'];
     expect((await pay(sub.id, cash())).statusCode).toBe(200);
     expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: false, waitingGyd: null });
-    expect((await door(sub.id)).json().data.refused).toContain('already paid');
+    const refused = (await door(sub.id)).json().data.refused as string;
+    expect(refused).toContain('already paid');
+    // [M15-R2 S4-1] Like every other refusal at this door: hand it back, never "refund" (that reads as Refund credit).
+    expect(refused).toContain('If you already took it, hand it back.');
+    expect(refused).not.toMatch(/refund/i);
   });
 
   it('while a record waits the partner is told, with the amount, and the offer is gone; it ends with the ask', async () => {
@@ -447,10 +451,17 @@ describe('the MMG door\'s rules', () => {
     expect(over.statusCode).toBe(409);
     expect(code(over)).toBe('PAY_AHEAD_LIMIT');
     expect(JSON.stringify(over.json())).toContain('5,000');
+    // [M15-R2 S4-1] Nothing was taken in yet: the words say hand the rest back, never "refund".
+    const overWords = over.json().error.message as string;
+    expect(overWords).toContain('Nothing was recorded');
+    expect(overWords).toContain('hand the rest back');
+    expect(overWords).not.toMatch(/refund/i);
     expect(await asks(sub.id)).toBe(0);
     expect((await pay(sub.id, cash())).statusCode).toBe(200);
     const full = await ask(sub.id, cash({ amount: 1000 }));
     expect(code(full)).toBe('PAY_AHEAD_LIMIT');
+    expect(full.json().error.message).toContain('If you already took it, hand it back.');
+    expect(full.json().error.message).not.toMatch(/refund/i);
   });
 
   it('money that fills the room during the wait stops the approved request, and nothing is credited twice', async () => {

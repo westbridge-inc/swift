@@ -49,9 +49,12 @@ const V2_CHANGED: Record<string, string> = {
   'How you pay': 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.',
 };
 const V2_ITEMS = V1_ITEMS.map((i) => (V2_CHANGED[i.heading] ? { ...i, text: V2_CHANGED[i.heading]! } : i));
-/** [OWNER 5 Nov 2026] The words served now: v2 with "How you pay" adding the partner paying Westbridge Inc. in person. */
+/** [OWNER 5 Nov 2026] The words served now: v2 with "How you pay" adding the partner paying Westbridge Inc. in person, and the price line split into a rise and a cut. */
 const V3_HOW_YOU_PAY = 'In the Swift app or on swiftgy.com, on MMG\u2019s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.';
-const V3_ITEMS = V2_ITEMS.map((i) => (i.heading === 'How you pay' ? { ...i, text: V3_HOW_YOU_PAY } : i));
+/** [REVIEW-G18 S3-1] v3 says 14 days' notice before a RISE only; a cut applies from the next fee not yet paid or charged. */
+const V3_PRICE_CHANGES = 'If the price goes up, Swift tells you in the app at least 14 days before, and the new price applies only from your first weekly fee due after that, never to a week you have already paid. If it goes down, the lower price applies from your next weekly fee not yet paid or charged, with a notice in the app.';
+const V3_CHANGED: Record<string, string> = { 'How you pay': V3_HOW_YOU_PAY, 'If the price changes': V3_PRICE_CHANGES };
+const V3_ITEMS = V2_ITEMS.map((i) => (V3_CHANGED[i.heading] ? { ...i, text: V3_CHANGED[i.heading]! } : i));
 const V3_TEXT = [...V3_ITEMS.map((i) => `${i.heading}: ${i.text}`), V1_TICK].join('\n');
 
 async function customer(n: number) {

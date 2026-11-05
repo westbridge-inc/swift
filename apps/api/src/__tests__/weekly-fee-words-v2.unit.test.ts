@@ -17,6 +17,8 @@ import { latestStoreFeeTick } from '../modules/partner/store-fee';
 import { latestProFeeTick } from '../modules/services/pro-fee';
 import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../modules/subscription/trial-length';
 import { guyanaTiers } from '../modules/ops/platform-config';
+import { FEE_RISE_NOTICE_DAYS } from '../modules/billing/fee-rise-notice';
+import { PRICE_BOOK_NOTICE_DAYS } from '../modules/billing/price-book';
 
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 const HOW_YOU_PAY_V2 = 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.';
@@ -30,10 +32,20 @@ const HOW_YOU_PAY_V2 = 'In the Swift app or on swiftgy.com, on MMG’s checkout 
 const WHEN_IT_STARTS_V2 = 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one. A new partner\u2019s free trial lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it, counted from the day Swift approves you (for a service provider, from the day the Pro Agreement says). A new branch has no trial of its own: it shares its business\u2019s. Each person gets one free trial for each kind of partner, and none while an earlier Swift subscription of theirs is overdue, paused or ended.';
 /** [OWNER 5 Nov 2026] v3 adds paying Westbridge Inc. directly, in person; nothing about the fee changed. */
 const HOW_YOU_PAY_V3 = 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.';
-const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V3, 'When it starts': WHEN_IT_STARTS_V2 };
+/**
+ * [REVIEW-G18 S3-1] v3 also says the price rule as the code does it: a RISE waits at least 14 days after the notice
+ * (fee-rise-notice.ts FEE_RISE_NOTICE_DAYS, price-book.ts PRICE_BOOK_NOTICE_DAYS) and never touches a week already
+ * paid; a CUT applies at once, from the next weekly fee not yet paid or charged (billing.service applyCardPriceCuts:
+ * "Issued charges and paid weeks keep their amount"; price-book.ts "A lower price needs no wait"; owner 29 Oct). v1 and
+ * v2 said 14 days for ANY change, which a cut does not wait for. The same words as the agreements' fee-cut line (#2376).
+ */
+const PRICE_CHANGES_V3 = 'If the price goes up, Swift tells you in the app at least 14 days before, and the new price applies only from your first weekly fee due after that, never to a week you have already paid. If it goes down, the lower price applies from your next weekly fee not yet paid or charged, with a notice in the app.';
+/** The v3 words as ticked, pinned (the integration test anchors the ledger row to the same text). */
+const V3_SHA256 = '9d8c7559e85aedb9ad3a178fe0f0d6927599a2439d6d97b1e06a5481e3dc9c05';
+const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V3, 'When it starts': WHEN_IT_STARTS_V2, 'If the price changes': PRICE_CHANGES_V3 };
 
 describe('[D3] the weekly fee words v2', () => {
-  it('serves v3: "How you pay" names the website and in person, and "When it starts" says the trial; the other lines and the tick are v1’s', () => {
+  it('serves v3: "How you pay" names the website and in person, "When it starts" says the trial, "If the price changes" splits a rise from a cut; the other line and the tick are v1’s', () => {
     const served = weeklyFeeTerms();
     expect(WEEKLY_FEE_ACK_VERSION).toBe('v3');
     expect(served.version).toBe('v3');
@@ -58,6 +70,17 @@ describe('[D3] the weekly fee words v2', () => {
     expect(when).toContain('for a service provider, from the day the Pro Agreement says');
     expect(when).toContain('none while an earlier Swift subscription of theirs is overdue, paused or ended');
     expect(when).not.toMatch(/Your free trial starts once/);
+  });
+
+  it('[REVIEW-G18 S3-1] the price line is true to the code: 14 days’ notice before a rise only, a cut from the next fee not yet paid or charged', () => {
+    const price = weeklyFeeTerms().items.find((i) => i.heading === 'If the price changes')!.text;
+    expect([FEE_RISE_NOTICE_DAYS, PRICE_BOOK_NOTICE_DAYS]).toEqual([14, 14]);
+    expect(price).toMatch(new RegExp(`^If the price goes up, Swift tells you in the app at least ${FEE_RISE_NOTICE_DAYS} days before, `));
+    expect(price).toContain('never to a week you have already paid.');
+    expect(price).toContain('If it goes down, the lower price applies from your next weekly fee not yet paid or charged');
+    // The v1/v2 line promised a 14-day wait for ANY change; a cut never waits.
+    expect(price).not.toMatch(/^Swift tells you in the app at least 14 days before\./);
+    expect(sha256(WEEKLY_FEE_ACK_TEXT)).toBe(V3_SHA256);
   });
 
   it('v1 keeps its exact words (the ledger rows already anchored to them)', () => {
