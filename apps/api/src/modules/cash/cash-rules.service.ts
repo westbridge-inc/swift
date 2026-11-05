@@ -950,7 +950,7 @@ export class CashRulesService {
     }));
   }
 
-  async rejectClaim(claimId: string, adminId: string, note: string, onAudit?: OnAudit, opts: { nothingSent?: boolean } = {}) {
+  async rejectClaim(claimId: string, adminId: string, note: string, onAudit?: OnAudit, opts: { nothingSent?: boolean; approvalId?: string } = {}) {
     let wasApproved = false;
     // No case is ever stuck: until it is paid a person can close it, so an open case cannot block a deletion for good.
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'], {
@@ -964,7 +964,13 @@ export class CashRulesService {
         select: { id: true },
       });
       if (payAsk) throw new AppError(409, 'CLAIM_PAYMENT_ASK_OPEN', 'Someone has asked to record a payment on this. Finish or withdraw that ask first: the money may already have been sent.');
-      // A spent ask whose payment was refused leaves the row here too, so an approved case never closes silently.
+      // A statement made before a payment was tried says nothing about that payment.
+      const asked = opts.approvalId ? await tx.privilegedApproval.findUnique({ where: { id: opts.approvalId }, select: { createdAt: true } }) : null;
+      const triedSince = asked && await tx.privilegedApproval.findFirst({ where: { action: PAY_ASK_ACTION, entityId: claimId, status: 'APPLIED', appliedAt: { gte: asked.createdAt } }, select: { id: true } });
+      if (triedSince) throw new AppError(409, 'CLAIM_PAYMENT_ASK_SINCE', 'A payment was tried on this after the reject was asked. Check whether money left, then ask again.');
+      // A spent ask whose payment was refused leaves the row here too, so an approved case never closes silently. The
+      // row is locked first, so a read of its status cannot go stale before the status changes.
+      await tx.$queryRaw`SELECT id FROM reimbursement_claims WHERE id = ${claimId} FOR UPDATE`;
       wasApproved = (await tx.reimbursementClaim.findUnique({ where: { id: claimId }, select: { status: true } }))?.status === 'APPROVED';
       if (wasApproved && opts.nothingSent !== true) {
         throw new AppError(409, 'CLAIM_CONFIRM_NOTHING_SENT', 'This was approved, so money may have left. State that nothing was sent, or record the payment.');

@@ -740,6 +740,40 @@ describe('[case by case] every unpaid door goes to a person, and nothing promise
       expect(await system(() => app.prisma.privilegedApproval.count({ where: { action: PAY_ASK_ACTION, entityId: claim.id } }))).toBe(0);
     });
 
+    it('a reject reads the row under its lock: a case approved while it waits still needs the statement', async () => {
+      const door = await ownDoor();
+      const pair = await freshPair(80, door);
+      const { claim } = await file(await atDoorOrder({ food: 650, pair, door }), 'no_show', { pair, door });
+      let rejected: Promise<string | undefined> | null = null;
+      await system(() => app.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM reimbursement_claims WHERE id = ${claim!.id} FOR UPDATE`;
+        const reject = system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help')).then(() => 'closed', (e: { code?: string }) => e.code);
+        expect(await settled(reject), 'the reject waits for the row').toBe(false);
+        await tx.reimbursementClaim.update({ where: { id: claim!.id }, data: { status: 'APPROVED' } });
+        rejected = reject;
+      }));
+      expect(await rejected).toBe('CLAIM_CONFIRM_NOTHING_SENT');
+      expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    });
+
+    it('a statement made before a payment was tried does not stand: the reject is refused, and an older spent ask does not stop it', async () => {
+      const claim = await approved(82);
+      const row = (status: string, createdAt: Date, action: string, appliedAt?: Date) => system(() => app.prisma.privilegedApproval.create({ data: {
+        action, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim.id, fingerprint: `fixture-${RUN}-${action}-${createdAt.getTime()}`, status, requestedBy: 'admin-pay', reason: 'fixture', expiresAt: new Date(Date.now() + HOUR), createdAt, ...(appliedAt ? { appliedAt } : {}),
+      } }));
+      const ago = (hours: number) => new Date(Date.now() - hours * HOUR);
+      const REJECT = 'PUT /cash-rules/claims/:id/reject';
+      const spent = await row('APPLIED', ago(5), PAY_ASK_ACTION, ago(1));
+      const before = await row('APPLIED', ago(2), REJECT, ago(0));
+      const reject = (approvalId: string) => system(() => cash.rejectClaim(claim.id, 'admin-review', 'no help', undefined, { nothingSent: true, approvalId }));
+      await expect(reject(before.id)).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_SINCE' });
+      expect((await claimRow(claim.id)).status).toBe('APPROVED');
+      expect(spent.id).toBeTruthy();
+      // Asked after that payment was tried: the person knew.
+      const after = await row('APPLIED', ago(0.5), REJECT, ago(0));
+      expect((await reject(after.id)).status).toBe('REJECTED');
+    });
+
     it('a reject waits for an ask that holds the lock, and then sees it', async () => {
       const claim = await approved(78);
       let rejected: Promise<string | undefined> | null = null;

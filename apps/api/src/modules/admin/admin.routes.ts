@@ -7600,7 +7600,7 @@ export async function adminRoutes(app: FastifyInstance) {
     // `nothingSent` is in the body, so the C4 fingerprint covers it and the second admin approves that statement.
     const body = rejectDocSchema.extend({ nothingSent: z.boolean().optional() }).parse(request.body);
     const claim = await cashRules.rejectClaim(id, request.user.userId, body.reason,
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }), { nothingSent: body.nothingSent });
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }), { nothingSent: body.nothingSent, approvalId: typeof request.headers[APPROVAL_HEADER] === 'string' ? request.headers[APPROVAL_HEADER] : undefined });
     return { success: true, data: claim };
   });
 
