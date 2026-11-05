@@ -36,6 +36,22 @@ function asReply(v: Read): ApiReply | Promise<ApiReply> {
   if (v === 'hangs') return new Promise<ApiReply>(() => undefined);
   return Array.isArray(v) ? ok(v) : v;
 }
+/** A read that answered 200 and then died: the body never finishes, or it holds no list. Either way nothing was read. */
+const CUT_BODIES: Array<[string, () => Response]> = [
+  ['a link that dies mid-body', () => new Response('{"success":true,"data":[{"id":"sos', { status: 200, headers: { 'Content-Type': 'application/json' } })],
+  ['a 200 with an empty object', () => new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })],
+  ['a 200 with no list', () => new Response('{"success":true}', { status: 200, headers: { 'Content-Type': 'application/json' } })],
+  ['a 200 with something that is not a list', () => new Response('{"success":true,"data":{"rows":[]}}', { status: 200, headers: { 'Content-Type': 'application/json' } })],
+];
+function cutReads(fetchMock: ReturnType<typeof mockApi>, path: string, cut: () => Response) {
+  const state = { on: false };
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const reply = await fetchMock(input, init);
+    return state.on && new URL(String(input)).pathname === path ? cut() : reply;
+  });
+  return state;
+}
+
 function serve(replies: Replies = {}) {
   const state = { ...replies };
   const fetchMock = mockApi((r) => {
@@ -221,12 +237,14 @@ describe('[SAFETY BOARD] an open SOS', () => {
     expect(within(card).queryByRole('button', { name: /Resolve/ })).toBeNull();
   });
 
-  it('past the grace window with no page: it says nobody was paged and marks the card, never “they can still cancel”', async () => {
+  it('past the grace window at the last read: it says so and marks the card, never “they can still cancel”', async () => {
     serve({ alerts: [sos({ status: 'TRIGGER_PENDING', graceEndsAt: '2020-01-01T00:00:00.000Z' })] });
     renderWithQuery(<SafetyPage />);
     const card = await alertCard();
     expect(card.textContent).not.toMatch(/can still cancel/);
-    expect(card.textContent).toMatch(/grace window ended/);
+    // The status is the last read's, the clock is live: on a normal SOS the sweep has paged by now, so it never says nobody was.
+    expect(card.textContent).toMatch(/grace window ended at \d\d:\d\d and it had not gone live at the last read/);
+    expect(card.textContent).not.toMatch(/nobody has been paged/i);
     expect(card.className).toContain('border-[var(--mc-bad)]');
     expect(within(card).queryByRole('button', { name: /Resolve/ })).toBeNull();
   });
@@ -330,6 +348,47 @@ describe('[SAFETY BOARD] a refused or failed read', () => {
     expect(await screen.findByText(/could not refresh/)).toBeTruthy();
     expect(within(await alertCard()).getByRole('button', { name: 'Resolve…' })).toBeTruthy();
     expect(await caseCard()).toBeTruthy();
+  });
+
+  describe.each(CUT_BODIES)('%s', (_name, cut) => {
+    it('with a card on screen: the card stays and the board says it was not read', async () => {
+      const { fetchMock } = serve({ alerts: [sos({ counterpartyUserId: null })] });
+      const reads = cutReads(fetchMock, '/api/v1/safety/sos', cut);
+      const { queryClient } = renderWithQuery(<SafetyPage />);
+      await alertCard();
+      reads.on = true;
+      await queryClient.invalidateQueries({ queryKey: ['safety-sos'] });
+      expect(await screen.findByText(/Not read since/)).toBeTruthy();
+      expect(screen.queryByText('No open SOS.')).toBeNull();
+      expect(within(await alertCard()).getByRole('button', { name: 'Resolve…' })).toBeTruthy();
+    });
+
+    it('on the first read: a failed read, never “No open SOS.”', async () => {
+      const { fetchMock } = serve();
+      cutReads(fetchMock, '/api/v1/safety/sos', cut).on = true;
+      renderWithQuery(<SafetyPage />);
+      expect(await screen.findByText(/Couldn't load the open SOS alerts/)).toBeTruthy();
+      expect(screen.queryByText('No open SOS.')).toBeNull();
+    });
+
+    it('with a case on screen: the case stays and the list says it could not refresh', async () => {
+      const { fetchMock } = serve({ cases: [kase()] });
+      const reads = cutReads(fetchMock, '/api/v1/safety/incidents', cut);
+      const { queryClient } = renderWithQuery(<SafetyPage />);
+      await caseCard();
+      reads.on = true;
+      await queryClient.invalidateQueries({ queryKey: ['safety-cases'] });
+      expect(await screen.findByText(/could not refresh/)).toBeTruthy();
+      expect(await caseCard()).toBeTruthy();
+    });
+
+    it('on the first read of cases: a failed read, never “No cases in this view.”', async () => {
+      const { fetchMock } = serve();
+      cutReads(fetchMock, '/api/v1/safety/incidents', cut).on = true;
+      renderWithQuery(<SafetyPage />);
+      expect(await screen.findByText(/Couldn't load the safety cases/)).toBeTruthy();
+      expect(screen.queryByText('No cases in this view.')).toBeNull();
+    });
   });
 
   it('a first read that fails is never “No open SOS.”', async () => {
@@ -447,13 +506,62 @@ describe('[SAFETY BOARD] “No open SOS.” needs a recent read', () => {
     expect(screen.getByText(/Not read since/)).toBeTruthy();
   });
 
+  it.each(['focus', 'pageshow'])('a laptop waking with no visibility event: %s takes the all-clear away at once', async (event) => {
+    const { state } = serve();
+    board();
+    await screen.findByText(NONE);
+    state.alerts = 'hangs';
+    vi.setSystemTime(Date.now() + 60_000);
+    act(() => { window.dispatchEvent(new Event(event)); });
+    expect(screen.queryByText(NONE)).toBeNull();
+    expect(screen.getByText(/Not read since/)).toBeTruthy();
+  });
+
+  it('coming back to the page within the cache time: no all-clear until this visit’s own read answers', async () => {
+    const { fetchMock, state } = serve();
+    let show: (_on: boolean) => void = () => undefined;
+    function Doors() { const [on, set] = useState(true); show = set; return on ? <SafetyPage /> : null; }
+    board(<Doors />);
+    await screen.findByText(NONE);
+    act(() => show(false));
+    state.alerts = 'hangs';
+    const before = sosReads(fetchMock).length;
+    act(() => show(true));
+    await waitFor(() => expect(sosReads(fetchMock).length).toBe(before + 1));
+    expect(screen.queryByText(NONE)).toBeNull();
+    expect(screen.getByText('Reading the open SOS alerts…')).toBeTruthy();
+    state.alerts = [];
+    await advance(25_000);
+    expect(await screen.findByText(NONE)).toBeTruthy();
+  });
+
+  it('a first read that failed stays on screen while the next one runs: it never goes back to “Loading”', async () => {
+    const { state } = serve({ alerts: 'network-down' });
+    board();
+    expect(await screen.findByText(/Couldn't load the open SOS alerts/)).toBeTruthy();
+    state.alerts = 'hangs';
+    await advance(15_000);
+    expect(screen.queryByText(/Loading the open SOS alerts/)).toBeNull();
+    expect(screen.getByText(/Couldn't load the open SOS alerts/)).toBeTruthy();
+  });
+
+  it('a failure in one view of the cases is not carried into the next while it loads', async () => {
+    const { state } = serve({ cases: 'network-down' });
+    const { user } = board();
+    expect(await screen.findByText(/Couldn't load the safety cases/)).toBeTruthy();
+    state.cases = 'hangs';
+    await user.click(screen.getByRole('button', { name: 'All' }));
+    expect(await screen.findByText('Loading the safety cases…')).toBeTruthy();
+    expect(screen.queryByText(/Couldn't load the safety cases/)).toBeNull();
+  });
+
   it('the page’s own clock takes the all-clear away with no read and no event', async () => {
     const { state } = serve();
     board();
     await screen.findByText(NONE);
     state.alerts = 'hangs';
     vi.setSystemTime(Date.now() + 60_000);
-    await advance(5_000);
+    await advance(1_000);
     expect(screen.queryByText(NONE)).toBeNull();
     expect(screen.getByText(/Not read since/)).toBeTruthy();
   });

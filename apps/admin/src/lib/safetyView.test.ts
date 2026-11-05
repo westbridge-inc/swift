@@ -88,6 +88,8 @@ describe('[SAFETY BOARD] what the board reads', () => {
     expect(sosReadFresh(now - 44_999, now)).toBe(true);
     expect(sosReadFresh(now - 45_000, now)).toBe(false);
     expect(sosReadFresh(0, now)).toBe(false);
+    expect(sosReadFresh(now + 1, now)).toBe(false); // a clock set backwards is not a fresh read
+    expect(sosReadFresh(now, now)).toBe(true);
   });
 
   it('marks what needs a person: nobody has it, they pressed again, or the grace window ran out and nothing went live', () => {

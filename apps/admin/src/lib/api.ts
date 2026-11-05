@@ -816,17 +816,23 @@ export const runOpsAlertDrill = (): Promise<Envelope<{ opsAlertId: string; recip
 export const SAFETY_LIST_LIMIT = 200;
 /** How long the board waits for a read. apiFetch has no timeout, and a read that never comes back must become a failed one. */
 export const SAFETY_READ_MS = 10_000;
+/** A board read counts only if a list came back. apiFetch answers `{}` for a 200 whose body died or could not be parsed, and a
+ *  missing list read as an empty one would tell a responder there is no SOS. */
+function listIn<T>(reply: Envelope<T[]>): Envelope<T[]> {
+  if (!Array.isArray(reply?.data)) throw new Error('The server’s answer was cut off or could not be read.');
+  return reply;
+}
 /** Gives up on its own timer as well as aborting: a read can hang in the session refresh or the body, where the abort does not reach. */
-function readWithin<T>(outer: AbortSignal | undefined, read: (_signal: AbortSignal) => Promise<T>): Promise<T> {
+function readWithin<T>(outer: AbortSignal | undefined, read: (_signal: AbortSignal) => Promise<Envelope<T[]>>): Promise<Envelope<T[]>> {
   const inner = new AbortController();
   const stop = () => inner.abort();
   outer?.addEventListener('abort', stop);
-  return new Promise<T>((resolve, reject) => {
+  return new Promise<Envelope<T[]>>((resolve, reject) => {
     const timer = setTimeout(() => {
       stop();
       reject(new Error(`The server did not answer within ${SAFETY_READ_MS / 1000} seconds.`));
     }, SAFETY_READ_MS);
-    read(inner.signal).then(resolve, reject).finally(() => {
+    read(inner.signal).then(listIn).then(resolve, reject).finally(() => {
       clearTimeout(timer);
       outer?.removeEventListener('abort', stop);
     });

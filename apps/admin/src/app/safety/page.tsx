@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useReducer, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
@@ -38,15 +38,19 @@ const refusedRead = (error: unknown) => { const status = errorStatus(error); ret
 /** Keep reading: offline, behind a hidden tab, and at once on opening or coming back. A failure shows at once, not after retries. */
 const BOARD_READ = { networkMode: 'always', retry: false, staleTime: 0, refetchOnWindowFocus: 'always', refetchIntervalInBackground: true } as const;
 
-/** Now, kept current on a timer and at once when a sleeping tab wakes, when no timer has run. */
+/** Now, kept current every second, and on the events a waking page may fire: which of them fires depends on the browser. */
 function useNow(): number {
   const [, tick] = useReducer((n: number) => n + 1, 0);
   useEffect(() => {
-    const timer = setInterval(tick, 5_000);
+    const timer = setInterval(tick, 1_000);
     document.addEventListener('visibilitychange', tick);
+    window.addEventListener('focus', tick);
+    window.addEventListener('pageshow', tick);
     return () => {
       clearInterval(timer);
       document.removeEventListener('visibilitychange', tick);
+      window.removeEventListener('focus', tick);
+      window.removeEventListener('pageshow', tick);
     };
   }, []);
   return Date.now();
@@ -57,9 +61,12 @@ type ListQuery<T> = UseQueryResult<Envelope<T[]>>;
 
 /** A list's first read, a refusal, a failed refresh, or the cap: said in words, never as an empty list. */
 function ListState<T>({ query, what, onRetry }: { query: ListQuery<T>; what: string; onRetry: () => void }) {
-  if (query.isPending) return <div className="mc-card" aria-busy="true">Loading {what}…</div>;
-  if (query.isError && (refusedRead(query.error) || !query.data)) {
-    return <QueryFailed error={query.error} what={what} onRetry={onRetry} retrying={query.isFetching} className="mb-3" />;
+  // With no data, each new read clears the error: the failure stays up while it runs, instead of flickering back to Loading.
+  const lastError = useRef<unknown>(null);
+  if (query.error) lastError.current = query.error;
+  if (query.isPending && !lastError.current) return <div className="mc-card" aria-busy="true">Loading {what}…</div>;
+  if (query.isPending || (query.isError && (refusedRead(query.error) || !query.data))) {
+    return <QueryFailed error={query.error ?? lastError.current} what={what} onRetry={onRetry} retrying={query.isFetching} className="mb-3" />;
   }
   if (query.isError) {
     return <p role="alert" className="mc-note mc-note-bad mb-3">This list could not refresh. It shows what it last read at {gyTime(query.dataUpdatedAt)}.</p>;
@@ -157,7 +164,7 @@ function SosCard({ alert: a, now, run, reveal }: { alert: SosRow; now: number; r
       {/* "I'm safe" never closes an alert: a person under duress can be made to tap it. A reason to call, never a dimmed row. */}
       {a.userSafeFlaggedAt ? <p className="mc-note mc-note-warn mb-2">They tapped “I’m safe”. That does not close this: call back and check before resolving.</p> : null}
       {sosGraceOver(a, now) ? (
-        <p className="mc-note mc-note-bad mb-2">The grace window ended at {gyTime(a.graceEndsAt)} and it has not gone live, so nobody has been paged. Call them.</p>
+        <p className="mc-note mc-note-bad mb-2">The grace window ended at {gyTime(a.graceEndsAt)} and it had not gone live at the last read. If this stays, no page went out: call them.</p>
       ) : a.status === 'TRIGGER_PENDING' ? (
         <p className="mc-note mc-note-info mb-2">They can still cancel.{a.graceEndsAt ? ` It goes live at ${gyTime(a.graceEndsAt)} if they do not.` : ''} There is nothing to acknowledge until it is live.</p>
       ) : null}
@@ -325,7 +332,12 @@ export default function SafetyPage() {
         ) : (
           <ListState query={alerts} what="the open SOS alerts" onRetry={() => void alerts.refetch()} />
         )}
-        {alerts.isSuccess && readRecently && openAlerts.length === 0 ? <div className="mc-card"><p>No open SOS.</p><p className="mc-muted text-xs">Read at {gyClock(alerts.dataUpdatedAt)}</p></div> : null}
+        {alerts.isSuccess && readRecently && openAlerts.length === 0 ? (
+          <div className="mc-card" aria-busy={!alerts.isFetchedAfterMount || undefined}>
+            {/* An answer from before this visit is not an all-clear: this visit's own read has to come back. */}
+            {alerts.isFetchedAfterMount ? <><p>No open SOS.</p><p className="mc-muted text-xs">Read at {gyClock(alerts.dataUpdatedAt)}</p></> : <p>Reading the open SOS alerts…</p>}
+          </div>
+        ) : null}
         {openAlerts.length > 0 ? <ul className="space-y-3">{openAlerts.map((a) => <SosCard key={a.id} alert={a} now={now} run={actions.run} reveal={reveal} />)}</ul> : null}
         {alerts.isSuccess && readRecently && openAlerts.length > 0 ? <p className="mc-muted text-xs mt-2">Read at {gyClock(alerts.dataUpdatedAt)}</p> : null}
       </section>
@@ -338,7 +350,7 @@ export default function SafetyPage() {
             ))}
           </div>
         </div>
-        <ListState query={cases} what="the safety cases" onRetry={() => void cases.refetch()} />
+        <ListState key={scope} query={cases} what="the safety cases" onRetry={() => void cases.refetch()} />
         {cases.isSuccess && queue.length === 0 ? <div className="mc-card">No cases in this view.</div> : null}
         {queue.length > 0 ? <ul className="space-y-3">{queue.map((c) => <CaseCard key={c.id} item={c} run={actions.run} />)}</ul> : null}
       </section>

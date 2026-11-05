@@ -147,7 +147,7 @@ export function caseActions(c: IncidentRow): CaseAction[] {
   return out;
 }
 
-/** The grace window ran out and it never went live: the server already refuses a cancel, and nobody has been paged. */
+/** The grace window ran out and the last read still has it not live: normally the next read shows it live, and if it does not, nobody was paged. */
 export const sosGraceOver = (a: SosRow, now: number): boolean =>
   a.status === 'TRIGGER_PENDING' && !!a.graceEndsAt && new Date(a.graceEndsAt).getTime() <= now;
 
@@ -209,7 +209,7 @@ export function sosPosition(a: SosRow): (SosPlace & { seq?: number; at?: string 
 
 /** "No open SOS." is said only on a read under this old. Three polls: one missed read is not an alarm, a silent board is. */
 export const SOS_READ_FRESH_MS = 45_000;
-export const sosReadFresh = (readAt: number, now: number): boolean => readAt > 0 && now - readAt < SOS_READ_FRESH_MS;
+export const sosReadFresh = (readAt: number, now: number): boolean => readAt > 0 && now >= readAt && now - readAt < SOS_READ_FRESH_MS;
 
 export type SlaState = 'ok' | 'due' | 'breached' | 'met';
 
