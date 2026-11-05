@@ -373,12 +373,13 @@ const PUBLISHED: Record<
   // [2026-11-05 batch · wording delegated by the owner 5 Nov 2026 · MATERIAL · DRAFT until a Guyana attorney reads it] Terms
   // s.4 (a taxi fare to the driver's own MMG); Privacy s.1 (location, exactly), s.2 (MMG references), s.6; Mover s.2 and
   // Business s.2 (swiftgy.com); Mover new s.7, later sections renumber; Business s.3 and s.6. Undoing exactly those edits
-  // and the date reproduces all four 2026-11-04 pins above (checked mechanically before pinning).
+  // the date and the page's .brand colour (the rider of 30 Oct) reproduces all four 2026-11-04 pins above (checked
+  // mechanically before pinning).
   '2026-11-05': {
-    terms: 'db4598cd8ae98dccbec1beef0f6a491c98242c735ac6df901c79a3c8fdbbb740',
-    privacy: '048a3dd3caa12c53502912c727674a3e60d4ab83181085f7f900eb8b7dab2c73',
-    driver_agreement: '70aeb8fcd2e9bb3f7adf100ae1152104c8e3ec0f9db34c3d4a72c611e69e8c58',
-    vendor_agreement: 'c8b0651f35d4426a516057e0a76c464d3c78e8848d56f1cbfd979d9bb5ee2ba7',
+    terms: '0a4748d1df54502c9cd3d103f3b83f0a84f5ddc05afd792ca5e5fa6fb9b2dd17',
+    privacy: '44ccf951b8d07ec1e940deb4fccf260ca7333ddcaaf1c3979f14d77ff9400f90',
+    driver_agreement: '968bec2b8c8ce6f73fce217efd4bb7f8048c93eb77b6efb116f5541fe629c557',
+    vendor_agreement: '4b80d467f6686bea7d2222d5ec2e3ddeb92e82a72f2f65d1b42b3c24722cdf6b',
   },
 };
 

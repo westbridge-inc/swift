@@ -182,6 +182,8 @@ import { OPERATOR, OPERATOR_ADDRESS } from './operator';
 // sections renumber. Business Agreement section 3 names the own-name declaration; section 6 drops a process that was
 // never written down. Authorities wording (Privacy section 5) is unchanged. The store-backed promise and pay after
 // delivery are OFF and have no text here.
+// The legal pages' .brand colour moves to the brand maroon in this version (COORD ruling 30 Oct 2026: it rides on the next
+// material bump). It sits in the hashed page chrome, not in the words.
 export const LEGAL_VERSION = '2026-11-05';
 const LAST_UPDATED = '5 November 2026'; // human form of LEGAL_VERSION
 
@@ -197,7 +199,7 @@ function page(title: string, body: string): string {
   main{max-width:720px;margin:0 auto;padding:32px 20px 64px}
   h1{font-size:26px;margin:0 0 4px} .muted{color:#6e6e73;font-size:13px;margin-bottom:28px}
   h2{font-size:17px;margin:28px 0 8px} p,li{font-size:15px} ul{padding-left:20px}
-  .brand{color:#E8192C;font-weight:700}
+  .brand{color:#803B3B;font-weight:700}
 </style>
 </head>
 <body><main>
