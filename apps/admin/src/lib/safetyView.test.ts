@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ENUM_LABELS } from '@/lib/labels';
 import {
-  DECISION_WORDS, INCIDENT_TRANSITIONS, SOS_RESOLUTION_CODES, SOS_TRANSITIONS, clocksFor, queueOrder, slaClock, sosActions, sosNeedsYou, sosNotes, sosPosition, sosPressesNotShown, sosReadFresh, worstSla,
+  CASE_READ_FRESH_MS, DECISION_WORDS, INCIDENT_TRANSITIONS, SOS_RESOLUTION_CODES, SOS_TRANSITIONS, clocksFor, queueOrder, slaClock, sosActions, sosNeedsYou, sosNotes, sosPosition, sosPressesNotShown, sosReadFresh, worstSla,
   type IncidentRow, type SosRow,
 } from '@/lib/safetyView';
 
@@ -90,6 +90,8 @@ describe('[SAFETY BOARD] what the board reads', () => {
     expect(sosReadFresh(0, now)).toBe(false);
     expect(sosReadFresh(now + 1, now)).toBe(false); // a clock set backwards is not a fresh read
     expect(sosReadFresh(now, now)).toBe(true);
+    expect(sosReadFresh(now - 89_999, now, CASE_READ_FRESH_MS)).toBe(true);
+    expect(sosReadFresh(now - 90_000, now, CASE_READ_FRESH_MS)).toBe(false);
   });
 
   it('marks what needs a person: nobody has it, they pressed again, or the grace window ran out and nothing went live', () => {

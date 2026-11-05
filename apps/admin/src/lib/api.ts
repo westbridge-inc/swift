@@ -805,8 +805,10 @@ export interface FailedDrillRow {
   escalationLevel: number;
   recipients: OpsAlertRecipientRow[];
 }
-export const fetchOpsAlerts = (): Promise<Envelope<OpsAlertRow[]>> => apiFetch('/api/v1/safety/ops-alerts');
-export const fetchFailedDrills = (): Promise<Envelope<FailedDrillRow[]>> => apiFetch('/api/v1/safety/ops-alerts/failed-drills');
+export const fetchOpsAlerts = (signal?: AbortSignal): Promise<Envelope<OpsAlertRow[]>> =>
+  readWithin(signal, (s) => apiFetch('/api/v1/safety/ops-alerts', { signal: s }));
+export const fetchFailedDrills = (signal?: AbortSignal): Promise<Envelope<FailedDrillRow[]>> =>
+  readWithin(signal, (s) => apiFetch('/api/v1/safety/ops-alerts/failed-drills', { signal: s }));
 export const acknowledgeOpsAlert = (id: string): Promise<Envelope<{ acknowledged: boolean }>> =>
   apiFetch(`/api/v1/safety/ops-alerts/${encodeURIComponent(id)}/ack`, { method: 'POST', body: '{}' });
 export const runOpsAlertDrill = (): Promise<Envelope<{ opsAlertId: string; recipients: number; reached: number }>> =>
