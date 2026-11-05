@@ -91,7 +91,7 @@ function TaxiAppSection({ bookingOn }: { bookingOn: boolean }) {
         <p className="mt-2 text-[15px] leading-[22px] text-[var(--swift-muted)]">The app has your ride code, SOS, trip sharing and driver checks too.</p>
       ) : (
         <>
-          <p className="mt-2 text-[15px] leading-[22px] text-[var(--swift-muted)]">Taxi rides are booked in the Swift mobile app during the pilot.</p>
+          <p className="mt-2 text-[15px] leading-[22px] text-[var(--swift-muted)]">Taxi rides are booked in the Swift mobile app.</p>
           <p className="mt-1 text-[15px] leading-[22px] text-[var(--swift-muted)]">
             Use the app for your safety PIN, SOS, trip sharing and driver checks.
             Taxi booking is unavailable on the web.

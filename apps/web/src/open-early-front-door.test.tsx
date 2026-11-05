@@ -316,16 +316,17 @@ describe('[OPEN-EARLY] the pre-launch partner note', () => {
   });
 });
 
-// [OPEN-EARLY · owner 31 Oct 2026] "Most businesses clear review within a day" is not true before launch: Swift checks
+// [OPEN-EARLY · owner 31 Oct 2026] A promise of review within a day is not true before launch: Swift checks
 // documents as they arrive and approves partners on launch day. The partner pages follow the same server answer as
 // the note: "soon" says launch day; open (live, or staging) keeps the review-time words; while the answer is on its
 // way, or if it fails, a sentence true in both states.
 describe('[OPEN-EARLY] the partner pages never promise review within a day before launch', () => {
   const SOON = 'We check documents as they arrive and approve partners on launch day.';
   const PAGES = [
-    ['For businesses', 'app/(marketing)/vendors/page.tsx', 'Most businesses clear review within a day'],
-    ['For riders and drivers', 'app/(marketing)/drivers/page.tsx', 'Most riders clear review within a day'],
-    ['Questions', 'app/(marketing)/faq/page.tsx', 'Most businesses clear review within a day'],
+    // [FULL-LAUNCH 5 Nov 2026] "Most ... clear review within a day" had no record behind it: the review days replace it.
+    ['For businesses', 'app/(marketing)/vendors/page.tsx', 'We review documents Monday to Saturday, 8:00–16:00 Guyana time, and you can browse the whole dashboard while you wait.'],
+    ['For riders and drivers', 'app/(marketing)/drivers/page.tsx', 'We review documents Monday to Saturday, 8:00–16:00 Guyana time, and you can browse the whole app while you wait.'],
+    ['Questions', 'app/(marketing)/faq/page.tsx', 'We review documents Monday to Saturday, 8:00–16:00 Guyana time.'],
   ] as const;
 
   async function page(file: string) {
@@ -372,15 +373,18 @@ describe('[OPEN-EARLY] the partner pages never promise review within a day befor
   it('no web page states a review time outside that switch', () => {
     const claim = /within a day|same-day review|24 hours to (review|approve)|approved (in|within)/i;
     const hits: string[] = [];
+    let scanned = 0;
     for (const dir of ['app', 'components']) {
       for (const file of readdirSync(join(SRC, dir), { recursive: true, encoding: 'utf8' })) {
         if (!file.endsWith('.tsx') || /\.test\./.test(file)) continue;
+        scanned += 1;
         readFileSync(join(SRC, dir, file), 'utf8').split('\n').forEach((line, i) => {
           if (claim.test(line)) hits.push(`${dir}/${file}:${i + 1}: ${line.trim()}`);
         });
       }
     }
-    expect(hits.length).toBeGreaterThan(0);
-    for (const line of hits) expect(line, line).toMatch(/live="/);
+    expect(scanned).toBeGreaterThan(50);
+    // [FULL-LAUNCH 5 Nov 2026] Stricter than it was: a claimed review time is now refused behind the switch too.
+    expect(hits).toEqual([]);
   });
 });
