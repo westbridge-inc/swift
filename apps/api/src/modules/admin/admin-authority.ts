@@ -405,7 +405,8 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /finance/payment-mix': c('C0', 'finance.read'),
   // [OWNER 5 Nov 2026] Fees paid in person, apart from MMG. Account numbers, no names.
   'GET /finance/in-person-payments': c('C0', 'finance.read'),
-  'GET /finance/in-person-payments/:receiptNumber': c('C0', 'finance.read'),
+  // A receipt names its partner: the level of GET /billing/receipts/:receiptNumber, not the list's.
+  'GET /finance/in-person-payments/:receiptNumber': c('C0', 'billing.read'),
   'PUT /finance/settlements/:id/process': c('C4', 'finance.settlement.process', E.settlement),
   'POST /finance/settlements/:id/adjust': c('C4', 'finance.settlement.adjust', E.settlement),
 

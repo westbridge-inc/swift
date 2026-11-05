@@ -4326,13 +4326,13 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: await listInPersonPayments(app.prisma, requireTenantId()) };
   });
 
-  /** One of those receipts, on Finance's own grant, to print. */
+  /** One of those receipts, to print: the lines and nothing else, at the level of GET /billing/receipts/:receiptNumber. */
   app.get('/finance/in-person-payments/:receiptNumber', { preHandler: [adminGuard] }, async (request) => {
     requireDefaultTenantBilling();
-    const { receiptNumber } = request.params as { receiptNumber: string };
+    const { receiptNumber } = z.object({ receiptNumber: z.string().regex(/^[A-Z0-9-]{1,64}$/) }).parse(request.params);
     const doc = await inPersonReceipt(app.prisma, requireTenantId(), receiptNumber);
-    if (!doc) throw new NotFoundError('Receipt', receiptNumber);
-    return { success: true, data: doc };
+    if (!doc) throw new NotFoundError('Receipt');
+    return { success: true, data: { receiptNumber: doc.receiptNumber, lines: doc.lines } };
   });
 
   /** MMG-vs-cash mix, last 30 days of completed orders, plus MMG confirmation

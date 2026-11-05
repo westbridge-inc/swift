@@ -638,19 +638,40 @@ describe('finance reads them apart from MMG', () => {
     expect(JSON.stringify(data)).not.toContain('Counter Kitchen');
   });
 
-  it('Finance reads one in-person receipt on its own grant, and nothing else through that door', async () => {
+  it('one in-person receipt reads at the receipt route\'s own level, and nothing else through that door', async () => {
     const sub = await makeSub();
     const res = await pay(sub.id, cheque());
     const number = res.json().data.receiptNumber as string;
     const read = await app.inject({ method: 'GET', url: `/api/v1/admin/finance/in-person-payments/${number}`, headers: headers() });
     expect(read.statusCode).toBe(200);
     expect(read.json().data.lines.join('\n')).toContain('by cheque (cleared)');
+    // Only what a receipt needs.
+    expect(Object.keys(read.json().data).sort()).toEqual(['lines', 'receiptNumber']);
+    expect((await app.inject({ method: 'GET', url: `/api/v1/admin/finance/in-person-payments/${encodeURIComponent('not a receipt')}`, headers: headers() })).statusCode).toBe(400);
     const other = await makeSub();
     const event = await app.prisma.billingEvent.create({ data: { subscriptionId: other.id, type: 'PREPAID_TOPUP', amount: 100, currencyCode: 'GYD', idempotencyKey: `mmg-checkout:test:${nanoid(8)}` } });
     await app.prisma.prepaidBalance.create({ data: { subscriptionId: other.id, balance: 100, currencyCode: 'GYD' } });
-    const mmg = `SWF-TEST-${nanoid(8)}`;
+    const mmg = ref('SWF-TEST');
     await app.prisma.feeReceipt.create({ data: { receiptNumber: mmg, subscriptionId: other.id, billingEventId: event.id, amount: 100, channel: 'MMG_CHECKOUT', mmgRef: ref('MMG') } });
     expect((await app.inject({ method: 'GET', url: `/api/v1/admin/finance/in-person-payments/${mmg}`, headers: headers() })).statusCode).toBe(404);
+  });
+
+  it('a receipt names its partner, so it needs billing.read: a finance-only grant sees the list and not the receipt', async () => {
+    const sub = await makeSub();
+    const number = (await pay(sub.id, cash())).json().data.receiptNumber as string;
+    const grant = async (permissions: string[]) => {
+      seq += 1;
+      const user = await app.prisma.user.create({ data: { phone: `+${PHONE_BASE + 920_000 + seq}`, firstName: 'Grant', lastName: `G${seq}`, roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true, admin: { create: { permissions } } } });
+      userIds.push(user.id);
+      const token = app.jwt.sign({ userId: user.id, role: 'ADMIN', jti: nanoid(8) });
+      await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `in-person-grant-${seq}`, deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
+      return token;
+    };
+    const receipt = (token: string) => app.inject({ method: 'GET', url: `/api/v1/admin/finance/in-person-payments/${number}`, headers: headers(token) });
+    const finance = await grant(['finance.read']);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/admin/finance/in-person-payments', headers: headers(finance) })).statusCode).toBe(200);
+    expect((await receipt(finance)).statusCode).toBe(403);
+    expect((await receipt(await grant(['billing.read']))).statusCode).toBe(200);
   });
 
   it('an MMG receipt never appears in the list, and the cash journal names the channel', async () => {

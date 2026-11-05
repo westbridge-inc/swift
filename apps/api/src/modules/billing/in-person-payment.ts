@@ -308,7 +308,7 @@ export async function recordInPersonPayment(prisma: PrismaClient, billing: Billi
   return done.result;
 }
 
-/** One receipt from Finance's list, on Finance's own grant: only a fee paid in person. */
+/** One receipt from Finance's list: only a fee paid in person. */
 export async function inPersonReceipt(prisma: PrismaClient, tenantId: string, receiptNumber: string) {
   const known = await prisma.feeReceipt.findFirst({ where: { tenantId, receiptNumber, channel: { in: [...IN_PERSON_CHANNELS] } }, select: { id: true } });
   return known ? feeReceiptDocument(prisma, receiptNumber, { tenantId, subscriptionWhere: subscriptionTenantWhere(tenantId) }) : null;
