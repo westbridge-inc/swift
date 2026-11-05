@@ -94,6 +94,23 @@ describe('Ops alerts', () => {
     expect(prompt).not.toHaveBeenCalled();
   });
 
+  it('an SOS page opens the Safety board, where the person is handled; the words on the page lead there too', async () => {
+    mockApi(handler());
+    renderWithQuery(<OpsAlertsPage />);
+    const sos = await screen.findByRole('listitem', { name: 'URGENT: SOS ACTIVE' });
+    expect(within(sos).getByRole('link', { name: 'Open the Safety board' }).getAttribute('href')).toBe('/safety');
+    const drill = screen.getByRole('listitem', { name: 'Ops alert drill — acknowledge now' });
+    expect(within(drill).queryByRole('link')).toBeNull();
+    expect(screen.getByText(/keep re-paging/).textContent).toMatch(/Handle the person on the Safety board/);
+  });
+
+  it('acknowledging an SOS page says where the person is handled', async () => {
+    mockApi(handler({ open: [SOS] }));
+    const { user } = renderWithQuery(<OpsAlertsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Acknowledge…' }));
+    expect(screen.getByRole('dialog').textContent).toContain('keep handling the person who asked for help on the Safety board');
+  });
+
   it('a page someone else already acknowledged says so instead of claiming it', async () => {
     mockApi(handler({
       open: [SOS],
