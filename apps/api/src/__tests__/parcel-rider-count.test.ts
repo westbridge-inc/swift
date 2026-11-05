@@ -10,7 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import courierRoutes from '../modules/courier/courier.routes';
 import { DISPATCH_WIDEST_RADIUS_KM } from '../modules/dispatch/dispatch.service';
-import { assertParcelHasRiders } from '../modules/dispatch/delivery-capacity';
+import { assertParcelHasRiders, ridersOnlineNear } from '../modules/dispatch/delivery-capacity';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -177,6 +177,15 @@ describe('[FULL-LAUNCH] a parcel and the riders online', () => {
     process.env['DISPATCH_AVAILABILITY'] = '1';
     process.env['DELIVERY_BLOCK_ON_NONE'] = '0';
     expect((await send(c, parcel(cell(9)))).statusCode).toBe(201);
+  });
+
+  it('store delivery counts as it did: a courier-only rider is not a delivery rider', async () => {
+    const at = cell(11);
+    await rider(at, 1_000, { riderType: 'COURIER' });
+    const count = () => sys(() => ridersOnlineNear(app.prisma, at, null, 'SMALL', 90));
+    expect(await count()).toBe(0);
+    await rider(at, 1_200, { riderType: 'DELIVERY' });
+    expect(await count()).toBe(1);
   });
 
   it('a read that fails says nothing: the parcel goes ahead', async () => {

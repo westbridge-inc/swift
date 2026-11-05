@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { beforeEach, describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { Prisma, type Order, type UserRole } from '@prisma/client';
@@ -14,6 +14,7 @@ import { vendorRoutes, HANDED_TO_RIDER_NOTE } from '../modules/vendor/vendor.rou
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { assignmentLogWhere } from '../modules/order/store-handover-log';
 import { verifyHandoverDecision } from '../modules/handover/handover-decision';
+import { freshOrderPlaceBudget } from './helpers/order-place-budget';
 
 // ---------------------------------------------------------------------------
 // [O-2 · owner 22 Oct 2026, ruling 19:45Z] "Stores: no pickup code" — every
@@ -175,6 +176,8 @@ async function purgeFixtures() {
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   });
 }
+
+beforeEach(() => freshOrderPlaceBudget(app.redis));
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
