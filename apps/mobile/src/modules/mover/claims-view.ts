@@ -40,7 +40,7 @@ export function flagHint(flag: string): string | null {
     case 'over_monthly_cap': return 'You have reached your 30-day limit, so a person reviews this one.';
     case 'over_review_threshold': return 'Orders of this size are always reviewed by a person.';
     case 'over_cap': return 'Several this month — a person reviews this one.';
-    case 'protection_suspended': return 'Automatic payment is paused; a person reviews this one. Get help to ask for a review.';
+    case 'protection_suspended': return 'Automatic payment is suspended; a person reviews this one. Get help to ask for a review.';
     case 'evidence_incomplete': return 'Some evidence is missing (see the checklist). A person can still approve it.';
     case 'gps_far': return 'Your location was recorded far from the delivery address, so a person reviews this one.';
     case 'sla_breached': return 'This payment to you is late. Swift has been told.';

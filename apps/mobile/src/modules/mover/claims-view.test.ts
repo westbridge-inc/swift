@@ -15,7 +15,7 @@ describe('claims view helpers — the rider\'s words for the policy', () => {
   });
   it('flags become plain hints; internal names never reach the rider; unknown flags say nothing', () => {
     expect(flagHint('over_monthly_cap')).toContain('30-day limit');
-    expect(flagHint('protection_suspended')).toContain('paused');
+    expect(flagHint('protection_suspended')).toContain('suspended');
     expect(flagHint('collusion_pair_cluster')).toBe('Reviewed by a person.');
     expect(flagHint('some_new_flag')).toBeNull();
     expect(reasonLabel('no_show')).toBe('Customer did not show');

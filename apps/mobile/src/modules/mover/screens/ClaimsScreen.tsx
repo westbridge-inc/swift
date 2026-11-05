@@ -30,11 +30,11 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
         {q.isError ? <ErrorState onRetry={() => void q.refetch()} message="Couldn't load these orders." /> : null}
         {data?.suspended ? (
           <Card style={{ borderColor: color.error, borderWidth: 1 }}>
-            <T variant="body" style={{ fontWeight: '700' }}>Automatic payment is paused for you</T>
+            <T variant="body" style={{ fontWeight: '700' }}>Automatic payment is suspended for you</T>
             <T variant="caption" style={{ color: color.text.secondary }}>
               A person reviews each one before Swift pays it. You can ask for a review of this decision.
             </T>
-            <LinkText label="Get help" onPress={() => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Automatic payment paused' })} />
+            <LinkText label="Get help" onPress={() => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Automatic payment suspended' })} />
           </Card>
         ) : null}
         {data && data.claims.length === 0 ? (

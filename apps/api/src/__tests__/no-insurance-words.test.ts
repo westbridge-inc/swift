@@ -31,6 +31,12 @@ const LINES: Array<[file: string, starts: RegExp]> = [
   ['apps/admin/src/components/dashboard/AlertsPanel.tsx', /to decide$|to pay$/],
 ];
 
+const SUSPENSION_WORDS = [
+  'apps/api/src/modules/cash/cash-rules.service.ts',
+  'apps/mobile/src/modules/mover/claims-view.ts',
+  'apps/mobile/src/modules/mover/screens/ClaimsScreen.tsx',
+];
+
 const BANNED = /\b(insur\w*|guarantee\w*|loss[- ]protection|protection|protected|covers?|covered|cover\w*|premiums?|claims?|policy|policies|reserve)\b/i;
 /** A sentence, so a data key or a code such as 'claim' or 'over_cap' is not read as words. */
 const isWords = (s: string) => /\s/.test(s.trim());
@@ -54,6 +60,12 @@ describe('[owner rule] Swift-backed promises never say or imply insurance', () =
     const strings = stringsIn(file);
     expect(strings.length).toBeGreaterThan(0);
     expect(strings.filter((s) => BANNED.test(s))).toEqual([]);
+  });
+  // A suspension is a person's decision after a finding, and it lasts until a person lifts it. Softer words are untrue.
+  it.each(SUSPENSION_WORDS)('%s says suspended, never paused', (file) => {
+    const strings = stringsIn(file).filter((s) => /automatic payment/i.test(s) && !/back on/i.test(s));
+    expect(strings.length).toBeGreaterThan(0);
+    expect(strings.filter((s) => !/suspended/i.test(s))).toEqual([]);
   });
   it.each(LINES)('%s: %s', (file, starts) => {
     const strings = stringsIn(file).filter((s) => starts.test(s));

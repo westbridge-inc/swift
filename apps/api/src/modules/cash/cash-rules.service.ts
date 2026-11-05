@@ -821,7 +821,7 @@ export class CashRulesService {
         body: claim.status === 'AUTO_APPROVED'
           ? `Swift will pay you $${amount.toLocaleString()}.`
           : suspended
-            ? 'Automatic payment is paused for you, so a person reviews this one. Support has the reason and the review route.'
+            ? 'Automatic payment is suspended for you, so a person reviews this one. Support has the reason and the review route.'
             : 'This needs a quick review. We will get back to you.',
         data: { kind: 'claim', claimId: claim.id },
       },
@@ -978,7 +978,7 @@ export class CashRulesService {
       const mover = await this.moverUser(existing);
       const account = await this.prisma.user.findUnique({ where: { id: mover.userId }, select: { lossProtectionSuspendedAt: true } });
       if (account?.lossProtectionSuspendedAt) {
-        throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'Automatic payment is paused for this mover; a person must review and approve this one before it is paid.');
+        throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'Automatic payment is suspended for this mover; a person must review and approve this one before it is paid.');
       }
     }
     const rules = await this.configFor(countryCode);
@@ -1014,7 +1014,7 @@ export class CashRulesService {
         if (!profile) throw new AppError(409, 'RLP_EVIDENCE_INCOMPLETE', 'The assigned mover is missing.');
         await tx.$queryRaw`SELECT id FROM users WHERE id = ${profile.userId} FOR SHARE`;
         const account = await tx.user.findUnique({ where: { id: profile.userId }, select: { lossProtectionSuspendedAt: true } });
-        if (account?.lossProtectionSuspendedAt) throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'Automatic payment is paused for this mover; a person must review this before it is paid.');
+        if (account?.lossProtectionSuspendedAt) throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'Automatic payment is suspended for this mover; a person must review this before it is paid.');
       }
       assertEvidenceComplete(await assembleClaimEvidence(tx, fresh, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm }));
     }).catch((err) => {
@@ -1090,8 +1090,8 @@ export class CashRulesService {
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Automatic payment paused',
-      body: 'Automatic payment is paused for you following a review. A person now reviews each unpaid cash order before Swift pays it; contact support to request a review of this decision.',
+      title: 'Automatic payment suspended',
+      body: 'Automatic payment is suspended for you following a review. A person now reviews each unpaid cash order before Swift pays it; contact support to request a review of this decision.',
       data: { kind: 'rlp_suspended' },
     }).catch(() => {});
     return updated;
