@@ -35,6 +35,7 @@ describe('[M2] a delivery PIN locked at the door', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Give SW-3003 a new delivery PIN?' });
     expect(dialog.textContent).toMatch(/customer reads the new PIN on their order screen/);
     expect(dialog.textContent).toMatch(/Swift does not message them/);
+    expect(dialog.textContent).toMatch(/give it a few seconds/);
     await user.type(within(dialog).getByRole('textbox', { name: 'Code sent to your phone' }), '654321');
     await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
     await user.click(within(dialog).getByRole('button', { name: 'Give a new PIN' }));
@@ -43,7 +44,7 @@ describe('[M2] a delivery PIN locked at the door', () => {
     expect(JSON.parse(String(posts[1]![1]?.body))).toEqual({ code: '654321' });
     expect(JSON.parse(String(posts[2]![1]?.body))).toEqual({ reason: REASON });
     expect(new Headers(posts[2]![1]?.headers).get('x-swift-reason')).toBe(REASON);
-    const done = await screen.findByText('SW-3003 has a new delivery PIN. Ask the customer to open their order and read it to the rider.');
+    const done = await screen.findByText('SW-3003 has a new delivery PIN. Ask the customer to give it a few seconds, then read it from their order to the rider.');
     expect(done.textContent).not.toMatch(/told/);
   });
 

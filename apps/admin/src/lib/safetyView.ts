@@ -2,10 +2,11 @@ import { ENUM_LABELS, humanise } from '@/lib/labels';
 
 // ---------------------------------------------------------------------------
 // [SAFETY BOARD] What the web console's Safety page decides, kept out of the component. Copied from the desktop console's
-// lib/safetyView.ts, with three differences on purpose:
+// lib/safetyView.ts, with these differences on purpose:
 //   - the resolution codes are the server's (the desktop list offers two the route refuses);
 //   - an SOS offers only the moves its status allows (the grace window allows neither);
-//   - a closed case still offers the lift when its hold is on: the server takes it, and nothing else clears the stamp.
+//   - a closed case still offers the lift when its hold is on: the server takes it, and nothing else clears the stamp;
+//   - the position is the newest one with its accuracy, and "no open SOS" needs a recent read.
 // The rules are restated here ONLY to stop offering what would be refused: the server decides again, and
 // safetyView.test.ts reads the server's source, so a change there turns this red.
 // ---------------------------------------------------------------------------
@@ -76,6 +77,7 @@ export interface SosRetrigger {
   note?: string | null;
   lat?: number | null;
   lng?: number | null;
+  accuracyM?: number | null;
   addressText?: string | null;
 }
 
@@ -93,6 +95,7 @@ export interface SosRow {
   triggerSource: string;
   triggerLat: number | null;
   triggerLng: number | null;
+  triggerAccuracyM: number | null;
   triggerAddressText: string | null;
   triggerNote: string | null;
   retriggers: SosRetrigger[] | null;
@@ -144,8 +147,13 @@ export function caseActions(c: IncidentRow): CaseAction[] {
   return out;
 }
 
-/** Nobody has this alert yet, or the person pressed again: the board marks it. */
-export const sosNeedsYou = (a: SosRow): boolean => (a.status === 'ACTIVE' && !a.acknowledgedAt) || a.retriggerCount > 0;
+/** The grace window ran out and it never went live: the server already refuses a cancel, and nobody has been paged. */
+export const sosGraceOver = (a: SosRow, now: number): boolean =>
+  a.status === 'TRIGGER_PENDING' && !!a.graceEndsAt && new Date(a.graceEndsAt).getTime() <= now;
+
+/** Nobody has this alert yet, the person pressed again, or the page never went out: the board marks it. */
+export const sosNeedsYou = (a: SosRow, now: number): boolean =>
+  (a.status === 'ACTIVE' && !a.acknowledgedAt) || a.retriggerCount > 0 || sosGraceOver(a, now);
 
 export interface SosNote {
   /** 0 = the press that raised the alert; n = the n-th repeat press. */
@@ -171,28 +179,37 @@ export function sosNotes(a: SosRow): SosNote[] {
 /** The alert's count is the truth; the summary keeps only the newest presses. */
 export const sosPressesNotShown = (a: SosRow): number => Math.max(0, (a.retriggerCount ?? 0) - repeats(a).length);
 
-const place = (addressText: string | null | undefined, lat: number | null | undefined, lng: number | null | undefined): string | null => {
+const place = (addressText: string | null | undefined, lat: number | null | undefined, lng: number | null | undefined, accuracyM: number | null | undefined): SosPlace | null => {
+  const measured = typeof accuracyM === 'number' && Number.isFinite(accuracyM) ? `±${Math.round(accuracyM)} m` : null;
   const address = typeof addressText === 'string' ? addressText.trim() : '';
-  if (address) return address;
-  return typeof lat === 'number' && typeof lng === 'number' ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : null;
+  if (address) return { text: address, accuracy: measured };
+  if (typeof lat !== 'number' || typeof lng !== 'number') return null;
+  return { text: `${lat.toFixed(5)}, ${lng.toFixed(5)}`, accuracy: measured ?? 'Accuracy not reported' };
 };
 
-export interface SosPosition {
-  first: { text: string } | null;
-  newest: { text: string; seq: number; at: string } | null;
+export interface SosPlace {
+  text: string;
+  /** "±900 m": five decimals alone read as an exact point, and an indoor fix is not one. */
+  accuracy: string | null;
 }
 
-/** Where they were when they pressed, and where they are now: a repeat press carries its own position, and a board that
- *  showed only the first would send a responder to where the person no longer is. */
-export function sosPosition(a: SosRow): SosPosition {
-  const firstText = place(a.triggerAddressText, a.triggerLat, a.triggerLng);
-  let newest: SosPosition['newest'] = null;
+/**
+ * Where they are, as far as the server knows: the newest press that carried a position, else the alert's own. There is no
+ * "first position" to show beside it: a repeat press with coordinates overwrites the alert's own (sos.service.ts), so the row
+ * holds the latest one and printing it as the first would say they have not moved.
+ */
+export function sosPosition(a: SosRow): (SosPlace & { seq?: number; at?: string }) | null {
+  let newest: (SosPlace & { seq: number; at: string }) | null = null;
   for (const r of repeats(a)) {
-    const text = place(r?.addressText, r?.lat, r?.lng);
-    if (text) newest = { text, seq: r.seq, at: r.at };
+    const found = place(r?.addressText, r?.lat, r?.lng, r?.accuracyM);
+    if (found) newest = { ...found, seq: r.seq, at: r.at };
   }
-  return { first: firstText ? { text: firstText } : null, newest };
+  return newest ?? place(a.triggerAddressText, a.triggerLat, a.triggerLng, a.triggerAccuracyM);
 }
+
+/** "No open SOS." is said only on a read under this old. Three polls: one missed read is not an alarm, a silent board is. */
+export const SOS_READ_FRESH_MS = 45_000;
+export const sosReadFresh = (readAt: number, now: number): boolean => readAt > 0 && now - readAt < SOS_READ_FRESH_MS;
 
 export type SlaState = 'ok' | 'due' | 'breached' | 'met';
 

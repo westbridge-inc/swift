@@ -1,6 +1,9 @@
-import { screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { useState } from 'react';
+import { act, screen, waitFor, within } from '@testing-library/react';
+import { QueryClient, QueryClientProvider, focusManager, onlineManager } from '@tanstack/react-query';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SafetyPage from './page';
+import { retryUnlessRefused } from '@/lib/query-retry';
 import { mockApi, renderWithQuery, requestsByMethod, type ApiReply, type ApiRequest } from '@/test/test-utils';
 
 // ---------------------------------------------------------------------------
@@ -13,7 +16,7 @@ import { mockApi, renderWithQuery, requestsByMethod, type ApiReply, type ApiRequ
 const TRIGGERED = '2026-11-05T14:04:00.000Z';
 const sos = (over: Record<string, unknown> = {}) => ({
   id: 'sos-1', tenantId: 'swift-default', actorUserId: 'user-1', actorRole: 'MOVER', status: 'ACTIVE', orderId: 'ord-1', orderType: 'TAXI', serviceJobId: null,
-  counterpartyUserId: 'user-2', triggeredAt: TRIGGERED, triggerSource: 'BUTTON', triggerLat: 6.80123, triggerLng: -58.15567, triggerAddressText: 'Regent Street, Georgetown',
+  counterpartyUserId: 'user-2', triggeredAt: TRIGGERED, triggerSource: 'BUTTON', triggerLat: 6.80123, triggerLng: -58.15567, triggerAccuracyM: 12, triggerAddressText: null,
   triggerNote: null, retriggers: null, userSafeFlaggedAt: null, acknowledgedAt: null, retriggerCount: 0, ...over,
 });
 const kase = (over: Record<string, unknown> = {}) => ({
@@ -26,8 +29,13 @@ const refused: ApiReply = { status: 403, body: { success: false, error: { code: 
 const broken: ApiReply = { status: 500, body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'An unexpected error occurred' } } };
 const ok = (data: unknown): ApiReply => ({ body: { success: true, data } });
 
-type Replies = { orderRead?: ApiReply; alerts?: unknown[] | ApiReply; cases?: unknown[] | ApiReply; onWrite?: (_r: ApiRequest) => ApiReply; people?: (_id: string) => ApiReply; phone?: (_r: ApiRequest) => ApiReply };
-const asReply = (v: unknown[] | ApiReply) => (Array.isArray(v) ? ok(v) : v);
+type Read = unknown[] | ApiReply | 'network-down' | 'hangs';
+type Replies = { orderRead?: ApiReply; alerts?: Read; cases?: Read; onWrite?: (_r: ApiRequest) => ApiReply; people?: (_id: string) => ApiReply; phone?: (_r: ApiRequest) => ApiReply };
+function asReply(v: Read): ApiReply | Promise<ApiReply> {
+  if (v === 'network-down') throw new TypeError('Failed to fetch');
+  if (v === 'hangs') return new Promise<ApiReply>(() => undefined);
+  return Array.isArray(v) ? ok(v) : v;
+}
 function serve(replies: Replies = {}) {
   const state = { ...replies };
   const fetchMock = mockApi((r) => {
@@ -61,7 +69,8 @@ describe('[SAFETY BOARD] an open SOS', () => {
     expect(within(card).getByRole('link', { name: 'Asha Example' }).getAttribute('href')).toBe('/users/user-1');
     expect(card.textContent).toContain('Rider or driver');
     expect(card.textContent).toContain('••• ••• 1234');
-    expect(card.textContent).toContain('Regent Street, Georgetown');
+    expect(card.textContent).toContain('6.80123, -58.15567');
+    expect(card.textContent).toContain('±12 m');
     expect(card.textContent).toContain('5 Nov 2026, 10:04');
     const order = await within(card).findByRole('link', { name: 'SW-1001' });
     expect(order.getAttribute('href')).toBe('/orders/ord-1');
@@ -81,7 +90,7 @@ describe('[SAFETY BOARD] an open SOS', () => {
   });
 
   it('says so when no position was captured, and names a service job that has no order', async () => {
-    serve({ alerts: [sos({ triggerLat: null, triggerLng: null, triggerAddressText: null, orderId: null, orderType: null, serviceJobId: 'job-1', counterpartyUserId: null })] });
+    serve({ alerts: [sos({ triggerLat: null, triggerLng: null, triggerAccuracyM: null, orderId: null, orderType: null, serviceJobId: 'job-1', counterpartyUserId: null })] });
     renderWithQuery(<SafetyPage />);
     const card = await alertCard();
     expect(card.textContent).toContain('No location was captured.');
@@ -89,26 +98,38 @@ describe('[SAFETY BOARD] an open SOS', () => {
     expect(within(card).queryByRole('link', { name: /SW-/ })).toBeNull();
   });
 
-  it('shows coordinates when there is no address', async () => {
-    serve({ alerts: [sos({ triggerAddressText: null })] });
+  it('coordinates with no accuracy say so: a bare 5-decimal point reads as exact', async () => {
+    serve({ alerts: [sos({ triggerAccuracyM: null })] });
     renderWithQuery(<SafetyPage />);
-    expect((await alertCard()).textContent).toContain('6.80123, -58.15567');
+    const where = within(await alertCard()).getByRole('region', { name: 'Where' });
+    expect(where.textContent).toContain('6.80123, -58.15567');
+    expect(where.textContent).toContain('Accuracy not reported');
   });
 
-  it('a repeat press that moved: the newest position comes first and the first one stays', async () => {
+  it('an address the server does hold is shown', async () => {
+    serve({ alerts: [sos({ triggerAddressText: 'Regent Street, Georgetown' })] });
+    renderWithQuery(<SafetyPage />);
+    expect(within(await alertCard()).getByRole('region', { name: 'Where' }).textContent).toContain('Regent Street, Georgetown');
+  });
+
+  // The server's shape: a repeat press with coordinates OVERWRITES the alert's own, so the first position is gone from the
+  // row and printing the row as "first" would say they have not moved.
+  it('a repeat press that moved: the newest position with its own accuracy, and no false first position', async () => {
     serve({ alerts: [sos({
-      retriggerCount: 2,
+      triggerLat: 6.81, triggerLng: -58.16, triggerAccuracyM: 900, retriggerCount: 2,
       retriggers: [
-        { seq: 1, at: '2026-11-05T14:06:00.000Z', lat: 6.81, lng: -58.16, addressText: 'Sheriff Street', note: null },
-        { seq: 2, at: '2026-11-05T14:08:00.000Z', lat: null, lng: null, addressText: null, note: 'please hurry' },
+        { seq: 1, at: '2026-11-05T14:06:00.000Z', lat: 6.81, lng: -58.16, accuracyM: 900, addressText: null, note: null },
+        { seq: 2, at: '2026-11-05T14:08:00.000Z', lat: null, lng: null, accuracyM: null, addressText: null, note: 'please hurry' },
       ],
     })] });
     renderWithQuery(<SafetyPage />);
     const card = await alertCard();
     const where = within(card).getByRole('region', { name: 'Where' });
-    expect(where.textContent).toMatch(/Sheriff Street/);
+    expect(where.textContent).toContain('6.81000, -58.16000');
+    expect(where.textContent).toContain('±900 m');
     expect(where.textContent).toMatch(/repeat press ×1 at 10:06/);
-    expect(where.textContent).toMatch(/First position: Regent Street, Georgetown/);
+    expect(where.textContent).not.toMatch(/First position/);
+    expect(where.textContent!.match(/6\.81000/g)).toHaveLength(1);
     expect(card.textContent).toContain('Asked again ×2');
     expect(card.textContent).toContain('please hurry');
   });
@@ -142,8 +163,10 @@ describe('[SAFETY BOARD] an open SOS', () => {
     expect(within(dialog).queryByRole('textbox')).toBeNull();
     await user.click(within(dialog).getByRole('button', { name: 'Acknowledge' }));
     expect(await screen.findByText('Acknowledged.')).toBeTruthy();
-    // The route does not say whether its page was acknowledged too, so the console does not claim it.
-    expect(screen.getByText(/still on Ops alerts/)).toBeTruthy();
+    // The route does not say whether its page was acknowledged too, so the console does not claim it, and it does not
+    // send them to acknowledge it there: someone outside the page's audience is refused there too.
+    expect(screen.getByText(/still on Ops alerts/).textContent).toMatch(/still re-paging/);
+    expect(screen.getByText(/still on Ops alerts/).textContent).not.toMatch(/acknowledge it there/);
     expect(posts(fetchMock)).toEqual([{ path: '/api/v1/safety/sos/sos-1/ack', body: {} }]);
     await waitFor(async () => expect(within(await alertCard()).queryByRole('button', { name: 'Acknowledge…' })).toBeNull());
     expect(within(await alertCard()).getByRole('button', { name: 'Resolve…' })).toBeTruthy();
@@ -158,6 +181,8 @@ describe('[SAFETY BOARD] an open SOS', () => {
     expect(offered).toEqual(['SAFE_CONFIRMED', 'POLICE_INVOLVED', 'MEDICAL', 'FALSE_ALARM', 'ABUSE', 'UNREACHABLE_CLOSED']);
     expect(dialog.textContent).toMatch(/all-clear/);
     expect(dialog.textContent).toMatch(/opens a safety case/);
+    expect(dialog.textContent).toMatch(/taken offline at once and told they are under review/);
+    expect(within(dialog).getByRole('radio', { name: 'Abuse by the other person' })).toBeTruthy();
     await user.click(within(dialog).getByRole('radio', { name: 'Confirmed safe' }));
     await user.type(within(dialog).getByRole('textbox', { name: 'Notes' }), 'Spoke to her, she is home.');
     await user.click(within(dialog).getByRole('button', { name: 'Resolve' }));
@@ -196,6 +221,16 @@ describe('[SAFETY BOARD] an open SOS', () => {
     expect(within(card).queryByRole('button', { name: /Resolve/ })).toBeNull();
   });
 
+  it('past the grace window with no page: it says nobody was paged and marks the card, never “they can still cancel”', async () => {
+    serve({ alerts: [sos({ status: 'TRIGGER_PENDING', graceEndsAt: '2020-01-01T00:00:00.000Z' })] });
+    renderWithQuery(<SafetyPage />);
+    const card = await alertCard();
+    expect(card.textContent).not.toMatch(/can still cancel/);
+    expect(card.textContent).toMatch(/grace window ended/);
+    expect(card.className).toContain('border-[var(--mc-bad)]');
+    expect(within(card).queryByRole('button', { name: /Resolve/ })).toBeNull();
+  });
+
   it('an acknowledged alert offers Resolve only', async () => {
     serve({ alerts: [sos({ status: 'ACKNOWLEDGED', acknowledgedAt: '2026-11-05T14:05:00.000Z' })] });
     renderWithQuery(<SafetyPage />);
@@ -219,6 +254,14 @@ describe('[SAFETY BOARD] the person behind an SOS', () => {
     expect(await within(card).findByText('+5926001234')).toBeTruthy();
     expect(new Headers(seen[0]!.init?.headers).get('x-swift-reason')).toBe('Calling back on an open SOS alert');
     expect(seen[0]!.url.pathname).toBe('/api/v1/admin/users/user-1/phone');
+  });
+
+  it('a person with no number on file says so', async () => {
+    serve({ alerts: [sos({ counterpartyUserId: null })], people: () => ok({ id: 'user-1', firstName: 'Asha', lastName: 'Example', phone: null }) });
+    renderWithQuery(<SafetyPage />);
+    const card = await alertCard();
+    expect(await within(card).findByText('No number on file')).toBeTruthy();
+    expect(within(card).queryByRole('button', { name: 'Show number' })).toBeNull();
   });
 
   it('a person read once is not read again on every refresh of the board', async () => {
@@ -269,8 +312,24 @@ describe('[SAFETY BOARD] a refused or failed read', () => {
     await alertCard();
     state.alerts = broken;
     await queryClient.invalidateQueries({ queryKey: ['safety-sos'] });
+    expect(await screen.findByText(/Not read since \d\d:\d\d:\d\d\. There may be an open SOS\./)).toBeTruthy();
+    expect(within(await alertCard()).getByRole('button', { name: 'Resolve…' })).toBeTruthy();
+  });
+
+  it('a 429 is not a refusal: the cards stay on both lists', async () => {
+    const tooMany: ApiReply = { status: 429, body: { success: false, error: { code: 'RATE_LIMITED', message: 'Too many requests' } } };
+    const { state } = serve({ alerts: [sos({ counterpartyUserId: null })], cases: [kase()] });
+    const { queryClient } = renderWithQuery(<SafetyPage />);
+    await alertCard();
+    await caseCard();
+    state.alerts = tooMany;
+    state.cases = tooMany;
+    await queryClient.invalidateQueries({ queryKey: ['safety-sos'] });
+    await queryClient.invalidateQueries({ queryKey: ['safety-cases'] });
+    expect(await screen.findByText(/Not read since/)).toBeTruthy();
     expect(await screen.findByText(/could not refresh/)).toBeTruthy();
     expect(within(await alertCard()).getByRole('button', { name: 'Resolve…' })).toBeTruthy();
+    expect(await caseCard()).toBeTruthy();
   });
 
   it('a first read that fails is never “No open SOS.”', async () => {
@@ -278,6 +337,146 @@ describe('[SAFETY BOARD] a refused or failed read', () => {
     renderWithQuery(<SafetyPage />);
     expect(await screen.findByText(/Couldn't load the open SOS alerts/)).toBeTruthy();
     expect(screen.queryByText('No open SOS.')).toBeNull();
+  });
+});
+
+// [G13 S1-1] "No open SOS." is a claim about a person in danger. It may be said only on a read that ran and came back
+// recently: never because a read paused with the Wi-Fi, hung, or waited behind a hidden tab.
+describe('[SAFETY BOARD] “No open SOS.” needs a recent read', () => {
+  const NONE = 'No open SOS.';
+  /** The client the console really runs on (app/providers.tsx): the test default would hide all of this. */
+  const board = (ui = <SafetyPage />) => renderWithQuery(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: retryUnlessRefused } } })}>{ui}</QueryClientProvider>,
+  );
+  const sosReads = (fetchMock: ReturnType<typeof mockApi>) => fetchMock.mock.calls.filter(([url]) => new URL(String(url)).pathname === '/api/v1/safety/sos');
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+  beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] }); });
+  afterEach(() => { vi.useRealTimers(); onlineManager.setOnline(true); focusManager.setFocused(undefined); });
+
+  it('prints when it was read, to the second', async () => {
+    serve();
+    board();
+    await screen.findByText(NONE);
+    expect(screen.getByText(/^Read at \d\d:\d\d:\d\d$/)).toBeTruthy();
+  });
+
+  it('the Wi-Fi drops after a good read: the read still runs, fails, and the all-clear goes', async () => {
+    const { fetchMock, state } = serve();
+    board();
+    await screen.findByText(NONE);
+    const before = sosReads(fetchMock).length;
+    state.alerts = 'network-down';
+    act(() => { onlineManager.setOnline(false); });
+    await advance(15_000);
+    expect(sosReads(fetchMock).length).toBeGreaterThan(before);
+    expect(screen.queryByText(NONE)).toBeNull();
+    expect(screen.getByText(/Not read since \d\d:\d\d:\d\d\. There may be an open SOS\./)).toBeTruthy();
+  });
+
+  it('offline at first load: says so, never a heading over nothing', async () => {
+    act(() => { onlineManager.setOnline(false); });
+    serve({ alerts: 'network-down' });
+    board();
+    expect(await screen.findByText(/Couldn't load the open SOS alerts/)).toBeTruthy();
+    expect(screen.queryByText(NONE)).toBeNull();
+  });
+
+  it('a read that hangs is given up on at 10 seconds and the all-clear goes', async () => {
+    const { fetchMock, state } = serve();
+    board();
+    await screen.findByText(NONE);
+    state.alerts = 'hangs';
+    await advance(15_000);
+    const hung = sosReads(fetchMock).at(-1)!;
+    expect((hung[1]?.signal as AbortSignal).aborted).toBe(false);
+    await advance(9_000);
+    expect((hung[1]?.signal as AbortSignal).aborted).toBe(false);
+    await advance(1_500);
+    expect((hung[1]?.signal as AbortSignal).aborted).toBe(true);
+    expect(screen.queryByText(NONE)).toBeNull();
+    expect(screen.getByText(/Not read since/)).toBeTruthy();
+  });
+
+  it('a read that never gets past the token refresh is given up on too: the timer does not depend on fetch answering the abort', async () => {
+    serve({ alerts: 'hangs' });
+    board();
+    await advance(10_500);
+    expect(screen.getByText(/Couldn't load the open SOS alerts/)).toBeTruthy();
+  });
+
+  it('a hidden tab keeps reading', async () => {
+    const { fetchMock } = serve();
+    board();
+    await screen.findByText(NONE);
+    act(() => { focusManager.setFocused(false); });
+    const before = sosReads(fetchMock).length;
+    await advance(15_000);
+    expect(sosReads(fetchMock).length).toBe(before + 1);
+  });
+
+  it('a tab coming back reads at once, not at the next tick', async () => {
+    const { fetchMock } = serve();
+    board();
+    await screen.findByText(NONE);
+    act(() => { focusManager.setFocused(false); });
+    const before = sosReads(fetchMock).length;
+    act(() => { focusManager.setFocused(true); });
+    await waitFor(() => expect(sosReads(fetchMock).length).toBe(before + 1));
+  });
+
+  it('opening the page reads at once, even with a recent answer in the cache', async () => {
+    const { fetchMock } = serve();
+    let show: (_on: boolean) => void = () => undefined;
+    function Doors() { const [on, set] = useState(true); show = set; return on ? <SafetyPage /> : null; }
+    board(<Doors />);
+    await screen.findByText(NONE);
+    act(() => show(false));
+    const before = sosReads(fetchMock).length;
+    act(() => show(true));
+    await waitFor(() => expect(sosReads(fetchMock).length).toBe(before + 1));
+  });
+
+  it('a laptop waking: no timer ran, the read is old, and the all-clear is gone the moment the tab shows', async () => {
+    const { state } = serve();
+    board();
+    await screen.findByText(NONE);
+    state.alerts = 'hangs';
+    vi.setSystemTime(Date.now() + 60_000);
+    act(() => { document.dispatchEvent(new Event('visibilitychange', { bubbles: true })); });
+    expect(screen.queryByText(NONE)).toBeNull();
+    expect(screen.getByText(/Not read since/)).toBeTruthy();
+  });
+
+  it('the page’s own clock takes the all-clear away with no read and no event', async () => {
+    const { state } = serve();
+    board();
+    await screen.findByText(NONE);
+    state.alerts = 'hangs';
+    vi.setSystemTime(Date.now() + 60_000);
+    await advance(5_000);
+    expect(screen.queryByText(NONE)).toBeNull();
+    expect(screen.getByText(/Not read since/)).toBeTruthy();
+  });
+
+  it('a card on screen says the same when its read is old: a repeat press may not be showing', async () => {
+    const { state } = serve({ alerts: [sos({ counterpartyUserId: null })] });
+    board();
+    await alertCard();
+    state.alerts = 'network-down';
+    await advance(15_000);
+    expect(screen.getByText(/Not read since/)).toBeTruthy();
+    expect(screen.getByRole('listitem', { name: /^SOS from / })).toBeTruthy();
+  });
+
+  it('cases take the same road: offline ends “No cases in this view.”', async () => {
+    const { state } = serve();
+    board();
+    await screen.findByText('No cases in this view.');
+    state.cases = 'network-down';
+    act(() => { onlineManager.setOnline(false); });
+    await advance(60_000);
+    expect(screen.queryByText('No cases in this view.')).toBeNull();
+    expect(screen.getByText(/could not refresh/)).toBeTruthy();
   });
 });
 
@@ -314,6 +513,14 @@ describe('[SAFETY BOARD] a case', () => {
     expect(card.innerHTML).not.toContain('user-reporter');
   });
 
+  it('a closed case that still lists a hold does not swear the person is still held: another case’s lift can clear it', async () => {
+    serve({ cases: [kase({ status: 'CLOSED', interimAction: 'SUSPENDED_PENDING_REVIEW' })] });
+    renderWithQuery(<SafetyPage />);
+    const card = await caseCard();
+    expect(card.textContent).toMatch(/still lists a suspension/);
+    expect(card.textContent).not.toMatch(/is still on/);
+  });
+
   it('Lift goes to the one route that clears the hold, and says the person is told and what another case keeps', async () => {
     const { fetchMock, state } = serve({ cases: [kase({ interimAction: 'SUSPENDED_PENDING_REVIEW' })], onWrite: () => { state.cases = [kase()]; return ok(kase()); } });
     const { user } = renderWithQuery(<SafetyPage />);
@@ -345,6 +552,7 @@ describe('[SAFETY BOARD] a case', () => {
     expect(within(dialog).getAllByRole('radio').map((r) => (r as HTMLInputElement).value)).toEqual(['DISMISSED', 'WARNING_ISSUED', 'SUSPENSION_PERMANENT', 'RESOLVED_OTHER']);
     expect(dialog.textContent).toMatch(/Only Dismissed lifts the suspension/);
     expect(dialog.textContent).toMatch(/does not suspend anyone/);
+    expect(dialog.textContent).toMatch(/Warning issued is a record: Swift sends them nothing\. Warn them yourself\./);
     await user.click(within(dialog).getByRole('radio', { name: /Warning issued/ }));
     await user.type(within(dialog).getByRole('textbox', { name: 'Notes' }), 'Spoke to both people.');
     await user.click(within(dialog).getByRole('button', { name: 'Record the decision' }));
@@ -401,6 +609,6 @@ describe('[SAFETY BOARD] a case', () => {
     renderWithQuery(<SafetyPage />);
     await caseCard('Case INC-TOP');
     expect(screen.getAllByRole('listitem', { name: /^Case / })[0]!.getAttribute('aria-label')).toBe('Case INC-TOP');
-    expect(screen.getByText(/first 200/)).toBeTruthy();
+    expect(screen.getByText(/first 200/).textContent).toMatch(/There may be more/);
   });
 });

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ENUM_LABELS } from '@/lib/labels';
 import {
-  DECISION_WORDS, INCIDENT_TRANSITIONS, SOS_RESOLUTION_CODES, SOS_TRANSITIONS, clocksFor, queueOrder, slaClock, sosActions, sosNotes, sosPosition, sosPressesNotShown, worstSla,
+  DECISION_WORDS, INCIDENT_TRANSITIONS, SOS_RESOLUTION_CODES, SOS_TRANSITIONS, clocksFor, queueOrder, slaClock, sosActions, sosNeedsYou, sosNotes, sosPosition, sosPressesNotShown, sosReadFresh, worstSla,
   type IncidentRow, type SosRow,
 } from '@/lib/safetyView';
 
@@ -44,7 +44,7 @@ describe('[SAFETY BOARD] the rules match the server', () => {
 
 const alert = (over: Partial<SosRow> = {}): SosRow => ({
   id: 'sos-1', actorUserId: 'u1', actorRole: 'CUSTOMER', status: 'ACTIVE', orderId: null, orderType: null, serviceJobId: null, counterpartyUserId: null, triggeredAt: '2026-11-05T14:00:00.000Z',
-  triggerSource: 'BUTTON', triggerLat: null, triggerLng: null, triggerAddressText: null, triggerNote: null, retriggers: null, userSafeFlaggedAt: null, acknowledgedAt: null, retriggerCount: 0, ...over,
+  triggerSource: 'BUTTON', triggerLat: null, triggerLng: null, triggerAccuracyM: null, triggerAddressText: null, triggerNote: null, retriggers: null, userSafeFlaggedAt: null, acknowledgedAt: null, retriggerCount: 0, ...over,
 });
 const row = (over: Partial<IncidentRow> = {}): IncidentRow => ({
   id: 'c', caseNumber: 'INC-1', status: 'OPEN', severity: 'S2', category: 'OTHER', summary: 'Something happened.', subjectUserId: 'u', orderId: null, sosAlertId: null, escalatedPoliceAt: null,
@@ -72,14 +72,31 @@ describe('[SAFETY BOARD] what the board reads', () => {
     expect(sosPressesNotShown(alert({ retriggerCount: 0 }))).toBe(0);
   });
 
-  it('the position: the newest press that had one, else the first, else none', () => {
-    expect(sosPosition(alert())).toEqual({ newest: null, first: null });
-    const first = { triggerLat: 6.8, triggerLng: -58.1 };
-    expect(sosPosition(alert(first)).first).toEqual({ text: '6.80000, -58.10000' });
-    expect(sosPosition(alert({ ...first, triggerAddressText: 'Water Street' })).first).toEqual({ text: 'Water Street' });
-    const moved = alert({ ...first, retriggers: [{ seq: 1, at: 'a', lat: 6.9, lng: -58.2 }, { seq: 2, at: 'b', addressText: 'Camp Street' }, { seq: 3, at: 'c' }] });
-    expect(sosPosition(moved).newest).toEqual({ text: 'Camp Street', seq: 2, at: 'b' });
-    expect(sosPosition(alert({ retriggers: [{ seq: 1, at: 'a', lat: 0, lng: 0 }] })).newest?.text).toBe('0.00000, 0.00000');
+  it('the position: the newest press that had one, else the alert’s own, else none, with its own accuracy', () => {
+    expect(sosPosition(alert())).toBeNull();
+    const own = { triggerLat: 6.8, triggerLng: -58.1, triggerAccuracyM: 20 };
+    expect(sosPosition(alert(own))).toEqual({ text: '6.80000, -58.10000', accuracy: '±20 m' });
+    expect(sosPosition(alert({ ...own, triggerAccuracyM: null }))).toEqual({ text: '6.80000, -58.10000', accuracy: 'Accuracy not reported' });
+    expect(sosPosition(alert({ ...own, triggerAddressText: 'Water Street', triggerAccuracyM: null }))).toEqual({ text: 'Water Street', accuracy: null });
+    const moved = alert({ ...own, retriggers: [{ seq: 1, at: 'a', lat: 6.9, lng: -58.2, accuracyM: 899.6 }, { seq: 2, at: 'b', addressText: 'Camp Street' }, { seq: 3, at: 'c' }] });
+    expect(sosPosition(moved)).toEqual({ text: 'Camp Street', accuracy: null, seq: 2, at: 'b' });
+    expect(sosPosition(alert({ retriggers: [{ seq: 1, at: 'a', lat: 0, lng: 0, accuracyM: 899.6 }] }))).toEqual({ text: '0.00000, 0.00000', accuracy: '±900 m', seq: 1, at: 'a' });
+  });
+
+  it('a read counts only if it came back under 45 seconds ago', () => {
+    const now = 1_000_000;
+    expect(sosReadFresh(now - 44_999, now)).toBe(true);
+    expect(sosReadFresh(now - 45_000, now)).toBe(false);
+    expect(sosReadFresh(0, now)).toBe(false);
+  });
+
+  it('marks what needs a person: nobody has it, they pressed again, or the grace window ran out and nothing went live', () => {
+    const now = new Date('2026-11-05T14:00:00.000Z').getTime();
+    expect(sosNeedsYou(alert({ status: 'ACTIVE' }), now)).toBe(true);
+    expect(sosNeedsYou(alert({ status: 'ACKNOWLEDGED', acknowledgedAt: 'x' }), now)).toBe(false);
+    expect(sosNeedsYou(alert({ status: 'ACKNOWLEDGED', acknowledgedAt: 'x', retriggerCount: 1 }), now)).toBe(true);
+    expect(sosNeedsYou(alert({ status: 'TRIGGER_PENDING', graceEndsAt: '2026-11-05T14:00:10.000Z' }), now)).toBe(false);
+    expect(sosNeedsYou(alert({ status: 'TRIGGER_PENDING', graceEndsAt: '2026-11-05T13:59:50.000Z' }), now)).toBe(true);
   });
 
   it('a clock reads from the deadline and the stamp that stops it, never the status', () => {

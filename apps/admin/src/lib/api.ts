@@ -814,13 +814,32 @@ export const runOpsAlertDrill = (): Promise<Envelope<{ opsAlertId: string; recip
 
 // ─── [SAFETY BOARD] An SOS and a safety case: the routes the desktop console already uses ─────
 export const SAFETY_LIST_LIMIT = 200;
-export const fetchSafetySos = (): Promise<Envelope<SosRow[]>> => apiFetch(`/api/v1/safety/sos?status=open&limit=${SAFETY_LIST_LIMIT}`);
+/** How long the board waits for a read. apiFetch has no timeout, and a read that never comes back must become a failed one. */
+export const SAFETY_READ_MS = 10_000;
+/** Gives up on its own timer as well as aborting: a read can hang in the session refresh or the body, where the abort does not reach. */
+function readWithin<T>(outer: AbortSignal | undefined, read: (_signal: AbortSignal) => Promise<T>): Promise<T> {
+  const inner = new AbortController();
+  const stop = () => inner.abort();
+  outer?.addEventListener('abort', stop);
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      stop();
+      reject(new Error(`The server did not answer within ${SAFETY_READ_MS / 1000} seconds.`));
+    }, SAFETY_READ_MS);
+    read(inner.signal).then(resolve, reject).finally(() => {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', stop);
+    });
+  });
+}
+export const fetchSafetySos = (signal?: AbortSignal): Promise<Envelope<SosRow[]>> =>
+  readWithin(signal, (s) => apiFetch(`/api/v1/safety/sos?status=open&limit=${SAFETY_LIST_LIMIT}`, { signal: s }));
 export const acknowledgeSos = (id: string): Promise<Envelope<{ id: string; status: string }>> =>
   apiFetch(`/api/v1/safety/sos/${encodeURIComponent(id)}/ack`, { method: 'POST', body: '{}' });
 export const resolveSos = (id: string, resolutionCode: SosResolutionCode, notes?: string): Promise<Envelope<{ id: string; status: string }>> =>
   apiFetch(`/api/v1/safety/sos/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify({ resolutionCode, ...(notes ? { notes } : {}) }) });
-export const fetchSafetyCases = (scope: CaseScope): Promise<Envelope<IncidentRow[]>> =>
-  apiFetch(`/api/v1/safety/incidents?status=${scope}&limit=${SAFETY_LIST_LIMIT}`);
+export const fetchSafetyCases = (scope: CaseScope, signal?: AbortSignal): Promise<Envelope<IncidentRow[]>> =>
+  readWithin(signal, (s) => apiFetch(`/api/v1/safety/incidents?status=${scope}&limit=${SAFETY_LIST_LIMIT}`, { signal: s }));
 export const workSafetyCase = (id: string, action: 'ack' | 'close' | 'lift-interim'): Promise<Envelope<IncidentRow>> =>
   apiFetch(`/api/v1/safety/incidents/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: '{}' });
 export const decideSafetyCase = (id: string, decisionCode: DecisionCode, notes?: string): Promise<Envelope<IncidentRow>> =>

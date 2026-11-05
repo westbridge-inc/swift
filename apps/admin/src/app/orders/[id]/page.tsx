@@ -499,7 +499,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                             await sendStepUpCode().catch(() => undefined);
                             void actions.run({
                               title: `Give ${o.orderNumber} a new delivery PIN?`,
-                              body: <p>The customer reads the new PIN on their order screen and gives it to the rider. Swift does not message them, so tell them or have the rider ask. The old PIN stops working. Nobody here sees the new one.</p>,
+                              body: <p>The customer reads the new PIN on their order screen and gives it to the rider. Swift does not message them, so tell them or have the rider ask, and give it a few seconds to reach their screen. The old PIN stops working. Nobody here sees the new one.</p>,
                               confirmLabel: 'Give a new PIN',
                               dismissLabel: 'Keep it',
                               fields: [{ kind: 'text', name: 'code', label: 'Code sent to your phone', required: true }],
@@ -507,7 +507,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                                 await verifyStepUpCode(String(values['code']).trim());
                                 return resetDeliveryPin(id, reason);
                               },
-                              success: () => `${o.orderNumber} has a new delivery PIN. Ask the customer to open their order and read it to the rider.`,
+                              success: () => `${o.orderNumber} has a new delivery PIN. Ask the customer to give it a few seconds, then read it from their order to the rider.`,
                             });
                           }}
                         >

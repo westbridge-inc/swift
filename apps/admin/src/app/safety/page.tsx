@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useReducer, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import {
@@ -8,10 +8,10 @@ import {
   type Envelope,
 } from '@/lib/api';
 import { ENUM_LABELS, label } from '@/lib/labels';
-import { gyDateTime, gyTime } from '@/lib/dates';
+import { gyClock, gyDateTime, gyTime } from '@/lib/dates';
 import { succeeded } from '@/lib/outcome';
 import {
-  DECISION_WORDS, SOS_RESOLUTION_CODES, caseActions, categoryWords, clocksFor, interimWords, queueOrder, sosActions, sosNeedsYou, sosNotes, sosPosition, sosPressesNotShown, worstSla,
+  DECISION_WORDS, SOS_RESOLUTION_CODES, caseActions, categoryWords, clocksFor, interimWords, queueOrder, sosActions, sosGraceOver, sosNeedsYou, sosNotes, sosPosition, sosPressesNotShown, sosReadFresh, worstSla,
   type CaseScope, type DecisionCode, type IncidentRow, type SlaClock, type SosResolutionCode, type SosRow,
 } from '@/lib/safetyView';
 import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
@@ -26,18 +26,38 @@ import { useActionRunner } from '@/components/mc/useActionRunner';
 //
 // Who may act is the server's call: every read and write here passes the same ops check, so an account the server refuses
 // has no cards, and so no buttons. A failed refresh keeps the cards, because an outage must not blank a live emergency.
+// "No open SOS." is the worst thing this page can get wrong, so it is said only on a read that came back in the last 45
+// seconds. BOARD_READ makes a read that could not run or never returned a failed read, instead of an old answer.
 // Every action renders the server's answer; nothing is shown as done before it is.
 // ---------------------------------------------------------------------------
 
 const PERSON_READ_MS = 5 * 60_000;
-const refusedRead = (error: unknown) => { const status = errorStatus(error); return typeof status === 'number' && status >= 400 && status < 500; };
+/** The server said this account may not read: the cards go. Anything else (a 429, a 5xx, no network) leaves them on screen. */
+const refusedRead = (error: unknown) => { const status = errorStatus(error); return status === 401 || status === 403; };
+
+/** Keep reading: offline, behind a hidden tab, and at once on opening or coming back. A failure shows at once, not after retries. */
+const BOARD_READ = { networkMode: 'always', retry: false, staleTime: 0, refetchOnWindowFocus: 'always', refetchIntervalInBackground: true } as const;
+
+/** Now, kept current on a timer and at once when a sleeping tab wakes, when no timer has run. */
+function useNow(): number {
+  const [, tick] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    const timer = setInterval(tick, 5_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+    };
+  }, []);
+  return Date.now();
+}
 
 type Reveal = ReturnType<typeof usePhoneReveal>;
 type ListQuery<T> = UseQueryResult<Envelope<T[]>>;
 
 /** A list's first read, a refusal, a failed refresh, or the cap: said in words, never as an empty list. */
 function ListState<T>({ query, what, onRetry }: { query: ListQuery<T>; what: string; onRetry: () => void }) {
-  if (query.isLoading) return <div className="mc-card" aria-busy="true">Loading {what}…</div>;
+  if (query.isPending) return <div className="mc-card" aria-busy="true">Loading {what}…</div>;
   if (query.isError && (refusedRead(query.error) || !query.data)) {
     return <QueryFailed error={query.error} what={what} onRetry={onRetry} retrying={query.isFetching} className="mb-3" />;
   }
@@ -45,7 +65,7 @@ function ListState<T>({ query, what, onRetry }: { query: ListQuery<T>; what: str
     return <p role="alert" className="mc-note mc-note-bad mb-3">This list could not refresh. It shows what it last read at {gyTime(query.dataUpdatedAt)}.</p>;
   }
   if ((query.data?.data.length ?? 0) >= SAFETY_LIST_LIMIT) {
-    return <p className="mc-note mc-note-warn mb-3">Showing the first {SAFETY_LIST_LIMIT}. More exist.</p>;
+    return <p className="mc-note mc-note-warn mb-3">Showing the first {SAFETY_LIST_LIMIT}. There may be more.</p>;
   }
   return null;
 }
@@ -69,11 +89,13 @@ function Person({ id, role, reveal }: { id: string; role?: string; reveal: Revea
     <span className="inline-flex flex-wrap items-baseline justify-end gap-x-2">
       <Link href={`/users/${id}`} className="mc-link-button">{name}</Link>
       {role ? <span className="mc-muted">{label('UserRole', role)}</span> : null}
-      <PhoneReveal
-        phone={u.phone}
-        revealed={reveal.revealed[key]}
-        onReveal={reveal.revealFor(key, `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealUserPhone(id, reason))}
-      />
+      {u.phone ? (
+        <PhoneReveal
+          phone={u.phone}
+          revealed={reveal.revealed[key]}
+          onReveal={reveal.revealFor(key, `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealUserPhone(id, reason))}
+        />
+      ) : <span className="mc-muted">No number on file</span>}
     </span>
   );
 }
@@ -91,10 +113,10 @@ function OrderLink({ id, type }: { id: string; type: string | null }) {
 
 type Run = ReturnType<typeof useActionRunner>['run'];
 
-function SosCard({ alert: a, run, reveal }: { alert: SosRow; run: Run; reveal: Reveal }) {
+function SosCard({ alert: a, now, run, reveal }: { alert: SosRow; now: number; run: Run; reveal: Reveal }) {
   const said = sosNotes(a);
   const notShown = sosPressesNotShown(a);
-  const { first, newest } = sosPosition(a);
+  const where = sosPosition(a);
   const can = sosActions(a);
   const raised = gyDateTime(a.triggeredAt);
 
@@ -104,14 +126,14 @@ function SosCard({ alert: a, run, reveal }: { alert: SosRow; run: Run; reveal: R
     confirmLabel: 'Acknowledge',
     reason: false,
     submit: () => acknowledgeSos(a.id),
-    success: () => succeeded('Acknowledged.', 'If its page is still on Ops alerts, acknowledge it there too.'),
+    success: () => succeeded('Acknowledged.', 'If its page is still on Ops alerts, it is still re-paging.'),
   });
   const resolve = () => void run({
     title: 'Resolve this SOS?',
     body: (
       <p>
         Only a person closes an SOS, and a closed one cannot be reopened. Emergency contacts who were texted get an all-clear. Police involved or Abuse opens a
-        safety case against the other person on the trip, if there is one.
+        safety case against the other person on the trip, if there is one. A rider or driver is taken offline at once and told they are under review.
       </p>
     ),
     confirmLabel: 'Resolve',
@@ -125,7 +147,7 @@ function SosCard({ alert: a, run, reveal }: { alert: SosRow; run: Run; reveal: R
   });
 
   return (
-    <li className={`mc-card${sosNeedsYou(a) ? ' border-[var(--mc-bad)]' : ''}`} aria-label={`SOS from ${label('UserRole', a.actorRole)}, ${raised}`}>
+    <li className={`mc-card${sosNeedsYou(a, now) ? ' border-[var(--mc-bad)]' : ''}`} aria-label={`SOS from ${label('UserRole', a.actorRole)}, ${raised}`}>
       <p className="mc-label">SOS · raised {raised} · {label('SosTriggerSource', a.triggerSource)}</p>
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <StatusBadge group="SosStatus" value={a.status} />
@@ -134,7 +156,9 @@ function SosCard({ alert: a, run, reveal }: { alert: SosRow; run: Run; reveal: R
 
       {/* "I'm safe" never closes an alert: a person under duress can be made to tap it. A reason to call, never a dimmed row. */}
       {a.userSafeFlaggedAt ? <p className="mc-note mc-note-warn mb-2">They tapped “I’m safe”. That does not close this: call back and check before resolving.</p> : null}
-      {a.status === 'TRIGGER_PENDING' ? (
+      {sosGraceOver(a, now) ? (
+        <p className="mc-note mc-note-bad mb-2">The grace window ended at {gyTime(a.graceEndsAt)} and it has not gone live, so nobody has been paged. Call them.</p>
+      ) : a.status === 'TRIGGER_PENDING' ? (
         <p className="mc-note mc-note-info mb-2">They can still cancel.{a.graceEndsAt ? ` It goes live at ${gyTime(a.graceEndsAt)} if they do not.` : ''} There is nothing to acknowledge until it is live.</p>
       ) : null}
 
@@ -164,9 +188,12 @@ function SosCard({ alert: a, run, reveal }: { alert: SosRow; run: Run; reveal: R
 
       <section aria-label="Where" className="mt-3 text-sm">
         <p className="font-semibold">Where</p>
-        {newest ? <p>{newest.text} <span className="mc-muted">Newest position, from repeat press ×{newest.seq} at {gyTime(newest.at)}</span></p> : null}
-        {first ? <p>{newest ? `First position: ${first.text}` : first.text}</p> : null}
-        {!first && !newest ? <p>No location was captured.</p> : null}
+        {where ? (
+          <p>
+            {where.text}{where.accuracy ? <span className="mc-muted"> {where.accuracy}</span> : null}
+            {where.seq ? <span className="mc-muted"> Newest position, from repeat press ×{where.seq} at {gyTime(where.at)}</span> : null}
+          </p>
+        ) : <p>No location was captured.</p>}
       </section>
 
       {can.length > 0 ? (
@@ -202,7 +229,7 @@ function CaseCard({ item: c, run }: { item: IncidentRow; run: Run }) {
     body: (
       <p>
         {hold ? `Only Dismissed lifts the ${hold.noun}: any other decision leaves it on until someone lifts it. ` : null}
-        Permanent suspension is a record: it does not suspend anyone. Do that on the person’s page.
+        Warning issued is a record: Swift sends them nothing. Warn them yourself. Permanent suspension is a record too: it does not suspend anyone. Do that on the person’s page.
       </p>
     ),
     confirmLabel: 'Record the decision',
@@ -242,7 +269,7 @@ function CaseCard({ item: c, run }: { item: IncidentRow; run: Run }) {
         {c.legalHold ? <span className="mc-badge">Legal hold</span> : null}
       </div>
       <p className="text-sm whitespace-pre-wrap break-words">{c.summary}</p>
-      {c.status === 'CLOSED' && hold ? <p className="mc-note mc-note-warn mt-2">This case is closed and its {hold.noun} is still on. Closing did not lift it.</p> : null}
+      {c.status === 'CLOSED' && hold ? <p className="mc-note mc-note-warn mt-2">This case is closed and still lists a {hold.noun}. Closing does not lift one.</p> : null}
       {c.status === 'CLOSED' ? null : (
         <dl className="mc-rows">
           {clocksFor(c).map((k) => <div key={k.label} className="mc-row"><dt>{k.label}</dt><dd className={k.state === 'breached' ? 'mc-text-bad' : ''}>{clockWords(k)}</dd></div>)}
@@ -275,10 +302,13 @@ export default function SafetyPage() {
   });
   const reveal = usePhoneReveal(actions.run);
   // A live emergency is not a page you refresh by hand.
-  const alerts = useQuery({ queryKey: ['safety-sos'], queryFn: fetchSafetySos, refetchInterval: 15_000 });
-  const cases = useQuery({ queryKey: ['safety-cases', scope], queryFn: () => fetchSafetyCases(scope), refetchInterval: 60_000 });
+  const alerts = useQuery({ ...BOARD_READ, queryKey: ['safety-sos'], queryFn: ({ signal }) => fetchSafetySos(signal), refetchInterval: 15_000 });
+  const cases = useQuery({ ...BOARD_READ, queryKey: ['safety-cases', scope], queryFn: ({ signal }) => fetchSafetyCases(scope, signal), refetchInterval: 60_000 });
+  const now = useNow();
   // No rows once the server refuses the read, so no buttons; the last good rows if a refresh only failed.
-  const openAlerts = alerts.isError && refusedRead(alerts.error) ? [] : alerts.data?.data ?? [];
+  const alertsRefused = alerts.isError && refusedRead(alerts.error);
+  const openAlerts = alertsRefused ? [] : alerts.data?.data ?? [];
+  const readRecently = sosReadFresh(alerts.dataUpdatedAt, now);
   const queue = queueOrder(cases.isError && refusedRead(cases.error) ? [] : cases.data?.data ?? []);
 
   return (
@@ -290,9 +320,14 @@ export default function SafetyPage() {
       {actions.banner}
       <section aria-label="Open SOS alerts" className="mb-6">
         <h2 className="text-lg font-semibold mb-2">Open SOS alerts</h2>
-        <ListState query={alerts} what="the open SOS alerts" onRetry={() => void alerts.refetch()} />
-        {alerts.isSuccess && openAlerts.length === 0 ? <div className="mc-card">No open SOS.</div> : null}
-        {openAlerts.length > 0 ? <ul className="space-y-3">{openAlerts.map((a) => <SosCard key={a.id} alert={a} run={actions.run} reveal={reveal} />)}</ul> : null}
+        {alerts.dataUpdatedAt > 0 && !alertsRefused && (alerts.isError || !readRecently) ? (
+          <p role="alert" className="mc-note mc-note-bad mb-3">Not read since {gyClock(alerts.dataUpdatedAt)}. There may be an open SOS.</p>
+        ) : (
+          <ListState query={alerts} what="the open SOS alerts" onRetry={() => void alerts.refetch()} />
+        )}
+        {alerts.isSuccess && readRecently && openAlerts.length === 0 ? <div className="mc-card"><p>No open SOS.</p><p className="mc-muted text-xs">Read at {gyClock(alerts.dataUpdatedAt)}</p></div> : null}
+        {openAlerts.length > 0 ? <ul className="space-y-3">{openAlerts.map((a) => <SosCard key={a.id} alert={a} now={now} run={actions.run} reveal={reveal} />)}</ul> : null}
+        {alerts.isSuccess && readRecently && openAlerts.length > 0 ? <p className="mc-muted text-xs mt-2">Read at {gyClock(alerts.dataUpdatedAt)}</p> : null}
       </section>
       <section aria-label="Cases">
         <div className="flex flex-wrap items-center gap-2 mb-2">
