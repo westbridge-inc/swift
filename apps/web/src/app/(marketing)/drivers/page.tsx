@@ -79,10 +79,11 @@ export default function DriversPage() {
                     relationship.
                   </li>
                 </ul>
-                {/* Deliberate: "cash in hand", never "payout". Swift never pays movers —
-                    using the word would describe a money movement that does not happen. */}
+                {/* Deliberate: "cash in hand", never "payout". Swift does not pay earnings:
+                    using the word would describe a money movement that does not happen. It also
+                    promises nothing about a loss at the door, which a person decides case by case. */}
                 <p className="mt-4 text-sm text-[var(--swift-muted)]">
-                  Swift never pays you, because Swift never holds your money. Your earnings screen
+                  Swift does not pay your earnings, because Swift never holds your money. Your earnings screen
                   says <b className="font-semibold text-[var(--swift-ink)]">cash in hand</b> for that
                   reason.
                 </p>

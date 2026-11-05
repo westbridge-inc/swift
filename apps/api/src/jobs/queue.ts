@@ -12,6 +12,7 @@ import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { ownerRlsBindEnabled } from '../lib/owner-rls';
 import { insertTicketFor, orderCaseExists } from '../lib/owner-wall-tickets';
 import { recoveryFor } from './recovery-policy';
+import { removeRetiredSchedules } from './retired-schedules';
 import {
   requireActiveDiscoveryTenant,
   runForActiveDiscoveryTenants,
@@ -863,7 +864,7 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
         // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
         tenantId: null,
         title: 'Possible vendor–rider collusion',
-        body: `${pairs.length} vendor–rider pair(s) show an unusual concentration of guarantee claims. Review the claims dashboard before the next settlement.`,
+        body: `${pairs.length} vendor–rider pair(s) show an unusual concentration of unpaid cash orders. Review Unpaid cash orders before the next settlement.`,
         data: { kind: 'ops_collusion_affinity', pairs: pairs.slice(0, 20) },
       }),
     );
@@ -1724,22 +1725,17 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
-      if (job.name === 'rlp-sweep' || job.name === 'rlp-reserve-provision') {
-        // [DOC-1 §31.4 · P31-1] Loss protection: the daily SLA/reserve sweep, and the monthly provisioning.
+      if (job.name === 'rlp-sweep') {
+        // [DOC-1 §31.4 · P31-1] The daily sweep: decided cases nobody paid, cases nobody decided.
         const { NotificationService } = await import('../modules/notification/notification.service');
         const { CountryConfigService } = await import('../modules/country/country-config.service');
         const { cashRulesFor } = await import('../modules/cash/cash-rules.service');
-        const { sweepLossProtection, provisionReserveForPreviousMonth } = await import('../modules/cash/rlp');
+        const { sweepLossProtection } = await import('../modules/cash/rlp');
         const countryConfig = new CountryConfigService(ctx.prisma);
         const notifications = new NotificationService(ctx.prisma, ctx.io);
         const rulesFor = (code: string) => cashRulesFor(countryConfig, code);
-        if (job.name === 'rlp-sweep') {
-          const run = await sweepLossProtection(ctx.prisma, { notifications, rulesFor, gateFor: (code) => countryConfig.getIdGateThresholdLocal(code) });
-          ctx.log.info(`Loss protection sweep: ${run.breached.length} past SLA (${run.newlyFlagged} newly flagged), ${run.lowReserve.length} reserve(s) low`);
-        } else {
-          const rows = await provisionReserveForPreviousMonth(ctx.prisma, { notifications, rulesFor });
-          ctx.log.info(`Loss protection reserve: ${rows.filter((r) => r.created).length} provisioned of ${rows.length} countries with revenue`);
-        }
+        const run = await sweepLossProtection(ctx.prisma, { notifications, rulesFor });
+        ctx.log.info(`Loss protection sweep: ${run.breached.length} past the staff deadline (${run.newlyFlagged} newly flagged), ${run.overdue.length} waiting for a person`);
         return;
       }
 
@@ -3249,18 +3245,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // [DOC-1 §31.4 · P31-1] Loss protection: SLA breaches and a low reserve, daily at 03:00; the
-  // reserve line provisioned from the previous month's fee revenue on the 1st at 05:00.
+  // [DOC-1 §31.4 · P31-1] Decided cases nobody paid and cases nobody decided, daily at 03:00.
   await queues.verificationQueue.add('rlp-sweep', {}, {
     repeat: { pattern: '0 3 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });
-  await queues.verificationQueue.add('rlp-reserve-provision', {}, {
-    repeat: { pattern: '0 5 1 * *' },
-    removeOnComplete: 12,
-    removeOnFail: 12,
-  });
+  // [Coordinator ruling, 5 Nov 2026] A registration lives in Redis, not in the code: a job that no longer exists is
+  // removed here, or a deployed server keeps firing it.
+  await removeRetiredSchedules(queues.verificationQueue);
 
   await queues.verificationQueue.add('retention-sweep', {}, {
     repeat: { pattern: '10 4 * * *' },

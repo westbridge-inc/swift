@@ -113,7 +113,7 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
     expect(destinationFor({ kind: 'incident_interim_suspension', orderId: 'o1', caseNumber: 'INC-1' }))
       .toEqual({ screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } });
     expect(destinationFor({ kind: 'claim_over_gate', orderId: 'o1' }))
-      .toEqual({ screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } });
+      .toEqual({ screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Unpaid cash order', orderId: 'o1' } });
   });
 
   it('none of the three still falls through to the customer Delivery screen', () => {
@@ -394,7 +394,7 @@ const CENSUS: Case[] = [
   // `d` must mirror what the API actually SENDS. The drift check compares only
   // `kind` strings, so a payload that grows a field goes unnoticed here and the
   // case then grades a shape nothing produces.
-  { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts' },
+  { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Unpaid cash order', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts', scan: false },
   { k: 'guardian_checkin', d: { ...O, sessionId: 's1', level: 'SOFT' }, to: { screen: 'Taxi' }, why: 'passenger mid-RIDE — the check-in card lives on Taxi, which asks the server whether one is outstanding. Was Delivery, a screen a ride never renders on, so the person being asked if they are safe could not answer' },
   { k: 'guardian_driver_confirm', d: { ...O, sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z' }, to: { screen: 'GuardianDriverConfirm', params: { sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z', orderId: 'o1' } }, why: '[TST-001] the DRIVER, on a screen MoverStack mounts. This used to route to Delivery — which MoverStack never mounts — and this census asserted that dead end as passing, on a SAFETY path, while POST /safety/guardian/driver-confirm sat with no caller. It carries the cycle and the nonce so the screen answers THAT check' },
   { k: 'guardian_deescalation', d: { ...O, sessionId: 's1', cycleId: 'cy1' }, to: DELIVERY('o1'), why: 'admins — [S-04] a passenger never answered a hard check and the driver de-escalated; the review is an ops surface, not mobile' },
@@ -554,8 +554,9 @@ const CENSUS: Case[] = [
   { k: 'rlp_suspended', d: {}, to: { screen: 'Claims' }, why: 'rider — the claims screen shows the suspension and the help route' },
   { k: 'rlp_reinstated', d: {}, to: { screen: 'Claims' }, why: 'rider — same screen' },
   { k: 'rlp_sla_breached', d: { breached: 2, date: '2026-09-06' }, to: null, why: 'admins — approved payouts past the SLA' },
-  { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'admins — the reserve line is below its floor' },
-  { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'admins — the monthly provisioning notice' },
+  { k: 'rlp_review_overdue', d: { overdue: 2, date: '2026-09-06' }, to: null, why: 'admins — a case still open at 7 days' },
+  { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'admins — an older notice: no sum has to be held any more', scan: false },
+  { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'admins — the monthly provisioning notice', scan: false },
   { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6). [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No longer sent (the self-declared tier is removed): kept for inbox rows sent before', scan: false },
   { k: 'vendor_needs_public_phone', d: { vendorId: 'v1' }, to: { screen: 'Main' }, why: 'vendor owner — [owner #51] documents done, the store goes live once it publishes a number customers can call; the waiting store\'s own screen asks for it' },
   { k: 'vendor_needs_food_handler_tick', d: { vendorId: 'v1' }, to: { screen: 'VendorRoot', params: { screen: 'Account' } }, why: 'vendor owner — [FOOD-PERMIT · owner 24 Oct] a registered restaurant ticks that everyone who handles its food holds a current certificate; the store\'s Documents (on Account) show the tick' },
@@ -784,7 +785,7 @@ describe('every destination is a route the app actually registers', () => {
     billing_mmg_checkout: 'MMG status is for every partner',
     guardian_driver_confirm: 'the driver is asked to confirm the trip status',
     dispatch_offer: 'the earner has an offer with a running clock',
-    claim_over_gate: 'the rider is owed a delivery guarantee',
+    claim_over_gate: 'an older notice: the rider asks for help with a large unpaid order',
     prep_ready: 'the rider is told the bag is packed at the counter',
     custody_handoff_code: 'the rider holding the goods is told a relay rider is coming',
     custody_relay_assigned: 'a relay rider is asked to take an order over',

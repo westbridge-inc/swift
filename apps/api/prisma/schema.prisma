@@ -1160,7 +1160,7 @@ model ReimbursementClaim {
   /// [DOC-1 §31.4 · DOC-INV-47 · P31-1] The evidence bundle as assembled at filing —
   /// from artefacts the platform already holds (arrival, GPS, photo, pickup, cart),
   /// never typed by the rider. Re-derived at payout; the stored copy is the review
-  /// record. `evidenceComplete` false means the claim is never auto-paid.
+  /// record, refreshed when a person decides. Incomplete evidence needs a person's written reason to be paid.
   evidence         Json?
   evidenceComplete Boolean     @default(false)
   handoverEvidenceId String? @unique
@@ -1177,14 +1177,14 @@ model ReimbursementClaim {
   @@map("reimbursement_claims")
 }
 
-/// [DOC-1 §31.4 · P31-1] Rider loss protection reserve ledger — see RlpReserveEntryKind.
+/// [DOC-1 §31.4 · P31-1] The set-aside ledger — see RlpReserveEntryKind.
 model RlpReserveEntry {
   id          String              @id @default(cuid())
   countryCode String
   kind        RlpReserveEntryKind
-  /// Signed, major units: provisioning and top-ups positive, a payout negative.
+  /// Signed, major units: top-ups positive, a payout negative.
   amount      Decimal             @db.Decimal(12, 2)
-  /// PROVISION idempotency: one provisioning row per country per calendar month (YYYY-MM).
+  /// History only: one PROVISION row per country per calendar month (YYYY-MM).
   periodKey   String?
   /// PAYOUT idempotency: one reserve draw per claim.
   claimId     String?             @unique
@@ -1206,11 +1206,12 @@ enum ClaimStatus {
   PAID
 }
 
-/// [DOC-1 §31.4 · P31-1] The rider loss protection reserve: a named liability line,
-/// per country. PROVISION is the monthly provisioning from fee revenue, PAYOUT is one
-/// claim drawn from it (negative), ADJUSTMENT an audited manual top-up or correction.
-/// The balance is the sum, and the database refuses a sum below zero — a claim is paid
-/// from the reserve or not at all, never ad hoc from operating cash.
+/// [DOC-1 §31.4 · P31-1] The company money a person has recorded for payments at the door,
+/// per country. ADJUSTMENT is an audited manual entry of plain company money or a correction,
+/// PAYOUT is one decided case drawn from it (negative). PROVISION is history: the old monthly
+/// share of fees, which nothing writes any more (coordinator ruling, 5 Nov 2026).
+/// The balance is the sum, and the database refuses a sum below zero: a payment is recorded
+/// from this line or not at all, so the record never goes negative.
 enum RlpReserveEntryKind {
   PROVISION
   PAYOUT

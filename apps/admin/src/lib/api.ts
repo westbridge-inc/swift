@@ -533,12 +533,12 @@ export const fetchClaims = (status?: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims?limit=50${status ? `&status=${status}` : ''}`);
 export const approveClaim = (id: string, reason: string) =>
   apiFetch(`/api/v1/admin/cash-rules/claims/${id}/approve`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
-export const rejectClaim = (id: string, reason: string) =>
-  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason }), reason });
+export const rejectClaim = (id: string, reason: string, nothingSent?: boolean) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/reject`, { method: 'PUT', body: JSON.stringify({ reason, ...(nothingSent ? { nothingSent } : {}) }), reason });
 // [A-11] The payout carries its evidence: a unique transfer reference AND the
 // amount actually sent, which the server checks against the claim's own figure.
-export const payClaim = (id: string, reference: string, amount: string | number, reason: string) =>
-  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference, amount }), reason });
+export const payClaim = (id: string, reference: string, amount: string | number, reason: string, evidenceReason?: string) =>
+  apiFetch(`/api/v1/admin/cash-rules/claims/${id}/paid`, { method: 'PUT', body: JSON.stringify({ reference, amount, ...(evidenceReason ? { evidenceReason } : {}) }), reason });
 export const fetchCashMetrics = () => apiFetch('/api/v1/admin/cash-rules/metrics');
 // [DOC-1 §31.4 · P31-1] The loss-protection reserve line and the mover's protection.
 export const fetchRlpReserve = (country = 'GY') => apiFetch(`/api/v1/admin/cash-rules/rlp/reserve?country=${encodeURIComponent(country)}`);

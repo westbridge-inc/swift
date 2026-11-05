@@ -10,7 +10,7 @@ import { runWithoutTenant } from '../plugins/tenant-context';
 import { NotificationService } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
-import { LOSS_PROTECTION_DEFAULTS, provisionReserveForPreviousMonth, sweepLossProtection } from '../modules/cash/rlp';
+import { LOSS_PROTECTION_DEFAULTS, sweepLossProtection } from '../modules/cash/rlp';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { testPhone } from './helpers/fixture-ids';
 
@@ -18,11 +18,11 @@ import { testPhone } from './helpers/fixture-ids';
 // [REVIEW-G2 S4-1 + REVIEW-M S4 on #2079] Rider loss protection is paid from Swift's reserve: a COUNTRY line
 // (rlp_reserve_entries has no tenant). #2079 confined reading and topping it up to the default tenant. The
 // rest of the census:
-//   writers  adjustReserve (admin adjust: #2079), drawReserveForPayout (a claim PAID), monthly provisioning;
-//   readers  reserveStatement (admin read: #2079), the daily sweep and provisioning notices.
+//   writers  adjustReserve (admin adjust: #2079), drawReserveForPayout (a claim PAID);
+//   readers  reserveStatement (admin read: #2079), the daily sweep's notices.
 // Like billing (requireDefaultTenantBilling), the program belongs to the default tenant until a per-operator
 // reserve exists: another operator's claim is never paid from it (refused before the balance is read, so
-// its refusal never states the balance), its partners' fees never provision it, and its admins are never
+// its refusal never states the balance), and its admins are never
 // paged with the line's balance (the notices are the default tenant's, not platform-wide).
 // ---------------------------------------------------------------------------
 
@@ -108,73 +108,16 @@ describe('[#2079 follow-up] another operator never draws on, funds, or hears abo
     // The daily sweep is about Swift's own claims: another operator's approved claim, however late, is neither
     // listed in its SLA page nor flagged by it.
     const sweep = await sys(() => sweepLossProtection(app.prisma, {
-      now: new Date(Date.now() + 30 * 86_400_000), rulesFor: async () => ({ ...LOSS_PROTECTION_DEFAULTS }), gateFor: async () => 1,
+      now: new Date(Date.now() + 30 * 86_400_000), rulesFor: async () => ({ ...LOSS_PROTECTION_DEFAULTS }),
     }));
     expect(sweep.breached.map((b) => b.claimId)).not.toContain(claim.id);
     expect((await sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } }))).flags).toEqual([]);
   });
 
-  it('monthly provisioning counts only the default tenant\'s paid fees, and its notice pages the default tenant\'s admins only', async () => {
-    // Two countries of this run's own (two letters, never a real market) so no other suite's revenue mixes in.
-    const tag = RUN.replace(/[^a-z]/g, 'q').toUpperCase();
-    const CO_B = `X${tag[0] ?? 'Q'}`;
-    const CO_A = `Y${tag[1] ?? 'Q'}`;
-    let year = 2041;
-    while (await sys(() => app.prisma.rlpReserveEntry.count({ where: { countryCode: { in: [CO_A, CO_B] }, kind: 'PROVISION', periodKey: `${year}-03` } })) > 0) year += 1;
-    const period = new Date(Date.UTC(year, 3, 1));
-    const payer = async (tenantId: string, countryCode: string) => {
-      const u = await user(tenantId, ['MOVER'], 'MOVER', { countryCode });
-      const r = await sys(() => app.prisma.rider.create({ data: { userId: u.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }));
-      const sub = await sys(() => app.prisma.subscription.create({ data: { riderId: r.id, type: 'DELIVERY_RIDER', status: 'ACTIVE', weeklyRate: 12000, currentPeriodStart: new Date(Date.UTC(year, 2, 1)), currentPeriodEnd: new Date(Date.UTC(year, 2, 8)), nextBillingDate: new Date(Date.UTC(year, 2, 8)) } as never }));
-      await sys(() => app.prisma.subscriptionPayment.create({ data: { subscriptionId: sub.id, amount: 12000, status: 'CAPTURED', paymentMethod: 'CASH', periodStart: new Date(Date.UTC(year, 2, 1)), periodEnd: new Date(Date.UTC(year, 2, 8)), paidAt: new Date(Date.UTC(year, 2, 3)) } as never }));
-      return sub;
-    };
-    const subs = [await payer(TENANT_B, CO_B), await payer('swift-default', CO_A)];
-    const adminB = await user(TENANT_B, ['ADMIN', 'CUSTOMER'], 'ADMIN', { admin: { create: { permissions: ['*'] } } });
-    const adminA = await user('swift-default', ['ADMIN', 'CUSTOMER'], 'ADMIN', { admin: { create: { permissions: ['*'] } } });
-    try {
-      const run = await sys(() => provisionReserveForPreviousMonth(app.prisma, { now: period, rulesFor: async () => ({ ...LOSS_PROTECTION_DEFAULTS, rlpReserveRatePct: 2 }), notifications }));
-      expect(run.find((r) => r.countryCode === CO_B)).toBeUndefined();
-      expect(run.find((r) => r.countryCode === CO_A)).toMatchObject({ created: true, revenue: 12000, provisioned: 240 });
-      const told = async (userId: string) => sys(() => app.prisma.notification.count({ where: { userId, data: { path: ['kind'], equals: 'rlp_reserve_provisioned' } } }));
-      expect(await told(adminA.id)).toBe(1);
-      expect(await told(adminB.id)).toBe(0);
-    } finally {
-      for (const sub of subs) await sys(() => app.prisma.subscription.delete({ where: { id: sub.id } }));
-    }
-  });
-
-  it('[BILL-PRO] a pro\'s paid weekly fee is fee revenue too: it provisions the reserve in the pro\'s country, only in the default tenant', async () => {
-    const tag = RUN.replace(/[^a-z]/g, 'q').toUpperCase();
-    const CO_B = `W${tag[2] ?? 'Q'}`;
-    const CO_A = `V${tag[3] ?? 'Q'}`;
-    let year = 2041;
-    while (await sys(() => app.prisma.rlpReserveEntry.count({ where: { countryCode: { in: [CO_A, CO_B] }, kind: 'PROVISION', periodKey: `${year}-05` } })) > 0) year += 1;
-    const period = new Date(Date.UTC(year, 5, 1));
-    const providerIds: string[] = [];
-    const proPayer = async (tenantId: string, countryCode: string) => {
-      const u = await user(tenantId, ['CUSTOMER'], 'CUSTOMER', { countryCode });
-      const p = await sys(() => app.prisma.serviceProvider.create({ data: { userId: u.id, trade: 'tutor', isVerified: true } }));
-      providerIds.push(p.id);
-      const sub = await sys(() => app.prisma.subscription.create({ data: { serviceProviderId: p.id, type: 'INDEPENDENT_PRO', status: 'ACTIVE', weeklyRate: 8000, currentPeriodStart: new Date(Date.UTC(year, 4, 1)), currentPeriodEnd: new Date(Date.UTC(year, 4, 8)), nextBillingDate: new Date(Date.UTC(year, 4, 8)) } as never }));
-      await sys(() => app.prisma.subscriptionPayment.create({ data: { subscriptionId: sub.id, amount: 8000, status: 'CAPTURED', paymentMethod: 'CASH', periodStart: new Date(Date.UTC(year, 4, 1)), periodEnd: new Date(Date.UTC(year, 4, 8)), paidAt: new Date(Date.UTC(year, 4, 3)) } as never }));
-      return sub;
-    };
-    const subs = [await proPayer(TENANT_B, CO_B), await proPayer('swift-default', CO_A)];
-    try {
-      const run = await sys(() => provisionReserveForPreviousMonth(app.prisma, { now: period, rulesFor: async () => ({ ...LOSS_PROTECTION_DEFAULTS, rlpReserveRatePct: 2 }), notifications }));
-      expect(run.find((r) => r.countryCode === CO_B)).toBeUndefined();
-      expect(run.find((r) => r.countryCode === CO_A)).toMatchObject({ created: true, revenue: 8000, provisioned: 160 });
-    } finally {
-      for (const sub of subs) await sys(() => app.prisma.subscription.delete({ where: { id: sub.id } }));
-      await sys(() => app.prisma.serviceProvider.deleteMany({ where: { id: { in: providerIds } } }));
-    }
-  });
-
   it('no loss-protection notice is platform-wide: each pages the default tenant (census of rlp.ts)', () => {
     const rlp = readFileSync(join(__dirname, '..', 'modules', 'cash', 'rlp.ts'), 'utf8');
     const calls = rlp.split('notifyAdmins(prisma').length - 1;
-    expect(calls).toBeGreaterThanOrEqual(3);
+    expect(calls).toBeGreaterThanOrEqual(2); // the staff-deadline notice and the 7-day reminder; the monthly and low-line ones are gone
     expect(rlp).not.toMatch(/tenantId: null/);
     expect(rlp.match(/notifyAdmins\(prisma, opts\.notifications, \{\s*tenantId: RLP_TENANT,/g)?.length ?? 0).toBe(calls);
   });

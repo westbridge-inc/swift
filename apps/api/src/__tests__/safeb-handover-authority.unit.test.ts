@@ -113,7 +113,7 @@ function fixture() {
     order.status = 'FAILED'; order.paymentStatus = 'FAILED';
     state.claim = {
       id: 'safeb-claim', orderId: order.id, riderId: null, driverId: driver.id,
-      customerId: order.customerId, amount: 1000, status: 'AUTO_APPROVED', reason: 'refused',
+      customerId: order.customerId, amount: 1000, status: 'APPROVED', reason: 'refused',
       gpsLat: DOOR.lat, gpsLng: DOOR.lng, photoUrl, createdAt: new Date(), reviewedBy: null,
     };
     return state.claim;
@@ -174,7 +174,7 @@ describe('failed handover needs authoritative evidence', () => {
     expect.soft(result).toBe('RLP_EVIDENCE_INCOMPLETE');
     expect.soft(h.state.draws).toHaveLength(0);
     expect.soft(h.state.reserve).toBe(10_000);
-    expect.soft(h.state.claim.status).toBe('AUTO_APPROVED');
+    expect.soft(h.state.claim.status).toBe('APPROVED');
   });
 
   it('rechecks changed completion evidence within the payout transaction', async () => {

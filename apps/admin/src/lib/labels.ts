@@ -87,7 +87,7 @@ export const ENUM_LABELS = {
     RESCUE_INCENTIVE: 'Rescue bonus',
   },
   ClaimStatus: {
-    AUTO_APPROVED: 'Approved automatically', PENDING_REVIEW: 'Waiting for review', APPROVED: 'Approved',
+    AUTO_APPROVED: 'Old rule, needs a person', PENDING_REVIEW: 'Waiting for review', APPROVED: 'Approved',
     REJECTED: 'Rejected', PAID: 'Paid',
   },
   ReturnStatus: {
@@ -191,7 +191,7 @@ const TONES: Partial<Record<EnumName, Record<string, Tone>>> = {
   },
   PaymentStatus: { CAPTURED: 'good', CLAIMED: 'warn', FAILED: 'bad', UNKNOWN: 'warn', PENDING: 'neutral' },
   SubscriptionStatus: { ACTIVE: 'good', TRIAL: 'info', PAUSED: 'neutral', PAST_DUE: 'warn', SUSPENDED: 'bad', CANCELLED: 'neutral', CHURNED: 'neutral' },
-  ClaimStatus: { AUTO_APPROVED: 'good', PENDING_REVIEW: 'warn', APPROVED: 'good', REJECTED: 'bad', PAID: 'good' },
+  ClaimStatus: { AUTO_APPROVED: 'warn', PENDING_REVIEW: 'warn', APPROVED: 'good', REJECTED: 'bad', PAID: 'good' },
   ReturnStatus: { REQUESTED: 'warn', APPROVED: 'good', REJECTED: 'bad', REFUND_DUE: 'warn', REFUNDED: 'good' },
   VerificationDocumentStatus: { PENDING: 'warn', APPROVED: 'good', REJECTED: 'bad', EXPIRED: 'bad' },
   SupportStatus: { OPEN: 'warn', IN_PROGRESS: 'info', RESOLVED: 'good' },

@@ -197,7 +197,7 @@ describe('the failed handover is one generation', () => {
     expect(await facts(order.id, customer.userId)).toEqual({ status: 'ARRIVED', payment: 'PENDING', strikes: 0, claims: 0, earnings: 0, filings: 0 });
 
     const retry = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl, sessionId: rider.sessionId });
-    expect(retry.claim?.status).toBe('AUTO_APPROVED');
+    expect(retry.claim?.status).toBe('PENDING_REVIEW');
     expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0, filings: 1 });
     // The notices left after the commit: the customer's outcome notice and the rider's claim notice, once each.
     expect(await app.prisma.notification.count({ where: { userId: customer.userId, data: { path: ['kind'], equals: 'handover_review' } } })).toBe(1);
@@ -211,7 +211,7 @@ describe('the failed handover is one generation', () => {
     const spy = vi.spyOn(notifications, 'send').mockRejectedValue(new Error('push provider down'));
     try {
       const res = await cash.handover(order.id, rider.userId, { outcome: 'refused', gps: order.door, photoUrl: await issuedPhoto(order.id, rider.userId), sessionId: rider.sessionId });
-      expect(res.claim?.status, JSON.stringify(res.claim?.flags)).toBe('AUTO_APPROVED');
+      expect(res.claim?.status, JSON.stringify(res.claim?.flags)).toBe('PENDING_REVIEW');
       expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0, filings: 1 });
     } finally {
       spy.mockRestore();
@@ -224,7 +224,7 @@ describe('the failed handover is one generation', () => {
     const order = await makeAtDoorOrder(customer.userId, rider.riderId);
     const photoUrl = await issuedPhoto(order.id, rider.userId);
     const first = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl, sessionId: rider.sessionId });
-    expect(first.claim?.status).toBe('AUTO_APPROVED');
+    expect(first.claim?.status).toBe('PENDING_REVIEW');
     const again = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl, sessionId: rider.sessionId });
     expect(again.claim?.id).toBe(first.claim?.id);
     expect(again.order.status).toBe('FAILED');
