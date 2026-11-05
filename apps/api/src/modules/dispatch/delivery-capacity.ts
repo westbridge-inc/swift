@@ -7,6 +7,7 @@ import { haversineM } from '../batching/eligibility';
 import { riderStackingCapacity } from './concurrency-policy';
 import { sizeClassForProbe, stackableForProbe } from './stack-eligibility';
 import { goodsVehicleTypesForPackageSize } from '../../config/vehicle-classes';
+import { AppError } from '../../utils/errors';
 import type { DispatchCandidate } from './scoring';
 
 // ---------------------------------------------------------------------------
@@ -174,6 +175,8 @@ export async function ridersOnlineNear(
   packageSize: string | null,
   freshSeconds: number,
   km = CAPACITY_RADIUS_KM,
+  /** Who serves this work: dispatch's own split (a parcel goes to COURIER or BOTH riders). */
+  riderTypes: readonly string[] = ['DELIVERY', 'BOTH'],
 ): Promise<number> {
   const freshSince = new Date(Date.now() - freshSeconds * 1000);
   const tenantFilter = tenantId ? Prisma.sql`AND u."tenantId" = ${tenantId}` : Prisma.empty;
@@ -188,7 +191,7 @@ export async function ridersOnlineNear(
       AND u."activeRole" IN ('MOVER', 'RIDER')
       ${tenantFilter}
       AND r."vehicleType"::text = ANY(${goodsVehicleTypesForPackageSize(packageSize)})
-      AND r."riderType"::text = ANY(ARRAY['DELIVERY','BOTH'])
+      AND r."riderType"::text = ANY(${[...riderTypes]})
       AND r."currentLat" IS NOT NULL
       AND r."currentLng" IS NOT NULL
       AND ST_DWithin(
@@ -197,6 +200,27 @@ export async function ridersOnlineNear(
         ${km * 1000}
       )`;
   return Number(rows[0]?.n ?? 0);
+}
+
+/**
+ * [FULL-LAUNCH] Will any rider ever be offered this parcel? A count, not a promise: every rider online within the
+ * widest search, busy or not, because a parcel waits for one who frees up. Zero means the job could only sit "looking"
+ * until it is cancelled, so the sender is told now. Same flag as the store gate; a failed read says nothing and the
+ * parcel goes ahead.
+ */
+export async function assertParcelHasRiders(
+  prisma: PrismaClient,
+  pickup: { lat: number; lng: number },
+  tenantId: string | null,
+  packageSize: string,
+  freshSeconds: number,
+  widestKm: number,
+): Promise<void> {
+  if (process.env['DISPATCH_AVAILABILITY'] !== '1' || process.env['DELIVERY_BLOCK_ON_NONE'] === '0') return;
+  const riders = await ridersOnlineNear(prisma, pickup, tenantId, packageSize, freshSeconds, widestKm, ['COURIER', 'BOTH']).catch(() => null);
+  if (riders === 0) {
+    throw new AppError(409, 'DELIVERY_NO_RIDERS', 'No riders are online near your pickup right now — try sending your parcel again later.', { reason: 'NO_RIDERS' });
+  }
 }
 
 /** The pure decision, from the measured numbers (exported for the unit test). */

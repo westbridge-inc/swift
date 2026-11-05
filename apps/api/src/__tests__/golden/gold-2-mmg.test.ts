@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { beforeEach, describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
@@ -18,6 +18,7 @@ import { startGoldenWorker } from './gold-7-worker';
 import { hashVelocityId } from '../../modules/integrity/velocity';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { grantStepUp } from '../helpers/step-up';
+import { freshOrderPlaceBudget } from '../helpers/order-place-budget';
 
 // Provider/device-only: opening the real wallet, live MMG acceptance and real
 // SMS/push delivery are excluded. In-app link/claim/refusal/hold cases below
@@ -287,6 +288,8 @@ async function purgeRedis(ids: string[], velocityActors: string[]) {
     if (mine.length > 0) await app.redis.del(...mine);
   } while (cursor !== '0');
 }
+
+beforeEach(() => freshOrderPlaceBudget(app.redis));
 
 beforeAll(async () => {
   vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', PAY_HOST);

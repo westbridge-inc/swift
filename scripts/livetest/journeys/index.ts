@@ -21,7 +21,7 @@ import { JourneyRun, type Journey, type JourneyResult } from '../journey.js';
 import { writeResults } from '../report.js';
 import { seedJourneyRoster } from '../roster.js';
 import { provisionJourneyWorld, moversOffline, startHeartbeat } from '../provision.js';
-import { sleep } from '../client.js';
+import { POST, sleep } from '../client.js';
 import { latestHoldUntil } from './common.js';
 import type { Ctx } from './context.js';
 import { AUTH_01, AUTH_02, AUTH_03, PLAT_03 } from './auth.js';
@@ -94,6 +94,11 @@ export async function runJourneySuite(o: SuiteOpts): Promise<number> {
 
   o.log('Phase 1 — roster (real signup path) and world (vendors orderable, movers online)');
   const roster = await seedJourneyRoster(o.log);
+  // [FULL-LAUNCH] The accounts are reused and the order limit is 6 an hour: a rerun inside one clock hour starts clean
+  // here, on the private instance only. Within a run no customer places more than 5:
+  // C1 5, C2 5, C3 4, C4 5, C5 5, C6 5, C7 2, C8 5. A new journey that places an order keeps to that.
+  const budget = await POST('/test-control/order-place-budget/reset', {}, Object.values(roster.customers)[0]!.session.token);
+  if (!budget.ok) throw new Error(`the order budget could not be reset: ${budget.status}`);
   const world = await provisionJourneyWorld(roster, o.admin, o.log);
   const overrides: Record<string, { lat: number; lng: number } | null | undefined> = {};
   const ctx: Ctx = { runId: o.runId, log: o.log, identity: o.identity, admin: o.admin, adminPhone: o.adminPhone, roster, world, stash: { heartbeatOverrides: overrides } };

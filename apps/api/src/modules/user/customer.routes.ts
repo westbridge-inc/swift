@@ -15,7 +15,7 @@ import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
-import { velocityGuard } from '../integrity/velocity';
+import { readOrderPlacementBudget, refundOrderPlacement, reserveOrderPlacement, velocityGuard, type OrderPlacementReservation } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
@@ -2548,6 +2548,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // (releasing it is what let the receipt probe answer "none" for a placed
     // order) and the answer is the committed receipt.
     let commit = null as CheckoutCommit | null;
+    // [FULL-LAUNCH] The order limit's reservation: given back only on the confirmed rollback below.
+    let reservation = null as OrderPlacementReservation | null;
     try {
       result = await orderService.checkout({
         userId,
@@ -2564,6 +2566,9 @@ export async function customerRoutes(app: FastifyInstance) {
           ? { expectedPrices: { total: body.expectedTotal, lines: body.expectedLines } }
           : {}),
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
+        reservePlacement: async (orders) => {
+          reservation = await reserveOrderPlacement(app.redis, await readOrderPlacementBudget({ prisma: app.prisma }, userId), orders);
+        },
         onCommitted: (committed) => { commit = committed; },
       });
     } catch (err) {
@@ -2592,6 +2597,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // hold the key hostage — release so the same key can retry once the
         // customer fixes the problem (e.g. MIN_ORDER). Only this request's own
         // claim: never a newer request's after this one's claim was lost.
+        await refundOrderPlacement(app.redis, reservation);
         if (redisKey) await releaseCheckoutClaim(app.redis, redisKey, claim).catch(() => {});
         throw err;
       }

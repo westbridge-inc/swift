@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { beforeEach, describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -15,6 +15,7 @@ import { escalateStoreSilentMmgClaim, expireUnpaidMmgAcceptance, expireUnpaidMmg
 import { MMG_ACCEPT_EXPIRY_REASON, MMG_STORE_SILENT_SUBJECT } from '../modules/order/mmg-accept-expiry';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { freshOrderPlaceBudget } from './helpers/order-place-budget';
 
 // ---------------------------------------------------------------------------
 // [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An MMG order the store ACCEPTED but
@@ -151,6 +152,8 @@ async function purgeFixtures() {
     } while (cursor !== '0');
   });
 }
+
+beforeEach(() => freshOrderPlaceBudget(app.redis));
 
 beforeAll(async () => {
   vi.stubEnv('STORE_MMG_PAY_LINK', '');
