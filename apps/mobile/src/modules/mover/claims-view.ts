@@ -10,9 +10,10 @@ export type ClaimView = {
   underReview: boolean;
 };
 
-export function claimStatus(status: string): { label: string; tone: 'brand' | 'success' | 'neutral' | 'error' } {
+export function claimStatus(status: string, evidenceComplete = true): { label: string; tone: 'brand' | 'success' | 'neutral' | 'error' } {
   switch (status) {
-    case 'APPROVED': return { label: 'Approved by a person', tone: 'success' };
+    // Evidence is missing: it needs one more decision, so nothing reads as done.
+    case 'APPROVED': return evidenceComplete ? { label: 'Approved by a person', tone: 'success' } : { label: 'Reviewed', tone: 'brand' };
     case 'PAID': return { label: 'Paid', tone: 'success' };
     // A row the old rule approved automatically waits for a person like a new one.
     case 'AUTO_APPROVED': case 'PENDING_REVIEW': return { label: 'A person will review this', tone: 'brand' };
@@ -25,6 +26,7 @@ export function claimStatus(status: string): { label: string; tone: 'brand' | 's
 const EVIDENCE_LABEL: Record<string, string> = {
   handover_not_completed: 'Handover was not completed',
   rider_at_door: 'You were at the door',
+  elapsed_wait: 'Your wait was recorded',
   customer_contacted: 'You contacted the customer in the app',
   door_photo: 'Photo at the door',
   pickup_proof: 'Pickup recorded',
@@ -43,7 +45,7 @@ export function flagHint(flag: string): string | null {
     case 'over_review_threshold': case 'over_gate': return 'Orders of this size get a closer look.';
     case 'over_cap': return 'Several this month. The reviewer can see this.';
     case 'protection_suspended': return 'Swift\'s help was suspended for you when this was recorded. Get help to ask for a review.';
-    case 'evidence_incomplete': return 'Some evidence is missing (see the checklist). Swift cannot pay without it.';
+    case 'evidence_incomplete': return 'Some evidence is missing (see the checklist). The reviewer can see this.';
     case 'gps_far': return 'Your location was recorded far from the delivery address. The reviewer can see this.';
     case 'sla_breached': return 'This is taking longer than it should. Swift has been told.';
     case 'collusion_customer': case 'collusion_customer_cluster': case 'collusion_pair': case 'collusion_pair_cluster': case 'collusion_address': case 'outlier':

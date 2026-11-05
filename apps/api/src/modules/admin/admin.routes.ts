@@ -7580,7 +7580,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
       tenantPrisma.reimbursementClaim.count({ where }),
     ]);
-    return { success: true, ...paginatedResponse(claims, total, { page, limit, skip }) };
+    // The evidence as it stands now: the console offers only what can be recorded.
+    const rows = status === 'PAID' || status === 'REJECTED' ? claims : await cashRules.withEvidenceNow(claims);
+    return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });
 
   app.put('/cash-rules/claims/:id/approve', { preHandler: [adminGuard] }, async (request) => {
@@ -7611,12 +7613,14 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({
       reference: z.string(),
       amount: z.union([z.number(), z.string()]),
+      // Required by the service when the evidence is incomplete. In the body, so the C4 fingerprint covers it.
+      evidenceReason: z.string().max(500).optional(),
     }).parse(request.body ?? {});
     // [ADM-002] PAID is a money fact on a manual rail; the CAS, the payout
     // evidence and the audit row commit together. `E.claim` declares paymentRef
     // and paidAmount, so the diff IS the evidence — the legacy row is retired.
     const claim = await cashRules.markClaimPaid(id, request.user.userId, body.reference, body.amount,
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }), { evidenceReason: body.evidenceReason });
     return { success: true, data: claim };
   });
 
@@ -7628,7 +7632,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ─── [DOC-1 §31.4 · P31-1] Rider loss protection: the reserve line and suspension ──
 
-  /** The set-aside for a country: balance, floor, latest entries. */
+  /** The set-aside for a country: balance, latest entries. */
   app.get('/cash-rules/rlp/reserve', { preHandler: [canonicalTenantGuard] }, async (request) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
     return { success: true, data: await cashRules.lossProtectionReserve(country.toUpperCase()) };

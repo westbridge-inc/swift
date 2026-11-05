@@ -11,15 +11,15 @@ import { doorCashHoldAudience, stageDoorCashHoldPage, stageDoorCashShortPage } f
 import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
-import { identityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
+import { identityAuthority } from '../integrity/identity-review';
 import { CUSTOMER_ID_DOC_TYPE } from '../verification/retention-rules';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
 import { assertTripMayEndUnpaidOn } from '../rides/taxi-stop-rules';
 import { assertFailureSource, captureHandoverEvidence, handoverBinding } from './handover-evidence';
 import { type HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
-  LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, adjustReserve, assembleClaimEvidence, assertEvidenceComplete, coveredAmountFor,
-  assertRlpOperator, drawReserveForPayout, reserveStatement, rollingClaimTotal, type LossProtectionRules,
+  LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, adjustReserve, assembleClaimEvidence, coveredAmountFor, evidenceReasonFor,
+  assertRlpOperator, drawReserveForPayout, reserveStatement, rollingClaimTotal, type ClaimForEvidence, type LossProtectionRules,
 } from './rlp';
 
 // ---------------------------------------------------------------------------
@@ -910,29 +910,54 @@ export class CashRulesService {
   // -------------------------------------------------------------------------
 
   async approveClaim(claimId: string, adminId: string, note?: string, onAudit?: OnAudit) {
+    const row = await this.prisma.reimbursementClaim.findUnique({ where: { id: claimId } });
+    if (!row) throw new NotFoundError('Claim', claimId);
+    // The stored copy can be stale in both directions (a scan cleared, a rule changed), so the record and the words
+    // both come from the bundle as it stands now, the same way the payment reads it.
+    const { bundle } = await this.evidenceNow(row);
+    const flags = row.flags.filter((f) => f !== LOSS_PROTECTION_FLAGS.evidenceIncomplete);
+    if (!bundle.complete) flags.push(LOSS_PROTECTION_FLAGS.evidenceIncomplete);
     // [Coordinator ruling, 5 Nov 2026] A row the old rule approved automatically waits for a person like a new one.
     const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW', 'AUTO_APPROVED'], {
       status: 'APPROVED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
+      evidence: bundle as unknown as Prisma.InputJsonValue, evidenceComplete: bundle.complete, flags,
     }, onAudit);
-    // One decision about one order, told as that. DOC-INV-47 still refuses a payment without the bundle, so an
-    // approval over missing evidence says what will happen.
-    if (updated.evidenceComplete) {
+    // One decision about one order, told as that. With evidence missing nothing leaves without a written reason, so
+    // no amount is named: that is one more decision, and the mover hears either way.
+    if (bundle.complete) {
       await this.notifyClaim(updated, 'Swift decided to help', `A person at Swift decided to help with $${Number(updated.amount).toLocaleString()}, for this order only. You will get a message when it is sent.`, claimId);
     } else {
-      await this.notifyClaim(updated, 'Reviewed', 'A person at Swift reviewed this, but some evidence is missing, so Swift cannot pay it. Get help if you think this is wrong.', claimId);
+      await this.notifyClaim(updated, 'Reviewed', 'A person at Swift looked at this. Some evidence is missing, so it needs one more decision before anything is sent. You will get a message either way.', claimId);
     }
     return updated;
   }
 
+  /** The evidence as it stands now, with the country rule it is read under. */
+  private async evidenceNow(claim: ClaimForEvidence) {
+    const order = await this.prisma.order.findUnique({ where: { id: claim.orderId }, select: { customer: { select: { countryCode: true } } } });
+    if (!order) throw new NotFoundError('Order', claim.orderId);
+    const rules = await this.configFor(order.customer.countryCode);
+    return { bundle: await assembleClaimEvidence(this.prisma, claim, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm }) };
+  }
+
+  /** The review queue's rows with the evidence as it stands now, so the console offers only what can be recorded. */
+  async withEvidenceNow<T extends ClaimForEvidence>(claims: T[]): Promise<Array<T & { evidenceNow: { complete: boolean; missing: string[] } | null }>> {
+    return Promise.all(claims.map(async (claim) => {
+      const now = await this.evidenceNow(claim).catch(() => null);
+      return { ...claim, evidenceNow: now ? { complete: now.bundle.complete, missing: now.bundle.missing } : null };
+    }));
+  }
+
   async rejectClaim(claimId: string, adminId: string, note: string, onAudit?: OnAudit) {
-    const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW', 'AUTO_APPROVED'], {
+    // No case is ever stuck: until it is paid a person can close it, so an open case cannot block a deletion for good.
+    const updated = await this.transitionClaim(claimId, ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'], {
       status: 'REJECTED', reviewedBy: adminId, reviewNote: note, reviewedAt: new Date(),
     }, onAudit);
     await this.notifyClaim(updated, 'Not approved', `A person at Swift decided not to help with this one: ${note}`, claimId);
     return updated;
   }
 
-  async markClaimPaid(claimId: string, adminId: string, paymentRef: string, paidAmount: unknown, onAudit?: OnAudit) {
+  async markClaimPaid(claimId: string, adminId: string, paymentRef: string, paidAmount: unknown, onAudit?: OnAudit, opts: { evidenceReason?: string } = {}) {
     // [WR-004] PAID is a money fact on a manual rail — the reference (bank/MMG
     // ref, receipt number) IS the evidence. Without it the record attests a
     // payout nobody can trace, so it is required, not optional.
@@ -955,9 +980,10 @@ export class CashRulesService {
     // [#2079 follow-up] Swift's reserve pays Swift's claims only: another operator's is refused first.
     assertRlpOperator(claimOrder.tenantId);
 
-    // [DOC-1 §31.4 · DOC-INV-47 · P31-1] Nobody pays without the bundle, re-derived from the artefacts inside the
-    // transaction below: the stored copy is the reviewer's record, not the gate. [Coordinator ruling, 5 Nov 2026] And
-    // nobody pays what no person decided: a row the old rule approved automatically waits for a person.
+    // [DOC-1 §31.4 · DOC-INV-47 · P31-1] The bundle is re-derived from the artefacts inside the transaction below: the
+    // stored copy is the reviewer's record, not the gate. [Coordinator ruling, 5 Nov 2026] Incomplete evidence needs a
+    // person's written reason, on this same two-person path. Nobody pays what no person decided: a row the old rule
+    // approved automatically waits for a person.
     const countryCode = claimOrder.customer.countryCode;
     if (existing.status === 'AUTO_APPROVED') {
       throw new AppError(409, 'RLP_PERSON_MUST_DECIDE', 'Nobody has decided this one yet. A person must approve it before it is paid.');
@@ -967,14 +993,19 @@ export class CashRulesService {
 
     // The payout is DRAWN from the reserve line inside the same transaction as the
     // CAS and the audit row: a claim is paid from a funded line or not at all.
+    let shortfall: { missing: string; reason: string } | null = null;
     const updated = await this.transitionClaim(claimId, ['APPROVED'], {
       status: 'PAID', paidAt: new Date(), paymentRef: reference, paidAmount: attested,
       paidById: adminId, reviewedBy: existing?.reviewedBy ?? adminId,
     }, onAudit, async (tx) => {
-      const drawn = await drawReserveForPayout(tx, { countryCode, claimId, amount: Number(existing.amount), byId: adminId, tenantId: claimOrder.tenantId });
-      return { reserveBalanceAfter: drawn.balanceAfter };
+      const drawn = await drawReserveForPayout(tx, {
+        countryCode, claimId, amount: Number(existing.amount), byId: adminId, tenantId: claimOrder.tenantId,
+        ...(shortfall ? { note: `payment for request ${claimId}; evidence missing (${shortfall.missing}): ${shortfall.reason}` } : {}),
+      });
+      if (!shortfall) return { reserveBalanceAfter: drawn.balanceAfter };
+      await tx.reimbursementClaim.update({ where: { id: claimId }, data: { flags: { push: LOSS_PROTECTION_FLAGS.paidEvidenceIncomplete } } });
+      return { reserveBalanceAfter: drawn.balanceAfter, evidenceMissing: shortfall.missing, evidenceReason: shortfall.reason };
     }, async (tx) => {
-      await lockIdentityAuthority(tx);
       await tx.$queryRaw`SELECT id FROM orders WHERE id = ${existing.orderId} FOR UPDATE`;
       await tx.$queryRaw`SELECT id FROM reimbursement_claims WHERE id = ${claimId} FOR UPDATE`;
       const fresh = await tx.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
@@ -986,7 +1017,9 @@ export class CashRulesService {
         await tx.$queryRaw`SELECT id FROM cash_handover_evidence WHERE id = ${fresh.handoverEvidenceId} FOR SHARE`;
         await tx.$queryRaw`SELECT p.id FROM handover_photo_proofs p JOIN cash_handover_evidence e ON e."photoProofId" = p.id WHERE e.id = ${fresh.handoverEvidenceId} FOR SHARE OF p`;
       }
-      assertEvidenceComplete(await assembleClaimEvidence(tx, fresh, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm }));
+      const bundle = await assembleClaimEvidence(tx, fresh, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm });
+      const written = evidenceReasonFor(bundle, opts.evidenceReason);
+      shortfall = written ? { missing: bundle.missing.join(', '), reason: written } : null;
     }).catch((err) => {
       if (isDuplicateReferenceError(err)) {
         throw new AppError(
@@ -1090,10 +1123,9 @@ export class CashRulesService {
     return updated;
   }
 
-  /** The reserve line as the operator sees it: balance, floor, this month's provisioning, the latest entries. */
+  /** The line as the operator sees it: balance and the latest entries. */
   async lossProtectionReserve(countryCode: string) {
-    const [gateLocal, rules] = await Promise.all([this.countryConfig.getIdGateThresholdLocal(countryCode), this.configFor(countryCode)]);
-    return reserveStatement(this.prisma, countryCode, { gateLocal, rules });
+    return reserveStatement(this.prisma, countryCode);
   }
 
   /** An audited manual entry on the reserve line: a top-up or a correction. */
@@ -1190,7 +1222,8 @@ export class CashRulesService {
       this.prisma.order.count({ where: { status: 'FAILED', placedAt: { gte: window30 } } }),
       this.prisma.order.count({ where: { status: { in: ['DELIVERED', 'COMPLETED'] }, placedAt: { gte: window30 } } }),
       this.prisma.reimbursementClaim.aggregate({
-        where: { status: { in: ['AUTO_APPROVED', 'APPROVED', 'PAID'] }, createdAt: { gte: new Date(Date.now() - 7 * DAY_MS) } },
+        // Money that left: an undecided or unpaid row is not a payment.
+        where: { status: 'PAID', paidAt: { gte: new Date(Date.now() - 7 * DAY_MS) } },
         _sum: { amount: true },
         _count: true,
       }),

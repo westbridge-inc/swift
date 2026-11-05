@@ -1,5 +1,5 @@
 import { RetainedUploadPhotos } from '../../../lib/retainedUploadPhotos';
-import { parcelUnpaidWords } from '../../../lib/parcelUnpaidWords';
+import { parcelUnpaidWords, reviewWords } from '../../../lib/parcelUnpaidWords';
 import { MapCredits } from '../../../components/MapCredits';
 import { uploadHandoverPhoto } from '../../../hooks/mover';
 import type { AuthSessionSnapshot } from '../../../lib/authSession';
@@ -330,7 +330,7 @@ export function ActiveJobScreen({ navigation }: any) {
           onSuccess: (res: any) => {
             capturedProofs.current.forget(captured.key);
             // [BUG-HUNT-2 G02] Unpaid at the door: the parcel is still in their hands, so the job stays, on its return leg.
-            if (outcome && outcome !== 'paid') toast.show(parcelUnpaidWords(res?.claim?.status));
+            if (outcome && outcome !== 'paid') toast.show(parcelUnpaidWords(res?.claim?.status, res?.claim?.flags));
             active.refetch?.();
           },
           onError: (proofError: any) => {
@@ -528,15 +528,14 @@ export function ActiveJobScreen({ navigation }: any) {
     const recorded = isDriver ? 'Unpaid fare recorded' : 'Failed delivery recorded';
     const onSuccess = (res: any) => {
       const claim = res?.claim?.status;
+      const flags = res?.claim?.flags;
       if (isCourier) {
-        toast.show(parcelUnpaidWords(claim));
+        toast.show(parcelUnpaidWords(claim, flags));
         active.refetch?.();
         return;
       }
-      // [Coordinator ruling, 5 Nov 2026] Case by case, and never a promise. An older server can still answer AUTO_APPROVED.
-      toast.show(claim === 'AUTO_APPROVED' || claim === 'PENDING_REVIEW'
-        ? `${recorded} — a person will review this, and Swift may help.`
-        : `${recorded}.`);
+      const next = reviewWords(claim, flags);
+      toast.show(next ? `${recorded}. ${next}` : `${recorded}.`);
       navigation?.goBack?.();
     };
     const onError = (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the outcome — try again or call support.");

@@ -14,7 +14,13 @@ import { useStatusFromUrl } from '@/lib/status-from-url';
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
 
 /** What a flag reads as. A flag with no line here reads as its own words. */
-const FLAG_WORDS: Record<string, string> = { protection_suspended: 'help suspended', over_gate: 'over the ID gate', sla_breached: 'past the staff deadline' };
+const FLAG_WORDS: Record<string, string> = {
+  protection_suspended: 'help suspended', over_gate: 'over the ID gate', sla_breached: 'past the staff deadline',
+  review_overdue: 'waiting a week or more', paid_evidence_incomplete: 'paid with evidence missing',
+};
+
+/** The evidence as it stands now. An older row or a failed read falls back to what was stored. */
+const evidenceOk = (c: any): boolean => c.evidenceNow?.complete ?? c.evidenceComplete === true;
 
 /**
  * [Coordinator ruling, 5 Nov 2026] Case by case: failed cash handovers (no-show / refused) with GPS + photo evidence.
@@ -45,7 +51,8 @@ export default function ClaimsPage() {
     body: (
       <>
         <p>Order {c.orderId}. Nobody is owed this: you are deciding that Swift helps on this order only, from company money. The rider is told so.</p>
-        {c.evidenceComplete ? null : <p className="mc-text-bad mt-2">Evidence is missing, so this cannot be paid even if you approve it. The rider is told that.</p>}
+        {evidenceOk(c) ? null : <p className="mc-text-bad mt-2">Evidence is missing. If you approve, paying it needs a written reason, and the rider is told it needs one more decision.</p>}
+        {balance == null || balance >= Number(c.amount) ? null : <p className="mc-text-warn mt-2">The set-aside holds {gyd(balance)}, less than this. Company money must be recorded before it can be paid.</p>}
       </>
     ),
     confirmLabel: 'Approve request',
@@ -54,7 +61,7 @@ export default function ClaimsPage() {
   }).then(lockIfQueued(c.id));
   const reject = (c: any) => void actions.run({
     title: `Reject this ${gyd(c.amount)} payment request?`,
-    body: <p>Order {c.orderId}. The rider is told a person decided not to help, and reads your reason.</p>,
+    body: <p>Order {c.orderId}. The rider is told a person decided not to help, and reads your reason.{c.status === 'APPROVED' ? ' This closes a case that was approved and never paid.' : ''}</p>,
     confirmLabel: 'Reject request',
     submit: ({ reason }) => rejectClaim(c.id, reason),
     success: () => 'Request rejected.',
@@ -64,18 +71,24 @@ export default function ClaimsPage() {
   // the claim's own figure before anything closes. Never pre-filled.
   const pay = (c: any) => void actions.run({
     title: `Mark this ${gyd(c.amount)} payment request as paid?`,
-    body: <p>Order {c.orderId}. Type the reference and the amount you actually transferred.</p>,
+    body: (
+      <>
+        <p>Order {c.orderId}. Type the reference and the amount you actually transferred.</p>
+        {evidenceOk(c) ? null : <p className="mc-text-bad mt-2">Evidence is missing{c.evidenceNow?.missing?.length ? `: ${c.evidenceNow.missing.join(', ').replaceAll('_', ' ')}` : ''}. You may still pay: write why. A second admin approves your reason.</p>}
+      </>
+    ),
     confirmLabel: 'Mark paid',
     fields: [
       { kind: 'reference', name: 'reference', label: 'Payment reference (bank or MMG, unique to this payout)' },
       { kind: 'amount', name: 'amount', label: 'Amount you actually transferred (GYD)', cents: true },
+      ...(evidenceOk(c) ? [] : [{ kind: 'text' as const, name: 'evidenceReason', label: 'Why this is paid with evidence missing', required: true, minLength: 10 }]),
     ],
-    submit: ({ reason, values }) => payClaim(c.id, String(values['reference']), Number(values['amount']), reason),
+    submit: ({ reason, values }) => payClaim(c.id, String(values['reference']), Number(values['amount']), reason, evidenceOk(c) ? undefined : String(values['evidenceReason'])),
     success: () => 'Payout recorded.',
   }).then(lockIfQueued(c.id));
 
-  // [DOC-1 §31.4 · P31-1] The line every payment is drawn from: balance, floor, the latest entries. It only holds what
-  // a person records: no share of fees feeds it (coordinator ruling, 5 Nov 2026).
+  // [DOC-1 §31.4 · P31-1] The line every payment is drawn from: balance and the latest entries. It only holds what a
+  // person records: no share of fees feeds it, and no sum has to be held (coordinator ruling, 5 Nov 2026).
   const reserveQ = useQuery({ queryKey: ['rlp-reserve'], queryFn: () => fetchRlpReserve('GY') });
   const reserveActions = useActionRunner(() => { qc.invalidateQueries({ queryKey: ['rlp-reserve'] }); });
   const adjust = () => void reserveActions.run({
@@ -90,6 +103,7 @@ export default function ClaimsPage() {
     success: () => 'Set-aside entry recorded.',
   });
   const reserve: any = reserveQ.data?.data ?? null;
+  const balance: number | null = reserve ? Number(reserve.balance) : null;
 
   const rows: any[] = claimsQ.data?.data ?? [];
   const m: any = metricsQ.data?.data ?? {};
@@ -117,7 +131,7 @@ export default function ClaimsPage() {
         <div className="mc-card">
           <p className="mc-muted text-sm">Payments (7d)</p>
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : gyd(m.guaranteePayoutsThisWeek?.total ?? 0)}</p>
-          <p className="mc-muted text-xs mt-1">{metricsQ.isLoading ? '—' : m.guaranteePayoutsThisWeek?.count ?? 0} approved</p>
+          <p className="mc-muted text-xs mt-1">{metricsQ.isLoading ? '—' : m.guaranteePayoutsThisWeek?.count ?? 0} paid</p>
         </div>
         <div className="mc-card">
           <p className="mc-muted text-sm">Riders with payment requests (30d)</p>
@@ -128,17 +142,12 @@ export default function ClaimsPage() {
       )}
 
       {/* [DOC-1 §31.4] The reserve line: a claim is paid from it or not at all. */}
-      <div className={`rounded-[var(--mc-radius)] border p-5 mb-6 ${reserve?.low ? 'border-[var(--mc-warn)] bg-[var(--mc-warn-soft)]' : 'border-[var(--mc-line)] bg-[var(--mc-card)]'}`} data-testid="rlp-reserve">
+      <div className="rounded-[var(--mc-radius)] border p-5 mb-6 border-[var(--mc-line)] bg-[var(--mc-card)]" data-testid="rlp-reserve">
         <div className="flex flex-wrap items-center gap-4">
           <div>
             <p className="mc-muted text-sm">Set-aside (GY)</p>
             <p className="text-2xl font-bold">{reserveQ.isLoading ? '—' : reserve ? gyd(reserve.balance) : '—'}</p>
-            {reserve ? (
-              <p className="mc-muted text-xs">
-                floor {gyd(reserve.floor)}
-                {reserve.low ? ' · BELOW FLOOR — payments are refused once it is empty' : ''}
-              </p>
-            ) : null}
+            <p className="mc-muted text-xs">Company money a person has recorded. A payment is recorded from it or not at all.</p>
           </div>
           <button
             type="button"
@@ -226,8 +235,8 @@ export default function ClaimsPage() {
                       {it.key.replaceAll('_', ' ')}{it.present ? ' ✓' : it.required ? ' — missing' : ' (optional)'}
                     </span>
                   ))}
-                  {c.evidenceComplete ? null : (
-                    <span className="text-xs mc-text-bad">evidence incomplete — this cannot be paid, even if a person approves it</span>
+                  {evidenceOk(c) ? null : (
+                    <span className="text-xs mc-text-bad">evidence incomplete — paying this needs a written reason and a second admin</span>
                   )}
                 </div>
               ) : null}
@@ -242,29 +251,25 @@ export default function ClaimsPage() {
                   Approved automatically under the old rule, and the rider was told Swift would pay. Nobody decided it, so it cannot be paid until a person does.
                 </p>
               ) : null}
+              {c.status === 'APPROVED' && balance != null && balance < Number(c.amount) ? (
+                <p className="mt-3 text-xs mc-text-warn" data-testid={`short-line-${c.id}`}>
+                  The set-aside holds {gyd(balance)}. Record company money before you send anything: a payment that cannot be recorded here is lost to the record.
+                </p>
+              ) : null}
               {(c.status === 'PENDING_REVIEW' || c.status === 'AUTO_APPROVED' || c.status === 'APPROVED') && (
                 <div className="flex gap-2 mt-4">
                   {(c.status === 'PENDING_REVIEW' || c.status === 'AUTO_APPROVED') && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => approve(c)}
-                        disabled={queuedRows[c.id] === true}
-                        className="mc-btn"
-                      >
-                        Approve
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => reject(c)}
-                        disabled={queuedRows[c.id] === true}
-                        className="mc-btn"
-                      >
-                        Reject
-                      </button>
-                    </>
+                    <button
+                      type="button"
+                      onClick={() => approve(c)}
+                      disabled={queuedRows[c.id] === true}
+                      className="mc-btn"
+                    >
+                      Approve
+                    </button>
                   )}
-                  {c.status === 'APPROVED' && (
+                  {/* Mark paid only when it can be recorded: on this rail the money leaves first. */}
+                  {c.status === 'APPROVED' && balance != null && balance >= Number(c.amount) && (
                     <button
                       type="button"
                       onClick={() => pay(c)}
@@ -274,6 +279,15 @@ export default function ClaimsPage() {
                       Mark paid
                     </button>
                   )}
+                  {/* No case is ever stuck: until it is paid, a person can close it. */}
+                  <button
+                    type="button"
+                    onClick={() => reject(c)}
+                    disabled={queuedRows[c.id] === true}
+                    className="mc-btn"
+                  >
+                    Reject
+                  </button>
                 </div>
               )}
             </div>

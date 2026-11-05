@@ -12,6 +12,9 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import type { PrismaClient } from '@prisma/client';
 import { retryAccountErasures } from '../modules/user/account-erasure-retry';
+import { CashRulesService } from '../modules/cash/cash-rules.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { OrderService } from '../modules/order/order.service';
 import { AccountService } from '../modules/user/account.service';
 import { verdictFor, refusalMessage, BLOCKER_MESSAGE, PARTNER_BLOCKERS, windDownPartner } from '../modules/user/partner-wind-down';
 import { restoreBillingAccess } from '../modules/billing/billing-access';
@@ -458,6 +461,20 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     const accepted = await del(p.token);
     expect(accepted.statusCode, accepted.payload).toBe(200);
     expect(await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).toMatchObject({ status: 'PAID', riderId: p.riderId });
+  });
+
+  it('an approved case that was never paid can be closed by a person, and the deletion then goes through', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const order = await makeCashOrder(p.riderId);
+    const claim = await app.prisma.reimbursementClaim.create({ data: {
+      orderId: order.orderId, riderId: p.riderId, customerId: (await app.prisma.order.findUniqueOrThrow({ where: { id: order.orderId } })).customerId,
+      amount: 1500, reason: 'no_show', gpsLat: 6.8055, gpsLng: -58.1553, status: 'APPROVED',
+    } });
+    expect((await del(p.token)).statusCode).toBe(409);
+    const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), new OrderService(app.prisma, app.io));
+    await cash.rejectClaim(claim.id, 'admin-review', 'evidence never came');
+    const accepted = await del(p.token);
+    expect(accepted.statusCode, accepted.payload).toBe(200);
   });
 
   it('money already PAID OUT does not block — it has already reached them', async () => {

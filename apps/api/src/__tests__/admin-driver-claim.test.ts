@@ -273,13 +273,49 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     expect(payouts).toEqual([]);
     const told = await runWithoutTenant(() => app.prisma.notification.findMany({ where: { userId: mover.id }, select: { title: true, body: true }, orderBy: { createdAt: 'asc' } }));
     expect(told.map((n) => n.title)).toEqual(['Reviewed']);
-    // Incomplete evidence refuses the payment, so the approval never reads as help that cannot arrive.
-    expect(told[0]!.body).toContain('Swift cannot pay it');
+    // Payment now needs a written reason, so the approval never reads as money on its way.
+    expect(told[0]!.body).toContain('one more decision');
 
     // The approval was spent at the gate on the refused attempt: it cannot be spent again.
     const replay = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 }, { [APPROVAL_HEADER]: payId! });
     expect(replay.statusCode, replay.body).toBe(403);
     expect(await effects(claim.id, mover.id)).toMatchObject({ reserve: 0 });
     expect(await claimState(claim.id)).toEqual(after);
+
+    // 6. The queue states the evidence as it stands now, so the console asks for the reason before anyone sends money.
+    const rows: Array<{ id: string; evidenceNow?: { complete: boolean; missing: string[] } }> = [];
+    for (let page = 1; page <= 50; page += 1) {
+      const queued = await call(requester.token, 'GET', `/api/v1/admin/cash-rules/claims?status=APPROVED&limit=50&page=${page}`);
+      rows.push(...queued.json().data);
+      if (!queued.json().meta.hasNext) break;
+    }
+    const row = rows.find((c) => c.id === claim.id);
+    expect(row?.evidenceNow?.complete).toBe(false);
+    expect(row?.evidenceNow?.missing).toContain('elapsed_wait');
+
+    // 7. [Coordinator ruling, 5 Nov 2026] A person may still pay, with a written reason, through the same ceremony: the
+    //    second admin approves those words, and they land on the audit row and the ledger entry.
+    const { customer: { countryCode } } = await runWithoutTenant(() => app.prisma.order.findUniqueOrThrow({ where: { id: claim.orderId }, select: { customer: { select: { countryCode: true } } } }));
+    await runWithoutTenant(() => app.prisma.rlpReserveEntry.create({ data: { countryCode, kind: 'ADJUSTMENT', amount: 2000, note: 'fixture company money' } }));
+    const written = { reference, amount: 2000, evidenceReason: 'The passenger admitted it to support by phone.' };
+    const whyAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, written);
+    expect(whyAsk.statusCode, whyAsk.body).toBe(202);
+    const whyId = approvalIdOf(whyAsk);
+    expect((await call(approver.token, 'POST', `/api/v1/admin/approvals/${whyId}/decide`, { approve: true, reason: REASON })).statusCode).toBe(200);
+    // The approval covers the reason: a different one cannot use it.
+    const swapped = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { ...written, evidenceReason: 'Some other words entirely, long enough.' }, { [APPROVAL_HEADER]: whyId! });
+    expect(swapped.statusCode, swapped.body).not.toBe(200);
+    expect((await claimState(claim.id)).status).toBe('APPROVED');
+    const whyAsk2 = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, written);
+    const whyId2 = approvalIdOf(whyAsk2) ?? whyId;
+    if (whyId2 !== whyId) expect((await call(approver.token, 'POST', `/api/v1/admin/approvals/${whyId2}/decide`, { approve: true, reason: REASON })).statusCode).toBe(200);
+    const done = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, written, { [APPROVAL_HEADER]: whyId2! });
+    expect(done.statusCode, done.body).toBe(200);
+    expect((await claimState(claim.id)).status).toBe('PAID');
+    const entry = await runWithoutTenant(() => app.prisma.rlpReserveEntry.findUnique({ where: { claimId: claim.id } }));
+    expect(entry?.note).toContain('The passenger admitted it');
+    const audit = await runWithoutTenant(() => app.prisma.auditLog.findMany({ where: { entityId: claim.id }, orderBy: { createdAt: 'desc' }, take: 5 }));
+    expect(JSON.stringify(audit)).toContain('The passenger admitted it');
+    expect(JSON.stringify(audit)).toContain('elapsed_wait');
   });
 });

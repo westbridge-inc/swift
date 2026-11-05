@@ -27,9 +27,9 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
       <ScrollView contentContainerStyle={{ padding: space.lg, gap: space.md }} refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}>
         {q.isLoading ? <LoadingBlock /> : null}
         {q.isError ? <ErrorState onRetry={() => void q.refetch()} message="Couldn't load these orders." /> : null}
-        {data ? (
+        {data && !data.suspended ? (
           <T variant="caption" style={{ color: color.text.secondary }}>
-            A person at Swift looks at each one. Swift may help, but it does not promise to, and no amount is set until a person decides.
+            A person at Swift looks at each one. Swift may help, but it does not promise to. The amount shown is the unpaid order, not a sum Swift has agreed to.
           </T>
         ) : null}
         {data?.suspended ? (
@@ -45,7 +45,7 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
           <EmptyState icon="dollar-sign" title="None" body="When a customer doesn't pay at the door on a cash order, it shows here." />
         ) : null}
         {data?.claims.map((c: ClaimView) => {
-          const st = claimStatus(c.status);
+          const st = claimStatus(c.status, c.evidence?.complete ?? true);
           const hints = c.flags.map(flagHint).filter((h: string | null): h is string => Boolean(h));
           return (
             <Card key={c.id} accessibilityLabel={`Unpaid order ${money(Number(c.amount))} ${st.label}`}>

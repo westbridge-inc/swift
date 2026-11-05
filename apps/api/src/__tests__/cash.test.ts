@@ -688,6 +688,9 @@ describe('Admin review + founder metrics', () => {
     const data = res.json().data;
     expect(data.failedPaymentPct).toBeGreaterThanOrEqual(0);
     expect(data.guaranteePayoutsThisWeek.total).toBeGreaterThan(0);
+    // Only money that left: a row nobody paid is not a payment.
+    const paid = await app.prisma.reimbursementClaim.aggregate({ where: { status: 'PAID', paidAt: { gte: new Date(Date.now() - 7 * 86_400_000) } }, _sum: { amount: true }, _count: true });
+    expect(data.guaranteePayoutsThisWeek).toEqual({ total: Number(paid._sum.amount ?? 0), count: paid._count });
     expect(Array.isArray(data.claimsByRider)).toBe(true);
     expect(data.claimsByRider.length).toBeGreaterThan(0);
   });

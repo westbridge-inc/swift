@@ -1160,7 +1160,7 @@ model ReimbursementClaim {
   /// [DOC-1 §31.4 · DOC-INV-47 · P31-1] The evidence bundle as assembled at filing —
   /// from artefacts the platform already holds (arrival, GPS, photo, pickup, cart),
   /// never typed by the rider. Re-derived at payout; the stored copy is the review
-  /// record. `evidenceComplete` false means the claim is never auto-paid.
+  /// record, refreshed when a person decides. Incomplete evidence needs a person's written reason to be paid.
   evidence         Json?
   evidenceComplete Boolean     @default(false)
   handoverEvidenceId String? @unique

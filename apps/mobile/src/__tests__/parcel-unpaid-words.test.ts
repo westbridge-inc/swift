@@ -10,4 +10,9 @@ describe('[BUG-HUNT-2 G02] a parcel unpaid at the door', () => {
       expect(parcelUnpaidWords(status)).not.toMatch(/will pay/i);
     }
   });
+  it('a suspended rider is not told Swift may help', () => {
+    const words = parcelUnpaidWords('PENDING_REVIEW', ['protection_suspended']);
+    expect(words).toContain('suspended');
+    expect(words).not.toMatch(/may help/i);
+  });
 });

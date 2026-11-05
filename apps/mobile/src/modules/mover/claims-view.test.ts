@@ -6,6 +6,8 @@ describe('claims view helpers — the rider\'s words, case by case', () => {
     expect(claimStatus('PENDING_REVIEW')).toEqual({ label: 'A person will review this', tone: 'brand' });
     expect(claimStatus('AUTO_APPROVED')).toEqual({ label: 'A person will review this', tone: 'brand' });
     expect(claimStatus('APPROVED')).toEqual({ label: 'Approved by a person', tone: 'success' });
+    // Evidence is missing: one more decision is needed, so nothing reads as done.
+    expect(claimStatus('APPROVED', false)).toEqual({ label: 'Reviewed', tone: 'brand' });
     expect(claimStatus('PAID').label).toBe('Paid');
     expect(claimStatus('REJECTED')).toEqual({ label: 'Not approved', tone: 'error' });
   });
@@ -19,7 +21,9 @@ describe('claims view helpers — the rider\'s words, case by case', () => {
     expect(flagHint('over_monthly_cap')).not.toMatch(/limit/i); // a limit reads as a right up to it
     expect(flagHint('over_gate')).toContain('closer look');
     expect(flagHint('protection_suspended')).toContain('suspended');
-    expect(flagHint('evidence_incomplete')).toContain('cannot pay');
+    expect(flagHint('evidence_incomplete')).toContain('reviewer can see');
+    expect(flagHint('evidence_incomplete')).not.toMatch(/cannot pay|can still approve/i);
+    expect(evidenceLine({ key: 'elapsed_wait', present: false, required: true }).label).toBe('Your wait was recorded');
     expect(flagHint('sla_breached')).not.toMatch(/payment to you/i);
     expect(flagHint('collusion_pair_cluster')).toBe('Reviewed by a person.');
     expect(flagHint('some_new_flag')).toBeNull();

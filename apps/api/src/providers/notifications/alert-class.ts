@@ -164,7 +164,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'ops_places_failing',
     // [COORD R1 · #1997 S4-1] a flood of wrong answers to the texted safety check-in link (the high ceiling tripped)
     'ops_checkin_link_flood',
-    'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low',
+    'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_review_overdue',
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
     // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)
     'vat_threshold',

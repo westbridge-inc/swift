@@ -1726,7 +1726,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'rlp-sweep') {
-        // [DOC-1 §31.4 · P31-1] The daily sweep of approved, unpaid cases and the low line.
+        // [DOC-1 §31.4 · P31-1] The daily sweep: decided cases nobody paid, cases nobody decided.
         const { NotificationService } = await import('../modules/notification/notification.service');
         const { CountryConfigService } = await import('../modules/country/country-config.service');
         const { cashRulesFor } = await import('../modules/cash/cash-rules.service');
@@ -1734,8 +1734,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const countryConfig = new CountryConfigService(ctx.prisma);
         const notifications = new NotificationService(ctx.prisma, ctx.io);
         const rulesFor = (code: string) => cashRulesFor(countryConfig, code);
-        const run = await sweepLossProtection(ctx.prisma, { notifications, rulesFor, gateFor: (code) => countryConfig.getIdGateThresholdLocal(code) });
-        ctx.log.info(`Loss protection sweep: ${run.breached.length} past SLA (${run.newlyFlagged} newly flagged), ${run.lowReserve.length} reserve(s) low`);
+        const run = await sweepLossProtection(ctx.prisma, { notifications, rulesFor });
+        ctx.log.info(`Loss protection sweep: ${run.breached.length} past the staff deadline (${run.newlyFlagged} newly flagged), ${run.overdue.length} waiting for a person`);
         return;
       }
 
@@ -3245,7 +3245,7 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // [DOC-1 §31.4 · P31-1] Approved, unpaid cases and a low line, daily at 03:00.
+  // [DOC-1 §31.4 · P31-1] Decided cases nobody paid and cases nobody decided, daily at 03:00.
   await queues.verificationQueue.add('rlp-sweep', {}, {
     repeat: { pattern: '0 3 * * *' },
     removeOnComplete: 30,

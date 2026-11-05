@@ -17,6 +17,7 @@ const firstClaim = {
   status: 'APPROVED',
   reason: 'CUSTOMER_NO_SHOW',
   flags: [],
+  evidenceComplete: true,
   gpsLat: 6.8013,
   gpsLng: -58.1551,
   photoUrl: null,
@@ -46,7 +47,7 @@ function claimsHandler(
       };
     }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/rlp/reserve') {
-      return { body: { success: true, data: { countryCode: 'GY', balance: 12000, floor: 52250, low: true, entries: [{ id: 'e1', kind: 'ADJUSTMENT', amount: '12000', periodKey: null, claimId: null, note: 'seed', createdAt: '2026-09-01T00:00:00.000Z' }] } } };
+      return { body: { success: true, data: { countryCode: 'GY', balance: 12000, entries: [{ id: 'e1', kind: 'ADJUSTMENT', amount: '12000', periodKey: null, claimId: null, note: 'seed', createdAt: '2026-09-01T00:00:00.000Z' }] } } };
     }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/metrics') {
       return {
@@ -269,14 +270,14 @@ describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
     const { user } = renderWithQuery(<ClaimsPage />);
     const reserve = await screen.findByTestId('rlp-reserve');
     await waitFor(() => expect(reserve.textContent).toContain('12,000'));
-    expect(reserve.textContent).toContain('BELOW FLOOR');
+    expect(reserve.textContent).not.toMatch(/floor/i); // no sum has to be held
     await user.click(within(await screen.findByRole('group', { name: 'Show payment requests' })).getByRole('button', { name: 'Approved' }));
     const bundle = await screen.findByTestId('evidence-claim-bundle');
     expect(bundle.textContent).toContain('door photo — missing');
     expect(bundle.textContent).toContain('rider at door ✓');
     expect(bundle.textContent).toContain('customer contacted (optional)');
     expect(bundle.textContent).toContain('evidence incomplete');
-    expect(bundle.textContent).toContain('cannot be paid, even if a person approves it');
+    expect(bundle.textContent).toContain('paying this needs a written reason and a second admin');
   });
 
   it('the set-aside says what it holds: no line about a monthly share, and an entry is company money', async () => {
@@ -297,7 +298,7 @@ describe('[case by case] a person decides each one', () => {
         return { body: { success: true, data: request.url.searchParams.get('status') === status ? rows : [] } };
       }
       if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/cash-rules/rlp/reserve') {
-        return { body: { success: true, data: { countryCode: 'GY', balance: 0, floor: 0, low: false, entries: [] } } };
+        return { body: { success: true, data: { countryCode: 'GY', balance: 20000, entries: [] } } };
       }
       return { body: { success: true, data: {} } };
     };
@@ -320,7 +321,7 @@ describe('[case by case] a person decides each one', () => {
     await user.click(await screen.findByRole('button', { name: 'Approve' }));
     const panel = await screen.findByRole('dialog');
     expect(panel.textContent).toContain('Nobody is owed this');
-    expect(panel.textContent).toContain('this cannot be paid even if you approve it');
+    expect(panel.textContent).toContain('paying it needs a written reason');
     expect(document.body.textContent).toContain('help suspended');
     expect(document.body.textContent).toContain('over the ID gate');
     expect(document.body.textContent).not.toMatch(/protection suspended/);
@@ -330,6 +331,51 @@ describe('[case by case] a person decides each one', () => {
     mockApi(queue([{ ...firstClaim, id: 'claim-ok', status: 'PENDING_REVIEW', evidenceComplete: true }], 'PENDING_REVIEW'));
     const { user } = renderWithQuery(<ClaimsPage />);
     await user.click(await screen.findByRole('button', { name: 'Approve' }));
-    expect((await screen.findByRole('dialog')).textContent).not.toContain('cannot be paid');
+    expect((await screen.findByRole('dialog')).textContent).not.toContain('written reason');
+  });
+
+  async function approvedTab(user: ReturnType<typeof renderWithQuery>['user']) {
+    await user.click(within(await screen.findByRole('group', { name: 'Show payment requests' })).getByRole('button', { name: 'Approved' }));
+  }
+
+  it('missing evidence as it stands now, whatever was stored: the dialog needs a written reason, and it is sent', async () => {
+    const stale = { ...firstClaim, id: 'claim-why', status: 'APPROVED', amount: 1200, evidenceComplete: true, evidenceNow: { complete: false, missing: ['door_photo'] } };
+    const fetchMock = mockApi((request) => {
+      if (request.method === 'PUT') return { body: { success: true, data: { ...stale, status: 'PAID' } } };
+      return queue([stale], 'APPROVED')(request);
+    });
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await approvedTab(user);
+    await user.click(await screen.findByRole('button', { name: 'Mark paid' }));
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('door photo');
+    await user.type(within(panel).getByRole('textbox', { name: /Payment reference/ }), 'BANK-WHY-1');
+    await user.type(within(panel).getByLabelText(/Amount you actually transferred/), '1200');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Paid after a phone check');
+    await user.click(within(panel).getByRole('button', { name: 'Mark paid' }));
+    expect(requestsByMethod(fetchMock, 'PUT'), 'no written reason, nothing sent').toHaveLength(0);
+    await user.type(within(panel).getByRole('textbox', { name: /Why this is paid with evidence missing/ }), 'The rider phoned from the door.');
+    await user.click(within(panel).getByRole('button', { name: 'Mark paid' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[0]![1]!.body))).toMatchObject({ evidenceReason: 'The rider phoned from the door.' });
+  });
+
+  it('evidence complete now, whatever was stored: no reason asked', async () => {
+    const fresh = { ...firstClaim, id: 'claim-fresh', status: 'APPROVED', evidenceComplete: false, evidenceNow: { complete: true, missing: [] } };
+    mockApi(queue([fresh], 'APPROVED'));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await approvedTab(user);
+    await user.click(await screen.findByRole('button', { name: 'Mark paid' }));
+    expect(within(await screen.findByRole('dialog')).queryByRole('textbox', { name: /Why this is paid/ })).toBeNull();
+  });
+
+  it('Mark paid is offered only when it can be recorded: a short line says so, and Reject stays', async () => {
+    const big = { ...firstClaim, id: 'claim-big', status: 'APPROVED', amount: 90000, evidenceNow: { complete: true, missing: [] } };
+    mockApi(queue([big], 'APPROVED'));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await approvedTab(user);
+    expect((await screen.findByTestId('short-line-claim-big')).textContent).toContain('Record company money before you send anything');
+    expect(screen.queryByRole('button', { name: 'Mark paid' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
   });
 });

@@ -108,7 +108,7 @@ describe('[#2079 follow-up] another operator never draws on, funds, or hears abo
     // The daily sweep is about Swift's own claims: another operator's approved claim, however late, is neither
     // listed in its SLA page nor flagged by it.
     const sweep = await sys(() => sweepLossProtection(app.prisma, {
-      now: new Date(Date.now() + 30 * 86_400_000), rulesFor: async () => ({ ...LOSS_PROTECTION_DEFAULTS }), gateFor: async () => 1,
+      now: new Date(Date.now() + 30 * 86_400_000), rulesFor: async () => ({ ...LOSS_PROTECTION_DEFAULTS }),
     }));
     expect(sweep.breached.map((b) => b.claimId)).not.toContain(claim.id);
     expect((await sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } }))).flags).toEqual([]);
@@ -117,7 +117,7 @@ describe('[#2079 follow-up] another operator never draws on, funds, or hears abo
   it('no loss-protection notice is platform-wide: each pages the default tenant (census of rlp.ts)', () => {
     const rlp = readFileSync(join(__dirname, '..', 'modules', 'cash', 'rlp.ts'), 'utf8');
     const calls = rlp.split('notifyAdmins(prisma').length - 1;
-    expect(calls).toBeGreaterThanOrEqual(2); // the SLA notice and the low-line notice; the monthly one is gone with the job
+    expect(calls).toBeGreaterThanOrEqual(2); // the staff-deadline notice and the 7-day reminder; the monthly and low-line ones are gone
     expect(rlp).not.toMatch(/tenantId: null/);
     expect(rlp.match(/notifyAdmins\(prisma, opts\.notifications, \{\s*tenantId: RLP_TENANT,/g)?.length ?? 0).toBe(calls);
   });
