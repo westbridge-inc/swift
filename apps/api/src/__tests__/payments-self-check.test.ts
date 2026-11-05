@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import Redis from 'ioredis';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -192,6 +192,63 @@ describe('the MMG checkout self-check', () => {
     const missing = formatSelfCheck(await runPaymentsSelfCheck(['mmg'], mmgEnv({ MMG_CHECKOUT_SECRET_KEY: '' }), {}));
     expect(missing).toBe('FAIL mmg: checkout settings and keys load (MMG_CHECKOUT_SECRET_KEY, MMG_CHECKOUT_ENABLED, MMG_DRIVER)');
     expect(missing).not.toContain(SECRET);
+  });
+});
+
+// [FULL-LAUNCH 5 Nov 2026] The self-check logged in through the push rail's provider, which production always refuses
+// (mmgPushRailOn is false there). That refusal said nothing about the credentials, and it was thrown outright, so no
+// line printed at all. The login is the lookup client's: the same driver and credentials as the checkout verifier.
+describe('the MMG merchant login, in production', () => {
+  const pair = () => generateKeyPairSync('rsa', { modulusLength: 4096, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+  const request = pair();
+  const reply = pair();
+  const PASSWORD_MMG = `mmg-login-${nanoid(10)}`;
+  const productionEnv = (over: Record<string, string> = {}) => ({
+    NODE_ENV: 'production', MMG_DRIVER: 'live', MMG_API_URL: 'https://mmg.example.test', MMG_CHECKOUT_URL: 'https://mmg-pay.example.test/checkout',
+    MMG_CHECKOUT_MERCHANT_ID: '1234567', MMG_CHECKOUT_CLIENT_ID: 'client-synthetic', MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
+    MMG_CHECKOUT_SECRET_KEY: `mmg-secret-${nanoid(10)}`, MMG_CHECKOUT_RETURN_ORIGIN: 'https://web.example.test',
+    MMG_CHECKOUT_PUBLIC_KEY: request.publicKey, MMG_CHECKOUT_PRIVATE_KEY: reply.privateKey,
+    MMG_API_KEY: 'api-synthetic', MMG_MERCHANT_ID: '5920000000', MMG_PASSWORD: PASSWORD_MMG, MMG_MKEY: 'mkey-synthetic', MMG_MSECRET: 'msecret-synthetic',
+    ...over,
+  });
+  const merchantLogin = (answer: () => Response, over: Record<string, string> = {}) => {
+    // As in the server's one-off container: the settings are the process's own.
+    for (const [name, value] of Object.entries(productionEnv(over))) vi.stubEnv(name, value);
+    const asked: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => { asked.push(new URL(String(url)).pathname); return answer(); }));
+    return asked;
+  };
+  afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+
+  it('good credentials: every line prints and the login is OK, with the push rail off and no round-trip switch', async () => {
+    const asked = merchantLogin(() => Response.json({ access_token: 'token-synthetic', expires_in: 120 }));
+    const lines = formatSelfCheck(await runPaymentsSelfCheck(['mmg'], productionEnv()));
+    expect(lines).toContain('OK   mmg: checkout settings and keys load');
+    expect(lines).toContain('OK   mmg: the merchant login works');
+    expect(asked).toEqual(['/e-commerce-login/mer']);
+    expect(lines).not.toContain(PASSWORD_MMG);
+  });
+
+  it('refused credentials: a FAIL on the login line, the other lines still print', async () => {
+    merchantLogin(() => new Response('denied', { status: 401 }));
+    const lines = formatSelfCheck(await runPaymentsSelfCheck(['mmg'], productionEnv()));
+    expect(lines).toContain('OK   mmg: checkout settings and keys load');
+    expect(lines).toContain('FAIL mmg: the merchant login works');
+    expect(lines).not.toContain('denied');
+  });
+
+  it('the login reads the settings it was handed, as every other line does', async () => {
+    merchantLogin(() => Response.json({ access_token: 'token-synthetic' }));
+    const lines = formatSelfCheck(await runPaymentsSelfCheck(['mmg'], productionEnv({ MMG_API_KEY: '' })));
+    expect(lines).toContain('FAIL mmg: the merchant login works');
+  });
+
+  it('a missing login setting: a FAIL line, never a run that cannot finish', async () => {
+    const asked = merchantLogin(() => Response.json({ access_token: 'token-synthetic' }), { MMG_API_KEY: '' });
+    const lines = formatSelfCheck(await runPaymentsSelfCheck(['mmg'], productionEnv({ MMG_API_KEY: '' })));
+    expect(lines).toContain('OK   mmg: checkout settings and keys load');
+    expect(lines).toContain('FAIL mmg: the merchant login works');
+    expect(asked).toEqual([]);
   });
 });
 

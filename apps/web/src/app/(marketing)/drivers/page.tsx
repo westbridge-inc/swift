@@ -115,7 +115,7 @@ export default function DriversPage() {
           <p className="mt-3 text-[var(--swift-muted)]">
             What you need depends on what you ride or drive. Photograph each document with your phone — the camera frames each one for you.
             {/* [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day. */}
-            {' '}<ReviewTime live="Most riders clear review within a day, and you can browse the whole app while you wait." after="You can browse the whole app while you wait." />
+            {' '}<ReviewTime live="We review documents Monday to Saturday, 8:00–16:00 Guyana time, and you can browse the whole app while you wait." after="You can browse the whole app while you wait." />
           </p>
           {/* The server's own launch checklists, per vehicle (lib/vehicle-documents; parity pinned by partner-wording.test). */}
           <ul className="mt-7 space-y-4">

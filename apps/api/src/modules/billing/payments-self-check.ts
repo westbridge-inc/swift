@@ -9,7 +9,7 @@ import {
   requestInitiationTime,
   serializeCheckoutRequest,
 } from '../../providers/mmg/mmg-checkout';
-import { getMmgProvider } from '../../providers/mmg/mmg-provider';
+import { getMmgLookupProvider } from '../../providers/mmg/mmg-provider';
 import { POWERTRANZ_ENV, PowerTranzCardRailProvider, PowerTranzConfigError, powerTranzConfigFromEnv } from '../../providers/card/powertranz-provider';
 
 // ---------------------------------------------------------------------------
@@ -132,7 +132,9 @@ async function mmgLines(env: Record<string, string | undefined>, deps: SelfCheck
     out.push({ ok: false, check: 'mmg: MMG_DRIVER is live (the merchant login is checked only then)' });
     return out;
   }
-  const login = deps.mmgLogin ?? (() => getMmgProvider().authenticate());
+  // The checkout's own client, not the push rail's: production refuses that one whatever is set, and a refusal here
+  // must be a FAIL line, so the call sits inside the promise.
+  const login = deps.mmgLogin ?? (async () => getMmgLookupProvider(env).authenticate());
   const answered = await login().then((r) => typeof r.token === 'string' && r.token.length > 0).catch(() => false);
   out.push({ ok: answered, check: 'mmg: the merchant login works' });
   return out;

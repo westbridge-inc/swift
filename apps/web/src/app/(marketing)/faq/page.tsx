@@ -78,8 +78,8 @@ const FAQ: QA[] = [
     a: (
       <>
         <BrowserOrderingNote open="Store ordering and order tracking work in your phone's browser." /> Taxi rides
-        require the Swift mobile app
-        during the pilot, including the safety PIN and SOS. <AppStoreSentence />
+        require the Swift mobile app,
+        including the safety PIN and SOS. <AppStoreSentence />
       </>
     ),
   },
@@ -122,7 +122,7 @@ const FAQ: QA[] = [
         Food Restaurant Licence and confirms that everyone who handles its food holds a current food handler&apos;s
         certificate). A person reviews them.{' '}
         {/* [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day. */}
-        <ReviewTime live="Most businesses clear review within a day." /> Your free trial starts the day you are{' '}
+        <ReviewTime live="We review documents Monday to Saturday, 8:00–16:00 Guyana time." /> Your free trial starts the day you are{' '}
         <i>approved</i>, so review time never eats into it. The{' '}
         <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/vendors">
           business page
