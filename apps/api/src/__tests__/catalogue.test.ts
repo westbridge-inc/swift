@@ -534,9 +534,10 @@ describe('deleting a menu item archives its order and booking references', () =>
   });
 
   it('does not erase an existing booking when the service listing is deleted', async () => {
+    // Far from the fixed slot an earlier case books tomorrow: at now + 1 day this collided for an hour each day.
     const category = await app.prisma.category.create({ data: { vendorId, name: `Archive service ${wordFreeTag(8)}` } });
     const item = await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Booked fixture', basePrice: 500, fulfillment: 'APPOINTMENT' } });
-    const held = await app.prisma.booking.create({ data: { itemId: item.id, vendorId, customerId, slotStart: new Date(Date.now() + DAY), slotEnd: new Date(Date.now() + DAY + 1800000) } });
+    const held = await app.prisma.booking.create({ data: { itemId: item.id, vendorId, customerId, slotStart: new Date(Date.now() + 20 * DAY), slotEnd: new Date(Date.now() + 20 * DAY + 1800000) } });
     expect((await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)).statusCode).toBe(200);
     expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: item.id, status: 'RESERVED' });
     await app.prisma.booking.update({ where: { id: held.id }, data: { status: 'CANCELLED' } }); // [BOOK-S2] as the coupling seam would
