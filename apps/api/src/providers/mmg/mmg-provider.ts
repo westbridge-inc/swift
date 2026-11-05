@@ -877,7 +877,7 @@ function readLiveMmgConfig(env: Record<string, string | undefined>): LiveMmgConf
  * find its own requests by OUR reference in lookup and history; the checkout
  * looks up MMG's own transaction id and depends on no such round trip.
  */
-export function getMmgLookupProvider(env: Record<string, string | undefined> = process.env): MmgCheckoutLookupClient {
+export function getMmgLookupProvider(env: Record<string, string | undefined> = process.env): MmgCheckoutLookupClient & Pick<MmgMerchantProvider, 'authenticate'> {
   const driver = env['MMG_DRIVER'] ?? 'sandbox';
   // [PROD-PATH] MMG fully off: every lookup refuses explicitly (MMG_DISABLED).
   if (driver === 'disabled') return new DisabledMmgProvider();

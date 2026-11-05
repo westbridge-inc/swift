@@ -212,7 +212,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   <div class="meta">
     ${customerName ? `${esc(customerName)}<br>` : ''}
     ${order.vendor ? `${soldBy(order.vendor, order.seller ?? null)}<br>` : ''}
-    ${new Date(order.placedAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })}<br>
+    ${new Date(order.placedAt).toLocaleString('en-GB', { timeZone: 'America/Guyana', dateStyle: 'long', timeStyle: 'short' })}<br>
     ${esc(paidHow)}
     ${isRide && order.driver ? `<br>Driver: ${esc(order.driver.firstName ?? 'Your driver')}${order.driver.vehicle ? ` · ${esc(order.driver.vehicle)}` : ''}${order.driver.licensePlate ? ` · ${esc(order.driver.licensePlate)}` : ''}` : ''}
     ${(isRide || isParcel) && order.pickupAddress ? `<br>From: ${esc(order.pickupAddress)}` : ''}
