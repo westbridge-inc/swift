@@ -183,7 +183,7 @@ describe('[5 Nov read] what ships now, in the words', () => {
     expect(section(VENDOR_AGREEMENT, /<h2>12\. /)).toContain('or directly to Westbridge Inc. in person by cash, cheque or bank transfer. A cheque counts only once it has cleared. Never pay the weekly fee through an agent or anyone else.');
     expect(VENDOR_AGREEMENT).not.toMatch(/only through MMG/);
     const refunds = read('apps/web/src/app/legal/refunds/page.tsx');
-    expect(refunds).toMatch(/directly to Westbridge Inc\. in person by cash, cheque or bank transfer; a cheque counts once it clears\./);
+    expect(refunds).toMatch(/directly to \{site\.legalEntityName\} in person by cash, cheque or bank transfer; a cheque counts once it clears\./);
     expect(refunds).toMatch(/if you paid in person, by a way you and \{site\.tradeName\} agree/);
     expect(PRIVACY).toContain('if you pay in person, how you paid, the reference and the receipt');
   });
