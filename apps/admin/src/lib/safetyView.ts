@@ -209,7 +209,9 @@ export function sosPosition(a: SosRow): (SosPlace & { seq?: number; at?: string 
 
 /** "No open SOS." is said only on a read under this old. Three polls: one missed read is not an alarm, a silent board is. */
 export const SOS_READ_FRESH_MS = 45_000;
-export const sosReadFresh = (readAt: number, now: number): boolean => readAt > 0 && now >= readAt && now - readAt < SOS_READ_FRESH_MS;
+export const sosReadFresh = (readAt: number, now: number, maxAgeMs = SOS_READ_FRESH_MS): boolean => readAt > 0 && now >= readAt && now - readAt < maxAgeMs;
+/** Cases poll every minute, and their clocks run in hours: one poll, the read's own 10 seconds, and a margin. */
+export const CASE_READ_FRESH_MS = 90_000;
 
 export type SlaState = 'ok' | 'due' | 'breached' | 'met';
 
