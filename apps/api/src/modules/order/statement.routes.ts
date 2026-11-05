@@ -9,6 +9,7 @@ import {
   buildVendorStatement,
   verifyStatementSignature,
   type StatementKind,
+  statementDay,
 } from './statement';
 
 /**
@@ -104,7 +105,6 @@ export async function statementRoutes(app: FastifyInstance) {
   });
 }
 
-function periodLabel(from: string, to: string): string {
-  const day = (d: string) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-  return `${day(from)} — ${day(to)}`;
+export function periodLabel(from: string, to: string): string {
+  return `${statementDay(from)} — ${statementDay(to)}`;
 }
