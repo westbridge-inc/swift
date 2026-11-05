@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, closeStoreRefund, endStuckRide, resetRideCode, sendStepUpCode, settleOrderRefund, revealOrderPartyPhone, openOrderProofPhoto, verifyStepUpCode, type OrderContactParty, type OrderProofPhoto } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, closeStoreRefund, endStuckRide, resetDeliveryPin, resetRideCode, sendStepUpCode, settleOrderRefund, revealOrderPartyPhone, openOrderProofPhoto, verifyStepUpCode, type OrderContactParty, type OrderProofPhoto } from '@/lib/api';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -32,6 +32,12 @@ function stopProgress(stop: RideStop, next: number | null): string {
   return stop.sequence === next ? 'Next stop' : 'Not reached yet';
 }
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
+
+/** [M2] Where the server's delivery PIN reset goes through (handover-reveal.ts): a goods delivery by a Swift rider, the PIN issued, on its way or at the door. */
+const DELIVERY_PIN_WINDOW = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'];
+const deliveryPinResettable = (o: { orderType?: string; fulfillment?: string; fulfillmentMode?: string | null; status?: string; handover?: { ridePinIssued?: boolean } | null }) =>
+  o.fulfillment === 'DELIVERY' && o.orderType !== 'TAXI' && o.orderType !== 'COURIER' && o.fulfillmentMode !== 'VENDOR_DELIVERY'
+  && !!o.handover?.ridePinIssued && DELIVERY_PIN_WINDOW.includes(o.status ?? '');
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -476,12 +482,39 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   the door. Same rule as the pickup code: never the value, only whether it
                   exists and whether wrong tries have locked the door (support reset). */}
               {o.handover?.ridePinIssued && !isRide && (
-                <div className="flex justify-between">
+                <div className="flex justify-between gap-4">
                   <span className="mc-muted">Delivery PIN</span>
                   <span className={o.handover.ridePinLocked ? 'mc-text-bad' : ''}>
                     {o.handover.ridePinLocked
                       ? `Locked — ${o.handover.ridePinAttempts} wrong tries (support reset)`
                       : `Issued to the customer${(o.handover.ridePinAttempts ?? 0) > 0 ? ` · ${o.handover.ridePinAttempts} wrong tries` : ''}`}
+                    {deliveryPinResettable(o) && (
+                      <>
+                        {' '}
+                        <button
+                          type="button"
+                          className="mc-btn"
+                          onClick={async () => {
+                            // [M2] The ride code's door: the code to your phone goes first, so the one panel takes both.
+                            await sendStepUpCode().catch(() => undefined);
+                            void actions.run({
+                              title: `Give ${o.orderNumber} a new delivery PIN?`,
+                              body: <p>The customer reads the new PIN on their order screen and gives it to the rider. Swift does not message them, so tell them or have the rider ask. The old PIN stops working. Nobody here sees the new one.</p>,
+                              confirmLabel: 'Give a new PIN',
+                              dismissLabel: 'Keep it',
+                              fields: [{ kind: 'text', name: 'code', label: 'Code sent to your phone', required: true }],
+                              submit: async ({ reason, values }) => {
+                                await verifyStepUpCode(String(values['code']).trim());
+                                return resetDeliveryPin(id, reason);
+                              },
+                              success: () => `${o.orderNumber} has a new delivery PIN. Ask the customer to open their order and read it to the rider.`,
+                            });
+                          }}
+                        >
+                          New delivery PIN
+                        </button>
+                      </>
+                    )}
                   </span>
                 </div>
               )}
