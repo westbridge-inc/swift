@@ -261,7 +261,8 @@ export function FirstOrderGuide({ store, manager, listening }: { store: HubStore
 /**
  * [WEB-ONBOARDING · owner 1 Nov 2026] A store not live yet (never approved): in place of the first-order guide, what is
  * left and whose turn it is, as the app's waiting store screen (VendorOnboarding) says it. The owner's steps are the
- * server's (`goLive`), each opening where it is done on this website; adding items works while the store waits.
+ * server's (`goLive`), each opening where it is done on this website. A menu comes after approval: the API refuses items before it
+ * (FULL-LAUNCH 5 Nov 2026), so an empty menu is said here, with no door to it.
  */
 export function NotLiveGuide({ store, manager, owner }: { store: HubStore; manager: boolean; owner: boolean }) {
   const itemsQ = useItems();
@@ -281,7 +282,7 @@ export function NotLiveGuide({ store, manager, owner }: { store: HubStore; manag
             <GuideRow key={step.words} index={i + 1} label={step.words} href={step.where === 'documents' ? '/dashboard/documents' : '/dashboard/settings'}
               detail={step.where === 'documents' ? 'A person at Swift checks each one' : 'In your store’s Settings'} />
           ))}
-          {emptyCatalogue && <GuideRow index={steps.length + 1} label="Add your first item" detail={`Your ${catalogue} is empty — nothing to order yet`} href="/dashboard/inventory" />}
+          {emptyCatalogue && <GuideRow index={steps.length + 1} label={`Add your ${catalogue} once you’re approved`} detail="You can add items then" />}
         </div>
       )}
       <p className="mt-4 text-sm opacity-90">{NOT_LIVE.wait}</p>

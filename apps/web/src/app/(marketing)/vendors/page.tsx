@@ -26,7 +26,7 @@ const DASHBOARD = [
   {
     icon: Boxes,
     title: 'Inventory that keeps up',
-    body: 'Add items one at a time, import a spreadsheet, or photograph a paper menu and let Swift read it. Sold-out hides instantly and comes back when you restock — and a live order holding that item asks the customer to swap rather than silently dropping it.',
+    body: 'Add items one at a time or import a spreadsheet. In the Swift app you can also upload a typed PDF menu (not a photo or a scan). Sold-out hides instantly and comes back when you restock — and a live order holding that item asks the customer to swap rather than silently dropping it.',
   },
   {
     icon: LineChart,
@@ -128,7 +128,7 @@ export default function VendorsPage() {
                 b: (
                   <>
                     A person checks every document.{' '}
-                    <ReviewTime live="Most businesses clear review within a day, and you can browse the whole dashboard while you wait." after="You can browse the whole dashboard while you wait." />
+                    <ReviewTime live="We review documents Monday to Saturday, 8:00–16:00 Guyana time, and you can browse the whole dashboard while you wait." after="You can browse the whole dashboard while you wait." />
                   </>
                 ),
               },
