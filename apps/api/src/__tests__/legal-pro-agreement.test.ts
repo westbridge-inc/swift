@@ -63,22 +63,24 @@ describe('the Business Agreement covers Providers (section 12)', () => {
 
 describe('the fresh tick is asked of Providers, and nobody else', () => {
   const CUSTOMER = ['CUSTOMER'] as UserRole[];
+  /** The last version before the 5 Nov batch, which is material for everyone on its own account. */
+  const SERVED = '2026-11-04';
 
   // [EXPRESS-FEE · owner 1 Nov] Served now under 2026-11-01 (non-material): the agreement version stays 2026-10-29.2.
   it('is a material version for Providers only, served (now under 2026-11-01); the version everyone else answers to is unchanged', () => {
-    // served now under 2026-11-04 (the waiting charge cap: non-material)
-    expect(LEGAL_VERSION).toBe('2026-11-04');
+    // served now under 2026-11-05 (the 5 Nov batch: material)
+    expect(LEGAL_VERSION).toBe('2026-11-05');
     expect(PRO_AGREEMENT_VERSION).toBe('2026-10-29.2');
     expect(compareLegalVersions(PRO_AGREEMENT_VERSION, LEGAL_VERSION)).toBeLessThan(0);
     expect(MATERIAL_CHANGES.find((c) => c.version === PRO_AGREEMENT_VERSION)).toMatchObject({ audience: 'provider' });
-    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');
+    expect(materialVersion(SERVED)).toBe('2026-10-28.1');
     expect(proSummary().join(' ')).toMatch(/list of services with bookable times/);
   });
 
   it('a customer or a store owner at 2026-10-29 is not asked; a pro who never accepted the agreement is, with the provider summary', () => {
-    expect(acceptanceStatus({ tosVersion: '2026-10-29', roles: CUSTOMER }).needsAcceptance).toBe(false);
-    expect(acceptanceStatus({ tosVersion: '2026-10-29', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[] }).needsAcceptance).toBe(false);
-    expect(acceptanceStatus({ tosVersion: '2026-10-29', roles: CUSTOMER, pro: { acceptedVersion: null } }))
+    expect(acceptanceStatus({ tosVersion: '2026-10-29', roles: CUSTOMER }, SERVED).needsAcceptance).toBe(false);
+    expect(acceptanceStatus({ tosVersion: '2026-10-29', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[] }, SERVED).needsAcceptance).toBe(false);
+    expect(acceptanceStatus({ tosVersion: '2026-10-29', roles: CUSTOMER, pro: { acceptedVersion: null } }, SERVED))
       .toMatchObject({ needsAcceptance: true, summary: [...proSummary()], agreements: ['vendor_agreement'] });
     // Already at the served version as a customer (signed up today): still asked, for the agreement.
     expect(acceptanceStatus({ tosVersion: LEGAL_VERSION, roles: CUSTOMER, pro: { acceptedVersion: null } }).needsAcceptance).toBe(true);
@@ -87,13 +89,13 @@ describe('the fresh tick is asked of Providers, and nobody else', () => {
   it('a pro who accepted it is not asked; one who accepted an older Business Agreement (a store owner) is', () => {
     expect(acceptanceStatus({ tosVersion: LEGAL_VERSION, roles: CUSTOMER, pro: { acceptedVersion: PRO_AGREEMENT_VERSION } }))
       .toMatchObject({ needsAcceptance: false, summary: [] });
-    expect(acceptanceStatus({ tosVersion: '2026-10-29', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[], pro: { acceptedVersion: '2026-10-28' } }))
+    expect(acceptanceStatus({ tosVersion: '2026-10-29', roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[], pro: { acceptedVersion: '2026-10-28' } }, SERVED))
       .toMatchObject({ needsAcceptance: true, summary: [...proSummary()], agreements: ['vendor_agreement'] });
   });
 
   it('a pro behind on the Terms too sees every summary they missed, oldest first, the provider lines last', () => {
     const v281 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-28.1')!.summary;
-    expect(acceptanceStatus({ tosVersion: '2026-10-28', roles: CUSTOMER, pro: { acceptedVersion: null } }).summary).toEqual([...v281, ...proSummary()]);
+    expect(acceptanceStatus({ tosVersion: '2026-10-28', roles: CUSTOMER, pro: { acceptedVersion: null } }, SERVED).summary).toEqual([...v281, ...proSummary()]);
   });
 
   it('before the provider version is served, nobody is asked for it', () => {

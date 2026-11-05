@@ -174,12 +174,13 @@ describe('the words: Terms s7, the refunds page and both FAQs, from the same num
   // [BILL-PRO PR7] Served now under 2026-10-29.2 (the Business Agreement covers Providers; material for Providers only):
   // a customer is still not asked. [EXPRESS-FEE · owner 1 Nov] ... and under 2026-11-01 (non-material) on top of that.
   it('published as 2026-10-29.1 (served now under 2026-11-01), classed non-material: nobody is asked again (a person at 2026-10-29 or 2026-10-28.1 stays)', () => {
-    // served now under 2026-11-04 (the waiting charge cap: non-material)
-    expect(LEGAL_VERSION).toBe('2026-11-04');
+    // served now under 2026-11-05 (the 5 Nov batch: material)
+    expect(LEGAL_VERSION).toBe('2026-11-05');
     expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-10-29.1')).toHaveLength(1);
     expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-29.1');
+    // Up to the last version before the 5 Nov batch, which is material on its own account.
     for (const accepted of ['2026-10-29', '2026-10-28.1']) {
-      expect(acceptanceStatus({ tosVersion: accepted, roles: ['CUSTOMER'] as UserRole[] }).needsAcceptance, accepted).toBe(false);
+      expect(acceptanceStatus({ tosVersion: accepted, roles: ['CUSTOMER'] as UserRole[] }, '2026-11-04').needsAcceptance, accepted).toBe(false);
     }
   });
 });

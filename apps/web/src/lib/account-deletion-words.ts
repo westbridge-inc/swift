@@ -24,8 +24,8 @@ export const DELETION_KEPT_LEAD = 'We do not keep anything we are not required t
 export const DELETION_KEPT: ReadonlyArray<{ what: string; why: string; howLong: string }> = [
   {
     what: 'Order, trip and delivery records',
-    why: 'Kept in de-identified form for disputes, guarantees, tax and legal record-keeping. They stop being linked to a person.',
-    howLong: 'For the period the law requires for disputes, guarantees, tax and legal obligations.',
+    why: 'Kept in de-identified form for disputes, payments Swift has decided to make, tax and legal record-keeping. They stop being linked to a person.',
+    howLong: 'For the period the law requires for disputes, payments Swift has decided to make, tax and legal obligations.',
   },
   {
     what: 'Money records — payouts, invoices, settlement',

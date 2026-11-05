@@ -51,7 +51,7 @@ describe('Terms of Service (Part 4)', () => {
   it.each([
     ['¶1 who the agreement is with, Guyana only, the tick, binding', `<p>These Terms of Service are a binding agreement between you and ${ID} ("<b>Swift</b>", "we", "us"), which operates the Swift app, websites and related services in Guyana (the "<b>Platform</b>"). By creating an account and ticking the acceptance box, you accept these Terms and confirm you have read our Privacy Policy. Your electronic acceptance forms a binding contract. If you do not agree, do not use the Platform.</p>`],
     ['¶4 P5 ID wording + the 18+ box', 'You must be at least 18 years old and capable of forming a binding contract. By creating an account you confirm that you are 18 or older; where the sign-up shows the "I am 18 or older" box, you confirm it by ticking that box. An account requires a phone number verified by SMS code. A customer never needs an ID or a photo to use Swift, and Swift does not ask a customer for either.'], // [owner 16 Oct: customers take no photos; 2026-10-17] [owner 24 Oct 2026: no customer ID gate; 2026-10-25] [CHECKLIST-LEGAL · owner 1 Nov 2026 (b): no customer ID at all; 2026-11-01.1]
-    ['¶5 payments and prices', "<p>Swift is software, not a payment service. You pay for an Order in cash at Handover or, where the Business offers it, directly into the Business's own MMG account under MMG's terms. Swift never holds, collects or transmits Order money, offers no wallet or stored value, and never asks for card numbers. Prices are the Business's own prices. Delivery fees and taxi fares are calculated by Swift and shown in the app before you confirm. Swift charges customers nothing.</p>"],
+    ['¶5 payments and prices', "<p>Swift is software, not a payment service. You pay for an Order in cash at Handover or, where the Business offers it, directly into the Business's own MMG account under MMG's terms. You pay a taxi fare to the driver at drop-off, in cash or, where the driver offers it, directly into the driver's own MMG account under MMG's terms. Swift never holds, collects or transmits Order money, offers no wallet or stored value, and never asks for card numbers. Prices are the Business's own prices. Delivery fees and taxi fares are calculated by Swift and shown in the app before you confirm. Swift charges customers nothing.</p>"],
     ['¶8 problems + statutory rights', "If something goes wrong with a fulfilled Order, report it from the Order screen within 7 days. Swift reviews it with GPS and photo evidence and asks the Business to put it right; any refund of Order money is made by the Business that received it. Nothing in this section affects your rights under the Consumer Affairs Act 2011, including returning goods to, and getting refunds from, the Business.</p>"],
     ['¶9 (h) the prohibited list, letters or documents, legal services', '(h) order, sell, send or carry anything Swift prohibits: alcohol, tobacco and vapes, medicines and drugs, 18+ items, cooking gas and fuel, weapons and ammunition, fireworks and explosives, pesticides and controlled chemicals, protected wildlife, raw gold and precious minerals, lottery and gambling products, counterfeit goods, currency and payment cards, and letters or documents; or offer legal services.'],
     ['¶11 SOS is not an emergency service', "These tools support your safety. Swift's safety team is not an emergency service and may not respond immediately; in an emergency call Police 911, Fire 912 or Ambulance 913 first."],
@@ -75,7 +75,7 @@ describe('Terms of Service (Part 4)', () => {
 describe('Privacy Policy (Part 4)', () => {
   it.each([
     // [EMAIL-HTTPS · 2026-10-27] the "as of" date is LAST_UPDATED: it moves with the new day's version.
-    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 4 November 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
+    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 5 November 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
     ['¶2 controller and data protection officer', '<p>Westbridge Inc. (trading as Swift), registration no. 17703, Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana, is the data controller. Our data protection officer is the Data Protection Officer, Westbridge Inc., privacy@swiftgy.com.'],
     // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] taxi rides and larger orders no longer need a customer's ID.
     // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b) — a DELIBERATE change] nor anything else: Swift takes no customer ID.
@@ -130,7 +130,7 @@ describe('Mover and Business Agreements (Part 4)', () => {
 
   it('Business: authority, P1 documents + January renewal, storefront facts + statutory rights, F8, own deliveries, invited staff', () => {
     expect(VENDOR_AGREEMENT).toContain('You confirm you are authorised to accept this Agreement for the business.');
-    expect(VENDOR_AGREEMENT).toContain("(for example: the owner's national ID or Digital ID card, business registration, and the food-safety licences and permits your category requires). If you trade under a registered business name, renew it each January.");
+    expect(VENDOR_AGREEMENT).toContain("(for example: the owner's national ID or Digital ID card, business registration (or, if your store's name is your own name, the short declaration you sign in the app), and the food-safety licences and permits your category requires). If you trade under a registered business name, renew it each January.");
     expect(VENDOR_AGREEMENT).toContain("<p>Your storefront must show your legal name, business address and phone. You must honour customers' return and refund rights under the Consumer Affairs Act 2011.</p>");
     expect(VENDOR_AGREEMENT).toContain('If you do not refund within 72 hours after Swift contacts you, Swift may suspend new orders or turn off MMG payment for your store until the refund is made.');
     expect(VENDOR_AGREEMENT).toContain('or, for any order you choose to deliver yourself, by your own staff, for whom you are fully responsible.');
@@ -185,7 +185,7 @@ describe('one version for the whole batch', () => {
   // [BILL-PRO] the Business Agreement covers Providers (s.12), material for Providers only, as 2026-10-29.2.
   // [EXPRESS-FEE · owner 1 Nov 2026, non-material] the bump for the express Delivery-policy wording, as 2026-11-01.
   it('is 2026-11-01', () => {
-    // served now under 2026-11-04 (the waiting charge cap: non-material)
-    expect(LEGAL_VERSION).toBe('2026-11-04');
+    // served now under 2026-11-05 (the 5 Nov batch: material)
+    expect(LEGAL_VERSION).toBe('2026-11-05');
   });
 });

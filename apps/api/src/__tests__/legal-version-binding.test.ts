@@ -370,16 +370,26 @@ const PUBLISHED: Record<
     driver_agreement: 'a4bc5e874eb2b2ae9d3992ba910bb22b38071d31f741cf3d627d915d515a4c4f',
     vendor_agreement: '942975fc7e4fc9a4dc54890daf2c80479b62d3009bfc9c416361afe38121f38d',
   },
+  // [2026-11-05 batch · wording delegated by the owner 5 Nov 2026 · MATERIAL · DRAFT until a Guyana attorney reads it] Terms
+  // s.4 (a taxi fare to the driver's own MMG); Privacy s.1 (location, exactly), s.2 (MMG references), s.6; Mover s.2 and
+  // Business s.2 (swiftgy.com); Mover new s.7, later sections renumber; Business s.3 and s.6. Undoing exactly those edits
+  // and the date reproduces all four 2026-11-04 pins above (checked mechanically before pinning).
+  '2026-11-05': {
+    terms: 'db4598cd8ae98dccbec1beef0f6a491c98242c735ac6df901c79a3c8fdbbb740',
+    privacy: '048a3dd3caa12c53502912c727674a3e60d4ab83181085f7f900eb8b7dab2c73',
+    driver_agreement: '70aeb8fcd2e9bb3f7adf100ae1152104c8e3ec0f9db34c3d4a72c611e69e8c58',
+    vendor_agreement: 'c8b0651f35d4426a516057e0a76c464d3c78e8848d56f1cbfd979d9bb5ee2ba7',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
   it.each([
     ['Mover Agreement', DRIVER_AGREEMENT],
     ['Business Agreement', VENDOR_AGREEMENT],
-  ])('%s directs weekly-fee payment to checkout in the Swift app', (_name, agreement) => {
+  ])('%s directs weekly-fee payment to checkout in the Swift app or on swiftgy.com', (_name, agreement) => {
     expect(agreement).not.toMatch(/MMG\s+agent|Swift\s+Number|account\s+number/i);
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
-    expect(feeParagraph).toContain("payable in the Swift app through MMG's checkout, or by card where the app offers it.");
+    expect(feeParagraph).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, or by card where the app offers it.");
   });
 
   it.each([
