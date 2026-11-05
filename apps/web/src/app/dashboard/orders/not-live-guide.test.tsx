@@ -50,7 +50,10 @@ describe('[WEB-ONBOARDING] a store not live yet is told what is left, not that t
     expect(within(guide).getByRole('link', { name: /Add the documents it still needs/ }).getAttribute('href')).toBe('/dashboard/documents');
     expect(within(guide).getByRole('link', { name: /Add the number customers can call/ }).getAttribute('href')).toBe('/dashboard/settings');
     expect(within(guide).getByText(NOT_LIVE.wait)).toBeTruthy();
-    expect(await within(guide).findByRole('link', { name: /Add your first item/ })).toBeTruthy();
+    // [FULL-LAUNCH 5 Nov 2026] Items need an approved store (the API answers 403 before that): no door to the menu yet.
+    expect(await within(guide).findByText('Add your menu once you’re approved')).toBeTruthy();
+    expect(within(guide).queryByRole('link', { name: /menu|item/i })).toBeNull();
+    expect(screen.queryByText('Add your first item')).toBeNull();
     expect(screen.queryByText('The board is live.')).toBeNull();
     expect(screen.queryByText('Use the switch below to start taking orders')).toBeNull();
     expect(screen.queryByText('Share your store link')).toBeNull();
