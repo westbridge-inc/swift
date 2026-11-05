@@ -89,7 +89,7 @@ export const MATERIAL_CHANGES: ReadonlyArray<MaterialChange> = [
       'Privacy: riders and drivers can now read exactly what is kept of their position: the latest position, a short trail deleted 3 hours after the last position, a job\u2019s distance but never its route, single positions at steps of a job, positions that look false, and positions during an open SOS.',
       'Orders: you can place at most 6 store orders and parcels in an hour. A store order or a parcel is held for one minute, and you can cancel it free in that minute. A delivery or a parcel can be refused when no rider is near.',
       'Privacy: order and job chat is deleted one year after the order or job ended, unless it is still needed; resolved support tickets after 3 years; closed safety records after 7 years.',
-      'Partners: the weekly fee can be paid on swiftgy.com, or directly to Westbridge Inc. in person by cash, cheque or bank transfer, never through an agent. Each branch of a business pays its own weekly fee.',
+      `Partners: the weekly fee can be paid on swiftgy.com, or directly to ${OPERATOR.name} in person by cash, cheque or bank transfer, never through an agent. Each branch of a business pays its own weekly fee.`,
       'Also: a taxi fare can go directly to the driver\u2019s own MMG where the driver offers it.',
     ],
   },
