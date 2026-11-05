@@ -8,7 +8,7 @@ import { Card, EmptyState, ErrorState, Header, LinkText, LoadingBlock, Screen, T
 import { useMoverClaims, useMoverKind } from '../../../hooks';
 import { money } from '../../../lib/money';
 import { dateLabel } from '../shared';
-import { claimStatus, evidenceLine, flagHint, reasonLabel, type ClaimView } from '../claims-view';
+import { claimHints, claimStatus, evidenceLine, reasonLabel, type ClaimView } from '../claims-view';
 
 /**
  * [DOC-1 §31.4 · P31-1] The rider's own view of their unpaid cash orders: each one's status, the evidence bundle as it
@@ -46,7 +46,7 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
         ) : null}
         {data?.claims.map((c: ClaimView) => {
           const st = claimStatus(c.status, c.evidence?.complete ?? true);
-          const hints = c.flags.map(flagHint).filter((h: string | null): h is string => Boolean(h));
+          const hints = claimHints(c.flags, c.status);
           return (
             <Card key={c.id} accessibilityLabel={`Unpaid order ${money(Number(c.amount))} ${st.label}`}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>

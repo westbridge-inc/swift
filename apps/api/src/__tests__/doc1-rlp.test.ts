@@ -27,6 +27,8 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { NotificationService } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService, DEFAULT_CASH_RULES } from '../modules/cash/cash-rules.service';
+import { PAY_ASK_ACTION, resolveApproval, type ApprovalOutcome } from '../modules/admin/admin-approval';
+import { lockClaimPaymentAsks } from '../modules/cash/claim-payout';
 import {
   LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, assembleClaimEvidence, reserveBalance,
   moverClaims, rlpReserveDdl, sweepLossProtection,
@@ -606,7 +608,7 @@ describe('[case by case] every unpaid door goes to a person, and nothing promise
     const { claim } = await file(await atDoorOrder({ food: 1100, pair, door }), 'no_show', { pair, door, photo: false });
     await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
     const before = await balance();
-    const closed = await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'the evidence will not come back'));
+    const closed = await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'the evidence will not come back', undefined, { nothingSent: true }));
     expect(closed.status).toBe('REJECTED');
     expect(await balance()).toBe(before);
     expect((await noticeOf(pair.riderUserId, 'claim_update'))?.body).toContain('the evidence will not come back');
@@ -615,7 +617,7 @@ describe('[case by case] every unpaid door goes to a person, and nothing promise
     const done = (await file(await atDoorOrder({ food: 900, pair: pair2, door: door2 }), 'no_show', { pair: pair2, door: door2 })).claim!;
     await system(() => cash.approveClaim(done.id, 'admin-review', 'read the bundle'));
     await system(() => cash.markClaimPaid(done.id, 'admin-pay', ref('DONE'), 900));
-    await expect(system(() => cash.rejectClaim(done.id, 'admin-review', 'too late'))).rejects.toMatchObject({ code: 'INVALID_CLAIM_STATE' });
+    await expect(system(() => cash.rejectClaim(done.id, 'admin-review', 'too late', undefined, { nothingSent: true }))).rejects.toMatchObject({ code: 'INVALID_CLAIM_STATE' });
     expect((await claimRow(done.id)).status).toBe('PAID');
   });
 
@@ -626,6 +628,167 @@ describe('[case by case] every unpaid door goes to a person, and nothing promise
     await system(() => app.prisma.reimbursementClaim.update({ where: { id: claim!.id }, data: { evidenceComplete: true } }));
     const [row] = await system(async () => cash.withEvidenceNow([await claimRow(claim!.id)]));
     expect(row!.evidenceNow).toEqual({ complete: false, missing: ['door_photo'] });
+  });
+
+  it('a closed case carries no late flag to the mover, on any phone; a decided, open one does', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(64, door);
+    const late = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'APPROVED', flags: [LOSS_PROTECTION_FLAGS.slaBreached, 'gps_far'] });
+    const closed = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'REJECTED', flags: [LOSS_PROTECTION_FLAGS.slaBreached, 'gps_far'] });
+    const paid = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'PAID', flags: [LOSS_PROTECTION_FLAGS.slaBreached] });
+    const view = await system(() => moverClaims(app.prisma, { riderId: pair.riderId, driverId: null }));
+    const flagsOf = (id: string) => view.claims.find((c) => c.id === id)!.flags;
+    expect(flagsOf(late.id)).toContain(LOSS_PROTECTION_FLAGS.slaBreached);
+    expect(flagsOf(closed.id)).toEqual(['gps_far']);
+    expect(flagsOf(paid.id)).toEqual([]);
+    expect((await claimRow(closed.id)).flags, 'the record keeps the fact').toContain(LOSS_PROTECTION_FLAGS.slaBreached);
+  });
+
+  it('reject refuses while a payment ask stands on the case: on this rail the money may already have left', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(66, door);
+    const { claim } = await file(await atDoorOrder({ food: 800, pair, door }), 'no_show', { pair, door });
+    await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
+    const ask = (status: string, expiresAt: Date) => system(() => app.prisma.privilegedApproval.create({ data: {
+      action: PAY_ASK_ACTION, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim!.id, fingerprint: `fixture-${RUN}-${status}`, status, requestedBy: 'admin-pay', reason: 'fixture', expiresAt,
+    } }));
+    const later = new Date(Date.now() + HOUR);
+    const pending = await ask('PENDING', later);
+    await expect(system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help'))).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_OPEN' });
+    await system(() => app.prisma.privilegedApproval.update({ where: { id: pending.id }, data: { status: 'APPROVED' } }));
+    await expect(system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help'))).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_OPEN' });
+    expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    // Withdrawn or lapsed, the case can always be closed.
+    await system(() => app.prisma.privilegedApproval.update({ where: { id: pending.id }, data: { status: 'CANCELLED' } }));
+    await ask('PENDING', new Date(Date.now() - HOUR));
+    expect((await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help', undefined, { nothingSent: true }))).status).toBe('REJECTED');
+  });
+
+  // A spent approval on a refused payment is reachable: the gate marks the ask APPLIED before the handler runs, and a
+  // short line, changed evidence or a reused reference then refuses it. The row stays APPROVED, and the dialog that made
+  // the ask said "the amount you actually transferred".
+  it('an approved case never closes silently: a person states nothing was sent, and it is on the audit row, after a spent ask too', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(68, door);
+    const { claim } = await file(await atDoorOrder({ food: 750, pair, door }), 'no_show', { pair, door });
+    await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
+    await system(() => app.prisma.privilegedApproval.create({ data: {
+      action: PAY_ASK_ACTION, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim!.id, fingerprint: `fixture-${RUN}-spent`, status: 'APPLIED', requestedBy: 'admin-pay', reason: 'fixture', expiresAt: new Date(Date.now() + HOUR),
+    } }));
+    for (const opts of [undefined, {}, { nothingSent: false }]) {
+      await expect(system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help', undefined, opts))).rejects.toMatchObject({ code: 'CLAIM_CONFIRM_NOTHING_SENT' });
+    }
+    expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    const facts: Record<string, unknown>[] = [];
+    const closed = await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help', async (_tx, f) => { facts.push(f); }, { nothingSent: true }));
+    expect(closed.status).toBe('REJECTED');
+    expect(facts[0]).toMatchObject({ nothingSent: true });
+  });
+
+  it('an undecided case needs no such statement: nothing could have been sent', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(70, door);
+    const { claim } = await file(await atDoorOrder({ food: 750, pair, door }), 'no_show', { pair, door });
+    const facts: Record<string, unknown>[] = [];
+    expect((await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help', async (_tx, f) => { facts.push(f); }))).status).toBe('REJECTED');
+    expect(facts[0]).not.toHaveProperty('nothingSent');
+  });
+
+  describe('a payment ask and a reject never pass each other', () => {
+    const settled = async (p: Promise<unknown>, ms = 400) => Promise.race([p.then(() => true, () => true), new Promise<boolean>((done) => { setTimeout(() => done(false), ms); })]);
+    const approved = async (seed: number) => {
+      const door = await ownDoor();
+      const pair = await freshPair(seed, door);
+      const { claim } = await file(await atDoorOrder({ food: 650, pair, door }), 'no_show', { pair, door });
+      await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
+      return claim!;
+    };
+    const payAsk = (claimId: string): Promise<ApprovalOutcome> => system(() => resolveApproval(
+      app.prisma, { cls: 'C4', capability: 'cashrules.claim.pay' } as never,
+      { method: 'PUT', routeUrl: '/cash-rules/claims/:id/paid', params: { id: claimId }, body: { reference: ref(`ASK${claimId.slice(-6)}`), amount: 650 } },
+      { userId: 'admin-pay' }, null, 'recording the payment',
+    ));
+
+    it('an ask on a closed case is refused before it is written', async () => {
+      const claim = await approved(72);
+      await system(() => cash.rejectClaim(claim.id, 'admin-review', 'no help', undefined, { nothingSent: true }));
+      await expect(payAsk(claim.id)).rejects.toMatchObject({ code: 'INVALID_CLAIM_STATE' });
+      expect(await system(() => app.prisma.privilegedApproval.count({ where: { action: PAY_ASK_ACTION, entityId: claim.id } }))).toBe(0);
+    });
+
+    it('an ask on a case that has not been approved, or came from the old rule, is refused before it is written', async () => {
+      const door = await ownDoor();
+      const pair = await freshPair(74, door);
+      const { claim } = await file(await atDoorOrder({ food: 650, pair, door }), 'no_show', { pair, door });
+      await expect(payAsk(claim!.id)).rejects.toMatchObject({ code: 'INVALID_CLAIM_STATE' });
+      await system(() => app.prisma.reimbursementClaim.update({ where: { id: claim!.id }, data: { status: 'AUTO_APPROVED' } }));
+      await expect(payAsk(claim!.id)).rejects.toMatchObject({ code: 'RLP_PERSON_MUST_DECIDE' });
+    });
+
+    it('an ask waits for a reject that holds the lock, and then is refused', async () => {
+      const claim = await approved(76);
+      let asked: Promise<boolean> | null = null;
+      await system(() => app.prisma.$transaction(async (tx) => {
+        await lockClaimPaymentAsks(tx, claim.id);
+        const ask = payAsk(claim.id).then(() => 'written', (e: { code?: string }) => e.code);
+        asked = settled(ask);
+        expect(await asked, 'the ask waits for the lock').toBe(false);
+        await tx.reimbursementClaim.update({ where: { id: claim.id }, data: { status: 'REJECTED' } });
+        asked = ask as unknown as Promise<boolean>;
+      }));
+      expect(await asked).toBe('INVALID_CLAIM_STATE');
+      expect(await system(() => app.prisma.privilegedApproval.count({ where: { action: PAY_ASK_ACTION, entityId: claim.id } }))).toBe(0);
+    });
+
+    it('a reject reads the row under its lock: a case approved while it waits still needs the statement', async () => {
+      const door = await ownDoor();
+      const pair = await freshPair(80, door);
+      const { claim } = await file(await atDoorOrder({ food: 650, pair, door }), 'no_show', { pair, door });
+      let rejected: Promise<string | undefined> | null = null;
+      await system(() => app.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM reimbursement_claims WHERE id = ${claim!.id} FOR UPDATE`;
+        const reject = system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help')).then(() => 'closed', (e: { code?: string }) => e.code);
+        expect(await settled(reject), 'the reject waits for the row').toBe(false);
+        await tx.reimbursementClaim.update({ where: { id: claim!.id }, data: { status: 'APPROVED' } });
+        rejected = reject;
+      }));
+      expect(await rejected).toBe('CLAIM_CONFIRM_NOTHING_SENT');
+      expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    });
+
+    it('a statement made before a payment was tried does not stand: the reject is refused, and an older spent ask does not stop it', async () => {
+      const claim = await approved(82);
+      const row = (status: string, createdAt: Date, action: string, appliedAt?: Date) => system(() => app.prisma.privilegedApproval.create({ data: {
+        action, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim.id, fingerprint: `fixture-${RUN}-${action}-${createdAt.getTime()}`, status, requestedBy: 'admin-pay', reason: 'fixture', expiresAt: new Date(Date.now() + HOUR), createdAt, ...(appliedAt ? { appliedAt } : {}),
+      } }));
+      const ago = (hours: number) => new Date(Date.now() - hours * HOUR);
+      const REJECT = 'PUT /cash-rules/claims/:id/reject';
+      const spent = await row('APPLIED', ago(5), PAY_ASK_ACTION, ago(1));
+      const before = await row('APPLIED', ago(2), REJECT, ago(0));
+      const reject = (approvalId: string) => system(() => cash.rejectClaim(claim.id, 'admin-review', 'no help', undefined, { nothingSent: true, approvalId }));
+      await expect(reject(before.id)).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_SINCE' });
+      expect((await claimRow(claim.id)).status).toBe('APPROVED');
+      expect(spent.id).toBeTruthy();
+      // Asked after that payment was tried: the person knew.
+      const after = await row('APPLIED', ago(0.5), REJECT, ago(0));
+      expect((await reject(after.id)).status).toBe('REJECTED');
+    });
+
+    it('a reject waits for an ask that holds the lock, and then sees it', async () => {
+      const claim = await approved(78);
+      let rejected: Promise<string | undefined> | null = null;
+      await system(() => app.prisma.$transaction(async (tx) => {
+        await lockClaimPaymentAsks(tx, claim.id);
+        await tx.privilegedApproval.create({ data: {
+          action: PAY_ASK_ACTION, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim.id, fingerprint: `fixture-${RUN}-lock`, status: 'PENDING', requestedBy: 'admin-pay', reason: 'fixture', expiresAt: new Date(Date.now() + HOUR),
+        } });
+        const reject = system(() => cash.rejectClaim(claim.id, 'admin-review', 'no help', undefined, { nothingSent: true })).then(() => 'closed', (e: { code?: string }) => e.code);
+        expect(await settled(reject), 'the reject waits for the lock').toBe(false);
+        rejected = reject;
+      }));
+      expect(await rejected).toBe('CLAIM_PAYMENT_ASK_OPEN');
+      expect((await claimRow(claim.id)).status).toBe('APPROVED');
+    });
   });
 
   it('the mover view carries no pay-by date, and an old automatic row reads as waiting for a person', async () => {

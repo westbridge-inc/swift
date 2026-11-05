@@ -472,7 +472,7 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     } });
     expect((await del(p.token)).statusCode).toBe(409);
     const cash = new CashRulesService(app.prisma, new NotificationService(app.prisma, app.io), new OrderService(app.prisma, app.io));
-    await cash.rejectClaim(claim.id, 'admin-review', 'evidence never came');
+    await cash.rejectClaim(claim.id, 'admin-review', 'evidence never came', undefined, { nothingSent: true });
     const accepted = await del(p.token);
     expect(accepted.statusCode, accepted.payload).toBe(200);
   });

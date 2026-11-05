@@ -1,3 +1,4 @@
+import { PAY_ASK_ACTION } from '../modules/admin/admin-approval';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -255,6 +256,11 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     // 4. Paid: the same ceremony. [SAFE-B] Two people cannot supply evidence that does not exist: the
     //    payout is refused inside its transaction and no money fact is written.
     const reference = `TAXI${nanoid(10).replace(/[^A-Za-z0-9]/g, '0').toUpperCase()}`;
+    // A reject asked now, with its statement that nothing was sent, is overtaken by the payment tried below.
+    const staleAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON, nothingSent: true });
+    expect(staleAsk.statusCode, staleAsk.body).toBe(202);
+    const staleId = approvalIdOf(staleAsk);
+    expect((await call(approver.token, 'POST', `/api/v1/admin/approvals/${staleId}/decide`, { approve: true, reason: REASON })).statusCode).toBe(200);
     const payAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 });
     expect(payAsk.statusCode, payAsk.body).toBe(202);
     const payId = approvalIdOf(payAsk);
@@ -264,6 +270,9 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     const paid = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference, amount: 2000 }, { [APPROVAL_HEADER]: payId! });
     expect(paid.statusCode, paid.body).toBe(409);
     expect(paid.json().error.code).toBe('RLP_EVIDENCE_INCOMPLETE');
+    const staleReject = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON, nothingSent: true }, { [APPROVAL_HEADER]: staleId! });
+    expect(staleReject.statusCode, staleReject.body).toBe(409);
+    expect(staleReject.json().error.code).toBe('CLAIM_PAYMENT_ASK_SINCE');
 
     const after = await claimState(claim.id);
     expect(after).toMatchObject({ status: 'APPROVED', paymentRef: null, paidAt: null, paidById: null, reviewedBy: requester.userId });
@@ -301,6 +310,16 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     const whyAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, written);
     expect(whyAsk.statusCode, whyAsk.body).toBe(202);
     const whyId = approvalIdOf(whyAsk);
+    // The real ask carries the action the reject check reads, and a reject that goes all the way through is refused.
+    expect((await runWithoutTenant(() => app.prisma.privilegedApproval.findUniqueOrThrow({ where: { id: whyId! } }))).action).toBe(PAY_ASK_ACTION);
+    const rejectAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON, nothingSent: true });
+    expect(rejectAsk.statusCode, rejectAsk.body).toBe(202);
+    const rejectId = approvalIdOf(rejectAsk);
+    expect((await call(approver.token, 'POST', `/api/v1/admin/approvals/${rejectId}/decide`, { approve: true, reason: REASON })).statusCode).toBe(200);
+    const rejected = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/reject`, { reason: REASON, nothingSent: true }, { [APPROVAL_HEADER]: rejectId! });
+    expect(rejected.statusCode, rejected.body).toBe(409);
+    expect(rejected.json().error.code).toBe('CLAIM_PAYMENT_ASK_OPEN');
+    expect((await claimState(claim.id)).status).toBe('APPROVED');
     expect((await call(approver.token, 'POST', `/api/v1/admin/approvals/${whyId}/decide`, { approve: true, reason: REASON })).statusCode).toBe(200);
     // The approval covers the reason: a different one cannot use it.
     const swapped = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { ...written, evidenceReason: 'Some other words entirely, long enough.' }, { [APPROVAL_HEADER]: whyId! });
@@ -312,6 +331,12 @@ describe('[DS110 #19 · G3-F1] a TAXI driver claim is tenant-owned: visible to i
     const done = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, written, { [APPROVAL_HEADER]: whyId2! });
     expect(done.statusCode, done.body).toBe(200);
     expect((await claimState(claim.id)).status).toBe('PAID');
+    // Another operator's admin learns nothing about the case from the refusal: its ask is answered as before.
+    expect((await call(foreign.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference: `${reference}F`, amount: 2000 })).statusCode).toBe(202);
+    // The same operator's admin is refused before anything is written.
+    const closedAsk = await call(requester.token, 'PUT', `/api/v1/admin/cash-rules/claims/${claim.id}/paid`, { reference: `${reference}G`, amount: 2000 });
+    expect(closedAsk.statusCode, closedAsk.body).toBe(400);
+    expect(closedAsk.json().error.code).toBe('INVALID_CLAIM_STATE');
     const entry = await runWithoutTenant(() => app.prisma.rlpReserveEntry.findUnique({ where: { claimId: claim.id } }));
     expect(entry?.note).toContain('The passenger admitted it');
     const audit = await runWithoutTenant(() => app.prisma.auditLog.findMany({ where: { entityId: claim.id }, orderBy: { createdAt: 'desc' }, take: 5 }));

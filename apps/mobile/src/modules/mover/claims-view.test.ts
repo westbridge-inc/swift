@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { claimStatus, evidenceLine, flagHint, reasonLabel } from './claims-view';
+import { claimHints, claimStatus, evidenceLine, flagHint, reasonLabel } from './claims-view';
 
 describe('claims view helpers — the rider\'s words, case by case', () => {
   it('status labels: a person reviews, a person approves, an old automatic row waits for a person, nothing promises', () => {
@@ -10,6 +10,13 @@ describe('claims view helpers — the rider\'s words, case by case', () => {
     expect(claimStatus('APPROVED', false)).toEqual({ label: 'Reviewed', tone: 'brand' });
     expect(claimStatus('PAID').label).toBe('Paid');
     expect(claimStatus('REJECTED')).toEqual({ label: 'Not approved', tone: 'error' });
+  });
+  it('a closed case never reads as still on its way: the late line shows only while it is open', () => {
+    expect(claimHints(['sla_breached'], 'APPROVED')).toEqual(['This is taking longer than it should. Swift has been told.']);
+    for (const closed of ['REJECTED', 'PAID']) expect(claimHints(['sla_breached'], closed)).toEqual([]);
+    // Everything else on a closed case still explains it.
+    expect(claimHints(['sla_breached', 'gps_far'], 'REJECTED')).toEqual([flagHint('gps_far')]);
+    expect(claimHints(['some_new_flag'], 'APPROVED')).toEqual([]);
   });
   it('evidence lines: present is ok, required-and-absent is missing, optional-and-absent is optional', () => {
     expect(evidenceLine({ key: 'door_photo', present: true, required: true })).toEqual({ label: 'Photo at the door', state: 'ok' });
@@ -23,7 +30,7 @@ describe('claims view helpers — the rider\'s words, case by case', () => {
     expect(flagHint('protection_suspended')).toContain('suspended');
     expect(flagHint('evidence_incomplete')).toContain('reviewer can see');
     expect(flagHint('evidence_incomplete')).not.toMatch(/cannot pay|can still approve/i);
-    expect(evidenceLine({ key: 'elapsed_wait', present: false, required: true }).label).toBe('Your wait was recorded');
+    expect(evidenceLine({ key: 'elapsed_wait', present: false, required: true }).label).toBe('Wait at the door');
     expect(flagHint('sla_breached')).not.toMatch(/payment to you/i);
     expect(flagHint('collusion_pair_cluster')).toBe('Reviewed by a person.');
     expect(flagHint('some_new_flag')).toBeNull();
