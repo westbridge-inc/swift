@@ -21,7 +21,7 @@ import { site, launch } from '@/site.config';
  * countries Swift serves is data, not code). Approved by the owner, 1 Oct 2026.
  */
 
-const UPDATED = '1 November 2026';
+const UPDATED = '5 November 2026';
 
 export const metadata = policyMetadata(
   'Delivery policy',
@@ -84,6 +84,12 @@ export default function DeliveryPage() {
 
       <h2>If a delivery cannot be completed</h2>
       <ul>
+        <li>
+          If no rider is near, or riders are too busy, the app tells you before you place the order, and you can order
+          for pickup instead where the business offers it. A parcel is refused before it is booked if no rider is online
+          near the pickup.
+        </li>
+        <li>If no rider can be found in time after you order, the order is cancelled and you are told.</li>
         <li>
           When the rider reaches your address, they mark their arrival. They must then wait at least 5 minutes before
           they can report that you were not there.

@@ -28,7 +28,7 @@ export const DELETION_KEPT: ReadonlyArray<{ what: string; why: string; howLong: 
     howLong: 'For the period the law requires for disputes, payments Swift has decided to make, tax and legal obligations.',
   },
   {
-    what: 'Money records — payouts, invoices, settlement',
+    what: 'Money records — weekly fees, receipts, refunds',
     why: 'Financial records have their own statutory retention duty. If money is still owed in either direction, that is settled before the account closes.',
     howLong: 'For the period the law requires for financial records.',
   },

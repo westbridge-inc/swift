@@ -36,7 +36,7 @@ import { site, launch } from '@/site.config';
  * week at a time, no paying ahead (was a four-week limit).
  */
 
-const UPDATED = '29 October 2026';
+const UPDATED = '5 November 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -148,7 +148,8 @@ export default function RefundsPage() {
       <ul>
         <li>
           <b>Paid in advance.</b> Each payment covers the week that starts on its due date. Today the fee is paid by
-          MMG.{' '}
+          MMG, or directly to Westbridge Inc. in person by cash, cheque or bank transfer; a cheque counts once it clears.
+          You get a receipt for every payment. Never pay the fee through an agent or anyone else.{' '}
           {cardsLive ? 'It can also be paid by Visa or Mastercard, through our bank’s card payment page.' : null}
         </li>
         <li>
@@ -167,7 +168,7 @@ export default function RefundsPage() {
         </li>
         <li>
           <b>Closing your account.</b> {site.tradeName} refunds any weekly fee you paid for a week that has not started,
-          within 14 days, to the account you paid from, records the refund, and then deletes your account. A week that has already started is not refunded.
+          within 14 days, to the account you paid from or, if you paid in person, by a way you and {site.tradeName} agree, records the refund, and then deletes your account. A week that has already started is not refunded.
         </li>
       </ul>
 

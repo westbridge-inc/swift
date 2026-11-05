@@ -7,6 +7,10 @@ import { CHILD_SAFETY, DRIVER_AGREEMENT, LEGAL_VERSION, MARKETING_CONSENT, PRIVA
 import { MATERIAL_CHANGES, NON_MATERIAL_CHANGES, acceptanceStatus } from '../modules/legal/reaccept';
 import { LIVE_RETENTION_DAYS } from '../modules/algo/decisions';
 import { TRACE_TTL_S } from '../modules/dispatch/gps-plausibility';
+import { ALGO_DEFAULTS } from '../modules/algo/algo-config';
+import { ORDER_HOLD_DEFAULT_MIN } from '../modules/order/hold-minutes';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
+import { RETENTION_DEFAULTS } from '../modules/compliance/retention.service';
 import type { UserRole } from '@prisma/client';
 
 const ROOT = resolve(__dirname, '../../../..');
@@ -38,12 +42,12 @@ describe('[owner 5 Nov] words the legal texts never use', () => {
       /for movers, licence, insurance and related documents/,
       /your own national insurance, tax and statutory obligations/,
       /vehicle registration, and insurance appropriate to carrying passengers where you drive passengers/,
-      /a roadworthy, insured vehicle of the class you registered/,
+      /a roadworthy vehicle of the class you registered, insured where the law requires it/,
       /Insurance and liability/,
       /You are responsible for insuring yourself, your vehicle and your carriage of passengers or goods as the law and your insurer require/,
       /it does not insure your work/,
       /Taxi drivers must hold insurance covering passengers carried for hire/,
-      /Anyone delivering must hold insurance that permits use for hire or reward/,
+      /Anyone delivering by motor vehicle must hold insurance that permits use for hire or reward/,
     ];
     const sentences = DOCS.flatMap(([, doc]) => doc.split(/(?<=[.;:])\s+|<\/?(?:p|li|h2)>/)).filter((s) => /insur/i.test(s));
     expect(sentences.length).toBeGreaterThan(0);
@@ -75,7 +79,10 @@ describe('[COORD 5 Nov 15:18Z] Mover Agreement: help when a customer does not pa
 describe('[row 658] the weekly fee is payable in the app or on swiftgy.com', () => {
   it.each([['Mover', DRIVER_AGREEMENT], ['Business', VENDOR_AGREEMENT]])('%s section 2', (_name, doc) => {
     const fee = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(doc)?.[0];
-    expect(fee).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, or by card where the app offers it.");
+    expect(fee).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, by card where the app offers it, or directly to Westbridge Inc. in person by cash, cheque or bank transfer. A cheque counts only once it has cleared. You get a receipt for every payment. Never pay the weekly fee through an agent or anyone else.");
+    expect(fee).toContain('If you pay twice or pay too much through MMG, Swift may return');
+    expect(fee).toContain('within 14 days, to the account you paid from or, if you paid in person, by a way you and Swift agree, records the refund');
+    expect(fee).toContain('A fee that goes down applies from your next weekly fee, with a notice in the app.');
   });
 });
 
@@ -147,6 +154,71 @@ describe('[brief 5 Nov] what this batch must not change', () => {
   });
   it('nothing is written for the store-backed promise or pay-after', () => {
     for (const [, doc] of DOCS) expect(doc).not.toMatch(/pay[- ]after|pay after delivery|Swift's promise|Swift pays the store/i);
+  });
+});
+
+describe('[5 Nov read] what ships now, in the words', () => {
+  it('the one-minute hold and the one-minute free cancel', () => {
+    expect(ORDER_HOLD_DEFAULT_MIN).toBe(1);
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
+    expect(section(TERMS, /<h2>5\. /)).toContain('A store order or a parcel is held for one minute after you place it, and you can cancel it free in that minute.');
+    expect(section(TERMS, /<h2>7\. /)).toContain('for one minute after a driver, rider or provider accepts it');
+  });
+  it('the order limit in the words is the limit in the code, and the second figure stays out of them', () => {
+    const limit = (ALGO_DEFAULTS['velocity.limits'] as Record<string, { max: number; perSeconds: number; clusterMax?: number }>)['order.place']!;
+    expect(limit).toMatchObject({ max: 6, perSeconds: 3600 });
+    expect(section(TERMS, /<h2>5\. /)).toContain('You can place at most 6 store orders and parcels in an hour; after that the app asks you to wait, and accounts that appear to belong to one person share a limit.');
+    expect(TERMS).not.toMatch(/\b12 (store )?orders\b/);
+  });
+  it('no rider near: refused before it is placed; no rider in time: cancelled and told', () => {
+    expect(section(TERMS, /<h2>5\. /)).toContain('A parcel is refused before it is booked when no rider is online near the pickup.');
+    expect(section(TERMS, /<h2>7\. /)).toContain('If no rider can be found in time, the Order is cancelled and you are told.');
+    expect(read('apps/web/src/app/legal/delivery/page.tsx')).toMatch(/A parcel is refused before it is booked if no rider is online\s+near the pickup\./);
+    expect(read('apps/api/src/modules/dispatch/delivery-capacity.ts')).toContain('No riders are online near your pickup right now');
+  });
+  it('the taxi waiting cap', () => {
+    expect(section(TERMS, /<h2>4\. /)).toContain('The waiting charge is never more than GY$1,800 for a ride.');
+  });
+  it('in person, on every door that names how the fee is paid', () => {
+    expect(section(VENDOR_AGREEMENT, /<h2>12\. /)).toContain('or directly to Westbridge Inc. in person by cash, cheque or bank transfer. A cheque counts only once it has cleared. Never pay the weekly fee through an agent or anyone else.');
+    expect(VENDOR_AGREEMENT).not.toMatch(/only through MMG/);
+    const refunds = read('apps/web/src/app/legal/refunds/page.tsx');
+    expect(refunds).toMatch(/directly to Westbridge Inc\. in person by cash, cheque or bank transfer; a cheque counts once it clears\./);
+    expect(refunds).toMatch(/if you paid in person, by a way you and \{site\.tradeName\} agree/);
+    expect(PRIVACY).toContain('if you pay in person, how you paid, the reference and the receipt');
+  });
+  it('branches pay per branch', () => {
+    expect(section(VENDOR_AGREEMENT, /<h2>2\. /)).toContain('Each branch of your business is its own store and pays its own weekly fee');
+  });
+  it('states no rider cash limit, either way', () => {
+    for (const [, doc] of DOCS) expect(doc).not.toMatch(/cash (limit|cap|float)|float limit/i);
+  });
+  it('no opening-soon or pilot words in any versioned text', () => {
+    for (const [, doc] of DOCS) expect(doc).not.toMatch(/\b(pilot|opening soon|launching soon|coming soon|pre-launch)\b/i);
+  });
+  it('the chat, ticket and safety clocks are the registry\'s', () => {
+    const days = (k: string) => RETENTION_DEFAULTS.find((r) => r.dataClass === k)!.retainDays;
+    expect([days('chat.order_messages'), days('support_tickets.resolved'), days('safety.records')]).toEqual([365, 1095, 2555]);
+    const s6 = section(PRIVACY, /<h2>6\. /);
+    expect(s6).not.toMatch(/retained with its order's record/);
+    expect(s6).toContain('Order and job chat is deleted one year after the order or job ended');
+    expect(s6).toContain('Resolved Help &amp; Support tickets are deleted 3 years after they are resolved, and closed safety records 7 years after they close');
+  });
+  it('deletion on the website: the words name it and the doors exist', () => {
+    expect(section(TERMS, /<h2>17\. /)).toContain('or on swiftgy.com');
+    expect(section(DRIVER_AGREEMENT, /<h2>10\. /)).toContain('delete your account in the app or on swiftgy.com');
+    for (const f of ['apps/web/src/app/portal/account/delete/page.tsx', 'apps/web/src/app/dashboard/settings/delete-account/page.tsx']) expect(read(f)).toContain('DeleteAccountFlow');
+  });
+  it('a closure request stops the fee, as the website says', () => {
+    expect(section(VENDOR_AGREEMENT, /<h2>10\. /)).toContain('From your request your store takes no new orders and no new weekly fee falls due');
+    expect(read('apps/web/src/lib/account-deletion-words.ts')).toContain('no new weekly fee is charged or falls due while your request is open');
+  });
+  it('household insecticide is allowed, pesticides are not', () => {
+    expect(section(TERMS, /<h2>8\. /)).toContain('agricultural and garden pesticides and controlled chemicals (sealed household insecticide sold by a store is allowed)');
+    expect(read('apps/api/src/modules/compliance/prohibited-items.ts')).toContain('HOUSEHOLD_INSECTICIDE_EXEMPTIONS');
+  });
+  it('the company is named from one place', () => {
+    for (const doc of [TERMS, PRIVACY]) expect(doc).toContain('Westbridge Inc. (trading as Swift), registration no. 17703, Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana');
   });
 });
 
