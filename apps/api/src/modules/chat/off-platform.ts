@@ -24,4 +24,4 @@ export function detectOffPlatformContact(message: string): boolean {
 }
 
 export const OFF_PLATFORM_WARNING =
-  'Keep it in the app — payments, proof and support only cover you here.';
+  'Keep it in the app — payments, proof and support only work here.';

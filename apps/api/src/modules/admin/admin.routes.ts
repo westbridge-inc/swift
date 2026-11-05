@@ -3357,7 +3357,7 @@ export async function adminRoutes(app: FastifyInstance) {
       throw new AppError(
         409,
         'ORDER_NOT_BAILED',
-        'A customer’s identity can only be opened against an order that was cancelled, refunded or failed, or that carries a reimbursement claim — not a live or completed one.',
+        'A customer’s identity can only be opened against an order that was cancelled, refunded or failed, or that has a payment request from its mover — not a live or completed one.',
       );
     }
     const cause = bailed ? `ORDER_${order.status}` : 'REIMBURSEMENT_CLAIM';
@@ -7612,7 +7612,9 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
       tenantPrisma.reimbursementClaim.count({ where }),
     ]);
-    return { success: true, ...paginatedResponse(claims, total, { page, limit, skip }) };
+    // The evidence as it stands now: the console offers only what can be recorded.
+    const rows = status === 'PAID' || status === 'REJECTED' ? claims : await cashRules.withEvidenceNow(claims);
+    return { success: true, ...paginatedResponse(rows, total, { page, limit, skip }) };
   });
 
   app.put('/cash-rules/claims/:id/approve', { preHandler: [adminGuard] }, async (request) => {
@@ -7627,9 +7629,10 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.put('/cash-rules/claims/:id/reject', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const body = rejectDocSchema.parse(request.body);
+    // `nothingSent` is in the body, so the C4 fingerprint covers it and the second admin approves that statement.
+    const body = rejectDocSchema.extend({ nothingSent: z.boolean().optional() }).parse(request.body);
     const claim = await cashRules.rejectClaim(id, request.user.userId, body.reason,
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }), { nothingSent: body.nothingSent, approvalId: typeof request.headers[APPROVAL_HEADER] === 'string' ? request.headers[APPROVAL_HEADER] : undefined });
     return { success: true, data: claim };
   });
 
@@ -7643,12 +7646,14 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({
       reference: z.string(),
       amount: z.union([z.number(), z.string()]),
+      // Required by the service when the evidence is incomplete. In the body, so the C4 fingerprint covers it.
+      evidenceReason: z.string().max(500).optional(),
     }).parse(request.body ?? {});
     // [ADM-002] PAID is a money fact on a manual rail; the CAS, the payout
     // evidence and the audit row commit together. `E.claim` declares paymentRef
     // and paidAmount, so the diff IS the evidence — the legacy row is retired.
     const claim = await cashRules.markClaimPaid(id, request.user.userId, body.reference, body.amount,
-      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }));
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }), { evidenceReason: body.evidenceReason });
     return { success: true, data: claim };
   });
 
@@ -7660,7 +7665,7 @@ export async function adminRoutes(app: FastifyInstance) {
 
   // ─── [DOC-1 §31.4 · P31-1] Rider loss protection: the reserve line and suspension ──
 
-  /** The named reserve line for a country: balance, floor, this month's provisioning, latest entries. */
+  /** The set-aside for a country: balance, latest entries. */
   app.get('/cash-rules/rlp/reserve', { preHandler: [canonicalTenantGuard] }, async (request) => {
     const { country } = z.object({ country: z.string().length(2).default('GY') }).parse(request.query ?? {});
     return { success: true, data: await cashRules.lossProtectionReserve(country.toUpperCase()) };

@@ -849,6 +849,16 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
     expect(fund.res.statusCode, fund.res.body).toBe(200);
 
     const reference = `GOLD3PAY${nanoid(10).replace(/[^A-Za-z0-9]/g, '0').toUpperCase()}`;
+    // Undecided, it cannot even be asked: the refusal comes before anything is written.
+    const undecided = await adminInject({ method: 'PUT', url: `/api/v1/admin/cash-rules/claims/${claimId}/paid`, token: admin.token, payload: { reference, amount: String(SEEDED_ZONE_FARE) } });
+    expect(undecided.statusCode, undecided.body).toBe(400);
+    expect(undecided.json().error.code).toBe('INVALID_CLAIM_STATE');
+    const approved = await withApproval(admin, approver, {
+      method: 'PUT',
+      url: `/api/v1/admin/cash-rules/claims/${claimId}/approve`,
+      payload: { reason: 'GOLD-3 fixture: a person read the case' },
+    });
+    expect(approved.res.statusCode, approved.res.body).toBe(200);
     const pay = await withApproval(admin, approver, {
       method: 'PUT',
       url: `/api/v1/admin/cash-rules/claims/${claimId}/paid`,
@@ -860,10 +870,10 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
     const [paid, draw, told] = await Promise.all([
       sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } })),
       sys(() => app.prisma.rlpReserveEntry.findMany({ where: { claimId } })),
-      sys(() => app.prisma.notification.findMany({ where: { userId: driverUserId, title: 'Guarantee paid' } })),
+      sys(() => app.prisma.notification.findMany({ where: { userId: driverUserId, title: 'Swift paid you' } })),
     ]);
     expect({ status: paid.status, paidAmount: Number(paid.paidAmount), paidBy: paid.paidById, ref: paid.paymentRef })
-      .toEqual({ status: 'PENDING_REVIEW', paidAmount: 0, paidBy: null, ref: null });
+      .toEqual({ status: 'APPROVED', paidAmount: 0, paidBy: null, ref: null });
     expect(draw).toEqual([]);
     expect(told).toHaveLength(0);
     // The spent approval cannot be spent again.

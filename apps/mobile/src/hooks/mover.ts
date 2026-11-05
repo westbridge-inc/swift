@@ -233,7 +233,7 @@ export function useEarnings<T = any>(kind: MoverKind | null) {
   const q = useQuery<T>({ ...moverRead.earningsHistory<T>(kind), enabled: !!kind && !pv });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS) : q;
 }
-/** [DOC-1 §31.4] The mover's guarantee claims — status, the evidence bundle as filed, the pay-out SLA, suspension. */
+/** [DOC-1 §31.4] The mover's unpaid cash orders — status, the evidence bundle as filed, any suspension. */
 export function useMoverClaims<T = any>(kind: MoverKind | null) {
   const pv = usePreview();
   const q = useQuery<T>({

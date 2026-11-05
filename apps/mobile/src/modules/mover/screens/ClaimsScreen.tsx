@@ -8,13 +8,12 @@ import { Card, EmptyState, ErrorState, Header, LinkText, LoadingBlock, Screen, T
 import { useMoverClaims, useMoverKind } from '../../../hooks';
 import { money } from '../../../lib/money';
 import { dateLabel } from '../shared';
-import { claimStatus, evidenceLine, flagHint, reasonLabel, type ClaimView } from '../claims-view';
+import { claimHints, claimStatus, evidenceLine, reasonLabel, type ClaimView } from '../claims-view';
 
 /**
- * [DOC-1 §31.4 · P31-1] Guarantee claims — the rider's own view of a policy that is
- * written, funded and capped: each claim's status, the evidence bundle as it was filed,
- * when Swift pays an approved claim, and whether their protection is suspended. Everything
- * shown is the server's; the screen decides nothing.
+ * [DOC-1 §31.4 · P31-1] The rider's own view of their unpaid cash orders: each one's status, the evidence bundle as it
+ * was filed, and any suspension. Everything shown is the server's; the screen decides nothing. [Coordinator ruling,
+ * 5 Nov 2026] Case by case: a person decides each one, Swift may help, and nothing here is a promise.
  */
 export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: string, p?: Record<string, unknown>) => void } }) {
   const { kind } = useMoverKind();
@@ -24,33 +23,37 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
   const pull = usePullToRefresh(() => q.refetch());
   return (
     <Screen>
-      <Header title="Guarantee claims" />
+      <Header title="Unpaid cash orders" />
       <ScrollView contentContainerStyle={{ padding: space.lg, gap: space.md }} refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}>
         {q.isLoading ? <LoadingBlock /> : null}
-        {q.isError ? <ErrorState onRetry={() => void q.refetch()} message="Couldn't load your claims." /> : null}
+        {q.isError ? <ErrorState onRetry={() => void q.refetch()} message="Couldn't load these orders." /> : null}
+        {data && !data.suspended ? (
+          <T variant="caption" style={{ color: color.text.secondary }}>
+            A person at Swift looks at each one. Swift may help, but it does not promise to. The amount shown is the unpaid order, not a sum Swift has agreed to.
+          </T>
+        ) : null}
         {data?.suspended ? (
           <Card style={{ borderColor: color.error, borderWidth: 1 }}>
-            <T variant="body" style={{ fontWeight: '700' }}>Your loss protection is suspended</T>
+            <T variant="body" style={{ fontWeight: '700' }}>Swift&apos;s help is suspended for you</T>
             <T variant="caption" style={{ color: color.text.secondary }}>
-              Claims you file are reviewed by a person before Swift pays them. You can ask for a review of this decision.
+              A person still looks at each one, but do not expect help while this stands. You can ask for a review of this decision.
             </T>
-            <LinkText label="Get help" onPress={() => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Loss protection suspended' })} />
+            <LinkText label="Get help" onPress={() => navigation?.navigate?.('GetHelp', { category: 'ACCOUNT', subject: 'Help suspended' })} />
           </Card>
         ) : null}
         {data && data.claims.length === 0 ? (
-          <EmptyState icon="shield" title="No claims" body="When a customer doesn't pay at the door on a cash order, the guarantee claim you file shows here." />
+          <EmptyState icon="dollar-sign" title="None" body="When a customer doesn't pay at the door on a cash order, it shows here." />
         ) : null}
         {data?.claims.map((c: ClaimView) => {
-          const st = claimStatus(c.status);
-          const hints = c.flags.map(flagHint).filter((h: string | null): h is string => Boolean(h));
+          const st = claimStatus(c.status, c.evidence?.complete ?? true);
+          const hints = claimHints(c.flags, c.status);
           return (
-            <Card key={c.id} accessibilityLabel={`Claim ${money(Number(c.amount))} ${st.label}`}>
+            <Card key={c.id} accessibilityLabel={`Unpaid order ${money(Number(c.amount))} ${st.label}`}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                 <T variant="title" style={{ fontSize: fontSize.lg }}>{money(Number(c.amount))}</T>
                 <TonePill label={st.label} tone={st.tone} />
               </View>
-              <T variant="caption" style={{ color: color.text.secondary }}>{reasonLabel(c.reason)} · filed {dateLabel(c.filedAt)}</T>
-              {c.settleBy && c.status !== 'PAID' ? <T variant="caption">Swift pays you by {dateLabel(c.settleBy)}</T> : null}
+              <T variant="caption" style={{ color: color.text.secondary }}>{reasonLabel(c.reason)} · recorded {dateLabel(c.filedAt)}</T>
               {c.paidAt ? <T variant="caption">Paid {dateLabel(c.paidAt)}{c.paymentRef ? ` · ref ${c.paymentRef}` : ''}</T> : null}
               {c.evidence ? (
                 <View style={{ marginTop: space.sm, gap: 4 }}>
@@ -70,7 +73,7 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
             </Card>
           );
         })}
-        <LinkText label="Something wrong with a claim? Get help" onPress={() => navigation?.navigate?.('GetHelp', { category: 'PAYMENT', subject: 'Delivery guarantee claim' })} />
+        <LinkText label="Something wrong with one of these? Get help" onPress={() => navigation?.navigate?.('GetHelp', { category: 'PAYMENT', subject: 'Unpaid cash order' })} />
       </ScrollView>
     </Screen>
   );

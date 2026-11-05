@@ -34,6 +34,13 @@ describe('[FULL-LAUNCH] the public words are true on the day', () => {
     expect(hits).toEqual([]);
   });
 
+  // [Coordinator ruling, 5 Nov 2026] Swift may help a mover at the door, case by case, so "never pays you" is not true.
+  it('For drivers says what is true of earnings, and neither rules out nor promises help at the door', () => {
+    const page = read('app/(marketing)/drivers/page.tsx');
+    expect(page).toContain('Swift does not pay your earnings, because Swift never holds your money.');
+    expect(page).not.toMatch(/Swift never pays you/);
+  });
+
   it('no page says "most" partners clear review, on any switch', () => {
     const hits = sources(SRC).filter((file) => /clear review/i.test(readFileSync(file, 'utf8')));
     expect(hits).toEqual([]);

@@ -341,24 +341,25 @@ describe('Spec §I — acceptance conformance baseline', () => {
   // 3 & 4. Ghost / no-show — cashRules.handover on an ARRIVED CASH order.
   // [SAFE-B] Each is filed on the evidence the server holds: the rider's own session holds a fresh fix at the
   // door (makeArrivedCashOrder) and the server issued the door photo.
-  it('3. a sub-threshold no-show → guarantee auto-approves the rider + customer is struck', async () => {
+  it('3. a sub-threshold no-show → a person decides the case + customer is struck', async () => {
     const customer = await makeCustomerUser('L1');
     const rider = await makeRiderUser();
     const order = await makeArrivedCashOrder(customer.id, rider.riderId, 3500); // under the ~$50 gate
     const photo = await issueSyntheticHandoverPhoto(app.prisma, { orderId: order.id, actorId: rider.userId, role: 'RIDER' });
     const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS, photoUrl: photo.url, sessionId: rider.sessionId });
-    expect(result.claim?.status).toBe('AUTO_APPROVED');
+    expect(result.claim?.status).toBe('PENDING_REVIEW');
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
     expect(strike).not.toBeNull();
   });
 
-  it('4. an over-threshold no-show → claim is NOT auto-covered (withheld), customer still struck', async () => {
+  it('4. an over-threshold no-show → a person decides that case too, flagged over the gate; customer still struck', async () => {
     const customer = await makeCustomerUser('L2');
     const rider = await makeRiderUser();
     const order = await makeArrivedCashOrder(customer.id, rider.riderId, 20000); // over the gate
     const photo = await issueSyntheticHandoverPhoto(app.prisma, { orderId: order.id, actorId: rider.userId, role: 'RIDER' });
     const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS, photoUrl: photo.url, sessionId: rider.sessionId });
-    expect(result.claim).toBeNull();
+    expect(result.claim).toMatchObject({ status: 'PENDING_REVIEW' });
+    expect(result.claim?.flags).toContain('over_gate');
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
     expect(strike).not.toBeNull();
   });
