@@ -10,7 +10,7 @@ import { Card, ChoiceChip, ErrorState, Header, LoadingBlock, PillButton, Screen,
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, weekChoices, weeksWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 import { inPersonWaiting, PAY_IN_PERSON, PAY_IN_PERSON_ASK } from '../../../lib/weeklyFeeInPerson';
 import { feeExpiry, reopenableMmg, REOPEN_ALREADY_PAID } from '../../../lib/weeklyFeeReopen';
 import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
@@ -81,8 +81,9 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
     setChecked((c) => ({ busy: false, at: ok ? Date.now() : c.at }));
   };
   const action = liveMmg(sub);
-  const choices = action ? weekChoices(action) : [];
-  const chosen = choices.find((c) => c.weeks === weeks) ?? choices[0];
+  // [owner 6 Nov 2026] The server's choice of weeks (absent from an older API: one week); a choice gone stale is one week.
+  const choices = action?.weekOptions;
+  const chosen = choices?.find((c) => c.weeks === weeks);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
   const reopen = reopenableMmg(sub, checkout);
   const mmgPending = contextPending || view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
@@ -152,14 +153,14 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
         {action && !blocked ? <Card>
           <T variant="heading">Pay with MMG</T>
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>Opens MMG&apos;s page, then brings you back to Swift.</T>
-          {choices.length > 1 ? <View testID="mmg-weeks" style={{ marginTop: space.lg, gap: space.sm }}>
+          {choices && choices.length > 1 ? <View testID="mmg-weeks" style={{ marginTop: space.lg, gap: space.sm }}>
             <T variant="label" weight="semibold">How many weeks?</T>
             <T variant="caption" tone="muted">You can pay up to four weeks ahead.</T>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
-              {choices.map((c) => <ChoiceChip key={c.weeks} label={`${weeksWords(c.weeks)} · ${feeMoney(c.amountGyd)}`} active={chosen?.weeks === c.weeks} onPress={() => setWeeks(c.weeks)} />)}
+              {choices.map((c) => <ChoiceChip key={c.weeks} label={`${c.weeks === 1 ? '1 week' : `${c.weeks} weeks`} · ${feeMoney(c.amountGyd)}`} active={(chosen?.weeks ?? 1) === c.weeks} onPress={() => setWeeks(c.weeks)} />)}
             </View>
           </View> : null}
-          <PillButton label={`Pay ${feeMoney(chosen?.amountGyd ?? action.amountGyd)} with MMG`} loading={view.busy} disabled={checkingLatest} style={{ marginTop: space.lg }} onPress={() => { void session.pay(action.weekOptions ? chosen?.weeks : undefined); }} />
+          <PillButton label={`Pay ${feeMoney(chosen?.amountGyd ?? action.amountGyd)} with MMG`} loading={view.busy} disabled={checkingLatest} style={{ marginTop: space.lg }} onPress={() => { void session.pay(choices && (chosen?.weeks ?? 1)); }} />
         </Card> : null}
         {showCard ? <CardPaySection family={family} card={card} latestSession={sub?.latestCardSession} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>

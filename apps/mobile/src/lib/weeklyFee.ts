@@ -39,14 +39,6 @@ export interface CheckoutStart { ref: string; status: CheckoutState; checkoutUrl
 export function liveMmg(sub?: FeeSubscription | null) {
   return sub?.payActions?.find((a): a is Extract<PayAction, { state: 'live' }> => a.id === 'MMG_CHECKOUT' && a.state === 'live');
 }
-/** [owner 6 Nov 2026] The weeks a partner can choose, as the server priced them; one week when the API offers no choice. */
-export function weekChoices(action: Extract<PayAction, { state: 'live' }>): WeekOption[] {
-  const offered = (action.weekOptions ?? []).filter((o) => Number.isInteger(o.weeks) && o.weeks >= 1 && o.amountGyd > 0);
-  return offered.length ? offered : [{ weeks: 1, amountGyd: action.amountGyd }];
-}
-export function weeksWords(weeks: number): string { return weeks === 1 ? '1 week' : `${weeks} weeks`; }
-/** A checkout the server refused at the four-week limit, or for the weeks before a higher fee: it names the most. */
-export const PAY_AHEAD_REFUSED = "Swift can't take that many weeks now. Refresh to see what is already paid and what you can pay.";
 /** A Back tap the server refused, or answered with anything but that checkout's open page. */
 export const REOPEN_REFUSED = "We couldn't reopen that MMG page. Its latest status is shown here.";
 export function subscriptionWords(status: string): string {
@@ -83,7 +75,7 @@ export function pollDelay(elapsed: number, state?: CheckoutState): number | null
   if (state === 'CONFIRMED' || state === 'NOT_PAID' || state === 'HELD' || elapsed >= 660_000) return null;
   return elapsed < 60_000 ? 3_000 : 15_000;
 }
-export interface FeeFailure { status?: number; code?: string; details?: { ref?: string } }
+export interface FeeFailure { status?: number; code?: string; message?: string; details?: { ref?: string } }
 export interface FeeTransport {
   /** `weeks` only when the server offered a choice of weeks (an older API takes one week). */
   start(_key: string, _weeks?: number): Promise<CheckoutStart>;
@@ -100,7 +92,6 @@ export class FeeCheckoutSession {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private generation = 0;
   private retryKey: string | undefined;
-  private retryWeeks: number | undefined;
   private followingRef: string | undefined;
   private view: CheckoutView = { checkout: null, returned: false, busy: false, error: '', blocked: false };
   private transport: FeeTransport;
@@ -117,12 +108,10 @@ export class FeeCheckoutSession {
     if (!this.active || this.view.busy || this.view.blocked) return;
     this.generation++; clearTimeout(this.timer);
     this.emit({ busy: true, error: '', checkout: null, returned: false });
-    // A retry of the same tap keeps its key; another choice of weeks is a new tap.
-    if (this.retryWeeks !== weeks) this.retryKey = undefined;
-    this.retryWeeks = weeks;
     this.retryKey ??= this.key();
     try {
-      const started = await this.transport.start(this.retryKey, weeks);
+      // A retry of the same tap keeps its key; another choice of weeks is another key (never the first choice's answer).
+      const started = await this.transport.start(this.retryKey + (weeks ?? ''), weeks);
       if (!this.active) return;
       this.retryKey = undefined;
       // Only the opaque reference survives the browser call. Never cache its URL.
@@ -146,8 +135,11 @@ export class FeeCheckoutSession {
       } else if (f.status === 403 || f.code === 'PAY_ACTION_OFF') {
         this.emit({ blocked: true }); this.transport.refresh();
       } else {
-        this.emit({ error: f.code === 'PAY_AHEAD_LIMIT' ? PAY_AHEAD_REFUSED : f.code === 'CHECKOUT_OPEN_OTHER_AMOUNT' ? 'Another MMG payment is already open. Finish it, or wait until it closes, then choose again.' : f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.' });
-        if (f.code === 'SUBSCRIPTION_NOT_FOUND' || f.code === 'PAY_AHEAD_LIMIT' || f.code === 'CHECKOUT_OPEN_OTHER_AMOUNT') this.transport.refresh();
+        // [owner 6 Nov 2026] Any other refusal (409: past the four-week limit or before a higher fee, another MMG payment
+        // for another amount open, the fee changed): the server's own words say what can be paid, and the fee is read again.
+        const refused = f.status === 409;
+        this.emit({ error: refused && f.message || (f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.') });
+        if (refused || f.code === 'SUBSCRIPTION_NOT_FOUND') this.transport.refresh();
       }
     } finally { this.emit({ busy: false }); }
   }

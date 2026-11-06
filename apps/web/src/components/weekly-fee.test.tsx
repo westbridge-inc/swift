@@ -11,18 +11,19 @@ describe('[owner 6 Nov 2026] up to four weeks ahead on the website', () => {
     mockApi(({ method, init }) => {
       if (method === 'POST') {
         bodies.push(String(init?.body));
-        return { status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT' } } };
+        return { status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT', message: 'Swift takes the weekly fee up to four weeks ahead. GY$2,100 is already paid toward weeks that have not started, so you can pay at most GY$6,300 now.' } } };
       }
       return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: FOUR }] } } };
     });
     const view = renderWithQuery(<WeeklyFee family="rider" />);
-    await screen.findByRole('button', { name: 'Pay GY$2,100 with MMG' });
-    const group = screen.getByRole('group', { name: 'How many weeks?' });
+    const group = await screen.findByRole('group', { name: 'How many weeks?' });
+    expect(screen.getByRole('button', { name: 'Pay GY$2,100 with MMG' })).toBeTruthy();
     expect(within(group).getAllByRole('radio')).toHaveLength(4);
     expect(group.textContent).toContain('You can pay up to four weeks ahead.');
     await view.user.click(within(group).getByLabelText(/4 weeks/));
     await view.user.click(screen.getByRole('button', { name: 'Pay GY$8,400 with MMG' }));
-    await screen.findByText("Swift can't take that many weeks now. Refresh to see what is already paid and what you can pay.");
+    // The server's own words: what is paid, and the most that can be paid now.
+    await screen.findByText('Swift takes the weekly fee up to four weeks ahead. GY$2,100 is already paid toward weeks that have not started, so you can pay at most GY$6,300 now.');
     expect(bodies).toEqual(['{"weeks":4}']);
     view.unmount();
   });
