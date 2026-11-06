@@ -32,6 +32,11 @@ export const CALL_RELAY_WEBHOOK_BASE_ENV = 'CALL_RELAY_WEBHOOK_BASE';
 /** Calls one order may start, connected or not (Swift pays for every attempt). */
 export const CALL_RELAY_MAX_ATTEMPTS_ENV = 'CALL_RELAY_MAX_ATTEMPTS_PER_ORDER';
 export const CALL_RELAY_DEFAULT_MAX_ATTEMPTS = 6;
+/** [CALL-RELAY-ON · 6 Nov 2026] Calls started in any 24 hours, every order together. Swift pays ~US$0.75 a
+ *  minute for a bridged call (two Guyana legs), and the per-order cap alone does not bound a day. The owner tunes it. */
+export const CALL_RELAY_MAX_CALLS_PER_DAY_ENV = 'CALL_RELAY_MAX_CALLS_PER_DAY';
+export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY = 100;
+export const CALL_RELAY_MAX_CALLS_PER_DAY_CEILING = 10_000;
 /** Owner ruling 22 Oct: a hard 30-minute limit on every call. */
 export const CALL_TIME_LIMIT_SECONDS = 1800;
 /** How long each phone rings before the leg counts as not answered. */
@@ -41,6 +46,7 @@ export interface CallRelayConfig {
   callerId: string;
   webhookBase: string;
   maxAttemptsPerOrder: number;
+  maxCallsPerDay: number;
   twilio: { accountSid: string; apiKeySid: string; apiKeySecret: string; authToken: string };
 }
 
@@ -65,6 +71,11 @@ export function readCallRelayConfig(
   const rawMax = (env[CALL_RELAY_MAX_ATTEMPTS_ENV] ?? '').trim();
   const maxAttemptsPerOrder = rawMax === '' ? CALL_RELAY_DEFAULT_MAX_ATTEMPTS : /^\d{1,2}$/.test(rawMax) ? Number(rawMax) : NaN;
   if (!(maxAttemptsPerOrder >= 1 && maxAttemptsPerOrder <= 20)) problems.push(`${CALL_RELAY_MAX_ATTEMPTS_ENV} must be a whole number from 1 to 20`);
+  const rawDaily = (env[CALL_RELAY_MAX_CALLS_PER_DAY_ENV] ?? '').trim();
+  const maxCallsPerDay = rawDaily === '' ? CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY : /^\d{1,5}$/.test(rawDaily) ? Number(rawDaily) : NaN;
+  if (!(maxCallsPerDay >= 1 && maxCallsPerDay <= CALL_RELAY_MAX_CALLS_PER_DAY_CEILING)) {
+    problems.push(`${CALL_RELAY_MAX_CALLS_PER_DAY_ENV} must be a whole number from 1 to ${CALL_RELAY_MAX_CALLS_PER_DAY_CEILING}`);
+  }
   const accountSid = env['TWILIO_ACCOUNT_SID'] ?? '';
   const apiKeySid = env['TWILIO_API_KEY_SID'] ?? '';
   const apiKeySecret = (env['TWILIO_API_KEY_SECRET'] ?? '').trim();
@@ -74,7 +85,7 @@ export function readCallRelayConfig(
   if (!apiKeySecret) problems.push('TWILIO_API_KEY_SECRET is missing');
   if (!authToken) problems.push('TWILIO_WEBHOOK_AUTH_TOKEN is missing (every call webhook is signature-checked with it)');
   if (problems.length) return { ok: false, problems };
-  return { ok: true, config: { callerId, webhookBase, maxAttemptsPerOrder, twilio: { accountSid, apiKeySid, apiKeySecret, authToken } } };
+  return { ok: true, config: { callerId, webhookBase, maxAttemptsPerOrder, maxCallsPerDay, twilio: { accountSid, apiKeySid, apiKeySecret, authToken } } };
 }
 
 /**

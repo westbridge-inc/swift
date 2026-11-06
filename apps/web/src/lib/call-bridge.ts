@@ -34,8 +34,37 @@ export const CALL_WORDS = {
   started: 'Swift is calling your phone now. Answer, then press 1. Swift will then ring them. Both phones show Swift’s number.',
 } as const;
 
-export function saveNumberTip(callerId: string | null | undefined): string | null {
-  return callerId ? `Swift calls come from ${callerId}. Save it in your contacts as “Swift” so you know it’s us.` : null;
+/** Swift's number spaced to read: +1 878 555 0123 (North America), +592 600 1234 (Guyana); any other as sent. */
+export function formatCallerId(callerId: string): string {
+  const nanp = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(callerId);
+  if (nanp) return `+1 ${nanp[1]} ${nanp[2]} ${nanp[3]}`;
+  const gy = /^\+592(\d{3})(\d{4})$/.exec(callerId);
+  if (gy) return `+592 ${gy[1]} ${gy[2]}`;
+  return callerId;
+}
+
+/**
+ * [CALL-RELAY-ON · owner 6 Nov 2026] "So a call does not look like a scam": Guyana networks show only the
+ * number for an incoming call, never a name. The number is the server's (GET /calls/config), never typed
+ * here. Plain GSM-7 words, the same as the phone app.
+ */
+export function callerLine(callerId: string | null | undefined): string | null {
+  return callerId ? `Swift calls you from ${formatCallerId(callerId)} (save it as Swift).` : null;
+}
+
+export const CALLER_LINE_WORDS = {
+  copy: 'Copy number',
+  copyA11y: "Copy Swift's call number",
+  copied: 'Number copied. Save it in your contacts as Swift.',
+  copyFailed: 'Select the number to copy it.',
+  save: 'Save contact',
+  saveA11y: 'Save Swift as a contact',
+} as const;
+
+/** A contact card (vCard 3.0) for Swift's call number, made in the browser; null for anything not a +E.164 number. */
+export function swiftContactCard(callerId: string | null | undefined): string | null {
+  if (!callerId || !/^\+[1-9]\d{6,14}$/.test(callerId)) return null;
+  return ['BEGIN:VCARD', 'VERSION:3.0', 'N:;Swift;;;', 'FN:Swift', 'ORG:Swift', `TEL;TYPE=VOICE:${callerId}`, 'END:VCARD', ''].join('\r\n');
 }
 
 export function bridgeErrorText(code: string | null | undefined): string {
@@ -45,6 +74,8 @@ export function bridgeErrorText(code: string | null | undefined): string {
     case 'CALL_IN_PROGRESS': return 'A Swift call on this order is already ringing. Answer it, or try again in a minute.';
     case 'CALL_LIMIT_REACHED': return 'Swift has connected as many calls as it can for this order. Message them in chat, or ask support.';
     case 'CALL_NO_NUMBER': return 'Swift has no number to call for this. Message them in chat, or ask support.';
+    // [CALL-RELAY-ON] The server's daily cap on Swift calls (CALL_RELAY_MAX_CALLS_PER_DAY) was reached.
+    case 'CALL_DAILY_LIMIT_REACHED': return 'Swift calls are busy right now. Message them in chat, or ask support.';
     default: return 'Swift could not place the call right now. Try again, or message them in chat.';
   }
 }

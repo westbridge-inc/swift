@@ -19,7 +19,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { callsRoutes, callVoiceRoutes, INBOUND_CALL_WORDS } from '../modules/calls/calls.routes';
 import { TwilioVoiceProvider } from '../providers/voice/twilio-voice';
 import { twilioSignature } from '../modules/notification/sms-inbound.routes';
-import { CALL_WORDS } from '../modules/calls/call-bridge';
+import { CALL_DAILY_CAP_LOCK, CALL_WORDS } from '../modules/calls/call-bridge';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { testPhone } from './helpers/fixture-ids';
@@ -36,6 +36,8 @@ const CALLER_ID = '+15005550006';
 const BASE = 'https://api.example.test/api/v1/calls/voice';
 const ENV = {
   CALL_RELAY: '1', CALL_RELAY_CALLER_ID: CALLER_ID, CALL_RELAY_WEBHOOK_BASE: BASE, CALL_RELAY_MAX_ATTEMPTS_PER_ORDER: '3',
+  // [CALL-RELAY-ON] The daily cap's own tests set it; every other test runs well under it.
+  CALL_RELAY_MAX_CALLS_PER_DAY: '10000',
   TWILIO_ACCOUNT_SID: SID, TWILIO_API_KEY_SID: KEY, TWILIO_API_KEY_SECRET: 'bridge-test-secret', TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN,
 };
 const NUM = String(Date.now()).slice(-5);
@@ -390,6 +392,78 @@ describe('[O-1] starting a call', () => {
     expect(rows[0]!.endedAt).not.toBeNull();
     twilioAnswers = 'ok';
     expect((await bridge(diner.token, o.id, 'rider')).statusCode).toBe(200);
+  });
+});
+
+// [CALL-RELAY-ON · 6 Nov 2026] Swift pays for every bridged call (~US$0.75/min, two Guyana legs). The per-order cap
+// does not bound a day (many orders x 6 attempts), so every start also counts the calls started in the last 24 hours.
+describe('[CALL-RELAY-ON] the daily cap (CALL_RELAY_MAX_CALLS_PER_DAY): calls started in any 24 hours, all orders', () => {
+  const startedToday = () => system(() => app.prisma.callSession.count({ where: { createdAt: { gte: new Date(Date.now() - DAY) } } }));
+  const finish = async (res: { json(): { data: { callId: string } } }) => { await hook('status', res.json().data.callId, { CallStatus: 'completed' }); };
+
+  it('at the cap the next start on ANY order is refused before anything is dialled, written or pushed', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String((await startedToday()) + 2);
+    const [a, b, c] = [await liveFood(), await liveFood(), await liveFood()];
+    const first = await bridge(diner.token, a.id, 'rider');
+    expect(first.statusCode, first.body).toBe(200);
+    await finish(first);
+    const second = await bridge(riderP.token, b.id, 'customer');
+    expect(second.statusCode, second.body).toBe(200);
+    await finish(second);
+    const before = (await callNotices(diner.id)).length;
+    const over = await bridge(diner.token, c.id, 'rider');
+    expect([over.statusCode, over.json().error.code]).toEqual([429, 'CALL_DAILY_LIMIT_REACHED']);
+    expect(over.json().error.message).toBe('Swift calls are busy right now. Message them in chat, or ask support.');
+    expect(placed).toHaveLength(2);
+    expect(await system(() => app.prisma.callSession.count({ where: { orderId: c.id } }))).toBe(0);
+    expect((await callNotices(diner.id)).length, 'no "Swift is calling you" push for a refused start').toBe(before);
+    for (const p of allPhones()) expect(over.body.includes(p)).toBe(false);
+  });
+
+  it('a call older than 24 hours no longer counts: the window rolls', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String((await startedToday()) + 1);
+    const [a, b] = [await liveFood(), await liveFood()];
+    const first = await bridge(diner.token, a.id, 'rider');
+    expect(first.statusCode, first.body).toBe(200);
+    await finish(first);
+    expect((await bridge(diner.token, b.id, 'rider')).json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');
+    // The same row, moved to just over a day ago: the cap frees exactly one start.
+    await system(() => app.prisma.callSession.update({ where: { id: first.json().data.callId }, data: { createdAt: new Date(Date.now() - DAY - 60_000) } }));
+    const again = await bridge(diner.token, b.id, 'rider');
+    expect(again.statusCode, again.body).toBe(200);
+    await finish(again);
+  });
+
+  it('every start takes the one daily lock, so two orders at the same moment cannot both pass the last slot', async () => {
+    const o = await liveFood();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const gotLock = new Promise<void>((r) => { locked = r; });
+    const holder = system(() => app.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CALL_DAILY_CAP_LOCK}))`;
+      locked();
+      await held;
+    }, { timeout: 20_000 }));
+    await gotLock;
+    const start = bridge(diner.token, o.id, 'rider');
+    const first = await Promise.race([start.then(() => 'answered'), new Promise((r) => setTimeout(() => r('waiting'), 1500))]);
+    expect(first, 'the start must wait for the daily lock').toBe('waiting');
+    expect(placed).toHaveLength(0);
+    release();
+    await holder;
+    const res = await start;
+    expect(res.statusCode, res.body).toBe(200);
+    await finish(res);
+  });
+
+  it('two starts on two orders racing for the last slot: exactly one call', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String((await startedToday()) + 1);
+    const [a, b] = [await liveFood(), await liveFood()];
+    const [x, y] = await Promise.all([bridge(diner.token, a.id, 'rider'), bridge(diner.token, b.id, 'rider')]);
+    expect([x.statusCode, y.statusCode].sort()).toEqual([200, 429]);
+    expect(placed).toHaveLength(1);
+    await finish(x.statusCode === 200 ? x : y);
   });
 });
 

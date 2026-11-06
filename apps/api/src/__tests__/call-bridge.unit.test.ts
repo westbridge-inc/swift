@@ -4,6 +4,7 @@ import { twilioSignature } from '../modules/notification/sms-inbound.routes';
 import {
   assertCallRelayConfig,
   CALL_RELAY_DEFAULT_MAX_ATTEMPTS,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY,
   CALL_RING_SECONDS,
   CALL_TIME_LIMIT_SECONDS,
   readCallRelayConfig,
@@ -162,6 +163,36 @@ describe('[O-1] the settings and the boot guard', () => {
       expect(readCallRelayConfig(full({ CALL_RELAY_WEBHOOK_BASE: base })).ok, base).toBe(false);
     }
     expect(readCallRelayConfig(full({ CALL_RELAY_CALLER_ID: '+5926001234' })).ok, 'a Guyana verified caller ID').toBe(true);
+  });
+
+  // [CALL-RELAY-ON · 6 Nov 2026] Swift pays ~US$0.75 a minute for every bridged call (two Guyana legs), and the
+  // per-order cap alone does not bound a day: many orders x 6 attempts. One account-wide cap per 24 hours.
+  it('the daily cap: 100 calls in any 24 hours by default, a whole number from 1 to 10000, named never echoed', () => {
+    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY).toBe(100);
+    const unset = readCallRelayConfig(full());
+    expect(unset.ok && unset.config.maxCallsPerDay).toBe(100);
+    for (const [raw, want] of [['1', 1], ['250', 250], [' 40 ', 40], ['10000', 10000], ['', 100]] as const) {
+      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_DAY: raw }));
+      expect(read.ok && read.config.maxCallsPerDay, JSON.stringify(raw)).toBe(want);
+    }
+    for (const raw of ['0', '10001', '-5', '1.5', '1e3', 'abc', '100000']) {
+      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_DAY: raw }));
+      expect(read.ok, JSON.stringify(raw)).toBe(false);
+      if (!read.ok) {
+        expect(read.problems.join(' ')).toMatch(/CALL_RELAY_MAX_CALLS_PER_DAY must be a whole number from 1 to 10000/);
+        expect(read.problems.join(' ')).not.toContain(`'${raw}'`);
+      }
+    }
+    // A bad cap with CALL_RELAY=1 refuses to start, like every other bridge setting.
+    expect(() => assertCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_DAY: '0' }))).toThrow(/CALL_RELAY_MAX_CALLS_PER_DAY/);
+    expect(() => assertCallRelayConfig({ CALL_RELAY_MAX_CALLS_PER_DAY: '0' }), 'off: nothing is checked').not.toThrow();
+  });
+
+  it('both env examples document the daily cap next to the per-order cap', () => {
+    const apiExample = readFileSync(join(__dirname, '..', '..', '.env.example'), 'utf8');
+    const deployExample = readFileSync(join(__dirname, '..', '..', '..', '..', 'deploy', '.env.deploy.example'), 'utf8');
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_DAY=/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_DAY=100$/m);
   });
 
   it('CALL_RELAY=1 half-configured refuses to start in every mode; off, nothing is checked', () => {

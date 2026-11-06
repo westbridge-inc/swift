@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { log } from '../../utils/logger';
 import { isTerminalOrderStatus } from '../order/order-status';
 import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import type { CallProvider, CallStep, ProviderWebhook } from '../../providers/voice/call-provider';
@@ -25,6 +26,9 @@ import type { NotificationAudience, NotificationPayload } from '../notification/
 // - Swift pays: a hard 30-minute limit on every call and a per-order cap on
 //   ATTEMPTS (connected or not), CALL_RELAY_MAX_ATTEMPTS_PER_ORDER. One live
 //   call per order (a database rule, so two taps start one call).
+// - [CALL-RELAY-ON · 6 Nov] And a daily cap over every order together:
+//   CALL_RELAY_MAX_CALLS_PER_DAY starts in any 24 hours (default 100), counted
+//   under one lock so two orders can never both take the last slot.
 // - The caller ID is Swift's number (CALL_RELAY_CALLER_ID), pinned on the
 //   dial, never the number being called. Never recorded.
 // - Just before each leg rings, that person gets a push: "Swift is calling
@@ -66,6 +70,10 @@ export const CALL_WORDS = {
 /** A call that has been live this long is over, whatever the provider last said:
  *  the ring on both legs plus the 30-minute limit, with a minute to spare. */
 export const CALL_STALE_AFTER_MS = (CALL_TIME_LIMIT_SECONDS + 2 * CALL_RING_SECONDS + 60) * 1000;
+
+/** [CALL-RELAY-ON] The one lock every start takes before it counts the day's calls. */
+export const CALL_DAILY_CAP_LOCK = 'swift:call-relay-daily-cap';
+const DAY_MS = 86_400_000;
 
 const CALL_ID = /^c[a-z0-9]{20,32}$/;
 const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
@@ -247,6 +255,14 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
       const attempts = await tx.callSession.count({ where: { orderId: order.id } });
       if (attempts >= deps.config.maxAttemptsPerOrder) {
         throw new AppError(429, 'CALL_LIMIT_REACHED', 'Swift has connected as many calls as it can for this order. Message them in chat, or ask support.');
+      }
+      // [CALL-RELAY-ON] Every order together: one lock (taken after the order row, in the same order by every start),
+      // then the calls started in the last 24 hours. Connected or not, every attempt counts, like the per-order cap.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CALL_DAILY_CAP_LOCK}))`;
+      const today = await tx.callSession.count({ where: { createdAt: { gte: new Date(now.getTime() - DAY_MS) } } });
+      if (today >= deps.config.maxCallsPerDay) {
+        log().warn({ maxCallsPerDay: deps.config.maxCallsPerDay }, '[CALL-RELAY-ON] daily call cap reached: Call via Swift refused until a slot frees');
+        throw new AppError(429, 'CALL_DAILY_LIMIT_REACHED', 'Swift calls are busy right now. Message them in chat, or ask support.');
       }
       const row = await tx.callSession.create({
         data: { orderId: order.id, callerUserId: input.userId, callerRole, calleeRole: input.target, provider: deps.provider.name },
