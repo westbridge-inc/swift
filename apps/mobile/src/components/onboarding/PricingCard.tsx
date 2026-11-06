@@ -5,7 +5,8 @@ import { Card, T } from '../../kit';
 import { usePartnerPricing } from '../../hooks/verification';
 import { useAuthStore } from '../../stores/authStore';
 import { moneyIn } from '../../lib/money';
-import { afterBirthWords, bandTrialDays, catalogueRetierOf, moverQuote, vendorQuote, type MoverTier, type PartnerVendorType } from '../../lib/partnerPricing';
+import { afterBirthWords, bandTrialDays, catalogueRetierOf, moverQuote, vehicleQuote, vendorQuote, type MoverTier, type PartnerVendorType } from '../../lib/partnerPricing';
+import { isHirePlate } from '../../lib/taxiPlate';
 
 /** Who the rate is for, in the partner's own words. */
 const MOVER_RATE_LABEL: Record<MoverTier, string> = {
@@ -15,7 +16,8 @@ const MOVER_RATE_LABEL: Record<MoverTier, string> = {
 };
 
 export type PricingCardProps =
-  | { kind: 'mover'; vehicleType: string | null | undefined }
+  /** [CARS-PLATES] `plate`: the plate typed so far — a private (P) plate car is priced as a delivery rider. */
+  | { kind: 'mover'; vehicleType: string | null | undefined; plate?: string }
   | { kind: 'vendor'; vendorType: PartnerVendorType };
 
 /** The SaaS pitch, price on the door: partners see exactly what Swift costs
@@ -35,7 +37,7 @@ export function PricingCard(props: PricingCardProps) {
   let rate: number;
   let detail: string;
   if (props.kind === 'mover') {
-    const quote = moverQuote(p, props.vehicleType);
+    const quote = props.plate !== undefined ? vehicleQuote(p, props.vehicleType, props.plate, isHirePlate) : moverQuote(p, props.vehicleType);
     if (!quote) return null;
     rate = quote.rate;
     detail = `${MOVER_RATE_LABEL[quote.tier]} rate · Keep 100% of every fare, fee and tip — no commission on orders.`;

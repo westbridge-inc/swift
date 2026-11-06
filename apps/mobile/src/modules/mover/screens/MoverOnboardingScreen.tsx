@@ -17,9 +17,9 @@ import { MoverWorkDoors, useMoverPastSignUp } from '../MoverWorkDoors';
 import { useStepUp, type MutationGuard } from '../../../hooks/useStepUp';
 import { StepUpDismissed } from '../../../lib/stepUp';
 import { VEHICLE_COPY, vehicleOffered } from '../../../lib/vehicleOffer';
-import { taxiPlateMessage } from '../../../lib/taxiPlate';
+import { CAR_ROW_HINT, carPlateMessage, isHirePlate } from '../../../lib/taxiPlate';
 import { usePartnerPricing } from '../../../hooks/partnerPricing';
-import { FEE_TICK_COPY, feeTick, feeTickError, moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
+import { FEE_TICK_COPY, feeTick, feeTickError, privateCarsOpen, quoteGate, QUOTE_GATE_COPY, vehicleQuote } from '../../../lib/partnerPricing';
 import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useAuthStore } from '../../../stores/authStore';
@@ -61,7 +61,7 @@ function ValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.
   );
 }
 
-function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active: boolean; onPress: () => void }) {
+function VehicleRow({ v, active, onPress, hint = v.hint }: { v: (typeof VTYPES)[number]; active: boolean; onPress: () => void; hint?: string }) {
   return (
     <Pressable onPress={onPress}>
       {({ pressed }) => (
@@ -86,7 +86,7 @@ function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active
               {v.label}
             </T>
             <T variant="caption" tone="muted">
-              {v.hint}
+              {hint}
             </T>
           </View>
           <MaterialCommunityIcons
@@ -110,7 +110,7 @@ function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active
 const TAXI_SIGNUP_KINDS: VehicleKind[] = ['CAR', 'WAGON_CAR'];
 
 export function VehicleSetup({
-  vt, setVt, onDone, mode = 'join', current = null, guard,
+  vt, setVt, onDone, mode = 'join', current = null, guard, onPlateChange,
 }: {
   vt: VehicleKind;
   setVt: (v: VehicleKind) => void;
@@ -119,6 +119,8 @@ export function VehicleSetup({
   mode?: 'join' | 'change';
   current?: VehicleKind | null;
   guard?: MutationGuard;
+  /** [CARS-PLATES] The plate typed so far, for the price card above (a P car is priced as a delivery rider). */
+  onPlateChange?: (plate: string) => void;
 }) {
   const become = useBecomePartner();
   const changeVehicle = useChangeVehicle(guard);
@@ -132,10 +134,7 @@ export function VehicleSetup({
   // exact version at provisioning, the same way signup records the Terms.
   const [agree, setAgree] = useState(false);
   const needsDetails = DRIVER_VEHICLE_KINDS.includes(vt);
-  // [Owner ruling 11 Oct 2026 — H-PLATE] A taxi plate starts with H: said under the field, and a
-  // non-H taxi plate cannot be saved (the server refuses it too, in the same words).
-  const plateMessage = needsDetails ? taxiPlateMessage(vt, plate) : null;
-  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate && !plateMessage?.error);
+  useEffect(() => { onPlateChange?.(plate); }, [plate, onPlateChange]);
   // The agreement was recorded when the first vehicle was saved; a change does not re-ask.
   const needsAgreement = mode === 'join';
   const sameAsSaved = mode === 'change' && vt === current && !needsDetails;
@@ -146,7 +145,14 @@ export function VehicleSetup({
   // no quote for the vehicle, or a stale quote disables the button and says so.
   const user = useAuthStore((s) => s.user) as { countryCode?: string } | null;
   const pricing = usePartnerPricing(user?.countryCode, true, { fresh: true });
-  const gate = quoteGate(pricing, (p) => moverQuote(p, vt));
+  // [Owner ruling 11 Oct 2026 — H-PLATE] A taxi plate starts with H: said under the field, and a
+  // non-H taxi plate cannot be saved (the server refuses it too, in the same words).
+  // [CARS-PLATES · owner 6 Nov 2026] While the server says private cars deliver, the plate decides the work instead:
+  // a P plate is a delivery car (never an error), an H plate a taxi that can add deliveries; priced to match.
+  const carsDeliver = privateCarsOpen(pricing.data);
+  const plateMessage = needsDetails ? carPlateMessage(vt, plate, carsDeliver) : null;
+  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate && !plateMessage?.error);
+  const gate = quoteGate(pricing, (p) => vehicleQuote(p, vt, plate, isHirePlate));
   const stale = !gate.ok && gate.why === 'stale';
   const { refetch: refetchPricing } = pricing;
   useEffect(() => {
@@ -193,13 +199,13 @@ export function VehicleSetup({
       </T>
       <View style={{ gap: space.sm, marginTop: space.md }}>
         {offered.map((v) => (
-          <VehicleRow key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} />
+          <VehicleRow key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} hint={carsDeliver && TAXI_SIGNUP_KINDS.includes(v.key) ? CAR_ROW_HINT : v.hint} />
         ))}
       </View>
       {needsDetails ? (
         <View style={{ gap: space.md, marginTop: space.md }}>
           {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
-          {TAXI_SIGNUP_KINDS.includes(vt) ? <T variant="label" tone="muted">{TAXI_TWO_LICENCES}</T> : null}
+          {TAXI_SIGNUP_KINDS.includes(vt) && (!carsDeliver || isHirePlate(plate)) ? <T variant="label" tone="muted">{TAXI_TWO_LICENCES}</T> : null}
           <LabeledInput value={make} onChangeText={setMake} placeholder="Make (e.g. Toyota)" />
           <LabeledInput value={model} onChangeText={setModel} placeholder="Model (e.g. Allion)" />
           <View style={{ flexDirection: 'row', gap: space.md }}>
@@ -284,6 +290,8 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
   // driver starts on Car, a rider on Motorcycle. A saved vehicle always wins.
   const presetVehicle: VehicleKind = moverPreset === 'taxi' ? 'CAR' : 'MOTORCYCLE';
   const [vt, setVt] = useState<VehicleKind>(savedVehicle ?? presetVehicle);
+  // [CARS-PLATES] The plate typed in the vehicle form, so the price card prices a private (P) car as a delivery rider.
+  const [draftPlate, setDraftPlate] = useState('');
   const [vehicleSaved, setVehicleSaved] = useState(!!savedVehicle);
   // [VEHICLES] "after you save vehicle you cant switch it at all": a saved vehicle has a
   // Change action. A change retires the old vehicle's papers, so the checklist below
@@ -334,13 +342,13 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
             the vehicle picked below: a taxi driver, a delivery rider and a
             heavy-delivery rider each read their own rate. */}
         <View style={{ marginTop: space.lg }}>
-          <PricingCard kind="mover" vehicleType={vt} />
+          <PricingCard kind="mover" vehicleType={vt} plate={draftPlate} />
         </View>
         </>}
 
         <View style={{ marginTop: space.xl }}>
           {!vehicleSaved ? (
-            <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} />
+            <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} onPlateChange={setDraftPlate} />
           ) : changing ? (
             <VehicleSetup
               mode="change"

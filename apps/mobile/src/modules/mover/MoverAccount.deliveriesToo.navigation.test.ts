@@ -97,7 +97,7 @@ vi.mock('../../hooks', () => {
   const read = { data: undefined, isLoading: false };
   const write = { mutate: vi.fn(), isPending: false, isError: false };
   return {
-    useActiveJob: () => ({ data: null }), useBroadcastLocation: () => undefined,
+    useActiveJob: () => ({ data: null }), useBroadcastLocation: () => undefined, useActiveJobs: () => ({ legs: [] }),
     useMoverKind: () => ({ kind: fx.kind, profile: fx.profile, dual: fx.dual }),
     useVerificationStatus: () => ({ data: { roleVerified: true }, isLoading: false }),
     useMoverStanding: () => read, useEarningsSummary: () => read, useMoverSubscription: () => read,

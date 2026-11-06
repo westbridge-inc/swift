@@ -57,6 +57,7 @@ vi.mock('../../../hooks', () => {
     useDispatchOffers: (...args: unknown[]) => { fx.offersArgs = args; return { offer: fx.offer, queuedBehind: 0, dismiss: vi.fn() }; },
     useActiveJob: () => ({ data: null }),
     useActiveJobs: () => ({ legs: [], run: null }),
+    useEarnerPrefetch: () => undefined, // [SPEED 30 Oct] Home reads Earnings ahead (hooks/earnerPrefetch)
     useGoOnline: mutation, useGoOffline: mutation, useAcceptJob: mutation,
     useAcceptOffer: (k: 'DRIVER' | 'RIDER') => ({ mutate: fx.accept[k], isPending: false }),
     useDeclineOffer: (k: 'DRIVER' | 'RIDER') => ({ mutateAsync: (...a: unknown[]) => { fx.decline[k](...a); return Promise.resolve(null); }, isPending: false }),
