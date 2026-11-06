@@ -357,17 +357,17 @@ export class CountryConfigService {
    * An unseeded profile key resolves to no extra documents. Used both to display
    * the checklist and to gate live operation.
    */
-  async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
+  async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma, kind: MoverRole | null = null): Promise<string[]> {
     const config = await this.getByCode(code, db);
-    return moverRequiredFrom(moverListsFrom(config.documentChecklists), vehicleType);
+    return moverRequiredFrom(moverListsFrom(config.documentChecklists), vehicleType, kind);
   }
 
   /** The documents a mover on this vehicle MAY add (the `_OPTIONAL` lists of the base and
    *  of each profile), minus what the vehicle requires. Display and upload only. [VERIFY-DOCS] */
-  async getMoverOptionalDocuments(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
+  async getMoverOptionalDocuments(code: string, vehicleType: VehicleType, db: Db = this.prisma, kind: MoverRole | null = null): Promise<string[]> {
     const config = await this.getByCode(code, db);
     const lists = moverListsFrom(config.documentChecklists);
-    return optionalFrom(lists, ['MOVER', ...docProfilesFor(vehicleType)], moverRequiredFrom(lists, vehicleType));
+    return optionalFrom(lists, ['MOVER', ...docProfilesFor(vehicleType, kind)], moverRequiredFrom(lists, vehicleType, kind));
   }
 }
 
@@ -400,9 +400,10 @@ export function moverListsFrom(stored: unknown): Record<string, string[]> {
 }
 
 /** The REQUIRED mover list from a checklist map: the MOVER base plus the vehicle's profiles. */
-export function moverRequiredFrom(lists: Record<string, string[]>, vehicleType: VehicleType): string[] {
+export function moverRequiredFrom(lists: Record<string, string[]>, vehicleType: VehicleType, kind: MoverRole | null = null): string[] {
   const base = lists['MOVER'] ?? [];
-  const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
+  // [CARS-PLATES] A car's delivery profile (kind RIDER) reads the delivery rider's list, without the taxi extras.
+  const extra = docProfilesFor(vehicleType, kind).flatMap((key) => lists[key] ?? []);
   return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
 }
 

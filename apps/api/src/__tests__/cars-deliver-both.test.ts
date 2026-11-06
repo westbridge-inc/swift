@@ -319,6 +319,20 @@ describe('[CARS-DELIVER PR4] switch ON: taxi + deliveries', () => {
     await sys(() => app.prisma.rider.update({ where: { id: driver.riderId }, data: { currentOrderId: null } }));
   });
 
+  it('[CARS-PLATES] a delivery profile on ANOTHER plate (a private car) is never offered or promoted from taxi work', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await taxiWithDeliveries();
+    const probe = async () => (await dispatch.findCandidates(`probe-${nanoid(6)}`, SPOT, 5, 'RIDER', 0, null, null, null, null)).map((c) => c.riderId);
+    expect(await probe()).toContain(driver.riderId);
+    await sys(() => app.prisma.rider.update({ where: { id: driver.riderId }, data: { licensePlate: `PW ${nanoid(5).replace(/[^a-z0-9]/gi, '0').toUpperCase()}` } }));
+    expect(await probe()).not.toContain(driver.riderId);
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeReadyOrder(customer.userId);
+    await expect(dispatch.claimOrder(order.id, driver.riderId, 'RIDER')).rejects.toMatchObject({ code: 'MOVER_INACTIVE' });
+    expect(await driverOf(driver.userId)).toMatchObject({ isOnline: true });
+    expect(await riderOf(driver.userId)).toMatchObject({ isOnline: false, returnsToTaxi: false });
+  });
+
   it('accepting promotes the delivery profile inside the claim: riderId (never driverId), taxi supply retired, same device session, work app deliveries', async () => {
     process.env['CAR_DELIVERIES'] = '1';
     const driver = await taxiWithDeliveries();

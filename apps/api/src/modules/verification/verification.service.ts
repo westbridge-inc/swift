@@ -38,7 +38,7 @@ import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND, storeGoLive, type StoreGoLive } from '../vendor/go-live';
 import { storeFeeNotice, storeFeeNoticeDedupeKey, storeFeeStanding, type StoreFeeQuote } from '../partner/store-fee';
 import { FOOD_HANDLERS_NOTICE_KIND, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, FOOD_HANDLERS_WHERE, foodHandlerAttestationView, foodHandlersNotice, foodHandlerStoresOf, foodHandlerTickApplies, storeAttested } from '../vendor/food-handlers';
-import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { docTypeName } from './doc-names';
 import { lastPaperHeld, partnerApprovalsOpen, PARTNER_APPROVAL_HELD, type UnfinishedPartner } from './approval-brake';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
@@ -162,7 +162,7 @@ export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClien
 
 /** The mover profile in use, from rows already read: the side they use now, else the side they
  *  last chose (while they still hold that role), else the Rider-first fallback of legacy
- *  profiles. The one rule for getMoverVehicleType, getStatus and the weekly fee. */
+ *  profiles. The one rule for getMoverInUse, getStatus and the weekly fee. */
 function moverProfileInUse<R, D>(
   user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
   rider: R | null,
@@ -1470,6 +1470,9 @@ export class VerificationService {
     let vehicleType: VehicleType | null;
     let plate: string | null;
     let taxi: boolean;
+    // [CARS-PLATES · owner 6 Nov 2026] A paper about a car that only the account's DELIVERY profile carries (a private,
+    // P-plate car: deliveries only) is judged as a delivery vehicle's: no H rule, insurance for hire or reward.
+    let privateCar = false;
     if (doc.subjectId) {
       const vehicle = await tx.vehicleProfile.findUnique({ where: { subjectId: doc.subjectId } });
       if (!vehicle || !(vehicle.vehicleKind in VEHICLE_CLASSES)) throw moverProfileRequired();
@@ -1488,10 +1491,17 @@ export class VerificationService {
         tx.rider.findUnique({ where: { userId: doc.userId }, select: { vehicleType: true, licensePlate: true } }),
         tx.driver.findUnique({ where: { userId: doc.userId }, select: { vehicleType: true, licensePlate: true } }),
       ]);
-      const passengerOnPlate = [driverOnAccount, riderOnAccount].find((profile) => !!profile && mark !== ''
+      const carOnPlate = (profile: { vehicleType: VehicleType; licensePlate: string | null } | null) => !!profile && mark !== ''
         && normalizeRegistrationMark(profile.licensePlate ?? '') === mark
-        && profile.vehicleType in VEHICLE_CLASSES && isPassengerVehicle(profile.vehicleType as VehicleType));
-      if (!taxi && passengerOnPlate) { vehicleType = passengerOnPlate.vehicleType as VehicleType; taxi = true; }
+        && profile.vehicleType in VEHICLE_CLASSES && isPassengerVehicle(profile.vehicleType as VehicleType);
+      const passengerOnPlate = [driverOnAccount, riderOnAccount].find(carOnPlate);
+      // [CARS-PLATES] Only while cars deliver (CAR_DELIVERIES on): the plate is on the account's delivery car and on no
+      // taxi profile of the account. The taxi profile on the plate (the twin's car too) keeps the H rule below.
+      if (carDeliveriesEnabled() && carOnPlate(riderOnAccount) && !carOnPlate(driverOnAccount)) {
+        vehicleType = riderOnAccount!.vehicleType;
+        taxi = false;
+        privateCar = true;
+      } else if (!taxi && passengerOnPlate) { vehicleType = passengerOnPlate.vehicleType as VehicleType; taxi = true; }
     } else {
       // A legacy unbound row cannot acquire today's chosen role as historical authority.
       const rider = await tx.rider.findUnique({ where: { userId: doc.userId } });
@@ -1517,7 +1527,7 @@ export class VerificationService {
     // insurance certificate whose vehicle cannot be told is treated as a motor vehicle's.
     if (doc.docType === 'vehicle_insurance' && !(vehicleType && !isMotorVehicle(vehicleType))
       && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
-      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT', taxi || (vehicleType && isPassengerVehicle(vehicleType))
+      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT', taxi || (!privateCar && vehicleType && isPassengerVehicle(vehicleType))
         ? 'A passenger vehicle needs HIRE-class insurance: cover for passengers carried for hire, confirmed by the reviewer from the policy’s limitations as to use. Confirm it, or reject the document as INSURANCE_NOT_HIRE.'
         : 'A motor vehicle that delivers needs insurance that permits use for hire or reward (commercial use), and the reviewer must confirm it from the policy’s limitations as to use. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
     }
@@ -1915,13 +1925,26 @@ export class VerificationService {
    * Driver is a taxi (CAR); a Rider carries its own vehicleType. Callers that
    * gate apply a stricter MOTORCYCLE default for the null case.
    */
-  private async getMoverVehicleType(userId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<VehicleType | null> {
+  /** [CARS-PLATES] The mover profile in use and its vehicle (the one rule, moverProfileInUse). */
+  private async getMoverInUse(userId: string, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<{ vehicleType: VehicleType; kind: 'RIDER' | 'DRIVER' } | null> {
     const [user, rider, driver] = await Promise.all([
       db.user.findUnique({ where: { id: userId }, select: { activeRole: true, lastMoverRole: true, roles: true } }),
       db.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
       db.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
     ]);
-    return moverVehicleFrom(user, rider, driver);
+    const kind = moverProfileInUse(user, rider, driver);
+    return kind === 'RIDER' ? { vehicleType: rider!.vehicleType, kind } : kind === 'DRIVER' ? { vehicleType: driver!.vehicleType, kind } : null;
+  }
+
+  /**
+   * [CARS-PLATES · owner 6 Nov 2026] The vehicle a mover list is for, and the WORK it is for: a car's delivery profile
+   * (a private-plate car) reads the delivery list, the taxi profile the taxi list. A preview of another vehicle
+   * (`vehicleHint` not the saved one) has no work yet and reads the vehicle's own list, exactly as before.
+   */
+  private async moverListSubject(userId: string, vehicleHint: VehicleType | undefined, db: Prisma.TransactionClient | PrismaClient = this.prisma): Promise<{ vehicleType: VehicleType; kind: 'RIDER' | 'DRIVER' | null }> {
+    const inUse = await this.getMoverInUse(userId, db);
+    const vehicleType = vehicleHint ?? inUse?.vehicleType ?? 'MOTORCYCLE';
+    return { vehicleType, kind: inUse && inUse.vehicleType === vehicleType ? inUse.kind : null };
   }
 
   /**
@@ -1940,8 +1963,8 @@ export class VerificationService {
     vendorId?: string,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
-      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId, db)) ?? 'MOTORCYCLE';
-      return this.countryConfig.getMoverChecklist(countryCode, vehicleType, db);
+      const { vehicleType, kind } = await this.moverListSubject(userId, vehicleHint, db);
+      return this.countryConfig.getMoverChecklist(countryCode, vehicleType, db, kind);
     }
     if (roleKey === 'SERVICE_PROVIDER') {
       // The standalone services marketplace is not a SERVICE vendor. Its gate
@@ -1968,8 +1991,8 @@ export class VerificationService {
     vehicleHint?: VehicleType,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
-      const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
-      return this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType);
+      const { vehicleType, kind } = await this.moverListSubject(userId, vehicleHint);
+      return this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType, this.prisma, kind);
     }
     if (roleKey === 'SERVICE_PROVIDER') {
       // A service category that is not open has no checklist at all — and nothing to add either.
@@ -3030,10 +3053,14 @@ export class VerificationService {
       this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
       this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
     ]);
-    const vehicles = [rider?.vehicleType, driver?.vehicleType].filter((type): type is VehicleType => !!type);
+    // [CARS-PLATES] Each profile's own list for its own work (a car's delivery profile: the delivery list).
+    const vehicles = [
+      ...(rider ? [{ type: rider.vehicleType, kind: 'RIDER' as const }] : []),
+      ...(driver ? [{ type: driver.vehicleType, kind: 'DRIVER' as const }] : []),
+    ];
     if (vehicles.length === 0) return false;
     // Expiry can stop either retained profile, even while the other surface is active.
-    const required = await Promise.all(vehicles.map((type) => this.countryConfig.getMoverChecklist(user.countryCode, type)));
+    const required = await Promise.all(vehicles.map((v) => this.countryConfig.getMoverChecklist(user.countryCode, v.type, undefined, v.kind)));
     return required.every((list) => !list.includes(docType));
   }
 

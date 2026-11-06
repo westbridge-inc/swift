@@ -6,7 +6,7 @@ import { assertNotSafetySuspended } from '../safety/incident.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { requireIdentityAuthority } from '../integrity/identity-review';
 import { moverFeeOperability, moverFeePayer } from '../subscription/mover-fee-authority';
-import { carDeliveryLivePreview, isCarDeliveryProfile, syncCarDeliveryProfile } from './car-deliveries';
+import { carDeliveryLivePreview, hasTaxiTwin, isCarDeliveryProfile, syncCarDeliveryProfile } from './car-deliveries';
 
 // ---------------------------------------------------------------------------
 // [CARS-DELIVER PR4] "Taxi + deliveries" supply: the offer gate and the claim's promotion, used only by the
@@ -93,6 +93,8 @@ export async function canTakeDeliveryFromTaxi(db: Db, riderId: string): Promise<
     select: { userId: true, vehicleType: true, isOnline: true, lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
   });
   if (!rider || rider.isOnline || !isCarDeliveryProfile(rider.vehicleType)) return false;
+  // [CARS-PLATES] Only the taxi car's twin rides along with taxi work (a private car on another plate never does).
+  if (!(await hasTaxiTwin(db, rider.userId))) return false;
   const taxi = await db.driver.findFirst({
     where: {
       userId: rider.userId, takesDeliveries: true, deliveryCardsCapable: true, isOnline: true, isAvailable: true, currentRideId: null,
@@ -144,6 +146,8 @@ export async function promoteDeliveryFromTaxi(tx: Tx, userId: string, riderId: s
     SELECT "id" FROM "sessions" WHERE "id" = ${taxi.locationSessionId} AND "userId" = ${userId} AND "expiresAt" > NOW() FOR SHARE`;
   if (!sessions[0]) return null;
   if ((await liveLegs(tx, riderId)) > 0) return null;
+  // [CARS-PLATES] The twin only (both rows locked above): a delivery profile on another plate is never promoted.
+  if (!(await hasTaxiTwin(tx, userId))) return null;
   await syncCarDeliveryProfile(tx, userId);
   await tx.$executeRaw`
     UPDATE "drivers" SET "isOnline" = false, "isAvailable" = false, "locationSessionId" = NULL, "updatedAt" = clock_timestamp()

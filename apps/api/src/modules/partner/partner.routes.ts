@@ -1,4 +1,4 @@
-import { assertHirePlate } from '../verification/hire-plate';
+import { assertPlateForWork, moverRoleForVehicle } from '../verification/hire-plate';
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../utils/errors';
 import { z } from '../../lib/zod';
@@ -136,7 +136,8 @@ export async function partnerRoutes(app: FastifyInstance) {
       || ((!!rider || !!driver) && await verification.isRoleVerified(userId, 'MOVER'));
     // [Owner ruling 11 Oct 2026] A taxi plate that can never be approved is refused in plain words
     // BEFORE the step-up: there is nothing to confirm for it. The service checks it again.
-    if (body.vehicle) assertHirePlate(body.vehicleType, body.vehicle.licensePlate);
+    // [CARS-PLATES · owner 6 Nov] A car's plate decides its work: a private plate is a delivery car.
+    if (body.vehicle) assertPlateForWork(body.vehicleType, body.vehicle.licensePlate, moverRoleForVehicle(body.vehicleType, body.vehicle.licensePlate));
     if (verified) await requireStepUp(app, request);
     const { result, authorityCleanup } = await service.changeVehicleWithAuthority(
       userId,

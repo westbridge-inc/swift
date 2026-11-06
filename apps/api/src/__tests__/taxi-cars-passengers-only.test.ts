@@ -238,7 +238,8 @@ describe('[owner 15 Oct] switch OFF: a taxi car gets no delivery or courier work
     const grab = await call('POST', `/api/v1/rider/orders/${plain.id}/accept`, car.token, {});
     expect(grab.statusCode, grab.body).toBe(403);
     expect(grab.json().error.code).toBe('VEHICLE_PASSENGERS_ONLY');
-    expect(grab.json().error.message).toContain('passengers only');
+    // [CARS-PLATES] The kill switch's words (car deliveries are ON at launch, owner 6 Nov 2026).
+    expect(grab.json().error.message).toContain('Car deliveries are paused');
     expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: plain.id } }))).riderId).toBeNull();
   });
 

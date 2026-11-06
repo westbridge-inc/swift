@@ -58,12 +58,42 @@ export interface CarDeliveriesStatus {
   takesDeliveries: boolean;
 }
 
-/** A Rider row on a passenger vehicle is a taxi car's delivery profile (onboarding never makes one otherwise). */
+/** A Rider row on a passenger vehicle: a car's delivery profile (the taxi car's twin, or a private-plate car). */
 export function isCarDeliveryProfile(vehicleType: VehicleType): boolean {
   return isPassengerVehicle(vehicleType);
 }
 
 const samePlate = (a?: string | null, b?: string | null) => normalizeRegistrationMark(a ?? '') === normalizeRegistrationMark(b ?? '');
+
+type CarRow = { vehicleType: VehicleType; licensePlate: string | null };
+
+/**
+ * [CARS-PLATES · owner 6 Nov 2026] A car's delivery profile is one of two things:
+ *  - the TAXI TWIN: the account's taxi profile names the same car (both passenger vehicles, the same non-empty
+ *    plate). It mirrors the taxi car and works under the taxi papers too (everything below, as built in October);
+ *  - a PRIVATE DELIVERY CAR: any other car (a P plate, owner 6 Nov: deliveries only). It is an ordinary delivery
+ *    rider on its own plate's papers (licence, registration, insurance for hire or reward, each checked by a
+ *    person), never mirrored from a taxi, never offered a ride (it has no taxi profile on that plate).
+ */
+export function isTaxiTwin(rider: CarRow | null | undefined, driver: CarRow | null | undefined): boolean {
+  return !!rider && !!driver && isPassengerVehicle(rider.vehicleType) && isPassengerVehicle(driver.vehicleType)
+    && normalizeRegistrationMark(driver.licensePlate ?? '') !== '' && samePlate(rider.licensePlate, driver.licensePlate);
+}
+
+/** The account's car rows, read as they are (the caller holds whatever locks it needs). */
+async function carRowsOf(db: Db, userId: string): Promise<{ rider: CarRow | null; driver: CarRow | null }> {
+  const [rider, driver] = await Promise.all([
+    db.rider.findUnique({ where: { userId }, select: { vehicleType: true, licensePlate: true } }),
+    db.driver.findUnique({ where: { userId }, select: { vehicleType: true, licensePlate: true } }),
+  ]);
+  return { rider, driver };
+}
+
+/** Is this account's delivery profile its taxi car's twin right now? */
+export async function hasTaxiTwin(db: Db, userId: string): Promise<boolean> {
+  const { rider, driver } = await carRowsOf(db, userId);
+  return isTaxiTwin(rider, driver);
+}
 
 const MIRROR_SOURCE = {
   vehicleType: true, vehicleMake: true, vehicleModel: true, vehicleYear: true, vehicleColor: true, licensePlate: true,
@@ -110,17 +140,18 @@ function carCanDeliver(vehicleType: VehicleType): boolean {
 
 function carDeliveryNeedsTaxi(): AppError {
   return new AppError(403, CAR_DELIVERY_NEEDS_TAXI,
-    'Deliveries by car run on your taxi profile. Set up taxi driving with this car first.');
+    'Your taxi car changed while you were going online. Open deliveries again to go online with the car your taxi profile names.');
 }
 
 /** GET /driver/deliveries — what the driver's account screen shows. Reads only. */
 export async function carDeliveriesStatus(db: Db, userId: string): Promise<CarDeliveriesStatus> {
   const [driver, rider] = await Promise.all([
-    db.driver.findUnique({ where: { userId }, select: { vehicleType: true, takesDeliveries: true } }),
-    db.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+    db.driver.findUnique({ where: { userId }, select: { vehicleType: true, licensePlate: true, takesDeliveries: true } }),
+    db.rider.findUnique({ where: { userId }, select: { vehicleType: true, licensePlate: true } }),
   ]);
   if (!driver) throw new NotFoundError('Driver');
-  const enabled = !!rider && isCarDeliveryProfile(rider.vehicleType);
+  // [CARS-PLATES] Set up = the delivery profile is THIS taxi car's twin; a private car on another plate is other work.
+  const enabled = isTaxiTwin(rider, driver);
   const vehicle = { type: driver.vehicleType, label: VEHICLE_CLASSES[driver.vehicleType]?.label ?? driver.vehicleType };
   const reason: CarDeliveriesReason | null = !carDeliveriesEnabled()
     ? 'SWITCH_OFF'
@@ -159,8 +190,9 @@ export async function enableCarDeliveries(prisma: PrismaClient, userId: string):
     if (!carCanDeliver(driver.vehicleType)) {
       throw new AppError(403, 'VEHICLE_NOT_OFFERED', 'This vehicle cannot take deliveries on Swift.');
     }
-    const rider = await tx.rider.findUnique({ where: { userId }, select: { id: true, vehicleType: true } });
-    if (rider && !isCarDeliveryProfile(rider.vehicleType)) {
+    const rider = await tx.rider.findUnique({ where: { userId }, select: { id: true, vehicleType: true, licensePlate: true } });
+    // [CARS-PLATES] Any delivery profile that is not this taxi car's twin (a motorbike, a private car) is other work.
+    if (rider && !isTaxiTwin(rider, driver)) {
       throw new AppError(409, DELIVERY_PROFILE_OTHER_VEHICLE,
         `You already deliver with your ${(VEHICLE_CLASSES[rider.vehicleType]?.label ?? 'other vehicle').toLowerCase()}. Switch to deliveries to use it.`);
     }
@@ -200,6 +232,8 @@ export async function syncCarDeliveryProfile(tx: Tx, userId: string): Promise<vo
     throw carDeliveryNeedsTaxi();
   }
   const rider = await tx.rider.findUniqueOrThrow({ where: { userId }, select: MIRROR_SOURCE });
+  // [CARS-PLATES] Only the twin mirrors: a delivery profile on another plate is its own car, never overwritten.
+  if (!isTaxiTwin(rider, driver)) throw carDeliveryNeedsTaxi();
   const next = carMirror(driver);
   if (mirrorDiffers(rider, next)) await tx.rider.update({ where: { userId }, data: next });
 }
@@ -228,19 +262,17 @@ export async function carDeliveryLivePreview(db: Db, userId: string): Promise<bo
 
 /**
  * The taxi document verdict a delivery profile works under, read under the caller's Rider lock (Rider ->
- * Driver). Denied unless the account's taxi profile names the same car (type and plate) as the delivery
- * profile. Delivery GO and every delivery claim (reserveRiderLeg) read it for a passenger vehicle.
+ * Driver). Delivery GO and every delivery claim (reserveRiderLeg) read it for a passenger vehicle.
+ * [CARS-PLATES · owner 6 Nov] null for a PRIVATE DELIVERY CAR (no taxi profile on its plate): it works on its own
+ * delivery papers alone, which the caller's own rider verdict already judged. For the taxi TWIN: the taxi verdict,
+ * denied while the two rows name different cars (types differ; the next delivery GO re-syncs them).
  */
-export async function lockCarDeliveryAuthority(tx: Tx, userId: string): Promise<MoverDocumentVerdict> {
+export async function lockCarDeliveryAuthority(tx: Tx, userId: string): Promise<MoverDocumentVerdict | null> {
+  await tx.$queryRaw`SELECT "id" FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
+  const { rider, driver } = await carRowsOf(tx, userId);
+  if (!isTaxiTwin(rider, driver)) return null;
   const verdict = await lockMoverDocuments(tx, userId, 'DRIVER');
-  const [driver, rider] = await Promise.all([
-    tx.driver.findUnique({ where: { userId }, select: { vehicleType: true, licensePlate: true } }),
-    tx.rider.findUnique({ where: { userId }, select: { vehicleType: true, licensePlate: true } }),
-  ]);
-  if (!driver || !rider || driver.vehicleType !== rider.vehicleType || !samePlate(driver.licensePlate, rider.licensePlate)
-    || !normalizeRegistrationMark(driver.licensePlate ?? '')) {
-    return { allowed: false, reason: 'docs', validUntil: null };
-  }
+  if (driver!.vehicleType !== rider!.vehicleType) return { allowed: false, reason: 'docs', validUntil: null };
   return verdict;
 }
 
@@ -283,13 +315,14 @@ export async function setTaxiAndDeliveries(prisma: PrismaClient, userId: string,
     await tx.$queryRaw`SELECT "id" FROM "riders" WHERE "userId" = ${userId} FOR UPDATE`;
     await tx.$queryRaw`SELECT "id" FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
     const [driver, rider] = await Promise.all([
-      tx.driver.findUnique({ where: { userId }, select: { id: true, vehicleType: true } }),
-      tx.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      tx.driver.findUnique({ where: { userId }, select: { id: true, vehicleType: true, licensePlate: true } }),
+      tx.rider.findUnique({ where: { userId }, select: { vehicleType: true, licensePlate: true } }),
     ]);
     if (!driver) throw new NotFoundError('Driver');
     if (on) {
       if (users[0].status !== 'ACTIVE') throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'Your account must be active before you can take work.');
-      if (!rider || !isCarDeliveryProfile(rider.vehicleType)) {
+      // [CARS-PLATES] Only this taxi car's twin rides along with taxi work; a private car on another plate never does.
+      if (!isTaxiTwin(rider, driver)) {
         throw new AppError(409, DELIVERIES_NOT_SET_UP, 'Add deliveries first, then turn on taxi rides and deliveries together.');
       }
       if (!carCanDeliver(driver.vehicleType)) throw new AppError(403, 'VEHICLE_NOT_OFFERED', 'This vehicle cannot take deliveries on Swift.');

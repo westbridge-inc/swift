@@ -33,6 +33,7 @@ import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { carDeliveriesEnabled, goodsVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { hireVehicleTypes, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { hirePlateSql, isHirePlate, TAXI_NEEDS_HIRE_PLATE } from '../verification/hire-plate';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
@@ -83,6 +84,11 @@ declare module 'fastify' {
 // ---------------------------------------------------------------------------
 
 export const OFFER_TIMEOUT_SECONDS = 20;
+
+/** [CARS-PLATES · owner 6 Nov 2026] The words a car without an H (hire) plate is refused a ride in. */
+export function hirePlateRefusal(): AppError {
+  return new AppError(403, TAXI_NEEDS_HIRE_PLATE, 'Taxi rides need an H-plate (hire) car. A private (P) plate car can take deliveries instead.');
+}
 
 /** [R9] The words a bus (or any vehicle outside the hire seat limit) is refused a ride in. */
 export function hireVehicleRefusal(): AppError {
@@ -1191,6 +1197,9 @@ export class DispatchService {
             -- [R9] Only a vehicle a hire may use: a bus driver online from before
             -- buses were hidden is never offered a ride.
             AND d."vehicleType"::text = ANY(${hireVehicleTypes()})
+            -- [CARS-PLATES · owner 6 Nov 2026] A ride goes only to an H-plate (hire) car: a private (P) plate car
+            -- delivers only, never a taxi ride (the papers gate refuses it at GO; this holds whatever the row says).
+            AND ${hirePlateSql(Prisma.raw('d."licensePlate"'))}
             ${passengerCount != null ? Prisma.sql`AND d."vehicleCapacity" >= ${passengerCount}` : Prisma.empty}
             ${taxiStops ? Prisma.sql`AND d."taxiStopsCapable" = true` : Prisma.empty}
             AND d."currentLat" IS NOT NULL
@@ -1255,6 +1264,10 @@ export class DispatchService {
           JOIN "users" u ON u."id" = r."userId"
           WHERE r."isOnline" = false
             AND d."takesDeliveries" = true
+            -- [CARS-PLATES] the taxi car's twin only: the delivery profile names the taxi's own car (same plate)
+            AND ${hirePlateSql(Prisma.raw('d."licensePlate"'))}
+            AND upper(regexp_replace(coalesce(r."licensePlate", ''), '[[:space:]-]+', '', 'g'))
+              = upper(regexp_replace(coalesce(d."licensePlate", ''), '[[:space:]-]+', '', 'g'))
             -- [REVIEW-F #2139 S2-2] only a taxi GO whose app can show a delivery card (an older one shows it as a ride)
             AND d."deliveryCardsCapable" = true
             AND d."isOnline" = true
@@ -2797,9 +2810,11 @@ export class DispatchService {
       // find its User may have waited behind a vehicle change.
       const driverDocuments = pool === 'DRIVER' ? await lockMoverDocuments(tx, moverAuthority.userId, 'DRIVER') : null;
       const currentDriver = pool === 'DRIVER'
-        ? await tx.driver.findUniqueOrThrow({ where: { id: moverId }, select: { vehicleType: true, taxiStopsCapable: true } }) : null;
+        ? await tx.driver.findUniqueOrThrow({ where: { id: moverId }, select: { vehicleType: true, taxiStopsCapable: true, licensePlate: true } }) : null;
       // [R9] A hire is claimed only with a vehicle a hire may use (never a bus), read under the profile lock.
       if (currentDriver && !isVehicleOffered(currentDriver.vehicleType)) throw hireVehicleRefusal();
+      // [CARS-PLATES · owner 6 Nov 2026] …and only by an H-plate (hire) car: a private (P) plate car never takes a ride.
+      if (currentDriver && !isHirePlate(currentDriver.licensePlate)) throw hirePlateRefusal();
       // [TAXI multi-stop 4/8] A ride with stops is claimed only from an app that
       // declared it can run them: the board and the offer pool already hide it
       // from the rest, and this locked read is the barrier (a forged or stale

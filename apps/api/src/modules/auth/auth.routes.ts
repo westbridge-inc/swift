@@ -3,7 +3,8 @@ import { scanUpload } from '../../lib/malware-scan';
 import { z } from '../../lib/zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
-import { partnerPriceList } from '../country/partner-pricing';
+import { partnerPriceList, privateCarPrices } from '../country/partner-pricing';
+import { carDeliveriesEnabled } from '../../config/vehicle-classes';
 import { weeklyFeeTerms } from '../partner/weekly-fee-ack';
 import { WEEKLY_RETIER_ON } from '../billing/weekly-retier';
 import { FEE_RISE_NOTICE_DAYS } from '../billing/fee-rise-notice';
@@ -586,6 +587,8 @@ export async function authRoutes(app: FastifyInstance) {
         // gets 7 days (subscription/trial-length.ts).
         trialDays: TRIAL_DAYS,
         ...partnerPriceList(config.subscriptionTiers),
+        // [CARS-PLATES · owner 6 Nov 2026] A private (P) plate car: deliveries only, at the delivery rider's weekly fee.
+        privateCars: privateCarPrices(config.subscriptionTiers, carDeliveriesEnabled()),
         // [Row 628] The weekly fee's words, shown with the amount before a partner signs up; the
         // "I understand the weekly fee" tick is recorded anchored to exactly these (partner/weekly-fee-ack.ts).
         feeTerms: weeklyFeeTerms(),

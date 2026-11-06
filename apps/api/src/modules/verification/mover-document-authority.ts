@@ -56,7 +56,9 @@ export async function evaluateMoverDocuments(
 ): Promise<MoverDocumentVerdict> {
   const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
   if (!user) return denied('docs');
-  const required = await new CountryConfigService(db as never).getMoverChecklist(user.countryCode, opts.vehicleType, db);
+  // [CARS-PLATES · owner 6 Nov 2026] The list for the WORK: a car's delivery profile reads the delivery list (no hire
+  // licences); the taxi profile the taxi list, and the H plate below.
+  const required = await new CountryConfigService(db as never).getMoverChecklist(user.countryCode, opts.vehicleType, db, opts.kind);
   const hire = opts.kind === 'DRIVER' && isPassengerVehicle(opts.vehicleType);
   // [Owner ruling 11 Oct 2026 · Opus 12 Oct] A taxi (car or wagon car; buses keep their own path) works
   // only on an H-series plate, whatever papers were approved before: the gate says so too, as documents.

@@ -13,7 +13,7 @@ import { assertHandoverRequestBudget } from '../handover/handover-request-budget
 import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { carDeliveriesEnabled, carriesGoods, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
-import { carDeliveryLivePreview, isCarDeliveryProfile, lockCarDeliveryAuthority, syncCarDeliveryProfile } from '../driver/car-deliveries';
+import { carDeliveryLivePreview, hasTaxiTwin, isCarDeliveryProfile, lockCarDeliveryAuthority, syncCarDeliveryProfile } from '../driver/car-deliveries';
 import { returnToTaxiAndDeliveries } from '../driver/car-deliveries-return';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -654,10 +654,12 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!isVehicleOffered(rider.vehicleType)) {
       throw new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Change your vehicle to go online.');
     }
-    // [CARS-DELIVER] A taxi car's delivery profile goes online only while CAR_DELIVERIES is on (taxi cars carry
-    // passengers only until counsel verifies goods carriage), and only as its owner's verified taxi car.
+    // [CARS-DELIVER] A car's delivery profile goes online only while CAR_DELIVERIES is on (the kill switch).
+    // [CARS-PLATES · owner 6 Nov] The taxi car's twin goes online only as its owner's verified taxi car; a private
+    // (P) plate car on its own delivery papers, like any rider.
     const carDelivery = isCarDeliveryProfile(rider.vehicleType);
     if (carDelivery && !carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    const taxiTwin = carDelivery && await hasTaxiTwin(app.prisma, request.user.userId);
     if (!locationSessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
@@ -681,7 +683,7 @@ export async function riderRoutes(app: FastifyInstance) {
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
     // [CARS-DELIVER] A taxi car previews the taxi verdict on the car its taxi profile names today (the
     // delivery profile is re-synced to that car under the locks below).
-    const verified = carDelivery
+    const verified = taxiTwin
       ? await carDeliveryLivePreview(app.prisma, request.user.userId)
       : await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
@@ -768,7 +770,8 @@ export async function riderRoutes(app: FastifyInstance) {
       // stale "verified" through to the online write. The legacy flag comes
       // from the LOCKED profile snapshot, not the preview.
       // [CARS-DELIVER] The delivery profile goes online as the car the taxi profile names now (Rider -> Driver).
-      if (carDelivery) await syncCarDeliveryProfile(tx, request.user.userId);
+      // [CARS-PLATES] Only the twin mirrors (sync refuses if it stopped being one); a private car is its own car.
+      if (taxiTwin) await syncCarDeliveryProfile(tx, request.user.userId);
       const liveDocuments = await lockMoverDocuments(tx, request.user.userId, 'RIDER');
       assertMoverDocuments(liveDocuments);
       const carDocuments = carDelivery ? await lockCarDeliveryAuthority(tx, request.user.userId) : null;

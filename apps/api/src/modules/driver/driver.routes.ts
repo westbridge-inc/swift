@@ -13,15 +13,15 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { carDeliveriesEnabled, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
-import { carDeliveriesStatus, declaresDeliveryCards, enableCarDeliveries, notARideOffer, setTaxiAndDeliveries } from './car-deliveries';
+import { carDeliveriesStatus, declaresDeliveryCards, enableCarDeliveries, followTaxiCar, isTaxiTwin, notARideOffer, setTaxiAndDeliveries } from './car-deliveries';
 import { poolForOrder } from '../dispatch/dispatch-generation-keys';
-import { passengersOnlyRefusal } from '../dispatch/concurrency-policy';
+import { passengersOnlyRefusal, riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { explainEarning } from '../../utils/explain-earning';
 import { z } from '../../lib/zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient, VehicleType } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { earningsWindow, jobsIn } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -278,10 +278,20 @@ export async function driverRoutes(app: FastifyInstance) {
 
     const driver = await app.prisma.$transaction(async (tx) => {
       await lockUserRoleAuthority(tx, request.user.userId);
+      // [CARS-PLATES] The global lock order (User, then Rider, then Driver): the car's delivery twin, if any, follows a
+      // changed car below, so its row is locked first.
+      const twinRows = identityChanged
+        ? await tx.$queryRaw<Array<{ id: string; vehicleType: VehicleType; licensePlate: string | null; currentOrderId: string | null }>>`
+            SELECT "id", "vehicleType", "licensePlate", "currentOrderId" FROM riders WHERE "userId" = ${request.user.userId} FOR UPDATE`
+        : [];
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
       if (identityChanged && me.currentRideId) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active ride before changing your vehicle.');
+      const twin = twinRows[0] && isTaxiTwin(twinRows[0], me) ? twinRows[0] : null;
+      if (twin && (twin.currentOrderId || (await riderLiveLegCount(tx, twin.id)) > 0)) {
+        throw new AppError(409, 'ACTIVE_WORK', 'Finish your active delivery before changing your vehicle.');
+      }
       const driver = await tx.driver.update({
         where: { userId: request.user.userId },
         data: {
@@ -323,6 +333,9 @@ export async function driverRoutes(app: FastifyInstance) {
       if (identityChanged) {
         await requireFreshVehicleReview(tx, request.user.userId, me.licensePlate, { ...driver, kind: 'DRIVER' });
       }
+      // [CARS-PLATES] The taxi car's delivery twin names the changed car too, offline with the cleared grant, so it is
+      // never left on the old plate (where it would read as a separate private car).
+      if (twin) await followTaxiCar(tx, twin.id, driver.id, { isOnline: false, isAvailable: false, locationSessionId: null });
 
       return driver;
     });

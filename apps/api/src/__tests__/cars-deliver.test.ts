@@ -234,7 +234,8 @@ describe('[CARS-DELIVER] switch OFF (the default): nothing changes for a taxi dr
     const enable = await call('POST', '/api/v1/driver/deliveries', driver.token);
     expect(enable.statusCode, enable.body).toBe(403);
     expect(enable.json().error.code).toBe('VEHICLE_PASSENGERS_ONLY');
-    expect(enable.json().error.message).toContain('passengers only');
+    // [CARS-PLATES] The kill switch's words: car deliveries are paused (they are ON at launch, owner 6 Nov).
+    expect(enable.json().error.message).toContain('Car deliveries are paused');
     expect(await riderOf(driver.userId)).toBeNull();
     expect(await userOf(driver.userId)).toEqual(before);
     expect(await sys(() => app.prisma.auditLog.count({ where: { userId: driver.userId, action: 'MOVER_CAR_DELIVERIES_ADDED' } }))).toBe(0);
@@ -282,7 +283,7 @@ describe('[CARS-DELIVER] switch ON (CAR_DELIVERIES=1): a verified taxi car also 
       vehicleColor: 'Silver', licensePlate: driver.plate, vehiclePhotoUrl: taxiBefore.vehiclePhotoUrl,
       profilePhotoUrl: taxiBefore.profilePhotoUrl, documentsVerified: true, isOnline: false, currentOrderId: null,
     });
-    expect(Number(rider!.floatLimit)).toBe(20_000); // L2's float, as onboarding seeds it
+    expect(Number(rider!.floatLimit)).toBe(8_000); // the float onboarding seeds (L1 until an approved ID earns L2, main #2296)
     expect(await userOf(driver.userId)).toEqual({ roles: ['CUSTOMER', 'MOVER', 'DRIVER', 'RIDER'], activeRole: 'DRIVER', lastMoverRole: 'DRIVER' });
     expect(await driverOf(driver.userId)).toEqual(taxiBefore); // the taxi profile is untouched
     expect(await sys(() => app.prisma.auditLog.count({ where: { userId: driver.userId, action: 'MOVER_CAR_DELIVERIES_ADDED', entityId: rider!.id } }))).toBe(1);
@@ -399,17 +400,28 @@ describe('[CARS-DELIVER] switch ON (CAR_DELIVERIES=1): a verified taxi car also 
     expect(go.statusCode, go.body).toBe(200);
   });
 
-  it('delivery GO re-syncs the car from the taxi profile (a plate or colour changed there is never left behind)', async () => {
+  it('delivery GO re-syncs the car from the taxi profile (a colour or photo changed there is never left behind)', async () => {
     process.env['CAR_DELIVERIES'] = '1';
     const driver = await makeTaxiDriver();
     expect((await call('POST', '/api/v1/driver/deliveries', driver.token)).statusCode).toBe(200);
-    const newPlate = `HK ${NUM}9${String(seq).padStart(2, '0')}`;
-    await sys(() => app.prisma.driver.update({ where: { userId: driver.userId }, data: { licensePlate: newPlate, vehicleColor: 'Blue', vehiclePhotoUrl: 'vehicles/synthetic/new.jpg' } }));
+    await sys(() => app.prisma.driver.update({ where: { userId: driver.userId }, data: { vehicleColor: 'Blue', vehiclePhotoUrl: 'vehicles/synthetic/new.jpg' } }));
     await sys(() => app.prisma.user.update({ where: { id: driver.userId }, data: { activeRole: 'RIDER', lastMoverRole: 'RIDER' } }));
 
     const go = await call('POST', '/api/v1/rider/go-online', driver.token, here);
     expect(go.statusCode, go.body).toBe(200);
-    expect(await riderOf(driver.userId)).toMatchObject({ licensePlate: newPlate, vehicleColor: 'Blue', vehiclePhotoUrl: 'vehicles/synthetic/new.jpg', isOnline: true });
+    expect(await riderOf(driver.userId)).toMatchObject({ licensePlate: driver.plate, vehicleColor: 'Blue', vehiclePhotoUrl: 'vehicles/synthetic/new.jpg', isOnline: true });
+  });
+
+  it('[CARS-PLATES] a taxi plate changed on the taxi profile carries the delivery twin with it at once, offline', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const driver = await makeTaxiDriver();
+    expect((await call('POST', '/api/v1/driver/deliveries', driver.token)).statusCode).toBe(200);
+    await sys(() => app.prisma.rider.update({ where: { userId: driver.userId }, data: { isOnline: true, isAvailable: true, locationSessionId: driver.sessionId } }));
+    const newPlate = `HK ${NUM}9${String(seq).padStart(2, '0')}`;
+    await sys(() => grantStepUp(app, driver.token));
+    const edit = await call('PUT', '/api/v1/driver/profile', driver.token, { licensePlate: newPlate });
+    expect(edit.statusCode, edit.body).toBe(200);
+    expect(await riderOf(driver.userId)).toMatchObject({ licensePlate: newPlate, isOnline: false, locationSessionId: null, documentsVerified: false });
   });
 
   it('a claim needs the taxi document verdict on the same car: with the hire insurance gone it is refused under lock, nothing bound', async () => {
@@ -429,14 +441,16 @@ describe('[CARS-DELIVER] switch ON (CAR_DELIVERIES=1): a verified taxi car also 
     expect((await riderOf(driver.userId))!.currentOrderId).toBeNull();
   });
 
-  it('a claim needs the taxi profile to name the same car: an online delivery profile left on an old plate is refused under lock', async () => {
+  it('[CARS-PLATES] a delivery profile on a plate no taxi profile carries is a private car: its own delivery papers only, refused under lock without them', async () => {
     process.env['CAR_DELIVERIES'] = '1';
     const driver = await makeTaxiDriver();
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const riderId = await seedCarProfile(driver);
     await sys(() => app.prisma.user.update({ where: { id: driver.userId }, data: { activeRole: 'RIDER', lastMoverRole: 'RIDER' } }));
+    // No legacy grant on the delivery profile: the papers decide.
     await sys(() => app.prisma.rider.update({ where: { id: riderId }, data: {
       isOnline: true, isAvailable: true, locationSessionId: driver.sessionId, currentLat: SPOT.lat, currentLng: SPOT.lng, lastLocationUpdate: new Date(),
+      documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null,
     } }));
     await sys(() => app.prisma.driver.update({ where: { userId: driver.userId }, data: { licensePlate: `HK ${NUM}7${String(seq).padStart(2, '0')}` } }));
     const order = await makeReadyOrder(customer.userId);

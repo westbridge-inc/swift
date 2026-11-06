@@ -713,7 +713,7 @@ export async function assignRelay(
     const serves = needsCourier ? relay.riderType === 'COURIER' || relay.riderType === 'BOTH' : relay.riderType === 'DELIVERY' || relay.riderType === 'BOTH';
     if (!serves) throw new AppError(400, 'WRONG_SERVICE_TYPE', `That rider does not do ${needsCourier ? 'courier' : 'delivery'} work.`);
     // [Owner ruling 15 Oct 2026] A taxi car carries no goods while car deliveries are off (the claim refuses it too).
-    if (!carriesGoods(relay.vehicleType)) throw new AppError(400, VEHICLE_PASSENGERS_ONLY, 'That rider’s vehicle is a taxi car, and taxi cars carry passengers only for now. Choose another rider.');
+    if (!carriesGoods(relay.vehicleType)) throw new AppError(400, VEHICLE_PASSENGERS_ONLY, 'That rider’s vehicle is a car, and car deliveries are paused right now. Choose another rider.');
     if (needsCourier && order.courierPackageSize && !vehicleCanCarry(relay.vehicleType, order.courierPackageSize)) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', 'That rider’s vehicle cannot carry this parcel.');
     }

@@ -1,15 +1,15 @@
 import { Prisma, type PrismaClient, type UserRole, type VehicleType, type RideClass } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
-import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isPassengerVehicle, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
-import { followTaxiCar } from '../driver/car-deliveries';
+import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isPassengerVehicle, isVehicleOffered, type MoverRole } from '../../config/vehicle-classes';
+import { followTaxiCar, isTaxiTwin } from '../driver/car-deliveries';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
 import { alignStoredVehicleKind, papersUnderSecondReview, requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
-import { assertHirePlate } from '../verification/hire-plate';
+import { assertPlateForWork, moverRoleForVehicle } from '../verification/hire-plate';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
@@ -201,7 +201,8 @@ export class PartnerService {
     }
     const feeSubject = input.role === 'VENDOR'
       ? { role: 'VENDOR' as const, vendorType: input.business!.vendorType }
-      : { role: 'MOVER' as const, vehicleType: input.vehicleType! };
+      // [CARS-PLATES] A car is priced for the work its plate gets: a private-plate car as a delivery rider.
+      : { role: 'MOVER' as const, vehicleType: input.vehicleType!, moverRole: moverRoleForVehicle(input.vehicleType!, input.vehicle?.licensePlate) };
     const combined = await this.prisma.$transaction(async (tx) => {
       // [Row 628] The fee the partner saw is the quote now, or nothing is written (WEEKLY_FEE_CHANGED).
       const quote = feeAck ? await signupQuote(tx, userId, feeSubject) : null;
@@ -269,8 +270,9 @@ export class PartnerService {
     if (rideClass && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
-    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
-    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed. [CARS-PLATES · owner 6 Nov]
+    // A car's plate decides its work: a private plate is a delivery car (only while CAR_DELIVERIES is on).
+    if (input.vehicle) assertPlateForWork(input.vehicleType, input.vehicle.licensePlate, moverRoleForVehicle(input.vehicleType, input.vehicle.licensePlate));
   }
 
   private async provisionLocked(tx: Tx, userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
@@ -291,6 +293,10 @@ export class PartnerService {
     }
     const vehicleType = input.vehicleType!;
     const rideClass = VEHICLE_CLASSES[vehicleType]?.rideClass;
+    // [CARS-PLATES] A private-plate car is a delivery profile carrying its own car (never a taxi).
+    if (rideClass && moverRoleForVehicle(vehicleType, input.vehicle?.licensePlate) === 'RIDER') {
+      return this.provisionRider(tx, user.id, user.roles, vehicleType, input.vehicle);
+    }
     return rideClass
       ? this.provisionDriver(tx, user.id, user.roles, input.vehicle, rideClass, vehicleType)
       : this.provisionRider(tx, user.id, user.roles, vehicleType);
@@ -309,9 +315,14 @@ export class PartnerService {
   // Cargo-only vehicles (bike, motorbike, canters, box trucks) provision a
   // delivery/courier Rider. Passenger-capable vehicles (car, wagon, bus) take
   // the Driver path above, at their ride tier.
-  private async provisionRider(tx: Tx, userId: string, roles: UserRole[], vehicleType: VehicleType): Promise<PartnerProvisionResult> {
+  private async provisionRider(tx: Tx, userId: string, roles: UserRole[], vehicleType: VehicleType, vehicle?: Vehicle): Promise<PartnerProvisionResult> {
     const existing = await tx.rider.findUnique({ where: { userId } });
-    const rider = existing ?? (await tx.rider.create({ data: { userId, riderType: 'BOTH', vehicleType } }));
+    // [CARS-PLATES] A private-plate car's delivery profile carries the car's details from the start: its plate is what
+    // its papers bind to and what a person checks against the Certificate of Registration.
+    const details = vehicle
+      ? { vehicleMake: vehicle.make, vehicleModel: vehicle.model, vehicleYear: vehicle.year, vehicleColor: vehicle.color, licensePlate: vehicle.licensePlate }
+      : {};
+    const rider = existing ?? (await tx.rider.create({ data: { userId, riderType: 'BOTH', vehicleType, ...details } }));
     // D.3 — seed the new rider's float limit from their trust level + country.
     if (!existing) await new FloatService(tx).recomputeForUser(userId);
     const updatedRoles = await this.ensureRoles(tx, userId, roles, ['MOVER', 'RIDER']);
@@ -508,12 +519,13 @@ export class PartnerService {
     if (!isVehicleOffered(input.vehicleType)) {
       throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Choose another vehicle.');
     }
-    const target = moverRoleFor(input.vehicleType);
-    if (target === 'DRIVER' && !input.vehicle) {
+    // [CARS-PLATES · owner 6 Nov] A car's plate decides its work: a private plate is a delivery car.
+    const target = moverRoleForVehicle(input.vehicleType, input.vehicle?.licensePlate);
+    if ((target === 'DRIVER' || isPassengerVehicle(input.vehicleType)) && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
     // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
-    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
+    if (input.vehicle) assertPlateForWork(input.vehicleType, input.vehicle.licensePlate, target);
     return this.prisma.$transaction(async (tx) => {
       const now = new Date();
       // The global lock order (mover-authority): User, then Rider, then Driver.
@@ -541,7 +553,8 @@ export class PartnerService {
 
       // The vehicle in use now: the profile the mover pointer names, else the one that exists.
       // [CARS-DELIVER] A taxi car's delivery profile only mirrors the taxi profile's car: that car is the one in use.
-      const current: MoverRole = rider && driver && isPassengerVehicle(rider.vehicleType)
+      // [CARS-PLATES] Only the twin (same car, same plate); a private car on another plate is its own vehicle.
+      const current: MoverRole = isTaxiTwin(rider, driver)
         ? 'DRIVER'
         : user.lastMoverRole === 'DRIVER' && driver
           ? 'DRIVER'
