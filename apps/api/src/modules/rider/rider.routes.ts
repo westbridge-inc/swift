@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { carDeliveriesEnabled, carriesGoods, isPassengerVehicle, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { carDeliveryLivePreview, hasTaxiTwin, isCarDeliveryProfile, isTaxiTwin, lockCarDeliveryAuthority, syncCarDeliveryProfile } from '../driver/car-deliveries';
 import { isHirePlate, PRIVATE_CAR_H_PLATE, PRIVATE_CAR_H_PLATE_COPY } from '../verification/hire-plate';
+import { normalizeRegistrationMark } from '../verification/subjects';
 import { returnToTaxiAndDeliveries } from '../driver/car-deliveries-return';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
@@ -566,7 +567,8 @@ export async function riderRoutes(app: FastifyInstance) {
     }
     // [CARS-PLATES · REVIEW-G22 S2-1] A delivery car never takes an H (hire) plate of its own: an H plate is a taxi car's,
     // so only the taxi car's own twin (the account's taxi profile on that very plate) carries one. Refused before step-up.
-    if (body.licensePlate !== undefined && isPassengerVehicle(rider.vehicleType) && isHirePlate(body.licensePlate)) {
+    if (body.licensePlate !== undefined && isPassengerVehicle(rider.vehicleType) && isHirePlate(body.licensePlate)
+      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(rider.licensePlate ?? '')) {
       const taxi = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { vehicleType: true, licensePlate: true } });
       if (!isTaxiTwin({ vehicleType: rider.vehicleType, licensePlate: body.licensePlate }, taxi)) {
         throw new AppError(400, PRIVATE_CAR_H_PLATE, PRIVATE_CAR_H_PLATE_COPY);

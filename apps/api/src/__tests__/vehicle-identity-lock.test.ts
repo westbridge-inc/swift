@@ -102,7 +102,8 @@ const read = (kind: 'driver' | 'rider', userId: string) => kind === 'driver'
 describe.each(['driver', 'rider'] as const)('%s vehicle identity changes require review', (kind) => {
   it.each([
     ['vehicleMake', 'Honda'], ['vehicleModel', 'Civic'], ['vehicleYear', 2020],
-    ['vehicleColor', 'Blue'], ['licensePlate', 'HC000001'],
+    // [CARS-PLATES · REVIEW-G22 S2-1] a delivery car never takes a new H (hire) plate of its own: its new plate is private.
+    ['vehicleColor', 'Blue'], ['licensePlate', kind === 'rider' ? 'PC000001' : 'HC000001'],
   ])('%s: requires step-up, retires supply and closes the old approval link', async (field, value) => {
     const mover = await fixture(kind);
     const body = { [field as string]: value };
