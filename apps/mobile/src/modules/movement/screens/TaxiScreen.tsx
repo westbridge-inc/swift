@@ -35,6 +35,7 @@ import { CalmRadar, Card, CircleChip, Eyebrow, IconChip, LoadingBlock, Money, Pi
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { CallParty } from '../../../components/CallParty';
+import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { orderStatusLabel } from '../../../lib/orderStatus';
@@ -1091,6 +1092,8 @@ function AssignedRideCard({
           )}
         </CallParty>
       </View>
+      {/* [CALL-RELAY-ON] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
+      <SwiftCallNumberTip />
 
       {showStartCode ? (
         <StartCodeCeremony

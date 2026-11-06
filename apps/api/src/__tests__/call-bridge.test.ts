@@ -4,8 +4,10 @@
  * nothing reaches a network, and the request it would have sent is asserted.
  * Every webhook is signed exactly as Twilio signs (full URL + form).
  *
- * Every party has a real, distinct number from testPhone() (the run-wide
- * fictional +59206 block), so a number anywhere it must not be is a leak.
+ * Every party has a distinct number in the shape of a Guyana mobile line
+ * (gyPhone(): +592699nnnn; [REVIEW-M17 S1-1] the dial guard refuses the
+ * fictional +5920 test block), never dialled (fetch is stubbed), so a number
+ * anywhere it must not be is a leak.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -16,10 +18,11 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { callsRoutes, callVoiceRoutes, INBOUND_CALL_WORDS } from '../modules/calls/calls.routes';
+import { callsRoutes, callVoiceRoutes, INBOUND_CALL_WORDS, redisServiceDayLedger } from '../modules/calls/calls.routes';
 import { TwilioVoiceProvider } from '../providers/voice/twilio-voice';
 import { twilioSignature } from '../modules/notification/sms-inbound.routes';
-import { CALL_WORDS } from '../modules/calls/call-bridge';
+import { CALL_DAILY_CAP_LOCK, CALL_DAY_PREFIX, CALL_WORDS, SERVICE_DAY_KEY, type ServiceDayLedger } from '../modules/calls/call-bridge';
+import { AccountService } from '../modules/user/account.service';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { testPhone } from './helpers/fixture-ids';
@@ -36,9 +39,15 @@ const CALLER_ID = '+15005550006';
 const BASE = 'https://api.example.test/api/v1/calls/voice';
 const ENV = {
   CALL_RELAY: '1', CALL_RELAY_CALLER_ID: CALLER_ID, CALL_RELAY_WEBHOOK_BASE: BASE, CALL_RELAY_MAX_ATTEMPTS_PER_ORDER: '3',
+  // [CALL-RELAY-ON] The daily cap's own tests set it; every other test runs well under it. The time limit is set to
+  // the longest allowed (30) here so the older documents below keep their numbers; the default (10) has its own test.
+  CALL_RELAY_MAX_CALLS_PER_DAY: '10000', CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY: '200', CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY: '200', CALL_RELAY_MAX_CALL_MINUTES: '30',
   TWILIO_ACCOUNT_SID: SID, TWILIO_API_KEY_SID: KEY, TWILIO_API_KEY_SECRET: 'bridge-test-secret', TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN,
 };
 const NUM = String(Date.now()).slice(-5);
+/** [REVIEW-M17 S1-1] A complete Guyana mobile number in shape, distinct within the run (fetch is stubbed: never dialled). */
+let gySeq = Math.floor(Math.random() * 9000);
+const gyPhone = () => `+592699${String((gySeq++ % 9000) + 1000)}`;
 const DAY = 86_400_000;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'call-bridge-test');
 
@@ -52,12 +61,19 @@ const http = (async (_url: string, init: FetchInit) => {
 }) as unknown as typeof fetch;
 
 let app: FastifyInstance;
+/** [REVIEW-G23 S3-3] The real service list, except that its reads or writes fail on demand. */
+let ledgerFault: 'none' | 'count-throws' | 'add-throws' | 'hang' = 'none';
+const realLedger = () => redisServiceDayLedger(app.redis);
+const faultyLedger: ServiceDayLedger = {
+  count: async (since) => { if (ledgerFault === 'count-throws') throw new Error('redis down'); if (ledgerFault === 'hang') await new Promise(() => undefined); return realLedger().count(since); },
+  add: async (member, at) => { if (ledgerFault === 'add-throws') throw new Error('redis down'); return realLedger().add(member, at); },
+  remove: async (member) => realLedger().remove(member),
+};
 const users: string[] = [];
 const orderIds: string[] = [];
 
 type Person = { id: string; token: string; phone: string };
-async function person(n: number, roles: string[], active: string, extra: Record<string, unknown> = {}): Promise<Person> {
-  const phone = testPhone();
+async function person(n: number, roles: string[], active: string, extra: Record<string, unknown> = {}, phone = gyPhone()): Promise<Person> {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone, firstName: 'Bridge', lastName: `Party${n}`, roles: roles as never, activeRole: active as never,
     countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, selfieCapturedAt: new Date(), tenantId: 'swift-default', ...extra,
@@ -82,8 +98,8 @@ async function order(data: Record<string, unknown>) {
 
 let diner: Person, riderP: Person, sender: Person, courierP: Person, owner: Person, staff: Person, passenger: Person, driverP: Person, stranger: Person;
 let riderId = '', courierRiderId = '', driverId = '', vendorId = '';
-const STORE_LINE = testPhone();
-const RECIPIENT = testPhone();
+const STORE_LINE = gyPhone();
+const RECIPIENT = gyPhone();
 const allPhones = () => [diner, riderP, sender, courierP, owner, staff, passenger, driverP, stranger].map((p) => p.phone).concat(STORE_LINE, RECIPIENT);
 
 beforeAll(async () => {
@@ -97,8 +113,15 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   const provider = (config: { twilio: ConstructorParameters<typeof TwilioVoiceProvider>[0] }) => new TwilioVoiceProvider(config.twilio, http);
   await app.register(callsRoutes, { prefix: '/api/v1/calls', provider });
+  // [REVIEW-G23 S3-3] The same door with a service list that can be made to fail (throw, or never answer).
+  await app.register(callsRoutes, { prefix: '/api/v1/calls-faulty', provider, ledger: faultyLedger });
   await app.register(callVoiceRoutes, { prefix: '/api/v1/calls/voice', provider });
   await app.ready();
+  // [REVIEW-M17 S2-1] The day's lists live in Redis for 25 hours: start this run from empty ones, and move call rows
+  // an earlier local run left behind out of the 24-hour window (only this suite writes call rows), so the rows and
+  // the lists describe the same day.
+  for (const key of await app.redis.keys(`${CALL_DAY_PREFIX}*`)) await app.redis.del(key);
+  await system(() => app.prisma.callSession.updateMany({ where: { createdAt: { gte: new Date(Date.now() - 2 * DAY) } }, data: { createdAt: new Date(Date.now() - 2 * DAY) } }));
 
   diner = await person(1, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
   sender = await person(2, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
@@ -151,8 +174,11 @@ beforeEach(() => {
   placed.length = 0;
   twilioAnswers = 'ok';
 });
-afterEach(() => {
+afterEach(async () => {
   for (const k of Object.keys(ENV)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  // [REVIEW-M17 S3-1] One live call per person: a call a test left ringing ends here, so it never makes the
+  // same test person "busy" in the next test (each test still proves its own live-call rules within itself).
+  await system(() => app.prisma.callSession.updateMany({ where: { orderId: { in: orderIds }, endedAt: null }, data: { endedAt: new Date(), status: 'NOT_CONNECTED' } }));
 });
 
 const bridge = (token: string, orderId: string, target: string) =>
@@ -168,6 +194,11 @@ function hook(step: string, callId: string, form: Record<string, string> = {}, o
   return app.inject({ method: 'POST', url: `/api/v1/calls/voice/${step}${query}`, headers, payload: new URLSearchParams(form).toString() });
 }
 
+/** [CALL-RELAY-ON · REVIEW-M17 S2-1] The service's day as the caps see it: the larger of the rows and the service list. */
+const startedToday = async () => Math.max(
+  await system(() => app.prisma.callSession.count({ where: { createdAt: { gte: new Date(Date.now() - DAY) }, status: { not: 'FAILED' } } })),
+  await app.redis.zcount(SERVICE_DAY_KEY, Date.now() - DAY, '+inf'),
+);
 const session = (id: string) => system(() => app.prisma.callSession.findUniqueOrThrow({ where: { id } }));
 const callNotices = (userId: string) => system(() => app.prisma.notification.findMany({ where: { userId }, orderBy: { createdAt: 'asc' } }))
   .then((rows) => rows.filter((r) => (r.data as { kind?: string } | null)?.kind === 'call_incoming'));
@@ -390,6 +421,383 @@ describe('[O-1] starting a call', () => {
     expect(rows[0]!.endedAt).not.toBeNull();
     twilioAnswers = 'ok';
     expect((await bridge(diner.token, o.id, 'rider')).statusCode).toBe(200);
+  });
+});
+
+// [CALL-RELAY-ON · 6 Nov 2026] Swift pays for every bridged call (~US$0.75/min, two Guyana legs). The per-order cap
+// does not bound a day (many orders x 6 attempts), so every start also counts the calls started in the last 24 hours.
+describe('[CALL-RELAY-ON] the daily cap (CALL_RELAY_MAX_CALLS_PER_DAY): calls started in any 24 hours, all orders', () => {
+  const finish = async (res: { json(): { data: { callId: string } } }) => { await hook('status', res.json().data.callId, { CallStatus: 'completed' }); };
+
+  it('at the cap the next start on ANY order is refused before anything is dialled, written or pushed', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String((await startedToday()) + 2);
+    const [a, b, c] = [await liveFood(), await liveFood(), await liveFood()];
+    const first = await bridge(diner.token, a.id, 'rider');
+    expect(first.statusCode, first.body).toBe(200);
+    await finish(first);
+    const second = await bridge(riderP.token, b.id, 'customer');
+    expect(second.statusCode, second.body).toBe(200);
+    await finish(second);
+    const before = (await callNotices(diner.id)).length;
+    const over = await bridge(diner.token, c.id, 'rider');
+    expect([over.statusCode, over.json().error.code]).toEqual([429, 'CALL_DAILY_LIMIT_REACHED']);
+    expect(over.json().error.message).toBe('Swift calls are busy right now. Message them in chat, or ask support.');
+    expect(placed).toHaveLength(2);
+    expect(await system(() => app.prisma.callSession.count({ where: { orderId: c.id } }))).toBe(0);
+    expect((await callNotices(diner.id)).length, 'no "Swift is calling you" push for a refused start').toBe(before);
+    for (const p of allPhones()) expect(over.body.includes(p)).toBe(false);
+  });
+
+  it('a call older than 24 hours no longer counts: the window rolls', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String((await startedToday()) + 1);
+    const [a, b] = [await liveFood(), await liveFood()];
+    const first = await bridge(diner.token, a.id, 'rider');
+    expect(first.statusCode, first.body).toBe(200);
+    await finish(first);
+    expect((await bridge(diner.token, b.id, 'rider')).json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');
+    // The same row, moved to just over a day ago: the cap frees exactly one start.
+    const longAgo = Date.now() - DAY - 60_000;
+    await system(() => app.prisma.callSession.update({ where: { id: first.json().data.callId }, data: { createdAt: new Date(longAgo) } }));
+    await app.redis.zadd(SERVICE_DAY_KEY, 'XX', longAgo, first.json().data.callId);
+    const again = await bridge(diner.token, b.id, 'rider');
+    expect(again.statusCode, again.body).toBe(200);
+    await finish(again);
+  });
+
+  it('every start takes the one daily lock, so two orders at the same moment cannot both pass the last slot', async () => {
+    const o = await liveFood();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const gotLock = new Promise<void>((r) => { locked = r; });
+    const holder = system(() => app.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CALL_DAILY_CAP_LOCK}))`;
+      locked();
+      await held;
+    }, { timeout: 20_000 }));
+    await gotLock;
+    const start = bridge(diner.token, o.id, 'rider');
+    const first = await Promise.race([start.then(() => 'answered'), new Promise((r) => setTimeout(() => r('waiting'), 1500))]);
+    expect(first, 'the start must wait for the daily lock').toBe('waiting');
+    expect(placed).toHaveLength(0);
+    release();
+    await holder;
+    const res = await start;
+    expect(res.statusCode, res.body).toBe(200);
+    await finish(res);
+  });
+
+  it('two starts on two orders racing for the last slot: exactly one call', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String((await startedToday()) + 1);
+    const [a, b] = [await liveFood(), await liveFood()];
+    // two different people (one person's second start would be refused as busy before the shared cap: S3-1)
+    const [x, y] = await Promise.all([bridge(diner.token, a.id, 'rider'), bridge(riderP.token, b.id, 'customer')]);
+    expect([x.statusCode, y.statusCode].sort()).toEqual([200, 429]);
+    expect(placed).toHaveLength(1);
+    await finish(x.statusCode === 200 ? x : y);
+  });
+});
+
+// [CALL-RELAY-ON · security review · owner 6 Nov ~11:10Z] The shared cap is shared, so one person could use it up. Each
+// person also has a rolling 24-hour cap, checked first, by their role ON THAT ORDER: as a customer
+// (CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY, default 5) or as a partner, a rider, driver or store
+// (CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY, default 20). A start the voice provider refused uses no daily slot.
+describe('[CALL-RELAY-ON] the per-person daily caps, by the caller\'s role on the order', () => {
+  const finish = async (res: { json(): { data: { callId: string } } }) => { await hook('status', res.json().data.callId, { CallStatus: 'completed' }); };
+  let seq = 30;
+  const freshCustomer = async () => person(seq++, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
+  const foodFor = (customerId: string, rider = riderId) => order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId, vendorId, riderId: rider, status: 'PICKED_UP', acceptedAt: new Date() });
+
+  it('a customer at their cap is refused on any order, while another customer can still call', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '2';
+    const [ana, ben] = [await freshCustomer(), await freshCustomer()];
+    const [a1, a2, a3, b1] = [await foodFor(ana.id), await foodFor(ana.id), await foodFor(ana.id), await foodFor(ben.id)];
+    for (const o of [a1, a2]) {
+      const res = await bridge(ana.token, o.id, 'rider');
+      expect(res.statusCode, res.body).toBe(200);
+      await finish(res);
+    }
+    const over = await bridge(ana.token, a3.id, 'rider');
+    expect([over.statusCode, over.json().error.code]).toEqual([429, 'CALL_USER_DAILY_LIMIT_REACHED']);
+    expect(over.json().error.message).toBe('You have used your Swift calls for today. Message them in chat, or ask support.');
+    expect(await system(() => app.prisma.callSession.count({ where: { orderId: a3.id } }))).toBe(0);
+    expect(placed).toHaveLength(2);
+    const other = await bridge(ben.token, b1.id, 'rider');
+    expect(other.statusCode, other.body).toBe(200);
+    await finish(other);
+  });
+
+  it('the role is the one on THAT order: a rider calling as a partner uses the partner cap, the same person ordering food uses the customer cap', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
+    process.env['CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY'] = '2';
+    const worker = await person(seq++, ['RIDER', 'CUSTOMER'], 'RIDER', { customer: { create: {} } });
+    const workerRider = (await system(() => app.prisma.rider.create({ data: { userId: worker.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }))).id;
+    const custs = [await freshCustomer(), await freshCustomer(), await freshCustomer()];
+    const jobs = [await foodFor(custs[0]!.id, workerRider), await foodFor(custs[1]!.id, workerRider), await foodFor(custs[2]!.id, workerRider)];
+    // as a partner: 2 calls, then the partner cap (2), not the customer cap (1)
+    for (const job of jobs.slice(0, 2)) {
+      const res = await bridge(worker.token, job.id, 'customer');
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await session(res.json().data.callId)).callerRole).toBe('rider');
+      await finish(res);
+    }
+    expect((await bridge(worker.token, jobs[2]!.id, 'customer')).json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+    // the same person as a CUSTOMER on their own food order: their partner calls do not count against it
+    const own = [await foodFor(worker.id), await foodFor(worker.id)];
+    const mine = await bridge(worker.token, own[0]!.id, 'rider');
+    expect(mine.statusCode, mine.body).toBe(200);
+    expect((await session(mine.json().data.callId)).callerRole).toBe('customer');
+    await finish(mine);
+    expect((await bridge(worker.token, own[1]!.id, 'rider')).json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+  });
+
+  it('a store\'s staff member is a partner: the partner cap applies to calls from the store desk', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
+    process.env['CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY'] = String(await system(() => app.prisma.callSession.count({ where: { callerUserId: staff.id, createdAt: { gte: new Date(Date.now() - DAY) }, status: { not: 'FAILED' } } })) + 2);
+    for (let i = 0; i < 2; i += 1) {
+      const res = await bridge(staff.token, (await liveFood()).id, 'customer');
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await session(res.json().data.callId)).callerRole).toBe('store');
+      await finish(res);
+    }
+    expect((await bridge(staff.token, (await liveFood()).id, 'customer')).json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+  });
+
+  it('the person\'s cap is checked before the shared one: at both, the person is told it is their own limit', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
+    const cid = await freshCustomer();
+    const [o1, o2] = [await foodFor(cid.id), await foodFor(cid.id)];
+    const first = await bridge(cid.token, o1.id, 'rider');
+    expect(first.statusCode, first.body).toBe(200);
+    await finish(first);
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String(await startedToday());
+    expect((await bridge(cid.token, o2.id, 'rider')).json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+    // and the shared cap still stops someone under their own cap
+    const fresh = await freshCustomer();
+    expect((await bridge(fresh.token, (await foodFor(fresh.id)).id, 'rider')).json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');
+  });
+
+  it('a start the voice provider refused uses no daily slot, the person\'s or the shared one', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
+    const cid = await freshCustomer();
+    const o = await foodFor(cid.id);
+    twilioAnswers = 'refuse';
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String((await startedToday()) + 1);
+    expect((await bridge(cid.token, o.id, 'rider')).json().error.code).toBe('CALL_PROVIDER_FAILED');
+    twilioAnswers = 'ok';
+    const res = await bridge(cid.token, o.id, 'rider');
+    expect(res.statusCode, res.body).toBe(200);
+    await finish(res);
+  });
+});
+
+// [REVIEW-G23 S3-3] The service list fails closed, fast: a read or write that fails, or never answers, refuses the start
+// (503) before anything is dialled or written.
+describe('[REVIEW-G23 S3-3] the service list fails closed', () => {
+  const faulty = (token: string, orderId: string) =>
+    app.inject({ method: 'POST', url: '/api/v1/calls-faulty/bridge', headers: { authorization: `Bearer ${token}` }, payload: { orderId, target: 'rider' } });
+  for (const fault of ['count-throws', 'add-throws', 'hang'] as const) {
+    it(`${fault}: 503, no call row, nothing dialled${fault === 'hang' ? ', and quickly' : ''}`, async () => {
+      ledgerFault = fault;
+      try {
+        const o = await liveFood();
+        const t0 = Date.now();
+        const res = await faulty(diner.token, o.id);
+        expect([res.statusCode, res.json().error.code]).toEqual([503, 'CALL_PROVIDER_FAILED']);
+        expect(Date.now() - t0, 'answers within the list wait, not a hung transaction').toBeLessThan(4000);
+        expect(await system(() => app.prisma.callSession.count({ where: { orderId: o.id } }))).toBe(0);
+        expect(placed).toHaveLength(0);
+      } finally { ledgerFault = 'none'; }
+    });
+  }
+  it('with the list healthy the same door starts a call (the seam is real)', async () => {
+    const o = await liveFood();
+    const res = await faulty(diner.token, o.id);
+    expect(res.statusCode, res.body).toBe(200);
+    await hook('status', res.json().data.callId, { CallStatus: 'completed' });
+  });
+});
+
+// [REVIEW-G23 S3-2] When the shared daily cap trips, the platform operators hear it once a day (admin inbox and push).
+describe('[REVIEW-G23 S3-2] the shared cap tripping tells the operators, once a day', () => {
+  it('two refusals at the cap: one admin notice, plain words, no number', async () => {
+    const op = await person(45, ['SUPER_ADMIN'], 'SUPER_ADMIN');
+    const notices = () => system(() => app.prisma.notification.findMany({ where: { userId: op.id, title: 'Swift calls: daily limit reached' } }));
+    const before = (await notices()).length;
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String(await startedToday());
+    for (let i = 0; i < 2; i += 1) {
+      expect((await bridge(diner.token, (await liveFood()).id, 'rider')).json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');
+    }
+    const after = await notices();
+    expect(after.length - before).toBe(1);
+    const n = after.at(-1)!;
+    expect(n.body).toMatch(/^Swift calls reached the daily limit of \d+\. Call via Swift is refused until a slot frees\. Check Ops for misuse\.$/);
+    expect(`${n.title} ${n.body}`).toMatch(/^[A-Za-z0-9 +().,:;'!?-]*$/);
+    for (const p of allPhones()) expect(JSON.stringify(n).includes(p)).toBe(false);
+  });
+});
+
+// [REVIEW-M17 S1-1 · toll fraud] Swift dials only a complete Guyana subscriber number (+592, 7 digits from 2-7),
+// never its own caller ID, on BOTH legs; a suspended or not-yet-approved store has no number at all.
+describe('[REVIEW-M17 S1-1] Swift dials only a complete Guyana line', () => {
+  async function withStore<T>(data: Record<string, unknown>, fn: () => Promise<T>): Promise<T> {
+    const before = await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { phone: true, publicPhone: true, status: true } }));
+    await system(() => app.prisma.vendor.update({ where: { id: vendorId }, data: data as never }));
+    try { return await fn(); } finally { await system(() => app.prisma.vendor.update({ where: { id: vendorId }, data: before as never })); }
+  }
+
+  it('a store\'s typed account line that is not a Guyana line is never dialled: international, premium, service, short', async () => {
+    for (const bad of ['+447700900123', '+882161234567', '+5929123456', '911', '6001234']) {
+      await withStore({ phone: bad, publicPhone: null }, async () => {
+        const o = await liveFood();
+        const res = await bridge(diner.token, o.id, 'store');
+        expect([bad, res.statusCode, res.json().error.code]).toEqual([bad, 409, 'CALL_NO_NUMBER']);
+      });
+    }
+    expect(placed).toHaveLength(0);
+  });
+
+  it('a suspended or not-yet-approved store has no number at all, published or typed', async () => {
+    for (const status of ['SUSPENDED', 'PENDING_APPROVAL']) {
+      await withStore({ status, phone: STORE_LINE, publicPhone: gyPhone() }, async () => {
+        const o = await liveFood();
+        const res = await bridge(diner.token, o.id, 'store');
+        expect([status, res.json().error.code]).toEqual([status, 'CALL_NO_NUMBER']);
+      });
+    }
+    expect(placed).toHaveLength(0);
+  });
+
+  it('a parcel recipient number the sender typed is dialled only when it is a Guyana line', async () => {
+    for (const bad of ['+882161234567', '+18005550123', '6001234']) {
+      const parcel = await order({ orderType: 'COURIER', customerId: sender.id, riderId: courierRiderId, status: 'PICKED_UP', courierRecipientPhone: bad, acceptedAt: new Date() });
+      const res = await bridge(courierP.token, parcel.id, 'recipient');
+      expect([bad, res.json().error.code]).toEqual([bad, 'CALL_NO_NUMBER']);
+    }
+    expect(placed).toHaveLength(0);
+  });
+
+  it('a caller whose own number is in the +5920 test range is never rung', async () => {
+    const tester = await person(40, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } }, testPhone());
+    const o = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: tester.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
+    // [REVIEW-G23 S4-4] The words say it is THEIR number Swift cannot call, not the other person's.
+    const res = await bridge(tester.token, o.id, 'rider');
+    expect([res.statusCode, res.json().error.code]).toEqual([409, 'CALL_CALLER_NUMBER_UNSUPPORTED']);
+    expect(res.json().error.message).toBe('Swift calls only Guyana numbers, not yours. Message them in chat, or ask support.');
+    expect(placed).toHaveLength(0);
+  });
+
+  it('Swift never dials its own caller ID', async () => {
+    process.env['CALL_RELAY_CALLER_ID'] = STORE_LINE;
+    const o = await liveFood();
+    expect((await bridge(diner.token, o.id, 'store')).json().error.code).toBe('CALL_NO_NUMBER');
+    expect(placed).toHaveLength(0);
+  });
+
+  it('a Guyana landline typed as the store line still dials (landlines are first-class)', async () => {
+    const landline = `+592225${String(gySeq++ % 10000).padStart(4, '0')}`;
+    await withStore({ phone: landline, publicPhone: null }, async () => {
+      const o = await liveFood();
+      const res = await bridge(riderP.token, o.id, 'store');
+      expect(res.statusCode, res.body).toBe(200);
+      await hook('leg1', res.json().data.callId, {});
+      const dial = await hook('leg1-gather', res.json().data.callId, { Digits: '1' });
+      expect(dial.body).toContain(`>${landline}</Number>`);
+      await hook('dial-done', res.json().data.callId, { DialCallStatus: 'no-answer' });
+    });
+  });
+
+  it('leg 2 checks again: a number changed to a foreign one after the start is not dialled', async () => {
+    const parcel = await order({ orderType: 'COURIER', customerId: sender.id, riderId: courierRiderId, status: 'PICKED_UP', courierRecipientPhone: RECIPIENT, acceptedAt: new Date() });
+    const res = await bridge(courierP.token, parcel.id, 'recipient');
+    expect(res.statusCode, res.body).toBe(200);
+    await system(() => app.prisma.order.update({ where: { id: parcel.id }, data: { courierRecipientPhone: '+882161234567' } }));
+    const out = await hook('leg1-gather', res.json().data.callId, { Digits: '1' });
+    expect(out.body).not.toContain('<Dial');
+    expect(out.body).not.toContain('882161234567');
+    expect(out.body).toContain('message the sender in chat');
+    expect((await session(res.json().data.callId)).status).toBe('NOT_CONNECTED');
+  });
+});
+
+// [REVIEW-M17 S3-1] One live call per PERSON: a second start while their own call is still live is refused.
+describe('[REVIEW-M17 S3-1] one live call per person at a time', () => {
+  it('a second start on another order while the first still rings is refused; once it ends, the next starts', async () => {
+    const [a, b] = [await liveFood(), await liveFood()];
+    const first = await bridge(diner.token, a.id, 'rider');
+    expect(first.statusCode, first.body).toBe(200);
+    const second = await bridge(diner.token, b.id, 'rider');
+    expect([second.statusCode, second.json().error.code]).toEqual([409, 'CALL_CALLER_BUSY']);
+    expect(second.json().error.message).toBe('You already have a Swift call ringing. Answer it, or try again in a minute.');
+    expect(placed).toHaveLength(1);
+    await hook('status', first.json().data.callId, { CallStatus: 'completed' });
+    const third = await bridge(diner.token, b.id, 'rider');
+    expect(third.statusCode, third.body).toBe(200);
+    await hook('status', third.json().data.callId, { CallStatus: 'completed' });
+  });
+});
+
+// [REVIEW-M17 S2-1 · REVIEW-G23 S2-1] Closing an account deletes the person's call rows, as the Privacy Policy says, and
+// Swift keeps nothing about their phone. The service list (call ids and times, nothing about a person) is untouched, so
+// the shared day still counts the calls. Accepted (COORD 6 Nov): a delete and a new sign-up with the same SIM starts
+// that one person's day afresh; the shared cap still holds.
+describe('[REVIEW-M17 S2-1] the REAL account erasure and the day', () => {
+  it('deleteAccount removes the call rows and leaves no per-phone record; the shared day still counts the call', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
+    const sim = gyPhone();
+    const first = await person(41, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } }, sim);
+    const o1 = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: first.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
+    const call = await bridge(first.token, o1.id, 'rider');
+    expect(call.statusCode, call.body).toBe(200);
+    const callId = call.json().data.callId as string;
+    await hook('status', callId, { CallStatus: 'completed' });
+    await system(() => app.prisma.order.update({ where: { id: o1.id }, data: { status: 'DELIVERED', deliveredAt: new Date() } as never }));
+    const dayBefore = await startedToday();
+    await new AccountService(app).deleteAccount(first.id);
+    // the real erasure: the row is gone, the phone tombstoned, and Redis holds nothing keyed to a person
+    expect(await system(() => app.prisma.callSession.count({ where: { id: callId } }))).toBe(0);
+    expect((await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: first.id }, select: { phone: true } }))).phone).toMatch(/^deleted:/);
+    expect(await app.redis.keys(`${CALL_DAY_PREFIX}*`)).toEqual([SERVICE_DAY_KEY]);
+    expect(await app.redis.zscore(SERVICE_DAY_KEY, callId), 'the service list keeps the call (id and time only)').not.toBeNull();
+    expect(await startedToday(), 'the shared day did not shrink').toBe(dayBefore);
+    // accepted: the same SIM signing up again starts that one person's day afresh ...
+    const again = await person(42, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } }, sim);
+    const o2 = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: again.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
+    const fresh = await bridge(again.token, o2.id, 'rider');
+    expect(fresh.statusCode, fresh.body).toBe(200);
+    await hook('status', fresh.json().data.callId, { CallStatus: 'completed' });
+    // ... and the shared cap still holds, erased call included
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String(await startedToday());
+    const other = await person(43, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
+    const o3 = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: other.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
+    expect((await bridge(other.token, o3.id, 'rider')).json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');
+  });
+});
+
+// [REVIEW-M17 S2-2] The per-call time limit is a setting, applied to both legs.
+describe('[REVIEW-M17 S2-2] CALL_RELAY_MAX_CALL_MINUTES', () => {
+  it('[owner 6 Nov] unset: the longest call is 10 minutes on both legs (TimeLimit=600, timeLimit="600")', async () => {
+    delete process.env['CALL_RELAY_MAX_CALL_MINUTES'];
+    const o = await liveFood();
+    const res = await bridge(diner.token, o.id, 'rider');
+    expect(res.statusCode, res.body).toBe(200);
+    expect(placed.at(-1)!.get('TimeLimit')).toBe('600');
+    await hook('leg1', res.json().data.callId, {});
+    const dial = await hook('leg1-gather', res.json().data.callId, { Digits: '1' });
+    expect(dial.body).toContain('timeLimit="600"');
+    await hook('dial-done', res.json().data.callId, { DialCallStatus: 'no-answer' });
+  });
+
+  it('set to 5 minutes: leg 1 TimeLimit=300 and leg 2 timeLimit="300"', async () => {
+    process.env['CALL_RELAY_MAX_CALL_MINUTES'] = '5';
+    const o = await liveFood();
+    const res = await bridge(diner.token, o.id, 'rider');
+    expect(res.statusCode, res.body).toBe(200);
+    expect(placed.at(-1)!.get('TimeLimit')).toBe('300');
+    await hook('leg1', res.json().data.callId, {});
+    const dial = await hook('leg1-gather', res.json().data.callId, { Digits: '1' });
+    expect(dial.body).toContain('timeLimit="300"');
+    await hook('dial-done', res.json().data.callId, { DialCallStatus: 'no-answer' });
   });
 });
 

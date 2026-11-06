@@ -3,11 +3,11 @@ import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import type { CallProvider } from '../../providers/voice/call-provider';
 import { TwilioVoiceProvider } from '../../providers/voice/twilio-voice';
 import { callRelayEnabled, readCallRelayConfig, type CallRelayConfig } from './call-relay-switch';
-import { CALL_STEPS, CALL_TARGETS, handleVoiceStep, startBridgeCall, type CallBridgeDeps, type CallStepName } from './call-bridge';
+import { CALL_STEPS, CALL_TARGETS, SERVICE_DAY_KEY, handleVoiceStep, startBridgeCall, type CallBridgeDeps, type CallStepName, type ServiceDayLedger } from './call-bridge';
 
 // ---------------------------------------------------------------------------
 // [O-1] The Swift call bridge's two doors.
@@ -27,6 +27,45 @@ import { CALL_STEPS, CALL_TARGETS, handleVoiceStep, startBridgeCall, type CallBr
 export interface CallRoutesOptions {
   /** Tests inject a provider that never reaches a network. */
   provider?: (config: CallRelayConfig) => CallProvider;
+  /** Tests may inject the service's daily list; by default it lives in Redis. */
+  ledger?: ServiceDayLedger;
+}
+
+const DAY_MS = 86_400_000;
+/** A day plus an hour: the list forgets itself once nothing in it can count. */
+const LEDGER_TTL_MS = 25 * 3600_000;
+
+/**
+ * [REVIEW-M17 S2-1 · REVIEW-G23 S2-1/S3-3] The service's daily list in Redis: call ids and times, nothing about a
+ * person. Every add trims what is older than a day, adds, and sets the expiry, in one MULTI; ioredis resolves a MULTI
+ * with per-command errors instead of rejecting, so every result is checked and any error rejects (fail closed).
+ */
+export function redisServiceDayLedger(redis: FastifyInstance['redis']): ServiceDayLedger {
+  return {
+    async count(sinceMs) {
+      await redis.zremrangebyscore(SERVICE_DAY_KEY, '-inf', `(${sinceMs}`);
+      return redis.zcard(SERVICE_DAY_KEY);
+    },
+    async add(member, atMs) {
+      const results = await redis.multi()
+        .zremrangebyscore(SERVICE_DAY_KEY, '-inf', `(${atMs - DAY_MS}`)
+        .zadd(SERVICE_DAY_KEY, atMs, member)
+        .pexpire(SERVICE_DAY_KEY, LEDGER_TTL_MS)
+        .exec();
+      if (!results || results.some(([err]) => err)) throw new Error('call day list write failed');
+    },
+    async remove(member) {
+      await redis.zrem(SERVICE_DAY_KEY, member);
+    },
+  };
+}
+
+/** [REVIEW-G23 S3-2] The words the operators get when the shared daily cap trips (GSM-7, no number). */
+export function dailyCapNotice(maxCallsPerDay: number): { title: string; body: string } {
+  return {
+    title: 'Swift calls: daily limit reached',
+    body: `Swift calls reached the daily limit of ${maxCallsPerDay}. Call via Swift is refused until a slot frees. Check Ops for misuse.`,
+  };
 }
 
 const defaultProvider = (config: CallRelayConfig): CallProvider => new TwilioVoiceProvider(config.twilio);
@@ -61,7 +100,18 @@ export async function callsRoutes(app: FastifyInstance, opts: CallRoutesOptions 
       throw new AppError(403, 'CALL_RELAY_OFF', 'Calls through Swift are not on yet. Message them in chat, or ask support to connect you.');
     }
     const { orderId, target } = bridgeBody.parse(request.body);
-    const deps: CallBridgeDeps = { prisma: app.prisma, provider: providerFor(config), config, notifications };
+    const deps: CallBridgeDeps = {
+      prisma: app.prisma, provider: providerFor(config), config, notifications,
+      ledger: opts.ledger ?? redisServiceDayLedger(app.redis),
+      // [REVIEW-G23 S3-2] Platform operators (tenant null = SUPER_ADMIN), admin inbox and push, once per UTC day.
+      alertDailyCap: async (max) => {
+        const words = dailyCapNotice(max);
+        await notifyAdmins(app.prisma, notifications, {
+          ...words, tenantId: null, data: { kind: 'call_daily_cap' },
+          dedupeKey: `call-daily-cap:${new Date().toISOString().slice(0, 10)}`,
+        });
+      },
+    };
     const result = await startBridgeCall(deps, { orderId, target, userId: request.user.userId });
     return { success: true, data: result };
   });

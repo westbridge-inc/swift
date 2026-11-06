@@ -610,7 +610,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
             <p className="text-xs font-bold uppercase tracking-wide text-[var(--swift-muted)]">Rider</p>
             <p className="break-words text-sm font-semibold">{riderName || 'Swift rider'}</p>
           </div>
-          <CallPartyButton orderId={o.id} target="rider" phone={o.rider?.user?.phone} label="Call" icon={false} ariaLabel={`Call ${riderName || 'the rider'}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]" noteClassName="w-full text-xs text-[var(--swift-muted)]" />
+          <CallPartyButton orderId={o.id} target="rider" phone={o.rider?.user?.phone} label="Call" icon={false} ariaLabel={`Call ${riderName || 'the rider'}`} callerLine={false} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]" noteClassName="w-full text-xs text-[var(--swift-muted)]" />
           {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider"; then that it went. */}
           {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside "Handed to rider" (never before ready, never while paused), as on the phone. */}
           {actions.some((a) => a.kind === 'handed-to-rider') && <div className="w-full"><RiderHandoverLine rider={o.rider} /></div>}
