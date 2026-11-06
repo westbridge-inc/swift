@@ -16,7 +16,19 @@ import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } f
 // the edge matrix rows for currency/amount/clock/dedupe. SO-6 throughout:
 // nothing here ever drops money.
 
-const prisma = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test' } } });
+// The pool is sized for this file, not left to the host. Prisma's default is
+// 2 x physical CPUs + 1: 5 on the old 4-CPU CI runner, 3 on the 2-CPU one
+// (private repo since 5 Nov 2026). S4 below needs 4 at once: the transaction
+// holding the row lock, two refund flags queued behind it, and the query that
+// watches them queue. With 3 the watcher waited for a connection that could
+// never free up (P2024, "connection limit: 3"). 5 = the old runner's pool.
+// An explicit connection_limit already in DATABASE_URL is kept.
+function sizedPool(url: string): string {
+  const u = new URL(url);
+  if (!u.searchParams.has('connection_limit')) u.searchParams.set('connection_limit', '5');
+  return u.toString();
+}
+const prisma = new PrismaClient({ datasources: { db: { url: sizedPool(process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test') } } });
 
 const userIds: string[] = [];
 const vendorIds: string[] = [];
