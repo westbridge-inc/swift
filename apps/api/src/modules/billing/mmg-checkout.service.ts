@@ -702,7 +702,14 @@ export class MmgCheckoutService {
         continue;
       }
       if (invoice.status !== 'UNPAID') throw unpayable();
-      if (await unresolvedAdPayments(this.prisma, invoice.campaignId) > 0) throw unresolved();
+      if (await unresolvedAdPayments(this.prisma, invoice.campaignId) > 0) {
+        // [I4] A tap at the same instant may have opened this invoice's page since the look above: that page is this
+        // tap's answer (the next pass binds it, and checks it again under the lock), never a refusal. Anything else
+        // is another payment being confirmed: nothing new is issued (as the weekly fee's `blocked`).
+        const mine = await this.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: invoice.id, status: { in: ['OPEN', 'CONFIRMING'] } } });
+        if (mine > 0) continue;
+        throw unresolved();
+      }
       // MMG takes whole dollars (CHECKOUT-CONTRACT D1): an invoice with cents is refused, never rounded.
       if (!invoice.amount.isInteger() || invoice.currency !== 'GYD' || invoice.amount.lte(0)) {
         throw new AppError(409, 'INVOICE_NOT_PAYABLE', 'This invoice cannot be paid with MMG.');
