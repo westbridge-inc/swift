@@ -50,6 +50,8 @@ export const SECRET_FILE_NAMES = [
   // [O-1] Swift's number for the call bridge's caller ID, entered by the owner
   // at a hidden prompt (helper 21) into the secret store, never a compose file.
   'CALL_RELAY_CALLER_ID',
+  // [INAPP-CALLS] The key that makes each person's in-app call identity opaque (HMAC of the account id).
+  'INAPP_CALLS_IDENTITY_SECRET',
   'SMTP_PASS',
   // [EMAIL-HTTPS] Resend's API key (EMAIL_PROVIDER=resend), set by the owner
   // at a hidden prompt into the store.

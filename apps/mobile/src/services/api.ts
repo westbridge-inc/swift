@@ -1584,6 +1584,11 @@ export const vendorApi = {
 export const callsApi = {
   config: () => api.get<{ success: boolean; data: CallConfig }>('/calls/config'),
   bridge: (orderId: string, target: CallTarget) => api.post<{ success: boolean; data: { callId: string; status: string } }>('/calls/bridge', { orderId, target }),
+  // [INAPP-CALLS] In-app calling (build 13; 403 INAPP_CALLS_OFF while the server switch is off).
+  appConfig: () => api.get<{ success: boolean; data: { enabled: boolean } }>('/calls/app/config'),
+  appToken: (platform: 'ios' | 'android') => api.post<{ success: boolean; data: { token: string; identity: string; ttlSeconds: number } }>('/calls/app/token', { platform }),
+  appStart: (orderId: string, target: CallTarget, platform: 'ios' | 'android') => api.post<{ success: boolean; data: { callId: string; token: string; ttlSeconds: number } }>('/calls/app', { orderId, target, platform }),
+  appCancel: (callId: string) => api.post<{ success: boolean; data: { ended: boolean } }>(`/calls/app/${encodeURIComponent(callId)}/cancel`),
 };
 
 export const chatApi = {

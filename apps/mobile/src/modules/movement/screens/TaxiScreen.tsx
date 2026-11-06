@@ -35,6 +35,7 @@ import { CalmRadar, Card, CircleChip, Eyebrow, IconChip, LoadingBlock, Money, Pi
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
 import { CallParty } from '../../../components/CallParty';
+import { CallInApp } from '../../../components/CallInApp';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { orderStatusLabel } from '../../../lib/orderStatus';
@@ -1090,6 +1091,19 @@ function AssignedRideCard({
             />
           )}
         </CallParty>
+        {/* [INAPP-CALLS] Build 13+, switch on: call the driver inside the app. */}
+        <CallInApp orderId={ride?.id} target="driver">
+          {(call) => (
+            <PillButton
+              label={call.label}
+              variant="soft"
+              size="md"
+              icon="headphones"
+              disabled={call.busy}
+              onPress={call.onPress}
+            />
+          )}
+        </CallInApp>
       </View>
 
       {showStartCode ? (

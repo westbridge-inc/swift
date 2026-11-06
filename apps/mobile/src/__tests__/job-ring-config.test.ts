@@ -6,8 +6,12 @@ import { join } from 'node:path';
 // ---------------------------------------------------------------------------
 // [RINGER] What build 12 carries for the job ring, and what it must not:
 // the tone in both native bundles, the iOS time-sensitive entitlement (never
-// critical alerts, owner ruling), expo-audio for playback only (no microphone
-// purpose string, no RECORD_AUDIO, no background audio).
+// critical alerts, owner ruling), expo-audio for playback only (it records
+// nothing and keeps no background playback service).
+// [INAPP-CALLS · owner 6 Nov 2026, "B" · build 13] In-app calls bring the
+// microphone (one purpose string, Swift's words, calls only), the iOS `audio` +
+// `voip` background modes and Android RECORD_AUDIO. They belong to the calls,
+// not to the ring: inapp-calls-native-config.test.ts holds them.
 // ---------------------------------------------------------------------------
 
 const MOBILE = process.cwd();
@@ -49,18 +53,17 @@ describe('build 12 job ring configuration', () => {
     expect(config.ios.entitlements).not.toHaveProperty('com.apple.developer.usernotifications.critical-alerts');
   });
 
-  it('uses expo-audio for playback only: no microphone, no recording, no background audio', async () => {
+  it('uses expo-audio for playback only: no recording, no background playback or recording', async () => {
     const config = await loadConfig();
-    expect(pluginOptions(config, 'expo-audio')).toEqual({
-      microphonePermission: false,
+    const options = pluginOptions(config, 'expo-audio');
+    expect(options).toEqual({
+      // [INAPP-CALLS] the in-app calls purpose string, never `false` (false DELETES the iOS key)
+      microphonePermission: config.ios.infoPlist?.['NSMicrophoneUsageDescription'],
       recordAudioAndroid: false,
       enableBackgroundPlayback: false,
       enableBackgroundRecording: false,
     });
-    expect(config.ios.infoPlist).not.toHaveProperty('NSMicrophoneUsageDescription');
-    expect(config.ios.infoPlist?.['UIBackgroundModes']).not.toContain('audio');
-    expect(config.android.blockedPermissions).toContain('android.permission.RECORD_AUDIO');
-    expect(config.android.permissions ?? []).not.toContain('RECORD_AUDIO');
+    expect(options['microphonePermission']).toMatch(/only during in-app calls.*never records calls/);
     const pkg = JSON.parse(readFileSync(join(MOBILE, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
     expect(pkg.dependencies['expo-audio']).toMatch(/^~56\./);
   });
@@ -91,7 +94,7 @@ const { compileModsAsync } = fromExpo('@expo/config-plugins');
 `;
 
 describe('what an EAS build of this config really carries', () => {
-  it('time-sensitive in the entitlements; no microphone, no background audio, RECORD_AUDIO removed', () => {
+  it('time-sensitive in the entitlements; expo-audio adds no playback service (the microphone belongs to in-app calls)', () => {
     const raw = execFileSync(process.execPath, ['-e', COMPILE], {
       cwd: MOBILE,
       env: { ...process.env, ANDROID_GOOGLE_MAPS_API_KEY: 'test-maps-key', EAS_BUILD_PLATFORM: '' },
@@ -107,9 +110,8 @@ describe('what an EAS build of this config really carries', () => {
     };
     expect(out.entitlements['com.apple.developer.usernotifications.time-sensitive']).toBe(true);
     expect(out.entitlements).not.toHaveProperty('com.apple.developer.usernotifications.critical-alerts');
-    expect(out.plist).not.toHaveProperty('NSMicrophoneUsageDescription');
-    expect(out.plist['UIBackgroundModes']).not.toContain('audio');
-    expect(out.permissions).toContainEqual({ name: 'android.permission.RECORD_AUDIO', node: 'remove' });
+    // [INAPP-CALLS] the microphone string is the in-app calls one; inapp-calls-native-config.test.ts holds the rest
+    expect(out.plist['NSMicrophoneUsageDescription']).toMatch(/only during in-app calls.*never records calls/);
     expect(out.permissions.map((p) => p.name)).not.toContain('android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK');
     expect(out.services.filter((name) => /audio/i.test(name))).toEqual([]);
   }, 120_000);

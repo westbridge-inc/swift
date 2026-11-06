@@ -1,0 +1,367 @@
+import { Prisma, type PrismaClient } from '@prisma/client';
+import { AppError } from '../../utils/errors';
+import { isTerminalOrderStatus, TERMINAL_ORDER_STATUSES } from '../order/order-status';
+import type { CallProvider, CallStep } from '../../providers/voice/call-provider';
+import { CALL_RING_SECONDS, CALL_TIME_LIMIT_SECONDS, type CallRelayConfig } from './call-relay-switch';
+import {
+  CALL_STALE_AFTER_MS,
+  CALL_STATUS,
+  CALL_WORDS,
+  callerRolesOn,
+  loadOrder,
+  numberFor,
+  pairAllowed,
+  roleWords,
+  warnOfCall,
+  webhookUrl,
+  type CallerRole,
+  type CallTarget,
+  type PartyOrder,
+} from './call-bridge';
+import {
+  INAPP_MAX_CLIENTS,
+  INAPP_RING_SECONDS,
+  INAPP_TOKEN_TTL_SECONDS,
+  INAPP_UNTAKEN_AFTER_MS,
+  inAppIdentity,
+  mintVoiceAccessToken,
+  type InAppCallsConfig,
+  type InAppPlatform,
+} from './inapp-calls-switch';
+import type { NotificationPayload } from '../notification/notification.service';
+
+// ---------------------------------------------------------------------------
+// [INAPP-CALLS · owner 6 Nov 2026, "B"] IN-APP CALLING.
+//
+// The caller's phone asks Swift to start a call on a live order (the same
+// party, pair, live-order and per-order attempt rules as the phone bridge, and
+// the same call_sessions row with no number in it). Swift answers with a short
+// Twilio access token; the phone connects to Swift's TwiML App with the call's
+// id; Twilio asks Swift what to do, and Swift rings the OTHER person's Swift
+// app (their opaque client identity) with one line for their call screen:
+// "Swift: your rider is calling about your order".
+//
+// Not answered in the app (old build, no data, no answer) and the phone bridge
+// on: Swift rings their PHONE from Swift's number in the same call, with the
+// bridge's own "Press 1" screen. Declined in the app: no phone call after it.
+//
+// Never: a phone number in a token, a parameter, a log or the row; a recording;
+// a call to someone who is not on the order; a call while INAPP_CALLS is off.
+// ---------------------------------------------------------------------------
+
+/** The in-app row's states, beside the bridge's (status is a text column; no schema change). */
+export const INAPP_STATUS = {
+  /** Started by the caller's phone; ringing (or about to ring) the other app. */
+  RINGING_APP: 'RINGING_APP',
+} as const;
+
+export const INAPP_PROVIDER = 'twilio-app';
+
+/** The provider steps of an in-app call (webhook path segments under /calls/voice). */
+export const INAPP_STEPS = ['app', 'app-answered', 'app-dial-done', 'app-status'] as const;
+export type InAppStepName = (typeof INAPP_STEPS)[number];
+
+/** What people read and hear (plain words; role words only). */
+export const INAPP_WORDS = {
+  notReached: CALL_WORDS.notReached,
+  tryingPhone: 'They are not answering in the app. Swift is calling their phone now.',
+} as const;
+
+/** The one line the other person's call screen shows. Role words only: never a name, never a number. */
+export function callScreenLine(callerRole: CallerRole, orderType: string): string {
+  return `Swift: ${roleWords(callerRole, orderType)} is calling about your order`;
+}
+
+const CALL_ID = /^c[a-z0-9]{20,32}$/;
+const CALL_SID = /^CA[0-9a-fA-F]{32}$/;
+const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
+/** Dial outcomes after which the person is tried on their phone: never reached in the app. Not "busy" (they declined). */
+const FALLBACK_DIAL_STATUSES = new Set(['no-answer', 'failed']);
+
+type Notifier = { send(payload: NotificationPayload): Promise<string> };
+
+export interface InAppDeps {
+  prisma: PrismaClient;
+  config: InAppCallsConfig;
+  /** The phone bridge's settings and provider while CALL_RELAY is on (the fallback); null while it is off. */
+  relay: { config: CallRelayConfig; provider: CallProvider } | null;
+  notifications: Notifier;
+  now?: () => Date;
+}
+
+const first = (fields: Record<string, string[]>, name: string) => fields[name]?.[0] ?? null;
+
+/** The Swift accounts behind a party, for ringing their app. A store rings its owner and staff seats together. */
+export async function appPeopleFor(prisma: PrismaClient, order: PartyOrder, role: CallTarget): Promise<string[]> {
+  switch (role) {
+    case 'customer': return order.customerId ? [order.customerId] : [];
+    case 'rider': return order.rider?.userId ? [order.rider.userId] : [];
+    case 'driver': return order.driver?.userId ? [order.driver.userId] : [];
+    case 'store': {
+      if (!order.vendor) return [];
+      const seats = await prisma.vendorStaff.findMany({ where: { vendorId: order.vendor.id }, select: { userId: true }, orderBy: { createdAt: 'asc' }, take: INAPP_MAX_CLIENTS });
+      const ids = [order.vendor.owner?.userId, ...seats.map((s) => s.userId)].filter((x): x is string => !!x);
+      return [...new Set(ids)].slice(0, INAPP_MAX_CLIENTS);
+    }
+    case 'recipient': return [];
+  }
+}
+
+/** Is this person on at least one live order (customer, rider, driver, store owner or staff)? */
+export async function onALiveOrder(prisma: PrismaClient, userId: string): Promise<boolean> {
+  const live = { status: { notIn: TERMINAL_ORDER_STATUSES } };
+  const found = await prisma.order.findFirst({
+    where: {
+      ...live,
+      OR: [
+        { customerId: userId },
+        { rider: { userId } },
+        { driver: { userId } },
+        { vendor: { owner: { userId } } },
+        { vendor: { staff: { some: { userId } } } },
+      ],
+    },
+    select: { id: true },
+  });
+  return !!found;
+}
+
+function tokenFor(config: InAppCallsConfig, userId: string, platform: InAppPlatform, now: Date): { token: string; identity: string; ttlSeconds: number } {
+  const identity = inAppIdentity(config.identitySecret, userId);
+  const token = mintVoiceAccessToken({
+    accountSid: config.twilio.accountSid,
+    apiKeySid: config.twilio.apiKeySid,
+    apiKeySecret: config.twilio.apiKeySecret,
+    identity,
+    twimlAppSid: config.twimlAppSid,
+    pushCredentialSid: config.pushCredential[platform],
+    ttlSeconds: INAPP_TOKEN_TTL_SECONDS,
+    now,
+  });
+  return { token, identity, ttlSeconds: INAPP_TOKEN_TTL_SECONDS };
+}
+
+/**
+ * A token so this phone can be rung in the app (registration). Only for a person on a live order:
+ * anyone else has no one to be called by.
+ */
+export async function issueRegistrationToken(deps: InAppDeps, userId: string, platform: InAppPlatform): Promise<{ token: string; identity: string; ttlSeconds: number }> {
+  if (!(await onALiveOrder(deps.prisma, userId))) {
+    throw new AppError(403, 'INAPP_NO_LIVE_ORDER', 'In-app calls are for the people on a live order.');
+  }
+  return tokenFor(deps.config, userId, platform, deps.now?.() ?? new Date());
+}
+
+export interface StartInAppInput {
+  orderId: string;
+  userId: string;
+  target: CallTarget;
+  platform: InAppPlatform;
+}
+
+/**
+ * Start an in-app call: the bridge's checks (party, live order, pair, cap, one live call per order),
+ * then a row (no number) and a token for the caller's phone to connect with.
+ */
+export async function startInAppCall(deps: InAppDeps, input: StartInAppInput): Promise<{ callId: string; token: string; ttlSeconds: number }> {
+  const now = deps.now?.() ?? new Date();
+  const order = await loadOrder(deps.prisma, input.orderId);
+  // Not a party is answered exactly like no order: no oracle.
+  const roles = order ? await callerRolesOn(deps.prisma, order, input.userId) : [];
+  if (!order || roles.length === 0) throw new AppError(404, 'NOT_FOUND', 'Order not found');
+  if (isTerminalOrderStatus(order.status)) {
+    throw new AppError(409, 'CALL_ORDER_NOT_LIVE', 'This order is finished, so Swift can no longer connect a call. Message them in chat or ask support.');
+  }
+  if (input.target === 'recipient') {
+    // The parcel recipient has no Swift account: only the phone bridge can reach them.
+    throw new AppError(400, 'INAPP_NOT_FOR_TARGET', 'The recipient does not have the Swift app. Use Call via Swift instead.');
+  }
+  const callerRole = roles.find((r) => pairAllowed(r, input.target, order.orderType));
+  if (!callerRole) throw new AppError(400, 'CALL_TARGET_INVALID', 'Swift cannot connect that call on this order.');
+  if ((await appPeopleFor(deps.prisma, order, input.target)).filter((id) => id !== input.userId).length === 0) {
+    throw new AppError(409, 'INAPP_NO_ONE', 'There is no one to call in the app for this. Message them in chat, or ask support.');
+  }
+
+  let callId: string;
+  try {
+    callId = await deps.prisma.$transaction(async (tx) => {
+      // One start at a time per order (the bridge's rule): the count and the insert see the same rows.
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+      // An in-app start Twilio never took (the phone could not connect) does not hold the order's one live slot.
+      await tx.callSession.updateMany({
+        where: { orderId: order.id, endedAt: null, status: INAPP_STATUS.RINGING_APP, providerCallId: null, createdAt: { lt: new Date(now.getTime() - INAPP_UNTAKEN_AFTER_MS) } },
+        data: { endedAt: now, status: CALL_STATUS.NOT_CONNECTED, durationSeconds: 0 },
+      });
+      // A call the provider never reported finished cannot hold the slot for ever (the bridge's rule).
+      const stale = new Date(now.getTime() - CALL_STALE_AFTER_MS);
+      await tx.callSession.updateMany({ where: { orderId: order.id, endedAt: null, createdAt: { lt: stale }, status: CALL_STATUS.CONNECTED }, data: { endedAt: now } });
+      await tx.callSession.updateMany({ where: { orderId: order.id, endedAt: null, createdAt: { lt: stale } }, data: { endedAt: now, status: CALL_STATUS.NOT_CONNECTED } });
+      // The cap counts every attempt on the order, in the app or through the bridge: one budget.
+      const attempts = await tx.callSession.count({ where: { orderId: order.id } });
+      if (attempts >= deps.config.maxAttemptsPerOrder) {
+        throw new AppError(429, 'CALL_LIMIT_REACHED', 'Swift has connected as many calls as it can for this order. Message them in chat, or ask support.');
+      }
+      const row = await tx.callSession.create({
+        data: { orderId: order.id, callerUserId: input.userId, callerRole, calleeRole: input.target, provider: INAPP_PROVIDER, status: INAPP_STATUS.RINGING_APP },
+        select: { id: true },
+      });
+      return row.id;
+    });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      throw new AppError(409, 'CALL_IN_PROGRESS', 'A Swift call on this order is already ringing. Answer it, or try again in a minute.');
+    }
+    throw err;
+  }
+  const { token, ttlSeconds } = tokenFor(deps.config, input.userId, input.platform, now);
+  return { callId, token, ttlSeconds };
+}
+
+/** The caller's phone could not connect: end the row Twilio never took, so the order is free again at once. */
+export async function cancelUntakenCall(deps: InAppDeps, userId: string, callId: string): Promise<void> {
+  if (!CALL_ID.test(callId)) throw new AppError(404, 'NOT_FOUND', 'Call not found');
+  const now = deps.now?.() ?? new Date();
+  const ended = await deps.prisma.callSession.updateMany({
+    where: { id: callId, callerUserId: userId, provider: INAPP_PROVIDER, status: INAPP_STATUS.RINGING_APP, providerCallId: null, endedAt: null },
+    data: { status: CALL_STATUS.NOT_CONNECTED, endedAt: now, durationSeconds: 0 },
+  });
+  if (ended.count !== 1) throw new AppError(404, 'NOT_FOUND', 'Call not found');
+}
+
+const hangup = (say?: string): { step: CallStep } => ({ step: say ? { verb: 'hangup', say } : { verb: 'hangup' } });
+
+/**
+ * One in-app provider webhook. The caller of this has ALREADY verified Twilio's signature over the exact URL.
+ * `callId` comes from the URL (?s=) for the steps Swift wrote, or from the caller's connect parameters for `app`.
+ */
+export async function handleInAppStep(
+  deps: InAppDeps,
+  step: InAppStepName,
+  callId: string,
+  fields: Record<string, string[]>,
+  enabled: boolean,
+): Promise<{ step: CallStep | null }> {
+  const now = deps.now?.() ?? new Date();
+  if (step === 'app-status') {
+    const sid = first(fields, 'CallSid');
+    const status = first(fields, 'CallStatus')?.toLowerCase() ?? null;
+    if (!sid || !CALL_SID.test(sid) || !status || !TERMINAL_CALL_STATUSES.has(status)) return { step: null };
+    const session = await deps.prisma.callSession.findUnique({ where: { providerCallId: sid } });
+    if (!session || session.provider !== INAPP_PROVIDER || session.endedAt) return { step: null };
+    await deps.prisma.callSession.updateMany({ where: { id: session.id, endedAt: null, status: { not: CALL_STATUS.CONNECTED } }, data: { status: CALL_STATUS.NOT_CONNECTED, endedAt: now, durationSeconds: 0 } });
+    await deps.prisma.callSession.updateMany({ where: { id: session.id, endedAt: null, status: CALL_STATUS.CONNECTED }, data: { endedAt: now } });
+    return { step: null };
+  }
+
+  const session = CALL_ID.test(callId) ? await deps.prisma.callSession.findUnique({ where: { id: callId } }) : null;
+  if (!session || session.provider !== INAPP_PROVIDER) return hangup();
+  const notConnected = { status: CALL_STATUS.NOT_CONNECTED, endedAt: now, durationSeconds: 0 };
+
+  switch (step) {
+    case 'app': {
+      // The caller's phone connected. It must be THIS row's caller, the row untaken and ringing, the switch on.
+      const sid = first(fields, 'CallSid');
+      const from = first(fields, 'From');
+      const callerIdentity = inAppIdentity(deps.config.identitySecret, session.callerUserId);
+      if (!enabled || session.endedAt || session.status !== INAPP_STATUS.RINGING_APP || session.providerCallId
+        || !sid || !CALL_SID.test(sid) || from !== `client:${callerIdentity}`) {
+        return hangup();
+      }
+      const order = await loadOrder(deps.prisma, session.orderId);
+      const people = order && !isTerminalOrderStatus(order.status)
+        ? (await appPeopleFor(deps.prisma, order, session.calleeRole as CallTarget)).filter((id) => id !== session.callerUserId)
+        : [];
+      // Single use: the first connect takes the row; a replay of the same call id is hung up.
+      const taken = await deps.prisma.callSession.updateMany({
+        where: { id: session.id, providerCallId: null, endedAt: null, status: INAPP_STATUS.RINGING_APP },
+        // The caller is on the line (their own app connected): the row's "caller confirmed" moment.
+        data: { providerCallId: sid, callerConfirmedAt: now },
+      });
+      if (taken.count !== 1) return hangup();
+      if (!order || people.length === 0) {
+        await deps.prisma.callSession.updateMany({ where: { id: session.id, endedAt: null }, data: notConnected });
+        return hangup(INAPP_WORDS.notReached);
+      }
+      return {
+        step: {
+          verb: 'dialApp',
+          clients: people.map((id) => inAppIdentity(deps.config.identitySecret, id)),
+          callerId: 'client:Swift',
+          params: { swiftLine: callScreenLine(session.callerRole as CallerRole, order.orderType), swiftCallId: session.id },
+          answered: webhookUrl(deps.config, 'app-answered', session.id),
+          done: webhookUrl(deps.config, 'app-dial-done', session.id),
+          ringSeconds: INAPP_RING_SECONDS,
+          limitSeconds: CALL_TIME_LIMIT_SECONDS,
+        },
+      };
+    }
+    case 'app-answered': {
+      // Runs on the other person's leg after they tapped Answer: an app is a person, no Press 1 needed.
+      const moved = await deps.prisma.callSession.updateMany({
+        where: { id: session.id, status: INAPP_STATUS.RINGING_APP, endedAt: null },
+        data: { status: CALL_STATUS.CONNECTED, connectedAt: now },
+      });
+      return moved.count === 1 ? { step: { verb: 'connect' } } : hangup();
+    }
+    case 'app-dial-done': {
+      if (session.status === CALL_STATUS.CONNECTED) {
+        const seconds = first(fields, 'DialCallDuration');
+        await deps.prisma.callSession.updateMany({
+          where: { id: session.id, endedAt: null },
+          data: { endedAt: now, durationSeconds: seconds && /^\d{1,6}$/.test(seconds) ? Number(seconds) : 0 },
+        });
+        return hangup();
+      }
+      if (session.endedAt || session.status !== INAPP_STATUS.RINGING_APP) return hangup();
+      const dialStatus = first(fields, 'DialCallStatus')?.toLowerCase() ?? '';
+      const fallback = await phoneFallback(deps, session, dialStatus, enabled, now);
+      if (fallback) return fallback;
+      await deps.prisma.callSession.updateMany({ where: { id: session.id, endedAt: null }, data: notConnected });
+      return hangup(INAPP_WORDS.notReached);
+    }
+    case 'app-status':
+      return { step: null };
+  }
+}
+
+/**
+ * Not reached in the app: ring their phone from Swift's number in the same call (one phone leg), with the
+ * bridge's Press-1 screen. Only while CALL_RELAY is on, never after a decline, and only if the order is still
+ * live and has a number for them. The row becomes a bridge row at CALLER_CONFIRMED (the caller is on the line),
+ * so the bridge's own screen / screen-gather / dial-done steps finish it.
+ */
+async function phoneFallback(
+  deps: InAppDeps,
+  session: { id: string; orderId: string; callerRole: string; calleeRole: string },
+  dialStatus: string,
+  enabled: boolean,
+  now: Date,
+): Promise<{ step: CallStep } | null> {
+  if (!deps.relay || !enabled || !FALLBACK_DIAL_STATUSES.has(dialStatus)) return null;
+  const order = await loadOrder(deps.prisma, session.orderId);
+  const to = order && !isTerminalOrderStatus(order.status) ? numberFor(order, session.calleeRole as CallTarget) : null;
+  if (!order || !to) return null;
+  const moved = await deps.prisma.callSession.updateMany({
+    where: { id: session.id, status: INAPP_STATUS.RINGING_APP, endedAt: null },
+    data: { status: CALL_STATUS.CALLER_CONFIRMED },
+  });
+  if (moved.count !== 1) return null;
+  const callee = session.calleeRole as CallTarget;
+  const bridgeDeps = { prisma: deps.prisma, provider: deps.relay.provider, config: deps.relay.config, notifications: deps.notifications };
+  const listeners = callee === 'store'
+    ? (order.vendor?.owner?.userId ? [order.vendor.owner.userId] : [])
+    : await appPeopleFor(deps.prisma, order, callee);
+  await warnOfCall(bridgeDeps, order, listeners, callee, session.callerRole as CallTarget, session.id, 2);
+  return {
+    step: {
+      verb: 'dial',
+      say: INAPP_WORDS.tryingPhone,
+      to,
+      callerId: deps.relay.config.callerId,
+      screen: webhookUrl(deps.relay.config, 'screen', session.id),
+      done: webhookUrl(deps.relay.config, 'dial-done', session.id),
+      ringSeconds: CALL_RING_SECONDS,
+      limitSeconds: CALL_TIME_LIMIT_SECONDS,
+    },
+  };
+}

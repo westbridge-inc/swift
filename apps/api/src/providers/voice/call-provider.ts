@@ -35,6 +35,12 @@ export type CallStep =
   | { verb: 'confirm'; prompt: string; next: string; noInput: string }
   /** Ring the other party with Swift's caller ID; `screen` runs on their phone before they are connected. */
   | { verb: 'dial'; say: string; to: string; callerId: string; screen: string; done: string; ringSeconds: number; limitSeconds: number }
+  /**
+   * [INAPP-CALLS] Ring the other person's Swift app (each of `clients`, at once; first answer wins).
+   * `callerId` is a client name ("client:Swift"), never a number; `params` reach their phone's call screen;
+   * `answered` runs on their leg after they answer; `done` runs when the dial ends.
+   */
+  | { verb: 'dialApp'; clients: string[]; callerId: string; params: Record<string, string>; answered: string; done: string; ringSeconds: number; limitSeconds: number }
   /** The screened party pressed 1: connect them. */
   | { verb: 'connect' }
   /** End this leg, optionally saying something first. */

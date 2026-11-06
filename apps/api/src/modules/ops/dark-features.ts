@@ -188,6 +188,18 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'product',
   },
   {
+    // [INAPP-CALLS · owner 6 Nov 2026, "B"] In-app calling (build 13). Ships OFF.
+    key: 'inapp_calls',
+    setting: 'INAPP_CALLS',
+    source: 'env',
+    // On only at '1' with blanks ignored (modules/calls/inapp-calls-switch.ts reads it so).
+    enabledWhenPattern: /^1$/,
+    title: 'In-app calls (Swift call screen, over the internet)',
+    whileOff:
+      "No one can call inside the Swift app: there is no 'Call in app' button, no token is issued and no app is rung. People call as before, through Swift's phone bridge (when CALL_RELAY is on) or the number on the order, and in-app chat works as always. Kept OFF until build 13 is in the stores, the Twilio TwiML App and push credentials are set, and the privacy wording for in-app calls is live.",
+    impact: 'product',
+  },
+  {
     // [O-1 · owner 22 Oct 2026] ON until store builds 9-12 / vc7-vc8 are retired (launch checklist).
     key: 'counterpart_phones_to_old_apps',
     setting: 'COUNTERPART_PHONES_TO_OLD_APPS',

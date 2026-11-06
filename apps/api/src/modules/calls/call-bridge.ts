@@ -80,7 +80,7 @@ export interface CallBridgeDeps {
   now?: () => Date;
 }
 
-const ORDER_PARTIES = {
+export const ORDER_PARTIES = {
   id: true,
   orderNumber: true,
   orderType: true,
@@ -92,7 +92,7 @@ const ORDER_PARTIES = {
   driver: { select: { userId: true, user: { select: { phone: true } } } },
   vendor: { select: { id: true, status: true, phone: true, publicPhone: true, owner: { select: { userId: true } } } },
 } as const;
-type PartyOrder = Prisma.OrderGetPayload<{ select: typeof ORDER_PARTIES }>;
+export type PartyOrder = Prisma.OrderGetPayload<{ select: typeof ORDER_PARTIES }>;
 
 const AUDIENCE: Record<CallerRole, NotificationAudience> = { customer: 'customer', rider: 'earner', driver: 'earner', store: 'business' };
 
@@ -115,7 +115,7 @@ async function isStoreStaff(prisma: PrismaClient, order: PartyOrder, userId: str
 }
 
 /** Everything `userId` is on this order (one person can be, say, the customer and a store's staff). */
-async function callerRolesOn(prisma: PrismaClient, order: PartyOrder, userId: string): Promise<CallerRole[]> {
+export async function callerRolesOn(prisma: PrismaClient, order: PartyOrder, userId: string): Promise<CallerRole[]> {
   const roles: CallerRole[] = [];
   if (order.rider?.userId === userId) roles.push('rider');
   if (order.driver?.userId === userId) roles.push('driver');
@@ -159,10 +159,10 @@ function peopleFor(order: PartyOrder, role: CallTarget): string[] {
   }
 }
 
-const webhookUrl = (config: CallRelayConfig, step: CallStepName, callId: string) =>
+export const webhookUrl = (config: Pick<CallRelayConfig, 'webhookBase'>, step: CallStepName, callId: string) =>
   `${config.webhookBase}/${step}?s=${encodeURIComponent(callId)}`;
 
-async function loadOrder(prisma: PrismaClient, orderId: string): Promise<PartyOrder | null> {
+export async function loadOrder(prisma: PrismaClient, orderId: string): Promise<PartyOrder | null> {
   return prisma.order.findUnique({ where: { id: orderId }, select: ORDER_PARTIES });
 }
 
@@ -171,7 +171,7 @@ async function loadOrder(prisma: PrismaClient, orderId: string): Promise<PartyOr
  * Leg 1 tells the person who tapped Call (their own phone rings first); leg 2 tells the account behind the
  * party being called. The parcel recipient has no account here and gets no push.
  */
-async function warnOfCall(
+export async function warnOfCall(
   deps: CallBridgeDeps,
   order: PartyOrder,
   listeners: string[],
