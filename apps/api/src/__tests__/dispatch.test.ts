@@ -2510,9 +2510,11 @@ describe('candidate selection at scale [SWIFT-142]', () => {
 });
 
 describe('vehicle capability matching [SWIFT-062]', () => {
-  it('an EXTRA_LARGE parcel is offered to a CAR, never to a bicycle', async () => {
+  it('a parcel goes only to a vehicle that can carry it — and never to a car (owner 6 Nov 2026: food and shop only)', async () => {
     // [Owner ruling 15 Oct 2026] TRANSFORMED: runs with CAR_DELIVERIES=1 (the re-enable path). With the switch
     // off (default) no car is a goods candidate: taxi-cars-passengers-only.test.ts.
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] TRANSFORMED AGAIN: cars deliver food and shop orders only, never courier
+    // parcels, so even with cars delivering no car is a parcel candidate; capability is still graded bike < motorbike.
     vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     await riderPool.empty({ isOnline: false });
     const localUserIds: string[] = [];
@@ -2536,16 +2538,24 @@ describe('vehicle capability matching [SWIFT-062]', () => {
       return r.id;
     };
     const bike = await mkVeh('BICYCLE');
+    const moto = await mkVeh('MOTORCYCLE');
     const car = await mkVeh('CAR');
     try {
       const xl = new Set((await dispatch.findCandidates(`s62-xl-${nanoid(6)}`, PICKUP, 5, 'RIDER', 0, null, null, 'EXTRA_LARGE')).map((c) => (c as { riderId: string }).riderId));
-      expect(xl.has(car)).toBe(true);
+      expect(xl.has(car)).toBe(false); // a car takes no parcel at all
+      expect(xl.has(moto)).toBe(false);
       expect(xl.has(bike)).toBe(false); // a bicycle can't carry a wardrobe box
 
-      // A SMALL parcel fits any vehicle — both are eligible.
+      const lg = new Set((await dispatch.findCandidates(`s62-lg-${nanoid(6)}`, PICKUP, 5, 'RIDER', 0, null, null, 'LARGE')).map((c) => (c as { riderId: string }).riderId));
+      expect(lg.has(moto)).toBe(true);
+      expect(lg.has(bike)).toBe(false);
+      expect(lg.has(car)).toBe(false);
+
+      // A SMALL parcel fits any parcel vehicle — the bike and the motorbike, never the car.
       const sm = new Set((await dispatch.findCandidates(`s62-sm-${nanoid(6)}`, PICKUP, 5, 'RIDER', 0, null, null, 'SMALL')).map((c) => (c as { riderId: string }).riderId));
-      expect(sm.has(car)).toBe(true);
+      expect(sm.has(car)).toBe(false);
       expect(sm.has(bike)).toBe(true);
+      expect(sm.has(moto)).toBe(true);
     } finally {
       await app.prisma.rider.deleteMany({ where: { userId: { in: localUserIds } } });
       await app.prisma.user.deleteMany({ where: { id: { in: localUserIds } } });

@@ -8,6 +8,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill, useLogoutConfirm } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { DeliveriesTooCard } from '../DeliveriesTooCard';
 import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
@@ -33,7 +34,7 @@ import { useMoverPreview } from '../../../stores/moverPreview';
 export function MoverAccountScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
   const { user } = useAuthStore();
-  const { kind, profile } = useMoverKind();
+  const { kind, profile, dual } = useMoverKind();
   // What the server does when a mover logs out (mover-authority.ts): the mover
   // goes offline, and a job not yet picked up is released back to dispatch. A
   // job already in their hands stays theirs; operations are paged. The box says
@@ -225,6 +226,10 @@ export function MoverAccountScreen({ navigation }: any) {
             onCancelPending={() => cancelPendingMmgLink.mutate()}
           />
         ) : null}
+
+        {/* [CARS-DELIVER] "Deliveries too" — shown only when the server says the taxi car can deliver now
+            (CAR_DELIVERIES on) or already does; the work-mode switch for an account with both. */}
+        <DeliveriesTooCard kind={kind ?? null} hasTaxiProfile={isDriver || dual === true} style={{ marginTop: space.md }} />
 
         {/* Ops rows */}
         <Card style={{ marginTop: space.md, paddingVertical: space.sm }}>

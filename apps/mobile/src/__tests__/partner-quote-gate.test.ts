@@ -20,7 +20,8 @@ const src = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8');
 
 describe('[PR1270-S2-04] signup commits only to a fetched, current, on-screen quote', () => {
   it.each([
-    ['src/modules/mover/screens/MoverOnboardingScreen.tsx', 'moverQuote(p, vt)'],
+    // [CARS-PLATES] the car's plate decides its quote (a private car at the rider's fee): still the one gate.
+    ['src/modules/mover/screens/MoverOnboardingScreen.tsx', 'vehicleQuote(p, vt, plate, isHirePlate)'],
     ['src/modules/vendor/screens/BusinessSetup.tsx', 'vendorQuote(p, type)'],
   ])('%s gates its submit control on the quote gate', (file, pick) => {
     const s = src(file);

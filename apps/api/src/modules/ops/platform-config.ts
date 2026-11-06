@@ -257,6 +257,10 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // (verification.service submitIdentity) and a customer never gives a photo (owner 16 Oct). The list
     // was read by nothing but the registry seed, which minted a selfie requirement from it.
 };
+/** [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car's delivery profile adds ONE car photo with the plate showing, so a
+ *  person can match the plate's letter (no certificate of fitness): the same document type a taxi uploads. Named here,
+ *  in the registry's own text (DOC-INV-2), and read by country-config moverRequiredFrom. */
+export const PRIVATE_CAR_PHOTO_DOC = 'vehicle_exterior_photo';
 
 /**
  * [TRADES · owner 13 Oct 2026] The legal FLOOR of each trade opened at launch: identity, the

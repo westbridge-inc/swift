@@ -3,7 +3,7 @@ import type { Prisma, PrismaClient, VehicleType } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import type { ConsentDocumentType } from '../legal/consent.service';
 import { browserClientOf } from '../auth/browser-session';
-import { moverRoleFor } from '../../config/vehicle-classes';
+import { moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
 import { partnerRateFor, PricingConfigError, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
 import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../subscription/trial-length';
 import { OPERATOR } from '../legal/operator';
@@ -159,7 +159,9 @@ export function assertWeeklyFeeAck(required: boolean, ack: WeeklyFeeAck | undefi
 }
 
 /** Who sign-up prices: a mover by the vehicle, a new store by its type (no catalogue yet: the first step). */
-export type FeeSubject = { role: 'MOVER'; vehicleType: VehicleType } | { role: 'VENDOR'; vendorType: string };
+/** [CARS-PLATES · owner 6 Nov 2026] `moverRole`: the work the vehicle gets when its plate decides it (a private-plate
+ *  car is a delivery rider and pays the rider's weekly fee, owner 04:30Z); absent, the vehicle's own role. */
+export type FeeSubject = { role: 'MOVER'; vehicleType: VehicleType; moverRole?: MoverRole } | { role: 'VENDOR'; vendorType: string };
 
 export interface SignupQuote { amount: number; currencyCode: string; tier: PartnerTier }
 
@@ -171,7 +173,7 @@ export async function signupQuote(db: PrismaClient | Prisma.TransactionClient, u
   const tiers = config.subscriptionTiers as unknown as SubscriptionTiers;
   const { rate, tier } = subject.role === 'VENDOR'
     ? partnerRateFor(tiers, { kind: 'VENDOR', isService: subject.vendorType === 'SERVICE', activeListings: 0 })
-    : partnerRateFor(tiers, { kind: moverRoleFor(subject.vehicleType), vehicleType: subject.vehicleType });
+    : partnerRateFor(tiers, { kind: subject.moverRole ?? moverRoleFor(subject.vehicleType), vehicleType: subject.vehicleType });
   return { amount: rate, currencyCode: config.currencyCode, tier };
 }
 

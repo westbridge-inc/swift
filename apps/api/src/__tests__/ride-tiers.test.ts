@@ -107,7 +107,7 @@ async function makeDriver(rideClass: RideClass) {
     data: {
       userId: u.id,
       vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2021,
-      vehicleColor: 'Silver', licensePlate: `TR-${seq}`,
+      vehicleColor: 'Silver', licensePlate: `HTR-${seq}`,
       rideClass,
       // [REPORT-014 F-014-01] Fixtures carry the honest physical shape: a
       // driver serving a class seats at least that class's capacity (the old

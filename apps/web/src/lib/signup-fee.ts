@@ -32,6 +32,14 @@ export interface SignupPricing {
   feeTerms?: FeeTerms;
   /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
   catalogueRetier?: { on?: unknown; noticeDays?: unknown };
+  /** [CARS-PLATES · owner 6 Nov 2026] A private (P) plate car: deliveries only, at the delivery rider's fee (`on` = the
+   *  server's CAR_DELIVERIES switch). Absent from an API that predates it. */
+  privateCars?: { on?: unknown; quotes?: { vehicleType: string; rate: number; role?: string }[] };
+}
+
+/** [CARS-PLATES] Private (P) plate cars deliver today: only for exactly `on: true` from the server. */
+export function privateCarsOpen(pricing: Pick<SignupPricing, 'privateCars'> | null | undefined): boolean {
+  return pricing?.privateCars?.on === true;
 }
 
 /** What sign-up sends for the tick: the words' version and the fee on screen. */
@@ -48,7 +56,8 @@ export interface WeeklyFeeAck {
 export type FeeState = { ask: string; ack?: undefined; tick?: boolean } | { ask: null; ack?: WeeklyFeeAck; tick?: undefined };
 
 /** Who is being priced: a business by its type, a rider or driver by the vehicle. */
-export type FeeChoice = { role: 'VENDOR'; vendorType: string } | { role: 'MOVER'; vehicleType: string };
+/** `privateCar`: [CARS-PLATES] a car on a private (P) plate, priced as a delivery rider (owner, 6 Nov 2026). */
+export type FeeChoice = { role: 'VENDOR'; vendorType: string } | { role: 'MOVER'; vehicleType: string; privateCar?: boolean };
 
 export const FEE_ASK = {
   loading: 'Loading your weekly fee…',
@@ -115,6 +124,12 @@ const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().
 /** The weekly fee quoted for this choice (a new store starts on the first catalogue step), or null. */
 export function feeQuote(pricing: SignupPricing, choice: FeeChoice): number | null {
   if (choice.role === 'MOVER') {
+    // [CARS-PLATES] A private car is the delivery rider's fee, only while the server says private cars deliver.
+    if (choice.privateCar) {
+      if (!privateCarsOpen(pricing)) return null;
+      const quote = pricing.privateCars?.quotes?.find((q) => q.vehicleType === choice.vehicleType);
+      return quote && quote.role === 'RIDER' && isRate(quote.rate) ? quote.rate : null;
+    }
     const rate = pricing.movers?.find((q) => q.vehicleType === choice.vehicleType)?.rate;
     return isRate(rate) ? rate : null;
   }

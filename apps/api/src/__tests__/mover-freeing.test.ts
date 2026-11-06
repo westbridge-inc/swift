@@ -131,7 +131,7 @@ async function makeDriver(opts: { online?: boolean; lastLocationUpdate?: Date; a
       vehicleModel: 'Allion',
       vehicleYear: 2018,
       vehicleColor: 'Silver',
-      licensePlate: `FR ${seq}11`,
+      licensePlate: `HFR ${seq}11`,
       driverLicenseUrl: 'x',
       vehicleInsuranceUrl: 'x',
       documentsVerified: true,

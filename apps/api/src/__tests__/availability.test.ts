@@ -52,7 +52,7 @@ async function makeDriver(latOffset: number) {
     data: {
       userId: u.id,
       vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
-      licensePlate: `AV${nanoid(5)}`,
+      licensePlate: `HAV${nanoid(5)}`,
       driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
       isOnline: true, isAvailable: true, documentsVerified: true,
       rideClass: 'ECONOMY' as never,
@@ -236,7 +236,7 @@ describe('taxi hard pre-check (flag-gated)', () => {
       data: {
         userId: dual.id,
         vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
-        licensePlate: `AV${nanoid(5)}`,
+        licensePlate: `HAV${nanoid(5)}`,
         driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
         isOnline: true, isAvailable: true, documentsVerified: true,
         rideClass: 'ECONOMY' as never,

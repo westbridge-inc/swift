@@ -12,13 +12,16 @@ import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lo
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesStatus, declaresDeliveryCards, enableCarDeliveries, followTaxiCar, isTaxiTwin, notARideOffer, setTaxiAndDeliveries } from './car-deliveries';
+import { poolForOrder } from '../dispatch/dispatch-generation-keys';
+import { passengersOnlyRefusal, riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { explainEarning } from '../../utils/explain-earning';
 import { z } from '../../lib/zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
-import type { PrismaClient } from '@prisma/client';
+import type { PrismaClient, VehicleType } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { earningsWindow, jobsIn } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -275,10 +278,20 @@ export async function driverRoutes(app: FastifyInstance) {
 
     const driver = await app.prisma.$transaction(async (tx) => {
       await lockUserRoleAuthority(tx, request.user.userId);
+      // [CARS-PLATES] The global lock order (User, then Rider, then Driver): the car's delivery twin, if any, follows a
+      // changed car below, so its row is locked first.
+      const twinRows = identityChanged
+        ? await tx.$queryRaw<Array<{ id: string; vehicleType: VehicleType; licensePlate: string | null; currentOrderId: string | null }>>`
+            SELECT "id", "vehicleType", "licensePlate", "currentOrderId" FROM riders WHERE "userId" = ${request.user.userId} FOR UPDATE`
+        : [];
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
       if (identityChanged && me.currentRideId) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active ride before changing your vehicle.');
+      const twin = twinRows[0] && isTaxiTwin(twinRows[0], me) ? twinRows[0] : null;
+      if (twin && (twin.currentOrderId || (await riderLiveLegCount(tx, twin.id)) > 0)) {
+        throw new AppError(409, 'ACTIVE_WORK', 'Finish your active delivery before changing your vehicle.');
+      }
       const driver = await tx.driver.update({
         where: { userId: request.user.userId },
         data: {
@@ -320,6 +333,9 @@ export async function driverRoutes(app: FastifyInstance) {
       if (identityChanged) {
         await requireFreshVehicleReview(tx, request.user.userId, me.licensePlate, { ...driver, kind: 'DRIVER' });
       }
+      // [CARS-PLATES] The taxi car's delivery twin names the changed car too, offline with the cleared grant, so it is
+      // never left on the old plate (where it would read as a separate private car).
+      if (twin) await followTaxiCar(tx, twin.id, driver.id, { isOnline: false, isAvailable: false, locationSessionId: null });
 
       return driver;
     });
@@ -349,6 +365,32 @@ export async function driverRoutes(app: FastifyInstance) {
       actor: 'DRIVER', entityId: me.id, userId: request.user.userId, keepSessionId: request.authSessionId,
     });
     return { success: true, data };
+  });
+
+  /** [CARS-DELIVER] GET /deliveries — "Deliveries too": can this taxi car take store deliveries as well, and
+   *  is it set up? While CAR_DELIVERIES is off the answer is { available: false, reason: 'SWITCH_OFF' } and
+   *  the phone shows nothing (taxi cars carry passengers only until counsel verifies goods carriage). */
+  app.get('/deliveries', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId);
+    return { success: true, data: await carDeliveriesStatus(app.prisma, request.user.userId) };
+  });
+
+  /** [CARS-DELIVER] POST /deliveries — set up "Deliveries too": a delivery profile on this verified taxi car
+   *  (car-deliveries.ts). Refused while CAR_DELIVERIES is off, before anything is read or written. */
+  app.post('/deliveries', { preHandler: [app.authenticate] }, async (request) => {
+    if (!carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    await getDriver(request.user.userId);
+    return { success: true, data: await enableCarDeliveries(app.prisma, request.user.userId) };
+  });
+
+  /** [CARS-DELIVER PR4] PUT /deliveries/mode { takesDeliveries } — "taxi + deliveries": store delivery offers also
+   *  come while this taxi is online and free (car-deliveries.ts). Turning it ON is refused while CAR_DELIVERIES is
+   *  off, before anything is read or written; turning it off is always allowed. */
+  app.put('/deliveries/mode', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId); // authz before validation
+    const { takesDeliveries } = z.object({ takesDeliveries: z.boolean() }).parse(request.body ?? {});
+    if (takesDeliveries && !carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    return { success: true, data: await setTaxiAndDeliveries(app.prisma, request.user.userId, takesDeliveries) };
   });
 
   /** POST /vehicle-photo — the PUBLIC exterior car photo riders see on
@@ -444,7 +486,11 @@ export async function driverRoutes(app: FastifyInstance) {
     const location = driverGoOnlineSchema.parse(request.body ?? {});
     // [TAXI multi-stop 4/8] Set on EVERY go-online from what this app declares:
     // an older app going online after a newer one clears it again.
-    const taxiStopsCapable = declaresTaxiStops(driverCapabilitiesSchema.parse(request.body ?? {}).capabilities);
+    const declared = driverCapabilitiesSchema.parse(request.body ?? {}).capabilities;
+    const taxiStopsCapable = declaresTaxiStops(declared);
+    // [CARS-DELIVER PR4 · REVIEW-F #2139 S2-2] Likewise whether this app can show a delivery card: only then is it
+    // offered deliveries from taxi work ("taxi + deliveries"). Set on every GO, so an older app clears it again.
+    const deliveryCardsCapable = declaresDeliveryCards(declared);
 
     // Serialize GO against role switching and compare the profile generation
     // captured before the slower verification gates. If an accept/offline/
@@ -500,6 +546,7 @@ export async function driverRoutes(app: FastifyInstance) {
           "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
           "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
           "taxiStopsCapable" = ${taxiStopsCapable},
+          "deliveryCardsCapable" = ${deliveryCardsCapable},
           "updatedAt" = clock_timestamp()
         WHERE id = ${driver.id} AND ${documentDeadlineSql(liveGate)}
         RETURNING "isOnline", "isAvailable"`;
@@ -1105,6 +1152,10 @@ export async function driverRoutes(app: FastifyInstance) {
       fare: zMoneyWhole.optional(),
       offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
     }).parse(request.body);
+    // [CARS-DELIVER PR4 · REVIEW-G #2138 S2-2 (b)] acceptOffer takes the pool from the ORDER, so this route would claim
+    // a store delivery for an older taxi app that showed it as a ride. Refused before anything is consumed.
+    const kind = await app.prisma.order.findUnique({ where: { id: orderId }, select: { orderType: true } });
+    if (kind && poolForOrder(kind) !== 'DRIVER') throw notARideOffer();
     const order = await dispatch.acceptOffer(orderId, request.user.userId, undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });

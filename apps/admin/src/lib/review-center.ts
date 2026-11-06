@@ -82,10 +82,15 @@ export const docLabel = (type: string) => LABELS[type] ?? 'Document';
 const REVIEWER_HINTS: Record<string, string> = {
   // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] the licence must cover the vehicle: motorcycles for a motorbike rider
   // (an e-bike or e-scooter rider signs up as one), motor cars for a taxi driver. No certificate of fitness for a motorbike.
-  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry, and that it covers the vehicle: a motorbike rider's licence must cover motorcycles (an e-bike or e-scooter counts as a motorbike); a taxi driver's must cover motor cars. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
+  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry, and that it covers the vehicle: a motorbike rider's licence must cover motorcycles (an e-bike or e-scooter counts as a motorbike); a taxi driver's must cover motor cars, and so must a car delivery driver's. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
   hire_car_driver_licence: "Hire Car Driver's Licence (GRA, its own document): same name as the driver's licence, and a current date (usually 3 years).",
   hire_car_vehicle_licence: "The car's yearly hire licence: the plate matches the registration, and the date is current.",
-  vehicle_registration: 'For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234) and match the plate the driver gave.',
+  // [CARS-PLATES · owner 6 Nov 2026] The person checking the certificate is what makes the plate's letter count: P-plate
+  // (private) cars deliver only; H-plate (hire) cars drive taxi rides and deliver.
+  vehicle_registration: 'The plate on the certificate must match the plate the mover gave: its first letter decides the work. For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234). A private (P) plate car may do deliveries only — approve it for that; Swift never offers it a ride.',
+  // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] a private (P) plate delivery car uploads ONE car photo so a person can match
+  // the plate's letter; it sits next to the registration in the applicant's papers (groupApplicants).
+  vehicle_exterior_photo: 'The plate must be readable in the photo and match the Certificate of Registration and the plate the mover gave. Its first letter decides the work: H = taxi rides and deliveries; P (private) = deliveries only.',
   // [R13 · owner 15 Oct 2026, research D6] every motor vehicle, not only a taxi
   vehicle_insurance: "Read 'Limitations as to use': it must permit use for hire or reward (taxi: passengers for hire; delivery: commercial use). A policy for social, domestic and pleasure use only is rejected as 'Insurance does not permit use for hire or reward'.",
 };
@@ -283,6 +288,18 @@ export async function loadReviewQueue(status: ReviewStatus, lane: ReviewLane): P
   }
   return [...docs.values()];
 }
+/** [CARS-PLATES · owner 6 Nov 2026] The car photo (plate showing) sits right after the registration it is matched against;
+ *  every other paper keeps its order. */
+export function platePapersTogether(docs: ReviewDocument[]): ReviewDocument[] {
+  const registration = docs.findIndex((d) => d.docType === 'vehicle_registration');
+  if (registration < 0) return docs;
+  const photos = docs.filter((d) => d.docType === 'vehicle_exterior_photo');
+  if (photos.length === 0) return docs;
+  const rest = docs.filter((d) => d.docType !== 'vehicle_exterior_photo');
+  const at = rest.findIndex((d) => d.docType === 'vehicle_registration');
+  return [...rest.slice(0, at + 1), ...photos, ...rest.slice(at + 1)];
+}
+
 export function groupApplicants(docs: ReviewDocument[]): Applicant[] {
   const groups = new Map<string, Applicant>();
   for (const doc of docs) {
@@ -296,6 +313,7 @@ export function groupApplicants(docs: ReviewDocument[]): Applicant[] {
     group.oldest = Math.min(group.oldest, created);
     groups.set(id, group);
   }
+  for (const group of groups.values()) group.documents = platePapersTogether(group.documents);
   return [...groups.values()].sort((a, b) => a.oldest - b.oldest || a.id.localeCompare(b.id));
 }
 export function waitingSince(timestamp: number, now: number): string {

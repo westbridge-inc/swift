@@ -360,9 +360,9 @@ export const DARK_FEATURES: DarkFeature[] = [
     setting: 'CAR_DELIVERIES',
     source: 'env',
     enabledWhen: '1',
-    title: 'Deliveries by taxi cars (H-plate cars, wagons, buses)',
+    title: 'Deliveries by car (private P-plate cars: deliveries only; H-plate taxis: rides and deliveries)',
     whileOff:
-      "Taxi cars carry passengers only (owner ruling, 15 Oct 2026, until counsel confirms the hire-car licence covers goods): a driver sees no store delivery or parcel offers, cannot grab or claim one, and every store delivery and parcel goes to riders. Passenger rides are unchanged.",
+      "Owner ruling 6 Nov 2026: ON at launch; this is the kill switch. While off, cars carry no goods: a car sees no store delivery or parcel offers, cannot grab or claim one, a private (P) plate car cannot sign up or go online, and every store delivery and parcel goes to bicycles and motorbikes. Taxi rides (H plates only) are unchanged.",
     impact: 'product',
   },
   {

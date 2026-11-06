@@ -61,6 +61,14 @@ export interface PartnerPricing {
   feeTerms?: FeeTerms;
   /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
   catalogueRetier?: { on?: unknown; noticeDays?: unknown };
+  /** [CARS-PLATES · owner 6 Nov 2026] A private (P) plate car: deliveries only, at the delivery rider's fee. `on` is the
+   *  server's CAR_DELIVERIES switch. Absent from an API that predates it (a car is a taxi there). */
+  privateCars?: { on?: unknown; quotes?: MoverQuote[] };
+}
+
+/** [CARS-PLATES] Private (P) plate cars deliver today: only for exactly `on: true` from the server. */
+export function privateCarsOpen(pricing: Pick<PartnerPricing, 'privateCars'> | null | undefined): boolean {
+  return pricing?.privateCars?.on === true;
 }
 
 /** [RETIER PR-C · owner 30 Oct 2026 · REVIEW-M N3] Whether Swift moves an existing store between catalogue steps
@@ -214,6 +222,20 @@ export function moverQuote(pricing: PartnerPricing | null | undefined, vehicleTy
   const quote = pricing.movers.find((q) => q?.vehicleType === vehicleType);
   if (!quote || !isRate(quote.rate) || !MOVER_TIERS.includes(quote.tier)) return null;
   return quote.role === 'RIDER' || quote.role === 'DRIVER' ? quote : null;
+}
+
+/**
+ * [CARS-PLATES · owner 6 Nov 2026] The quote for THIS car: a private (P, any non-H) plate car while private cars
+ * deliver is quoted as a delivery rider (the server's `privateCars`); anything else as `moverQuote`. Null when the
+ * server has no valid private-car quote (the fee gate then says it cannot show a price, never a taxi price).
+ */
+export function vehicleQuote(pricing: PartnerPricing | null | undefined, vehicleType: string | null | undefined, plate: string, isHire: (plate: string) => boolean): MoverQuote | null {
+  const base = moverQuote(pricing, vehicleType);
+  if (!base || base.role !== 'DRIVER' || !privateCarsOpen(pricing) || isHire(plate)) return base;
+  const quotes = pricing?.privateCars?.quotes;
+  const quote = Array.isArray(quotes) ? quotes.find((q) => q?.vehicleType === vehicleType) : undefined;
+  if (!quote || !isRate(quote.rate) || !MOVER_TIERS.includes(quote.tier) || quote.role !== 'RIDER') return null;
+  return quote;
 }
 
 /** A usable catalogue ladder: starts at 0 items, whole-number steps strictly

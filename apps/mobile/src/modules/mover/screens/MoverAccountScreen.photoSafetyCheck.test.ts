@@ -39,6 +39,7 @@ vi.mock('../../../kit', () => ({
   useLogoutConfirm: () => ({ requestLogout: vi.fn(), logoutDialog: null }),
 }));
 vi.mock('../../../kit/controls', () => ({ Stars: 'Stars' }));
+vi.mock('../DeliveriesTooCard', () => ({ DeliveriesTooCard: 'DeliveriesTooCard' })); // [CARS-DELIVER] its own test: MoverAccount.deliveriesToo
 vi.mock('../../../kit/toast', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('../../../services/api', () => ({ driverApi: {} }));
 const STANDING = { standing: 'GOOD', displayRating: 4.8, ratingBucket: '4.5+', ratingCount: 30, topRated: false, folded: { count: 0, average: null }, trend: [], topPositive: [], topNegative: [], coaching: [] };

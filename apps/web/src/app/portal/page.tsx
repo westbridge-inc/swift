@@ -122,7 +122,8 @@ export default function PortalHome() {
   const summary = useQuery({ queryKey: ['p-summary'], queryFn: getRiderSummary, enabled: !!rider.data, retry: 0 });
   // The taxi driver's four windows; the name stays `driverEarn` (the [W-10] census checks every money read's error state).
   const driverEarn = useQuery({ queryKey: ['p-driver-summary'], queryFn: getDriverSummary, enabled: !!driver.data, retry: 0 });
-  const riderSub = useQuery({ queryKey: ['p-rider-sub'], queryFn: getRiderSubscription, enabled: !!rider.data, retry: 0 });
+  // [CARS-DELIVER] One weekly fee per person: with a taxi profile too, the driver read below is that same fee.
+  const riderSub = useQuery({ queryKey: ['p-rider-sub'], queryFn: getRiderSubscription, enabled: !!rider.data && driver.isSuccess && !driver.data, retry: 0 });
   const driverSub = useQuery({ queryKey: ['p-driver-sub'], queryFn: getDriverSubscription, enabled: !!driver.data, retry: 0 });
   const settlements = useQuery({ queryKey: ['p-settlements'], queryFn: getRiderCashSettlements, enabled: !!rider.data, retry: 0 });
   // [WEB-ONBOARDING · owner 1 Nov 2026] A mover not cleared yet is told what is left, as the app's mover onboarding
@@ -272,6 +273,9 @@ export default function PortalHome() {
         </div>
       )}
 
+      {/* [CARS-DELIVER · owner 8 + 25 Oct] A mover who both delivers and drives pays ONE weekly fee (the server keeps
+          one per person across both profiles, and both routes answer with it): the delivery read is not made (above),
+          so its card stays empty, and the one card names both kinds of work. */}
       <div className="grid gap-4 md:grid-cols-2">
         <SubscriptionCard
           title="Delivery subscription"
@@ -281,7 +285,7 @@ export default function PortalHome() {
           onRetry={() => void riderSub.refetch()}
         />
         <SubscriptionCard
-          title="Taxi subscription"
+          title={isRider && isDriver ? 'Weekly fee — taxi rides and deliveries' : 'Taxi subscription'}
           sub={driverSub.data ?? null}
           isError={isDriver && driverSub.isError}
           error={driverSub.error}

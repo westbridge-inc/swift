@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { money } from '../../lib/money';
 import {
   cashInHandThisWeek,
+  otherProfileKind,
+  otherProfileWeek,
   earningRows,
   earningsWindowTotal,
   hasEarningRowsPayload,
@@ -101,5 +104,48 @@ describe('job-history earnings truth', () => {
     ]);
     expect(mergeUniqueRows([{ id: 'a' }], [{ status: 'DELIVERED' }]))
       .toEqual([{ id: 'a' }]);
+  });
+});
+
+// [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] An account with a taxi AND a delivery profile sees each profile's money on
+// its own earnings screen. One on "taxi rides and deliveries" goes back to taxi work after every delivery, so its
+// delivery money would sit out of sight: the earnings screen also shows the OTHER profile's week, from that
+// profile's own server summary (never added to this one), and says which kind the figures above are.
+describe('[CARS-DELIVER PR4] the other profile’s week, for an account with both', () => {
+  it('in taxi mode: the deliveries week, its cash after paying stores, and that the figures above are taxi rides only', () => {
+    expect(otherProfileWeek('RIDER', { thisWeek: { total: 4200, count: 3 }, cashInHand: { today: 0, thisWeek: 1600, thisMonth: 1600, allTime: 1600 } })).toEqual({
+      title: 'YOUR DELIVERIES THIS WEEK',
+      total: 4200,
+      cash: `Cash collected ${money(1600)}, after paying stores for the goods.`,
+      note: 'The figures above are your taxi rides only.',
+    });
+  });
+
+  it('in delivery mode: the taxi rides week, its cash fares, and that the figures above are deliveries only', () => {
+    expect(otherProfileWeek('DRIVER', { thisWeek: { total: 9000, count: 5 }, cashInHand: { today: 0, thisWeek: 3000, thisMonth: 3000, allTime: 3000 } })).toEqual({
+      title: 'YOUR TAXI RIDES THIS WEEK',
+      total: 9000,
+      cash: `Cash collected ${money(3000)}: the fares passengers paid you in cash.`,
+      note: 'The figures above are your deliveries only.',
+    });
+  });
+
+  it('no cash figure from an older server: the week alone; no week at all, or junk: nothing (never a guessed 0)', () => {
+    expect(otherProfileWeek('RIDER', { thisWeek: { total: 0, count: 0 } })).toMatchObject({ total: 0, cash: null });
+    for (const junk of [undefined, null, 'x', {}, { thisWeek: 'n/a' }]) expect(otherProfileWeek('RIDER', junk)).toBeUndefined();
+  });
+});
+
+// [REVIEW-F #2139 delta S3-1 · COORD 16:12Z] With CAR_DELIVERIES off the screens equal today's: only an account with a
+// taxi profile AND a CAR delivery profile gets the other profile's week; a motorbike + taxi account does not.
+describe('[CARS-DELIVER PR4] whose other week is shown', () => {
+  it('only for an account with a car delivery profile, and it is the kind the screen is not showing', () => {
+    expect(otherProfileKind({ kind: 'DRIVER', dual: true, carDeliveryProfile: true })).toBe('RIDER');
+    expect(otherProfileKind({ kind: 'RIDER', dual: true, carDeliveryProfile: true })).toBe('DRIVER');
+    expect(otherProfileKind({ kind: 'DRIVER', dual: true, carDeliveryProfile: false })).toBeNull();
+    expect(otherProfileKind({ kind: 'RIDER', dual: true, carDeliveryProfile: false })).toBeNull();
+    expect(otherProfileKind({ kind: 'DRIVER', dual: false, carDeliveryProfile: true })).toBeNull();
+    expect(otherProfileKind({ kind: null, dual: true, carDeliveryProfile: true })).toBeNull();
+    expect(otherProfileKind({ kind: 'DRIVER', dual: undefined, carDeliveryProfile: undefined })).toBeNull();
   });
 });

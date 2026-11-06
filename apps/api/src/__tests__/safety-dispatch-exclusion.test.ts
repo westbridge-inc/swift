@@ -62,7 +62,7 @@ async function makeDriverAt(offset: number, extra: Record<string, unknown> = {})
     data: {
       userId: user.id,
       vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
-      licensePlate: `EXC ${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
+      licensePlate: `HEXC ${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
       isOnline: true, isAvailable: true,
       currentLat: PICKUP.lat + 0.001 * offset,
       currentLng: PICKUP.lng + 0.001 * offset,
