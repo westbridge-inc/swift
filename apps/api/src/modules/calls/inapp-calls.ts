@@ -126,8 +126,34 @@ export async function onALiveOrder(prisma: PrismaClient, userId: string): Promis
   return !!found;
 }
 
-function tokenFor(config: InAppCallsConfig, userId: string, platform: InAppPlatform, now: Date): { token: string; identity: string; ttlSeconds: number } {
-  const identity = inAppIdentity(config.identitySecret, userId);
+/**
+ * [SECURITY REVIEW, MEDIUM] The identity of the session making THIS request, and only it: the session must be
+ * the caller's own and current. A token is never minted for any other identity (another session, a signed-out one).
+ */
+export async function sessionIdentity(prisma: PrismaClient, config: InAppCallsConfig, userId: string, sessionId: string | null | undefined, now: Date): Promise<string> {
+  const refused = () => new AppError(401, 'INAPP_SESSION', 'Please sign in again to use in-app calls.');
+  if (!sessionId) throw refused();
+  const session = await prisma.session.findUnique({ where: { id: sessionId }, select: { userId: true, deviceId: true, expiresAt: true } });
+  if (!session || session.userId !== userId || session.expiresAt <= now) throw refused();
+  return inAppIdentity(config.identitySecret, userId, sessionId, session.deviceId);
+}
+
+/**
+ * The identities to ring for these people: one per CURRENT session (signed in, not expired), newest first,
+ * at most INAPP_MAX_CLIENTS in all. A signed-out phone has no session, so it is never rung.
+ */
+export async function currentIdentities(prisma: PrismaClient, config: InAppCallsConfig, userIds: string[], now: Date): Promise<string[]> {
+  if (userIds.length === 0) return [];
+  const sessions = await prisma.session.findMany({
+    where: { userId: { in: userIds }, expiresAt: { gt: now } },
+    select: { id: true, userId: true, deviceId: true },
+    orderBy: { createdAt: 'desc' },
+    take: INAPP_MAX_CLIENTS,
+  });
+  return [...new Set(sessions.map((s) => inAppIdentity(config.identitySecret, s.userId, s.id, s.deviceId)))];
+}
+
+function tokenFor(config: InAppCallsConfig, identity: string, platform: InAppPlatform, now: Date): { token: string; identity: string; ttlSeconds: number } {
   const token = mintVoiceAccessToken({
     accountSid: config.twilio.accountSid,
     apiKeySid: config.twilio.apiKeySid,
@@ -142,19 +168,29 @@ function tokenFor(config: InAppCallsConfig, userId: string, platform: InAppPlatf
 }
 
 /**
- * A token so this phone can be rung in the app (registration). Only for a person on a live order:
- * anyone else has no one to be called by.
+ * A token for THIS session's identity only.
+ * - `register`: so this phone can be rung in the app. Only for a person on a live order (anyone else has no
+ *   one to be called by).
+ * - `unregister`: the app's sign-out / account switch removes this phone's binding before the session ends.
+ *   No live order needed: it can only ever name the session asking.
  */
-export async function issueRegistrationToken(deps: InAppDeps, userId: string, platform: InAppPlatform): Promise<{ token: string; identity: string; ttlSeconds: number }> {
-  if (!(await onALiveOrder(deps.prisma, userId))) {
+export async function issueSessionToken(
+  deps: InAppDeps,
+  input: { userId: string; sessionId: string | null | undefined; platform: InAppPlatform; purpose: 'register' | 'unregister' },
+): Promise<{ token: string; identity: string; ttlSeconds: number }> {
+  const now = deps.now?.() ?? new Date();
+  const identity = await sessionIdentity(deps.prisma, deps.config, input.userId, input.sessionId, now);
+  if (input.purpose === 'register' && !(await onALiveOrder(deps.prisma, input.userId))) {
     throw new AppError(403, 'INAPP_NO_LIVE_ORDER', 'In-app calls are for the people on a live order.');
   }
-  return tokenFor(deps.config, userId, platform, deps.now?.() ?? new Date());
+  return tokenFor(deps.config, identity, input.platform, now);
 }
 
 export interface StartInAppInput {
   orderId: string;
   userId: string;
+  /** The caller's own session: the connect token names this session's identity and no other. */
+  sessionId: string | null | undefined;
   target: CallTarget;
   platform: InAppPlatform;
 }
@@ -165,6 +201,7 @@ export interface StartInAppInput {
  */
 export async function startInAppCall(deps: InAppDeps, input: StartInAppInput): Promise<{ callId: string; token: string; ttlSeconds: number }> {
   const now = deps.now?.() ?? new Date();
+  const callerIdentity = await sessionIdentity(deps.prisma, deps.config, input.userId, input.sessionId, now);
   const order = await loadOrder(deps.prisma, input.orderId);
   // Not a party is answered exactly like no order: no oracle.
   const roles = order ? await callerRolesOn(deps.prisma, order, input.userId) : [];
@@ -213,7 +250,7 @@ export async function startInAppCall(deps: InAppDeps, input: StartInAppInput): P
     }
     throw err;
   }
-  const { token, ttlSeconds } = tokenFor(deps.config, input.userId, input.platform, now);
+  const { token, ttlSeconds } = tokenFor(deps.config, callerIdentity, input.platform, now);
   return { callId, token, ttlSeconds };
 }
 
@@ -262,15 +299,17 @@ export async function handleInAppStep(
       // The caller's phone connected. It must be THIS row's caller, the row untaken and ringing, the switch on.
       const sid = first(fields, 'CallSid');
       const from = first(fields, 'From');
-      const callerIdentity = inAppIdentity(deps.config.identitySecret, session.callerUserId);
+      // The From must be a CURRENT session of this row's caller (a signed-out phone's identity is dead).
+      const callerIdentities = await currentIdentities(deps.prisma, deps.config, [session.callerUserId], now);
       if (!enabled || session.endedAt || session.status !== INAPP_STATUS.RINGING_APP || session.providerCallId
-        || !sid || !CALL_SID.test(sid) || from !== `client:${callerIdentity}`) {
+        || !sid || !CALL_SID.test(sid) || !from || !callerIdentities.some((identity) => from === `client:${identity}`)) {
         return hangup();
       }
       const order = await loadOrder(deps.prisma, session.orderId);
       const people = order && !isTerminalOrderStatus(order.status)
         ? (await appPeopleFor(deps.prisma, order, session.calleeRole as CallTarget)).filter((id) => id !== session.callerUserId)
         : [];
+      const clients = await currentIdentities(deps.prisma, deps.config, people, now);
       // Single use: the first connect takes the row; a replay of the same call id is hung up.
       const taken = await deps.prisma.callSession.updateMany({
         where: { id: session.id, providerCallId: null, endedAt: null, status: INAPP_STATUS.RINGING_APP },
@@ -278,14 +317,19 @@ export async function handleInAppStep(
         data: { providerCallId: sid, callerConfirmedAt: now },
       });
       if (taken.count !== 1) return hangup();
-      if (!order || people.length === 0) {
+      if (order && clients.length === 0) {
+        // Nobody signed in on build 13 for them: straight to their phone (bridge on), never a silent ring.
+        const fallback = await phoneFallback(deps, session, 'failed', enabled, now);
+        if (fallback) return fallback;
+      }
+      if (!order || clients.length === 0) {
         await deps.prisma.callSession.updateMany({ where: { id: session.id, endedAt: null }, data: notConnected });
         return hangup(INAPP_WORDS.notReached);
       }
       return {
         step: {
           verb: 'dialApp',
-          clients: people.map((id) => inAppIdentity(deps.config.identitySecret, id)),
+          clients,
           callerId: 'client:Swift',
           params: { swiftLine: callScreenLine(session.callerRole as CallerRole, order.orderType), swiftCallId: session.id },
           answered: webhookUrl(deps.config, 'app-answered', session.id),

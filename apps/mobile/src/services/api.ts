@@ -272,6 +272,20 @@ export async function revokeAuthSession(refreshToken: string, pushToken: string 
   );
 }
 
+/**
+ * [INAPP-CALLS · SECURITY REVIEW] A token to UNREGISTER this phone's in-app call binding, asked with the
+ * OLD session's own access token (captured before sign-out), outside the interceptors, so it can only name
+ * that session. Used by the auth teardown just before revokeAuthSession.
+ */
+export async function inAppUnregisterToken(accessToken: string, platform: 'ios' | 'android'): Promise<string> {
+  const res = await axios.post<{ success: boolean; data: { token: string } }>(
+    `${API_URL}/api/v1/calls/app/token`,
+    { platform, purpose: 'unregister' },
+    { timeout: api.defaults.timeout, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` } },
+  );
+  return res.data.data.token;
+}
+
 export const UPLOAD_TIMEOUT_MS = 90_000;
 
 /** Retry only standalone file uploads, never custody/identity decisions.
@@ -1586,7 +1600,7 @@ export const callsApi = {
   bridge: (orderId: string, target: CallTarget) => api.post<{ success: boolean; data: { callId: string; status: string } }>('/calls/bridge', { orderId, target }),
   // [INAPP-CALLS] In-app calling (build 13; 403 INAPP_CALLS_OFF while the server switch is off).
   appConfig: () => api.get<{ success: boolean; data: { enabled: boolean } }>('/calls/app/config'),
-  appToken: (platform: 'ios' | 'android') => api.post<{ success: boolean; data: { token: string; identity: string; ttlSeconds: number } }>('/calls/app/token', { platform }),
+  appToken: (platform: 'ios' | 'android') => api.post<{ success: boolean; data: { token: string; identity: string; ttlSeconds: number } }>('/calls/app/token', { platform, purpose: 'register' }),
   appStart: (orderId: string, target: CallTarget, platform: 'ios' | 'android') => api.post<{ success: boolean; data: { callId: string; token: string; ttlSeconds: number } }>('/calls/app', { orderId, target, platform }),
   appCancel: (callId: string) => api.post<{ success: boolean; data: { ended: boolean } }>(`/calls/app/${encodeURIComponent(callId)}/cancel`),
 };

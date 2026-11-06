@@ -36,6 +36,7 @@ interface SdkVoice {
   initializePushRegistry(): Promise<void>;
   setIncomingCallContactHandleTemplate(template?: string): Promise<void>;
   register(token: string): Promise<void>;
+  unregister(token: string): Promise<void>;
   connect(token: string, options?: { params?: Record<string, string>; contactHandle?: string; notificationDisplayName?: string }): Promise<SdkCall>;
 }
 interface SdkModule {
@@ -113,6 +114,33 @@ export async function registerForInAppCalls(fetchToken: (platform: 'ios' | 'andr
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Bound so a slow network never holds up a sign-out. */
+export const UNREGISTER_TIMEOUT_MS = 5_000;
+
+/**
+ * [SECURITY REVIEW, MEDIUM] Sign-out, account switch or a refused session: remove this phone's in-app call
+ * binding BEFORE the session is torn down. `fetchToken` must ask the server with the OLD session's own
+ * credentials (the token names that session's identity and no other). The throttle is reset whatever
+ * happens, so the next account registers at once under its own identity. If this fails (offline, the session
+ * already refused), the server still never rings the old identity: it is per session and the session is gone.
+ */
+export async function unregisterInAppCalls(fetchToken: (platform: 'ios' | 'android') => Promise<string>): Promise<boolean> {
+  registeredAt = 0;
+  const v = getVoice();
+  if (!v) return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const work = (async () => { await v.unregister(await fetchToken(voicePlatform())); return true; })();
+    const timeout = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), UNREGISTER_TIMEOUT_MS); });
+    return await Promise.race([work, timeout]);
+  } catch {
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+    registeredAt = 0;
   }
 }
 

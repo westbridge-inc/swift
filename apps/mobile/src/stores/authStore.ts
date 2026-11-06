@@ -125,6 +125,16 @@ function clearBusinessEntryState(): void {
 }
 
 async function revokeCapturedSession(session: AuthSessionSnapshot): Promise<void> {
+  // [INAPP-CALLS · SECURITY REVIEW] Before the session is revoked: unregister this phone's in-app call binding
+  // with the captured session's own token (a no-op on builds without the calling module; bounded; never blocks
+  // the revoke below). The server also rotates the identity with the session, so a failure here is safe.
+  try {
+    const voice = await import('../services/inAppVoice');
+    await voice.unregisterInAppCalls(async (platform) => (await import('../services/api')).inAppUnregisterToken(session.accessToken, platform));
+  } catch {
+    // Server-side rotation still makes the old binding unreachable.
+  }
+
   let pushToken: string | null = null;
   try {
     const push = await import('../services/push');

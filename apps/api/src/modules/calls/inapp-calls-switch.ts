@@ -107,11 +107,15 @@ export function assertInAppCallsConfig(env: Record<string, string | undefined> =
 }
 
 /**
- * The person's Twilio client identity: opaque, stable, recomputable, never a number.
- * "s" + 40 hex of HMAC-SHA256(secret, userId) — letters and digits only (Twilio: alphanumeric and underscore).
+ * The Twilio client identity of ONE signed-in phone: opaque, recomputable, never a number.
+ * "s" + 40 hex of HMAC-SHA256(secret, userId + session id + device id): letters and digits only (Twilio:
+ * alphanumeric and underscore). [SECURITY REVIEW, MEDIUM] It is per session, not per person: a sign-out
+ * deletes the session row and the next sign-in has a new id, so the identity rotates, and Swift only ever
+ * rings the identities of a person's CURRENT sessions. A phone still registered under an old identity (the
+ * app could not unregister: offline, refused) can never be rung for anyone again.
  */
-export function inAppIdentity(secret: string, userId: string): string {
-  return `s${crypto.createHmac('sha256', secret).update(`swift-inapp-calls:v1:${userId}`).digest('hex').slice(0, 40)}`;
+export function inAppIdentity(secret: string, userId: string, sessionId: string, deviceId: string): string {
+  return `s${crypto.createHmac('sha256', secret).update(`swift-inapp-calls:v2:${userId}:${sessionId}:${deviceId}`).digest('hex').slice(0, 40)}`;
 }
 
 const b64url = (input: Buffer | string) => Buffer.from(input).toString('base64url');

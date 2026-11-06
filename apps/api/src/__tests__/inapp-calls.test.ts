@@ -54,7 +54,7 @@ let app: FastifyInstance;
 const users: string[] = [];
 const orderIds: string[] = [];
 
-type Person = { id: string; token: string; phone: string };
+type Person = { id: string; token: string; phone: string; sessionId: string; deviceId: string };
 async function person(n: number, roles: string[], active: string, extra: Record<string, unknown> = {}): Promise<Person> {
   const phone = testPhone();
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
@@ -63,8 +63,9 @@ async function person(n: number, roles: string[], active: string, extra: Record<
   } as never }));
   users.push(u.id);
   const token = app.jwt.sign({ userId: u.id, role: active, jti: nanoid(8) });
-  await system(() => app.prisma.session.create({ data: { userId: u.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `inapp-${n}-${NUM}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
-  return { id: u.id, token, phone };
+  const deviceId = `inapp-${n}-${NUM}`;
+  const s = await system(() => app.prisma.session.create({ data: { userId: u.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
+  return { id: u.id, token, phone, sessionId: s.id, deviceId };
 }
 
 const money = { subtotalBase: 3000, subtotalMarkup: 0, subtotalCustomer: 3000, deliveryFee: 500, tipAmount: 0, totalAmount: 3500, paymentMethod: 'CASH' };
@@ -84,7 +85,8 @@ let riderId = '', courierRiderId = '', driverId = '', vendorId = '';
 const STORE_LINE = testPhone();
 const RECIPIENT = testPhone();
 const allPhones = () => [diner, riderP, sender, courierP, owner, staff, passenger, driverP, stranger].map((p) => p.phone).concat(STORE_LINE, RECIPIENT);
-const id = (userId: string) => inAppIdentity(IDENTITY_SECRET, userId);
+/** The identity of a person's ONE current session (per user + session + device; rotates on sign-out). */
+const id = (p: Pick<Person, 'id' | 'sessionId' | 'deviceId'>) => inAppIdentity(IDENTITY_SECRET, p.id, p.sessionId, p.deviceId);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
@@ -179,8 +181,8 @@ function hook(step: string, form: Record<string, string> = {}, opts: { s?: strin
 }
 const sid = () => `CA${crypto.randomBytes(16).toString('hex')}`;
 /** The caller's phone connecting to the TwiML App with its call id (what voice.connect sends). */
-const connect = (callId: string, callerUserId: string, callSid = sid()) =>
-  hook('app', { CallSid: callSid, From: `client:${id(callerUserId)}`, To: '', callId }).then((r) => ({ r, callSid }));
+const connect = (callId: string, caller: Person, callSid = sid()) =>
+  hook('app', { CallSid: callSid, From: `client:${id(caller)}`, To: '', callId }).then((r) => ({ r, callSid }));
 
 const session = (callId: string) => system(() => app.prisma.callSession.findUniqueOrThrow({ where: { id: callId } }));
 const rowsFor = (orderId: string) => system(() => app.prisma.callSession.findMany({ where: { orderId } }));
@@ -219,7 +221,7 @@ describe('[INAPP-CALLS] switch off (how build 13 ships): nothing is issued, writ
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
     setEnv({ ...INAPP_ON, INAPP_CALLS: '0' });
-    const { r } = await connect(callId, diner.id);
+    const { r } = await connect(callId, diner);
     expect(r.body).toContain('<Hangup/>');
     expect(r.body).not.toContain('<Dial');
   });
@@ -232,7 +234,7 @@ describe('[INAPP-CALLS] tokens: only the people on a live order, opaque identity
     const res = await regToken(riderP.token, 'android');
     expect(res.statusCode).toBe(200);
     const { token, identity, ttlSeconds } = res.json().data;
-    expect(identity).toBe(id(riderP.id));
+    expect(identity).toBe(id(riderP));
     expect(identity).toMatch(/^s[0-9a-f]{40}$/);
     expect(identity).not.toContain(riderP.id);
     const { header, payload, signatureOk } = jwtParts(token);
@@ -271,7 +273,7 @@ describe('[INAPP-CALLS] starting a call: the bridge\'s party rules, one budget w
     const res = await start(diner.token, o.id, 'rider', 'ios');
     expect(res.statusCode).toBe(200);
     const { callId, token } = res.json().data;
-    expect(jwtParts(token).payload.grants.identity).toBe(id(diner.id));
+    expect(jwtParts(token).payload.grants.identity).toBe(id(diner));
     const row = await session(callId);
     expect(row).toMatchObject({ provider: 'twilio-app', status: 'RINGING_APP', callerUserId: diner.id, callerRole: 'customer', calleeRole: 'rider', providerCallId: null });
     for (const p of allPhones()) expect(JSON.stringify(row).includes(p) || res.body.includes(p)).toBe(false);
@@ -322,7 +324,7 @@ describe('[INAPP-CALLS] starting a call: the bridge\'s party rules, one budget w
     const o = await liveFood();
     const callId = (await start(diner.token, o.id, 'rider')).json().data.callId;
     expect((await app.inject({ method: 'POST', url: `/api/v1/calls/app/${callId}/cancel`, headers: auth(riderP.token) })).statusCode).toBe(404);
-    await connect(callId, diner.id);
+    await connect(callId, diner);
     expect((await app.inject({ method: 'POST', url: `/api/v1/calls/app/${callId}/cancel`, headers: auth(diner.token) })).statusCode).toBe(404);
     expect((await session(callId)).endedAt).toBeNull();
   });
@@ -363,10 +365,10 @@ describe('[INAPP-CALLS] the call: Swift rings the other app with role words, nev
   it('the whole path: connect -> the rider\'s app rings with "Swift: your customer is calling about your order" -> answered -> ended', async () => {
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
-    const { r, callSid } = await connect(callId, diner.id);
+    const { r, callSid } = await connect(callId, diner);
     expect(r.statusCode).toBe(200);
     expect(r.body).toContain(`<Dial callerId="client:Swift" timeout="20" timeLimit="1800" record="do-not-record" action="${BASE}/app-dial-done?s=${callId}" method="POST">`);
-    expect(r.body).toContain(`<Client url="${BASE}/app-answered?s=${callId}" method="POST"><Identity>${id(riderP.id)}</Identity>`);
+    expect(r.body).toContain(`<Client url="${BASE}/app-answered?s=${callId}" method="POST"><Identity>${id(riderP)}</Identity>`);
     expect(r.body).toContain('<Parameter name="swiftLine" value="Swift: your customer is calling about your order"/>');
     for (const p of allPhones()) expect(r.body.includes(p)).toBe(false);
     expect(r.body).not.toContain(riderP.id);
@@ -388,40 +390,40 @@ describe('[INAPP-CALLS] the call: Swift rings the other app with role words, nev
   it('the rider calls a store: the owner and the staff seat ring together; the line says "the store" side correctly', async () => {
     const o = await liveFood();
     const { callId } = (await start(riderP.token, o.id, 'store')).json().data;
-    const { r } = await connect(callId, riderP.id);
-    expect(r.body).toContain(`<Identity>${id(owner.id)}</Identity>`);
-    expect(r.body).toContain(`<Identity>${id(staff.id)}</Identity>`);
+    const { r } = await connect(callId, riderP);
+    expect(r.body).toContain(`<Identity>${id(owner)}</Identity>`);
+    expect(r.body).toContain(`<Identity>${id(staff)}</Identity>`);
     expect(r.body).toContain('value="Swift: your rider is calling about your order"');
   });
 
   it('a taxi: the passenger calls the driver ("your passenger" on the driver\'s screen)', async () => {
     const t = await order({ orderType: 'TAXI', customerId: passenger.id, driverId, status: 'DRIVER_EN_ROUTE', ridePin: '123456' });
     const { callId } = (await start(passenger.token, t.id, 'driver')).json().data;
-    const { r } = await connect(callId, passenger.id);
-    expect(r.body).toContain(`<Identity>${id(driverP.id)}</Identity>`);
+    const { r } = await connect(callId, passenger);
+    expect(r.body).toContain(`<Identity>${id(driverP)}</Identity>`);
     expect(r.body).toContain('value="Swift: your passenger is calling about your order"');
   });
 
   it('only THIS call\'s caller can connect it, once: another identity, a replay and an unknown id are hung up', async () => {
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
-    const impostor = await hook('app', { CallSid: sid(), From: `client:${id(stranger.id)}`, callId });
+    const impostor = await hook('app', { CallSid: sid(), From: `client:${id(stranger)}`, callId });
     expect(impostor.body).not.toContain('<Dial');
-    const asRider = await hook('app', { CallSid: sid(), From: `client:${id(riderP.id)}`, callId });
+    const asRider = await hook('app', { CallSid: sid(), From: `client:${id(riderP)}`, callId });
     expect(asRider.body).not.toContain('<Dial');
     expect((await session(callId)).providerCallId).toBeNull();
-    const ok = await connect(callId, diner.id);
+    const ok = await connect(callId, diner);
     expect(ok.r.body).toContain('<Dial');
-    const replay = await connect(callId, diner.id);
+    const replay = await connect(callId, diner);
     expect(replay.r.body).not.toContain('<Dial');
     expect((await session(callId)).providerCallId).toBe(ok.callSid);
-    expect((await hook('app', { CallSid: sid(), From: `client:${id(diner.id)}`, callId: 'cnosuchcallnosuchcallxx' })).body).toContain('<Hangup/>');
+    expect((await hook('app', { CallSid: sid(), From: `client:${id(diner)}`, callId: 'cnosuchcallnosuchcallxx' })).body).toContain('<Hangup/>');
   });
 
   it('unsigned, wrongly signed, and signed-for-another-URL webhooks are refused (403) and change nothing', async () => {
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
-    const form = { CallSid: sid(), From: `client:${id(diner.id)}`, callId };
+    const form = { CallSid: sid(), From: `client:${id(diner)}`, callId };
     expect((await hook('app', form, { sign: 'none' })).statusCode).toBe(403);
     const fields = Object.fromEntries(Object.entries(form).map(([k, v]) => [k, [v]]));
     const forged = await app.inject({ method: 'POST', url: '/api/v1/calls/voice/app', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': twilioSignature('not-the-token', `${BASE}/app`, fields) }, payload: new URLSearchParams(form).toString() });
@@ -440,7 +442,7 @@ describe('[INAPP-CALLS] the call: Swift rings the other app with role words, nev
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
     await system(() => app.prisma.order.update({ where: { id: o.id }, data: { status: 'DELIVERED' } }));
-    const { r } = await connect(callId, diner.id);
+    const { r } = await connect(callId, diner);
     expect(r.body).not.toContain('<Dial');
     expect((await session(callId)).status).toBe('NOT_CONNECTED');
   });
@@ -448,7 +450,7 @@ describe('[INAPP-CALLS] the call: Swift rings the other app with role words, nev
   it('caller hangs up while it rings: the status callback ends the row NOT_CONNECTED', async () => {
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
-    const { callSid } = await connect(callId, diner.id);
+    const { callSid } = await connect(callId, diner);
     await hook('app-status', { CallSid: callSid, CallStatus: 'canceled' });
     const row = await session(callId);
     expect(row).toMatchObject({ status: 'NOT_CONNECTED', durationSeconds: 0 });
@@ -461,7 +463,7 @@ describe('[INAPP-CALLS] not answered in the app: the phone bridge in the same ca
     setEnv({ ...INAPP_ON, ...RELAY_ON });
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
-    await connect(callId, diner.id);
+    await connect(callId, diner);
     const done = await hook('app-dial-done', { DialCallStatus: 'no-answer' }, { s: callId });
     expect(done.body).toContain('They are not answering in the app. Swift is calling their phone now.');
     expect(done.body).toMatch(new RegExp(`<Dial callerId="\\${CALLER_ID}" timeout="25" timeLimit="1800" record="do-not-record" action="${BASE}/dial-done\\?s=${callId}" method="POST"><Number url="${BASE}/screen\\?s=${callId}" method="POST">\\${riderP.phone}</Number></Dial>`));
@@ -479,7 +481,7 @@ describe('[INAPP-CALLS] not answered in the app: the phone bridge in the same ca
     setEnv({ ...INAPP_ON, ...RELAY_ON });
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
-    await connect(callId, diner.id);
+    await connect(callId, diner);
     const done = await hook('app-dial-done', { DialCallStatus: 'busy' }, { s: callId });
     expect(done.body).not.toContain('<Dial');
     expect(done.body).toContain("We couldn't reach them.");
@@ -489,7 +491,7 @@ describe('[INAPP-CALLS] not answered in the app: the phone bridge in the same ca
   it('CALL_RELAY off: no phone fallback, just "couldn\'t reach them"', async () => {
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
-    await connect(callId, diner.id);
+    await connect(callId, diner);
     const done = await hook('app-dial-done', { DialCallStatus: 'no-answer' }, { s: callId });
     expect(done.body).not.toContain('<Dial');
     for (const p of allPhones()) expect(done.body.includes(p)).toBe(false);
@@ -500,8 +502,82 @@ describe('[INAPP-CALLS] not answered in the app: the phone bridge in the same ca
     setEnv({ ...INAPP_ON, ...RELAY_ON });
     const o = await liveFood();
     const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
-    await connect(callId, diner.id);
+    await connect(callId, diner);
     expect((await hook('app-dial-done', { DialCallStatus: 'no-answer' }, { s: callId })).body).toContain('<Number');
     expect((await hook('app-dial-done', { DialCallStatus: 'no-answer' }, { s: callId })).body).not.toContain('<Number');
+  });
+});
+
+// [SECURITY REVIEW, MEDIUM] The identity is per signed-in phone (user + session + device) and rotates on sign-out.
+// A phone that stays registered under an old identity can never be rung, and a token only ever names the
+// session asking for it.
+describe('[INAPP-CALLS] identity per session: a signed-out phone is never rung, a token names only its own session', () => {
+  async function secondSession(p: Person, tag: string): Promise<Person> {
+    const token = app.jwt.sign({ userId: p.id, role: 'RIDER', jti: nanoid(8) });
+    const deviceId = `inapp-${tag}-${NUM}`;
+    const s = await system(() => app.prisma.session.create({ data: { userId: p.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
+    return { ...p, token, sessionId: s.id, deviceId };
+  }
+  const signOut = (p: Person) => system(() => app.prisma.session.delete({ where: { id: p.sessionId } }));
+
+  it('each phone (session) has its own identity, and a token names only the session that asked', async () => {
+    await liveFood();
+    const phone2 = await secondSession(riderP, 'rider-phone2');
+    expect(id(phone2)).not.toBe(id(riderP));
+    expect((await regToken(riderP.token)).json().data.identity).toBe(id(riderP));
+    expect((await regToken(phone2.token)).json().data.identity).toBe(id(phone2));
+    await signOut(phone2);
+  });
+
+  it('both of the rider\'s signed-in phones ring; after one signs out, only the other', async () => {
+    const phone2 = await secondSession(riderP, 'rider-phone3');
+    const o1 = await liveFood();
+    const first = (await start(diner.token, o1.id, 'rider')).json().data.callId;
+    const ring1 = (await connect(first, diner)).r.body;
+    expect(ring1).toContain(`<Identity>${id(riderP)}</Identity>`);
+    expect(ring1).toContain(`<Identity>${id(phone2)}</Identity>`);
+    await signOut(phone2);
+    const o2 = await liveFood();
+    const second = (await start(diner.token, o2.id, 'rider')).json().data.callId;
+    const ring2 = (await connect(second, diner)).r.body;
+    expect(ring2).toContain(`<Identity>${id(riderP)}</Identity>`);
+    expect(ring2).not.toContain(id(phone2));
+  });
+
+  it('a caller whose phone signed out after starting cannot connect with the old identity', async () => {
+    const phone2 = await secondSession(diner, 'diner-phone2');
+    const o = await liveFood();
+    const { callId } = (await start(phone2.token, o.id, 'rider')).json().data;
+    await signOut(phone2);
+    const { r } = await connect(callId, phone2);
+    expect(r.body).not.toContain('<Dial');
+    expect((await session(callId)).providerCallId).toBeNull();
+  });
+
+  it('unregister: any signed-in session gets a token for ITSELF without a live order; register still needs one', async () => {
+    const reg = await regToken(stranger.token);
+    expect(reg.statusCode).toBe(403);
+    const un = await app.inject({ method: 'POST', url: '/api/v1/calls/app/token', headers: auth(stranger.token), payload: { platform: 'ios', purpose: 'unregister' } });
+    expect(un.statusCode).toBe(200);
+    expect(un.json().data.identity).toBe(id(stranger));
+    expect(jwtParts(un.json().data.token).payload.grants.identity).toBe(id(stranger));
+    const bad = await app.inject({ method: 'POST', url: '/api/v1/calls/app/token', headers: auth(stranger.token), payload: { platform: 'ios', purpose: 'someone-else' } });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it('nobody signed in for them in the app and the bridge on: straight to their phone, never a silent ring', async () => {
+    setEnv({ ...INAPP_ON, ...RELAY_ON });
+    const parked = await system(() => app.prisma.session.findMany({ where: { userId: riderP.id } }));
+    await system(() => app.prisma.session.updateMany({ where: { userId: riderP.id }, data: { expiresAt: new Date(Date.now() - 1000) } }));
+    try {
+      const o = await liveFood();
+      const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
+      const { r } = await connect(callId, diner);
+      expect(r.body).not.toContain('<Client');
+      expect(r.body).toContain(`<Number url="${BASE}/screen?s=${callId}" method="POST">`);
+      expect((await session(callId)).status).toBe('CALLER_CONFIRMED');
+    } finally {
+      for (const p of parked) await system(() => app.prisma.session.update({ where: { id: p.id }, data: { expiresAt: p.expiresAt } }));
+    }
   });
 });

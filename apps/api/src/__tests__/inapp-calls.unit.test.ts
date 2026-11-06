@@ -63,13 +63,16 @@ describe('[INAPP-CALLS] the switch', () => {
 });
 
 describe('[INAPP-CALLS] identity and token', () => {
-  it('the identity is opaque, stable, per secret, and only letters and digits (Twilio: alphanumeric and underscore)', () => {
-    const a = inAppIdentity('k'.repeat(32), 'cuser1');
+  it('the identity is opaque, per secret, per user AND session AND device (rotates on sign-out), letters and digits only', () => {
+    const k = 'k'.repeat(32);
+    const a = inAppIdentity(k, 'cuser1', 'csession1', 'device1');
     expect(a).toMatch(/^s[0-9a-f]{40}$/);
-    expect(inAppIdentity('k'.repeat(32), 'cuser1')).toBe(a);
-    expect(inAppIdentity('k'.repeat(32), 'cuser2')).not.toBe(a);
-    expect(inAppIdentity('j'.repeat(32), 'cuser1')).not.toBe(a);
-    expect(a).not.toContain('cuser1');
+    expect(inAppIdentity(k, 'cuser1', 'csession1', 'device1')).toBe(a);
+    expect(inAppIdentity(k, 'cuser2', 'csession1', 'device1')).not.toBe(a);
+    expect(inAppIdentity(k, 'cuser1', 'csession2', 'device1')).not.toBe(a); // a new sign-in = a new identity
+    expect(inAppIdentity(k, 'cuser1', 'csession1', 'device2')).not.toBe(a);
+    expect(inAppIdentity('j'.repeat(32), 'cuser1', 'csession1', 'device1')).not.toBe(a);
+    for (const part of ['cuser1', 'csession1', 'device1']) expect(a).not.toContain(part);
   });
 
   it('the token is twilio-node\'s exact shape, HS256 over the API key secret', () => {

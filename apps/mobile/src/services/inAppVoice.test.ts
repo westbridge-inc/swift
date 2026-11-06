@@ -22,6 +22,7 @@ vi.mock('@twilio/voice-react-native-sdk', () => {
     initializePushRegistry = vi.fn(async () => { sdkState.calls.push({ m: 'initializePushRegistry', a: [] }); });
     setIncomingCallContactHandleTemplate = vi.fn(async (t?: string) => { sdkState.calls.push({ m: 'template', a: [t] }); });
     register = vi.fn(async (t: string) => { sdkState.calls.push({ m: 'register', a: [t] }); });
+    unregister = vi.fn(async (t: string) => { sdkState.calls.push({ m: 'unregister', a: [t] }); });
     connect = vi.fn(async (t: string, o: unknown) => {
       sdkState.calls.push({ m: 'connect', a: [t, o] });
       if (sdkState.connectFails) throw new Error('connect failed');
@@ -89,6 +90,45 @@ describe('[INAPP-CALLS] build 13 (module present)', () => {
     await expect(voice.placeInAppCall('o1', 'rider', { start: async () => ({ callId: 'cabc', token: 'tok' }), cancel })).rejects.toThrow('connect failed');
     expect(cancel).toHaveBeenCalledWith('cabc');
     expect(voice.inAppCallActive()).toBe(false);
+  });
+});
+
+describe('[INAPP-CALLS · SECURITY REVIEW] sign-out / account switch', () => {
+  beforeEach(() => { rn.native = { TwilioVoiceReactNative: {} }; });
+
+  it('unregisters with the token the OLD session fetched, and resets the throttle so the next account registers at once', async () => {
+    const fetchToken = vi.fn(async (p: string) => `reg-${p}`);
+    expect(await voice.registerForInAppCalls(fetchToken, 5_000_000)).toBe(true);
+    expect(await voice.unregisterInAppCalls(async (p) => `old-session-${p}`)).toBe(true);
+    expect(sdkState.calls.at(-1)).toEqual({ m: 'unregister', a: ['old-session-ios'] });
+    // the very next registration (a new account, seconds later) is not throttled
+    expect(await voice.registerForInAppCalls(fetchToken, 5_000_000 + 1_000)).toBe(true);
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+  });
+
+  it('a refused or failed unregister still resets the throttle and never throws', async () => {
+    const fetchToken = vi.fn(async () => 'reg');
+    await voice.registerForInAppCalls(fetchToken, 7_000_000);
+    expect(await voice.unregisterInAppCalls(async () => { throw new Error('401'); })).toBe(false);
+    expect(await voice.registerForInAppCalls(fetchToken, 7_000_000 + 1_000)).toBe(true);
+  });
+
+  it('a hung network never holds up the sign-out beyond the bound', async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = voice.unregisterInAppCalls(() => new Promise<string>(() => undefined));
+      await vi.advanceTimersByTimeAsync(voice.UNREGISTER_TIMEOUT_MS + 1);
+      expect(await pending).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a build without the module: nothing to unregister, no SDK import', async () => {
+    rn.native = {};
+    voice.resetInAppVoiceForTests();
+    expect(await voice.unregisterInAppCalls(async () => 'x')).toBe(false);
+    expect(sdkState.imported).toBe(0);
   });
 });
 

@@ -23,8 +23,10 @@ const I = plugin.internals as {
   wireManifest(m: unknown): { manifest: { $: Record<string, string>; application: Array<{ service: Array<{ $: Record<string, string>; 'intent-filter'?: unknown[] }> }> } };
   ROUTER_KT: string;
   INTENTS_KT: string;
+  GATE_KT: string;
   CALL_ACTIONS: string[];
   OVER_LOCK_ACTIONS: string[];
+  CALL_UUID_EXTRA: string;
   FIREBASE_MESSAGING_VERSION: string;
   VOICE_ANDROID_VERSION: string;
   TWILIO_FCM_SERVICE: string;
@@ -151,14 +153,47 @@ describe('[INAPP-CALLS] MainActivity: call intents only, no prompt at start, nev
     expect(() => I.wireMainActivity(MAIN_ACTIVITY.replace('override fun getMainComponentName', 'override fun onNewIntent(intent: Intent) {}\n  override fun getMainComponentName'))).toThrow(/already overrides onNewIntent/);
   });
 
-  it('the intent helper: only the SDK\'s own actions reach VoiceService; lock screen only for a ringing / answered call; never KEEP_SCREEN_ON', () => {
+  it('the intent helper: only the SDK\'s own actions reach VoiceService; never KEEP_SCREEN_ON', () => {
     expect(I.CALL_ACTIONS).not.toContain('ACTION_PUSH_APP_TO_FOREGROUND');
-    expect(I.CALL_ACTIONS).toEqual(expect.arrayContaining(['ACTION_ACCEPT_CALL', 'ACTION_REJECT_CALL', 'ACTION_INCOMING_CALL', 'ACTION_CALL_DISCONNECT']));
-    expect(I.OVER_LOCK_ACTIONS).toEqual(['ACTION_INCOMING_CALL', 'ACTION_ACCEPT_CALL']);
-    expect(I.INTENTS_KT).toContain('if (action == null || action !in CALL_ACTIONS) {\n      showOverLockScreen(activity, false)');
+    expect(I.CALL_ACTIONS).toEqual(expect.arrayContaining(['ACTION_ACCEPT_CALL', 'ACTION_REJECT_CALL', 'ACTION_CALL_DISCONNECT', 'ACTION_FOREGROUND_AND_DEPRIORITIZE_INCOMING_CALL_NOTIFICATION']));
     expect(I.INTENTS_KT).toContain('"com.twiliovoicereactnative.VoiceService"');
     expect(I.INTENTS_KT).not.toContain('KEEP_SCREEN_ON');
     expect(balanced(I.INTENTS_KT)).toBe(true);
+  });
+
+  // [SECURITY REVIEW, MEDIUM: confused deputy] MainActivity is exported; the SDK's PendingIntents target it.
+  it('an intent is forwarded ONLY when it names a call the SDK holds right now (its random call UUID); anything else is dropped', () => {
+    expect(I.CALL_UUID_EXTRA).toBe('UUID'); // com.twiliovoicereactnative.Constants.MSG_KEY_UUID
+    expect(I.INTENTS_KT).toContain('if (action == null || action !in CALL_ACTIONS || !SwiftCallGate.holdsCall(uuid)) {');
+    // the drop branch returns before the forward, and clears the lock-screen flags unless a call is live
+    const drop = I.INTENTS_KT.slice(I.INTENTS_KT.indexOf('!SwiftCallGate.holdsCall(uuid)) {'));
+    expect(drop.indexOf('return')).toBeLessThan(drop.indexOf('startService'));
+    expect(drop.slice(0, drop.indexOf('return'))).toContain('if (!SwiftCallGate.anyCall()) showOverLockScreen(activity, false)');
+    expect(I.GATE_KT).toMatch(/^package com\.twiliovoicereactnative\n/);
+    expect(I.GATE_KT).toContain('if (uuid !is UUID) return false');
+    expect(I.GATE_KT).toContain('VoiceApplicationProxy.getCallRecordDatabase().get(CallRecordDatabase.CallRecord(uuid)) != null');
+    expect(I.GATE_KT).toMatch(/catch \(e: Throwable\) \{\n {6}false/);
+    expect(balanced(I.GATE_KT)).toBe(true);
+  });
+
+  it('over the lock screen only for the incoming-call screen or Answer, and cleared on every pause / stop / resume with no call left', () => {
+    expect(I.OVER_LOCK_ACTIONS).toEqual(['ACTION_FOREGROUND_AND_DEPRIORITIZE_INCOMING_CALL_NOTIFICATION', 'ACTION_ACCEPT_CALL']);
+    expect(I.INTENTS_KT).toContain('showOverLockScreen(activity, action in OVER_LOCK_ACTIONS)');
+    expect(I.INTENTS_KT).toContain('private fun recheck(a: Activity) { if (!SwiftCallGate.anyCall()) showOverLockScreen(a, false) }');
+    for (const hook of ['onActivityResumed', 'onActivityPaused', 'onActivityStopped']) {
+      expect(I.INTENTS_KT).toContain(`override fun ${hook}(a: Activity) = recheck(a)`);
+    }
+  });
+
+  it('the SDK facts the gate stands on (read from the installed package)', () => {
+    const req = createRequire(join(MOBILE, 'package.json'));
+    const java = (f: string) => readFileSync(join(req.resolve('@twilio/voice-react-native-sdk/package.json'), '..', 'android/src/main/java/com/twiliovoicereactnative', f), 'utf8');
+    expect(java('Constants.java')).toContain('public static final String MSG_KEY_UUID = "UUID";');
+    for (const a of I.CALL_ACTIONS) expect(java('Constants.java')).toContain(`public static final String ${a} = "${a}";`);
+    expect(java('VoiceService.java')).toContain('intent.putExtra(Constants.MSG_KEY_UUID, uuid);');
+    expect(java('VoiceApplicationProxy.java')).toMatch(/static CallRecordDatabase getCallRecordDatabase\(\)/);
+    expect(java('CallRecordDatabase.java')).toContain('public CallRecord get(final CallRecord record)');
+    expect(java('CallRecordDatabase.java')).toContain('public Collection<CallRecord> getCollection()');
   });
 });
 

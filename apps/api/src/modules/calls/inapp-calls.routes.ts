@@ -13,7 +13,7 @@ import {
   INAPP_STEPS,
   cancelUntakenCall,
   handleInAppStep,
-  issueRegistrationToken,
+  issueSessionToken,
   startInAppCall,
   type InAppDeps,
   type InAppStepName,
@@ -24,7 +24,8 @@ import {
 //
 // inAppCallsRoutes (/api/v1/calls/app, signed-in):
 //   GET  /config            -> { enabled }
-//   POST /token             -> { platform } a short token to be rung in the app (live-order parties only)
+//   POST /token             -> { platform, purpose } a short token for THIS session's identity only:
+//                              register (live-order parties only) or unregister (sign-out / account switch)
 //   POST /                  -> { orderId, target, platform } start a call; { callId, token }
 //   POST /:callId/cancel    -> the caller's phone could not connect: free the order at once
 //   All refuse 403 INAPP_CALLS_OFF while the switch is off: nothing is issued, written or rung.
@@ -54,7 +55,7 @@ function liveRelay(providerFor: (twilio: InAppCallsConfig['twilio']) => CallProv
 }
 
 const OFF = () => new AppError(403, 'INAPP_CALLS_OFF', 'In-app calls are not on yet. Use Call via Swift, or message them in chat.');
-const platformBody = z.object({ platform: z.enum(['ios', 'android']) });
+const tokenBody = z.object({ platform: z.enum(['ios', 'android']), purpose: z.enum(['register', 'unregister']).default('register') });
 const startBody = z.object({ orderId: z.string().min(1).max(64), target: z.enum(CALL_TARGETS), platform: z.enum(['ios', 'android']) });
 const callIdParam = z.object({ callId: z.string().min(1).max(40) });
 
@@ -71,8 +72,9 @@ export async function inAppCallsRoutes(app: FastifyInstance, opts: InAppRoutesOp
   }, async (request) => {
     const config = liveConfig();
     if (!config) throw OFF();
-    const { platform } = platformBody.parse(request.body);
-    return { success: true, data: await issueRegistrationToken(depsFor(config), request.user.userId, platform) };
+    const { platform, purpose } = tokenBody.parse(request.body);
+    // Only ever this request's own session (its identity rotates on sign-out); never one named by the client.
+    return { success: true, data: await issueSessionToken(depsFor(config), { userId: request.user.userId, sessionId: request.authSessionId, platform, purpose }) };
   });
 
   app.post('/', {
@@ -82,7 +84,7 @@ export async function inAppCallsRoutes(app: FastifyInstance, opts: InAppRoutesOp
     const config = liveConfig();
     if (!config) throw OFF();
     const { orderId, target, platform } = startBody.parse(request.body);
-    return { success: true, data: await startInAppCall(depsFor(config), { orderId, target, platform, userId: request.user.userId }) };
+    return { success: true, data: await startInAppCall(depsFor(config), { orderId, target, platform, userId: request.user.userId, sessionId: request.authSessionId }) };
   });
 
   app.post('/:callId/cancel', {

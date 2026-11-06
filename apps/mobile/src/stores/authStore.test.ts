@@ -13,6 +13,13 @@ const preparePushTokenForLogout = vi.fn(async () => 'ExponentPushToken[device-a]
 const revokeAuthSession = vi.fn(async () => undefined);
 const stopMoverLocation = vi.fn(async () => undefined);
 const disconnectSocket = vi.fn(() => undefined);
+// [INAPP-CALLS · SECURITY REVIEW] The in-app call binding is removed with the OLD session's token, before revoke.
+const teardownOrder: string[] = [];
+const inAppUnregisterToken = vi.fn(async (accessToken: string, platform: string) => `unreg:${accessToken}:${platform}`);
+const unregisterInAppCalls = vi.fn(async (fetchToken: (platform: 'ios' | 'android') => Promise<string>) => {
+  teardownOrder.push(`unregister:${await fetchToken('ios')}`);
+  return true;
+});
 
 vi.mock('../lib/storage', () => ({
   zustandStorage: {
@@ -27,7 +34,11 @@ vi.mock('expo-crypto', () => ({
   randomUUID: () => `test-ad-scope-${++scopeSequence.value}`,
 }));
 vi.mock('../services/push', () => ({ preparePushTokenForLogout }));
-vi.mock('../services/api', () => ({ revokeAuthSession }));
+vi.mock('../services/api', () => ({
+  revokeAuthSession: (...args: unknown[]) => { teardownOrder.push('revoke'); return (revokeAuthSession as (...a: unknown[]) => Promise<undefined>)(...args); },
+  inAppUnregisterToken,
+}));
+vi.mock('../services/inAppVoice', () => ({ unregisterInAppCalls }));
 vi.mock('../services/backgroundLocation', () => ({ stopMoverLocation }));
 vi.mock('../services/socket', () => ({ disconnectSocket }));
 vi.mock('./storeSwitcher', () => ({
@@ -346,6 +357,27 @@ describe('authStore session boundaries', () => {
     });
     expect(stopMoverLocation).toHaveBeenCalledWith(aSession);
     expect(disconnectSocket).toHaveBeenCalledWith(aSession);
+  });
+
+  it('[INAPP-CALLS] logout and account switch unregister the in-app call binding with the OLD session\'s token, before revoking it', async () => {
+    teardownOrder.length = 0;
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    useAuthStore.getState().logout();
+    useAuthStore.getState().setAuth(user('b'), 'access-b', 'refresh-b');
+    await vi.waitFor(() => expect(teardownOrder).toEqual(['unregister:unreg:access-a:ios', 'revoke']));
+    expect(inAppUnregisterToken).toHaveBeenCalledWith('access-a', 'ios');
+    // switching straight from B to C (no explicit logout) tears B down the same way
+    teardownOrder.length = 0;
+    useAuthStore.getState().setAuth(user('c'), 'access-c', 'refresh-c');
+    await vi.waitFor(() => expect(teardownOrder).toEqual(['unregister:unreg:access-b:ios', 'revoke']));
+  });
+
+  it('[INAPP-CALLS] a failed unregister never stops the revoke', async () => {
+    teardownOrder.length = 0;
+    unregisterInAppCalls.mockRejectedValueOnce(new Error('offline'));
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    useAuthStore.getState().logout();
+    await vi.waitFor(() => expect(teardownOrder).toEqual(['revoke']));
   });
 
   it('ignores a stale refresh failure after a new principal boundary', () => {
