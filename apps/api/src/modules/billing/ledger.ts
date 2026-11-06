@@ -20,6 +20,9 @@ export const LEDGER_ACCOUNTS: Record<string, { name: string; type: LedgerAccount
   CLEARING_MMG: { name: 'MMG clearing — confirmed, not yet bank-settled', type: 'ASSET' },
   CLEARING_CARD: { name: 'Card provider clearing', type: 'ASSET' },
   BANK_LOCAL: { name: 'Local bank deposits', type: 'ASSET' },
+  // [OWNER 5 Nov 2026] A weekly fee paid in person in cash: the company's fee money, never order money, never MMG's.
+  // Moving the cash to the bank is not recorded in Swift, so this is cash taken less cash paid back, not a drawer count.
+  CASH_ON_HAND: { name: 'Weekly-fee cash received in person, less cash paid back in person', type: 'ASSET' },
   // [owner Q-1654-BOOKS A] MMG returned money that had already paid for a week: that week's fee is owed again.
   FEE_RECEIVABLE: { name: 'Weekly fees a partner owes again (MMG returned the money that paid them; subledger = subscriptionId)', type: 'ASSET' },
   WALLET_LIABILITY: { name: 'Payer fee-wallet balances (subledger = subscriptionId)', type: 'LIABILITY' },
@@ -144,10 +147,17 @@ export async function postLedger(
 // WeekApplication slice, which gives it a per-week anchor to amortize from.
 // ---------------------------------------------------------------------------
 
+/** Which account money from outside lands in: EXTERNAL is MMG; IN_PERSON_CASH and IN_PERSON_BANK are a weekly fee
+ *  paid directly to the company (in-person-payment.ts), so they never read as MMG money. */
+export type TopupRail = 'EXTERNAL' | 'CARD' | 'IN_PERSON_CASH' | 'IN_PERSON_BANK';
+const TOPUP_ACCOUNT: Record<TopupRail, string> = {
+  EXTERNAL: 'CLEARING_MMG', CARD: 'CLEARING_CARD', IN_PERSON_CASH: 'CASH_ON_HAND', IN_PERSON_BANK: 'BANK_LOCAL',
+};
+
 /** Money arrived from outside and credited a payer's wallet. */
-export function topupPostings(subscriptionId: string, amount: number, rail: 'EXTERNAL' | 'CARD' = 'EXTERNAL'): LedgerPosting[] {
+export function topupPostings(subscriptionId: string, amount: number, rail: TopupRail = 'EXTERNAL'): LedgerPosting[] {
   return [
-    { account: rail === 'CARD' ? 'CLEARING_CARD' : 'CLEARING_MMG', debit: amount },
+    { account: TOPUP_ACCOUNT[rail], debit: amount },
     { account: 'WALLET_LIABILITY', subledgerId: subscriptionId, credit: amount },
   ];
 }
@@ -161,13 +171,17 @@ export function refundSetAsidePostings(subscriptionId: string, amount: number): 
   ];
 }
 
+/** How a set-aside refund was paid back, and the account the money left. */
+export type RefundMethod = 'MMG' | 'BANK_TRANSFER' | 'CHEQUE' | 'CASH';
+const REFUND_ACCOUNT: Record<RefundMethod, string> = { MMG: 'CLEARING_MMG', BANK_TRANSFER: 'BANK_LOCAL', CHEQUE: 'BANK_LOCAL', CASH: 'CASH_ON_HAND' };
+
 /** A set-aside refund paid back outside Swift. Swift never moves the money: an
  *  admin pays it and records the reference, so it leaves the account it would
- *  have come from (MMG clearing, or the bank). */
-export function refundPaidPostings(subscriptionId: string, amount: number, method: 'MMG' | 'BANK_TRANSFER'): LedgerPosting[] {
+ *  have come from (MMG clearing, the bank, or the cash received in person). */
+export function refundPaidPostings(subscriptionId: string, amount: number, method: RefundMethod): LedgerPosting[] {
   return [
     { account: 'REFUND_PAYABLE', subledgerId: subscriptionId, debit: amount },
-    { account: method === 'BANK_TRANSFER' ? 'BANK_LOCAL' : 'CLEARING_MMG', credit: amount },
+    { account: REFUND_ACCOUNT[method], credit: amount },
   ];
 }
 

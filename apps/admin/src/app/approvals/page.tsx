@@ -119,7 +119,11 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
     confirmLabel: 'Execute it',
     reason: false,
     submit: () => applyApproval(row.id),
-    success: () => 'Executed.',
+    // [OWNER 5 Nov 2026] A fee paid in person gets its receipt only now.
+    success: (res) => {
+      const receipt = (res as { data?: { receiptNumber?: string } }).data?.receiptNumber;
+      return receipt ? `Executed. Receipt ${receipt}: print it from Finance, or it reaches the partner on their fee page.` : 'Executed.';
+    },
   });
 
   const problem = intent ? noteProblem(note, intent === 'approve') : null;

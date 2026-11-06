@@ -6,12 +6,13 @@ import { browserClientOf } from '../auth/browser-session';
 import { moverRoleFor } from '../../config/vehicle-classes';
 import { partnerRateFor, PricingConfigError, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
 import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../subscription/trial-length';
+import { OPERATOR } from '../legal/operator';
 
 /**
  * [COORD ruling 22 Oct 2026 · row 628 · GUARDRAILS §1 + §7 standing rule 2] The weekly fee at partner sign-up.
  *
  * A store, rider or taxi driver sees the weekly fee BEFORE they submit sign-up: the amount (the server's quote,
- * GET /auth/pricing), what it covers, when it starts, how it is paid and the 14-day rule for price changes — and
+ * GET /auth/pricing), what it covers, when it starts, how it is paid and the 14-day rule for a price rise — and
  * ticks "I understand the weekly fee" next to the partner agreement. Nobody pays at sign-up: the fee starts only
  * after approval (the billing flow then opens MMG's checkout page in the app).
  *
@@ -31,14 +32,16 @@ import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../subscription/trial-length'
  */
 export const WEEKLY_FEE_ACK_TYPE: ConsentDocumentType = 'weekly_fee_acknowledgement';
 /** The words served now, and the only version a NEW tick is taken on (assertWeeklyFeeAck). */
-export const WEEKLY_FEE_ACK_VERSION = 'v2';
+export const WEEKLY_FEE_ACK_VERSION = 'v3';
 /**
  * [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D3)] The versions whose tick still stands. v2 only adds the website as a
  * place to pay ("How you pay"); nothing about the fee changed, so a partner who ticked v1 is not asked again: a store
  * owner's store-fee tick (store-fee.ts latestStoreFeeTick) and a pro's fee tick (services/pro-fee.ts latestProFeeTick)
- * are read across these. The ledger keeps each row anchored to the words it was given to.
+ * are read across these. The ledger keeps each row anchored to the words it was given to. v3 adds a way to pay
+ * [OWNER 5 Nov 2026] and says the price rule exactly (a cut needs no 14-day wait; REVIEW-G18 S3-1); the fee itself and
+ * how it is changed are the same, and the cut rule only ever works in the partner's favour, so a v1 or v2 tick stands.
  */
-export const WEEKLY_FEE_ACK_HONOURED_VERSIONS: readonly string[] = ['v1', 'v2'];
+export const WEEKLY_FEE_ACK_HONOURED_VERSIONS: readonly string[] = ['v1', 'v2', 'v3'];
 
 /**
  * The v1 words, in the order they were shown until 1 Nov 2026. Never edited: rows already in the ledger are anchored
@@ -74,8 +77,7 @@ export const WEEKLY_FEE_ACK_TEXT_V1 = [
  *    per kind of partner (the trial entitlement law: one per person, per role), none while an earlier subscription in
  *    their accounts is overdue, paused or ended (DEBT_REINSTATE_FIRST: PAST_DUE, SUSPENDED, CHURNED). A change to any
  *    of those numbers is a new version (the unit test pins them together).
- * "What it covers", "If the price changes" and the tick are v1's, word for word. Card-rail switch-on checklist: before
- * card payment is offered, "How you pay" must change again, and that is v3.
+ * "What it covers", "If the price changes" and the tick are v1's, word for word.
  */
 export const WEEKLY_FEE_TERMS_V2 = {
   items: [
@@ -92,9 +94,39 @@ export const WEEKLY_FEE_ACK_TEXT_V2 = [
   WEEKLY_FEE_TERMS_V2.tick,
 ].join('\n');
 
+/**
+ * [OWNER 5 Nov 2026] The v3 words, two lines changed from v2:
+ *  - "How you pay" adds paying the company directly, in person;
+ *  - [REVIEW-G18 S3-1] "If the price changes" says the rule as the code applies it. A RISE waits at least 14 days
+ *    after the in-app notice (fee-rise-notice.ts FEE_RISE_NOTICE_DAYS; price-book.ts PRICE_BOOK_NOTICE_DAYS; the admin
+ *    door refuses a higher price sooner) and never touches a week already paid. A CUT needs no wait (owner 29 Oct): it
+ *    applies from the next weekly fee not yet paid or charged (billing.service applyCardPriceCuts: "Issued charges and
+ *    paid weeks keep their amount"; price-book.ts "A lower price needs no wait"), and the partner is told in the app
+ *    (tellFeeDecrease). v1 and v2 promised 14 days before ANY change, which a cut never waited for. Same words as the
+ *    agreements' fee-cut line. v3 was changed before any environment published it.
+ * Everything else is v2's, word for word. Card-rail switch-on checklist: before card payment is offered, "How you pay"
+ * must change again, and that is v4.
+ */
+const V3_CHANGED: Readonly<Record<string, string>> = {
+  'How you pay': `In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Or in person, directly to ${OPERATOR.name}, by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.`,
+  'If the price changes': 'If the price goes up, Swift tells you in the app at least 14 days before, and the new price applies only from your first weekly fee due after that, never to a week you have already paid. If it goes down, the lower price applies from your next weekly fee not yet paid or charged, with a notice in the app.',
+};
+export const WEEKLY_FEE_TERMS_V3 = {
+  items: WEEKLY_FEE_TERMS_V2.items.map((item) => {
+    const text = V3_CHANGED[item.heading];
+    return text === undefined ? item : { heading: item.heading, text };
+  }),
+  tick: WEEKLY_FEE_TERMS_V2.tick,
+} as const;
+
+export const WEEKLY_FEE_ACK_TEXT_V3 = [
+  ...WEEKLY_FEE_TERMS_V3.items.map((item) => `${item.heading}: ${item.text}`),
+  WEEKLY_FEE_TERMS_V3.tick,
+].join('\n');
+
 /** The words of WEEKLY_FEE_ACK_VERSION: what is served, and what a new tick is published and anchored to. */
-export const WEEKLY_FEE_TERMS = WEEKLY_FEE_TERMS_V2;
-export const WEEKLY_FEE_ACK_TEXT = WEEKLY_FEE_ACK_TEXT_V2;
+export const WEEKLY_FEE_TERMS = WEEKLY_FEE_TERMS_V3;
+export const WEEKLY_FEE_ACK_TEXT = WEEKLY_FEE_ACK_TEXT_V3;
 
 export interface WeeklyFeeTerms { version: string; items: { heading: string; text: string }[]; tick: string }
 

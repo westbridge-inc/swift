@@ -11,6 +11,7 @@ import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { inPersonWaiting, PAY_IN_PERSON, PAY_IN_PERSON_ASK } from '../../../lib/weeklyFeeInPerson';
 import { feeExpiry, reopenableMmg, REOPEN_ALREADY_PAID } from '../../../lib/weeklyFeeReopen';
 import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
@@ -109,6 +110,7 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
           {/* [FEE-STATUS] The API's words for where the fee stands: never a passed date as a next bill. */}
           <T variant="heading" testID="weekly-fee-status">{feeStatus?.headline}</T>
           {feeStatus?.detail ? <T variant="body" style={{ marginTop: space.md }}>{feeStatus.detail}</T> : null}
+          {sub.inPerson && sub.inPerson.waitingGyd !== null ? <T variant="body" testID="in-person-waiting" style={{ marginTop: space.md }}>{inPersonWaiting(sub.inPerson.waitingGyd)}</T> : null}
           {checkingLatest && !checked.busy ? <T variant="caption" tone="muted" testID="weekly-fee-checking" style={{ marginTop: space.sm }}>Checking for the latest…</T> : null}
           {checkout ? <T variant="body" style={{ marginTop: space.md }}>{checkoutWords(checkout, view.returned)}</T> : null}
           {view.returned && !checkout ? <T variant="body">Waiting for MMG…</T> : null}
@@ -150,6 +152,16 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
         </Card> : null}
         {showCard ? <CardPaySection family={family} card={card} latestSession={sub?.latestCardSession} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>
+        {sub.inPerson?.open ? <View testID="pay-in-person">
+          <T variant="caption">{PAY_IN_PERSON}</T>
+          <PillButton
+            testID="pay-in-person-ask"
+            label={PAY_IN_PERSON_ASK}
+            variant="soft"
+            style={{ marginTop: space.sm }}
+            onPress={() => navigation?.navigate?.('GetHelp', { category: 'PAYMENT', subject: 'I want to pay my weekly fee in person' })}
+          />
+        </View> : null}
         <View>
           <T variant="heading">Recent checkouts</T>
           {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {

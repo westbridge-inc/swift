@@ -549,6 +549,28 @@ describe('live: payActions per the contract (section 3)', () => {
   });
 });
 
+describe('[owner 5 Nov 2026] while a fee paid in person waits to be recorded', () => {
+  beforeEach(() => enable(true));
+
+  it('the page says so and offers no second payment; when the ask ends, Pay comes back', async () => {
+    const owing = await makeStore({ balance: 600 });
+    const before = (await subscriptionOf(owing)).json().data;
+    expect(before.payActions[0]).toMatchObject({ id: 'MMG_CHECKOUT', state: 'live' });
+    const row = await app.prisma.privilegedApproval.create({ data: {
+      action: 'POST /subscriptions/:id/in-person-payment', cls: 'C4', capability: 'subscription.inperson', entityId: owing.subId,
+      fingerprint: nanoid(16), requestedBy: owing.userId, reason: 'Paid at the counter this morning', status: 'PENDING',
+      bodySnapshot: { params: { id: owing.subId }, body: { method: 'CASH', amount: 1500 }, query: {} }, expiresAt: new Date(Date.now() + 3_600_000),
+    } });
+    const waiting = (await subscriptionOf(owing)).json().data;
+    expect(waiting.inPerson).toEqual({ open: false, waitingGyd: 1500 });
+    expect(waiting.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    await app.prisma.privilegedApproval.delete({ where: { id: row.id } });
+    const after = (await subscriptionOf(owing)).json().data;
+    expect(after.inPerson.waitingGyd).toBeNull();
+    expect(after.payActions[0]).toMatchObject({ id: 'MMG_CHECKOUT', state: 'live' });
+  });
+});
+
 describe('live: starting and following a checkout (sections 4-5)', () => {
   beforeEach(() => enable(true));
 

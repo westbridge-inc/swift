@@ -147,6 +147,8 @@ export const CLASS_MEANING: Record<string, string> = {
  * know whether they are about to forgive a fee or publish a price.
  */
 export function describeAction(action: string): string {
+  // [OWNER 5 Nov 2026] Money arriving, not a thing being created: the approver reads what they are signing.
+  if (action === 'POST /subscriptions/:id/in-person-payment') return 'Record a weekly fee paid in person';
   const [method, route = ''] = action.split(' ');
   const parts = route.split('/').filter((p) => p && !p.startsWith(':'));
   const subject = parts.map(humanise).join(' → ') || 'an admin action';

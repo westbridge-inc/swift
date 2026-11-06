@@ -20,7 +20,7 @@ import { consumeMmgReactivation, feePauseHoldsBilling, feePauseSpanOpen, mmgReac
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
 import { convertUsdToLocal, noticeRequired, FX_NOTICE_WINDOW_DAYS } from './fx';
 import { restoreBillingAccess } from './billing-access';
-import { postLedger, topupPostings, chargeSuccessPostings, walletReversalPostings } from './ledger';
+import { postLedger, topupPostings, chargeSuccessPostings, walletReversalPostings, type TopupRail } from './ledger';
 import { mapCardFailure, mapMmgFailure, type NormalizedFailure } from './failure-taxonomy';
 import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
@@ -2440,7 +2440,7 @@ export class BillingService {
    *  through it. */
   private async creditWalletInTx(
     tx: Prisma.TransactionClient,
-    opts: { subscriptionId: string; amount: number; currencyCode: string; eventKey: string; note: string; channel: string; mmgRef?: string; rail?: 'CARD'; expectedTenantId?: string },
+    opts: { subscriptionId: string; amount: number; currencyCode: string; eventKey: string; note: string; channel: string; mmgRef?: string; rail?: TopupRail; expectedTenantId?: string },
   ) {
     // A system payment has no request tenant. Derive ownership from the
     // trusted payer inside this transaction, never from a receipt default.
@@ -4595,6 +4595,8 @@ export class BillingService {
       expectedTenantId?: string;
       /** The rail the money came by, when the caller names it (MMG_CHECKOUT). */
       channel?: string;
+      /** The ledger account it lands in, when it is not MMG's (in-person-payment.ts). */
+      rail?: TopupRail;
       /** [OWNER RULING 8 Oct (2)] A payment a person records by hand is refused
        *  past one week ahead [owner #62] (they refund the rest). Money that arrived
        *  without anyone choosing it (a checkout MMG confirmed) is never refused:
@@ -4628,6 +4630,7 @@ export class BillingService {
         ? input.recordedBy.slice('agent-cash:'.length)
         : 'ADMIN_TOPUP'),
       mmgRef: input.reference,
+      rail: input.rail,
     });
   }
 

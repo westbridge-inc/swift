@@ -18,8 +18,8 @@ import { weeklyFeeAmount, type Priced } from './subscription-fee';
 //
 //   - a door the partner opens (the MMG checkout, a card Pay now) refuses a
 //     payment that would go past the cap, with plain words, BEFORE money moves;
-//   - a payment an operator records by hand (an admin-recorded fee payment, an
-//     agent payment attached by an admin) is refused the same way, naming the
+//   - a payment an operator records by hand (an admin-recorded fee payment, a
+//     fee paid in person, an agent payment attached by an admin) is refused the same way, naming the
 //     most that can still be recorded — the rest is refunded to the partner;
 //   - money that arrives without anyone opening a door (an agent payment, a
 //     late MMG approval, a card capture for a week already paid) is never
