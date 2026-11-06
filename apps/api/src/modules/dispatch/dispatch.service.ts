@@ -1199,7 +1199,7 @@ export class DispatchService {
             AND d."vehicleType"::text = ANY(${hireVehicleTypes()})
             -- [CARS-PLATES · owner 6 Nov 2026] A ride goes only to an H-plate (hire) car: a private (P) plate car
             -- delivers only, never a taxi ride (the papers gate refuses it at GO; this holds whatever the row says).
-            AND ${hirePlateSql(Prisma.raw('d."licensePlate"'))}
+            AND ${hirePlateSql()}
             ${passengerCount != null ? Prisma.sql`AND d."vehicleCapacity" >= ${passengerCount}` : Prisma.empty}
             ${taxiStops ? Prisma.sql`AND d."taxiStopsCapable" = true` : Prisma.empty}
             AND d."currentLat" IS NOT NULL
@@ -1265,7 +1265,7 @@ export class DispatchService {
           WHERE r."isOnline" = false
             AND d."takesDeliveries" = true
             -- [CARS-PLATES] the taxi car's twin only: the delivery profile names the taxi's own car (same plate)
-            AND ${hirePlateSql(Prisma.raw('d."licensePlate"'))}
+            AND ${hirePlateSql()}
             AND upper(regexp_replace(coalesce(r."licensePlate", ''), '[[:space:]-]+', '', 'g'))
               = upper(regexp_replace(coalesce(d."licensePlate", ''), '[[:space:]-]+', '', 'g'))
             -- [REVIEW-F #2139 S2-2] only a taxi GO whose app can show a delivery card (an older one shows it as a ride)

@@ -1497,7 +1497,10 @@ export class VerificationService {
       const passengerOnPlate = [driverOnAccount, riderOnAccount].find(carOnPlate);
       // [CARS-PLATES] Only while cars deliver (CAR_DELIVERIES on): the plate is on the account's delivery car and on no
       // taxi profile of the account. The taxi profile on the plate (the twin's car too) keeps the H rule below.
-      if (carDeliveriesEnabled() && carOnPlate(riderOnAccount) && !carOnPlate(driverOnAccount)) {
+      // [REVIEW-G22 S2-1] …and only on a plate that is NOT H: an H plate is a taxi car's whoever holds it today, so its
+      // papers are always reviewed taxi-grade (the H rule, insurance for passengers carried for hire) and can never
+      // reach a taxi having been checked only for commercial use.
+      if (carDeliveriesEnabled() && plateClassOf(plate ?? '') !== 'H' && carOnPlate(riderOnAccount) && !carOnPlate(driverOnAccount)) {
         vehicleType = riderOnAccount!.vehicleType;
         taxi = false;
         privateCar = true;
@@ -1961,9 +1964,13 @@ export class VerificationService {
     vehicleHint?: VehicleType,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
     vendorId?: string,
+    /** [CARS-PLATES] The work the list is for, when the caller already knows it (getStatus read the profiles). */
+    moverKind?: 'RIDER' | 'DRIVER' | null,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
-      const { vehicleType, kind } = await this.moverListSubject(userId, vehicleHint, db);
+      const { vehicleType, kind } = moverKind !== undefined && vehicleHint
+        ? { vehicleType: vehicleHint, kind: moverKind }
+        : await this.moverListSubject(userId, vehicleHint, db);
       return this.countryConfig.getMoverChecklist(countryCode, vehicleType, db, kind);
     }
     if (roleKey === 'SERVICE_PROVIDER') {
@@ -1989,9 +1996,12 @@ export class VerificationService {
     roleKey: ChecklistRole,
     required: readonly string[],
     vehicleHint?: VehicleType,
+    moverKind?: 'RIDER' | 'DRIVER' | null,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
-      const { vehicleType, kind } = await this.moverListSubject(userId, vehicleHint);
+      const { vehicleType, kind } = moverKind !== undefined && vehicleHint
+        ? { vehicleType: vehicleHint, kind: moverKind }
+        : await this.moverListSubject(userId, vehicleHint);
       return this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType, this.prisma, kind);
     }
     if (roleKey === 'SERVICE_PROVIDER') {
@@ -2195,6 +2205,7 @@ export class VerificationService {
     // apps render `trial.message` verbatim when present. Vendor checklists are
     // keyed by vendor TYPE; the trial role for all of them is VENDOR.
     let trialRole = 'VENDOR';
+    let moverKind: 'RIDER' | 'DRIVER' | null = null;
     // [VERIFY-DOCS] Police clearance is on every mover's optional list; it is used below only
     // when this person's lists name it, exactly as before.
     let policeClearedEarly: Promise<boolean> | undefined;
@@ -2205,6 +2216,8 @@ export class VerificationService {
         this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
       ]);
       vehicleType = moverVehicleFrom(user, rider, driver);
+      // [CARS-PLATES] The work the saved vehicle is in use for, read here so the lists below cost no extra round trip.
+      moverKind = moverProfileInUse(user, rider, driver);
       trialRole = driver ? 'DRIVER' : 'RIDER';
     }
     const trialRead = previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
@@ -2218,9 +2231,11 @@ export class VerificationService {
     let optional: string[];
     if (roleKey === 'MOVER') {
       const listVehicle = vehicleHint ?? vehicleType ?? 'MOTORCYCLE';
+      // A preview of another vehicle has no work yet (the vehicle's own list), as moverListSubject decides.
+      const listKind = moverKind && listVehicle === vehicleType ? moverKind : null;
       [gate, optional] = await Promise.all([
-        this.checklistFor(userId, user.countryCode, roleKey, listVehicle),
-        this.optionalFor(userId, user.countryCode, roleKey, [], listVehicle),
+        this.checklistFor(userId, user.countryCode, roleKey, listVehicle, this.prisma, undefined, listKind),
+        this.optionalFor(userId, user.countryCode, roleKey, [], listVehicle, listKind),
       ]);
     } else {
       gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);

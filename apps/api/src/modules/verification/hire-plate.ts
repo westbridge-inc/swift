@@ -61,6 +61,14 @@ export function assertPlateForWork(vehicleType: VehicleType, plate: string | nul
   if (role === 'DRIVER') assertHirePlate(vehicleType, plate);
 }
 
+/**
+ * [CARS-PLATES · REVIEW-G22 S2-1] An H (hire) plate is always a taxi car's: its papers are reviewed taxi-grade (the H
+ * rule, insurance for passengers carried for hire). So a delivery profile carries an H plate only as the taxi car's own
+ * twin (the account's taxi profile on that same plate); anywhere else it is refused, server side, in these words.
+ */
+export const PRIVATE_CAR_H_PLATE = 'PRIVATE_CAR_H_PLATE';
+export const PRIVATE_CAR_H_PLATE_COPY = 'An H (hire) plate car is a taxi car. To drive taxi rides and add deliveries, change your vehicle on the vehicle screen. A delivery-only car keeps its private (P) plate.';
+
 /** Words for a private-plate car's delivery sign-up (the app and the website say the same). */
 export const PRIVATE_CAR_COPY = 'A private (P) plate car can do deliveries only. Taxi rides need an H plate.';
 
@@ -69,8 +77,9 @@ export const PRIVATE_CAR_COPY = 'A private (P) plate car can do deliveries only.
  * normalizeRegistrationMark does (upper case, no spaces or dashes), starts with H. A P-plate car is never offered a
  * ride, whatever its row says about anything else.
  */
-export function hirePlateSql(plateColumn: Prisma.Sql): Prisma.Sql {
-  return Prisma.sql`left(upper(regexp_replace(coalesce(${plateColumn}, ''), '[[:space:]-]+', '', 'g')), 1) = 'H'`;
+export function hirePlateSql(): Prisma.Sql {
+  // The taxi profile's plate under the alias both taxi queries use (drivers d); a fixed fragment, never a raw identifier.
+  return Prisma.sql`left(upper(regexp_replace(coalesce(d."licensePlate", ''), '[[:space:]-]+', '', 'g')), 1) = 'H'`;
 }
 
 /** The refusal a non-H taxi meets at the claim (the locked belt behind the candidate SQL and the papers gate). */

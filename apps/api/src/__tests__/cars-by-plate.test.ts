@@ -22,6 +22,7 @@ import { signupQuote, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-f
 import { moverRoleForVehicle } from '../modules/verification/hire-plate';
 import { docProfilesFor } from '../config/vehicle-classes';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
+import { grantStepUp } from './helpers/step-up';
 
 // ---------------------------------------------------------------------------
 // [CARS-PLATES · owner 6 Nov 2026 ~04:20Z + 04:30Z] Cars by plate. A private (P) plate car does DELIVERIES ONLY and
@@ -399,5 +400,44 @@ describe('[CARS-PLATES] dispatch: a P car delivers, never drives a ride', () => 
       code: 'TAXI_NEEDS_HIRE_PLATE', message: expect.stringContaining('H-plate'),
     });
     expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } }))).driverId).toBeNull();
+  });
+});
+
+describe('[CARS-PLATES · REVIEW-G22 S2-1] an H plate is always a taxi car’s: never checked only for commercial use', () => {
+  it('a delivery car cannot type an H plate of its own (server side, before any step-up); a P plate edit still works', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const pc = await privateCar();
+    const h = plate('H');
+    const refused = await call('PUT', '/api/v1/rider/profile', pc.token, { licensePlate: h });
+    expect(refused.statusCode, refused.body).toBe(400);
+    expect(refused.json().error).toMatchObject({ code: 'PRIVATE_CAR_H_PLATE', message: expect.stringContaining('H (hire) plate car is a taxi car') });
+    expect((await riderOf(pc.userId))!.licensePlate).toBe(pc.plate);
+    // A taxi on ANOTHER H plate does not make this car its twin.
+    await sys(() => app.prisma.driver.create({ data: {
+      userId: pc.userId, vehicleType: 'CAR', vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2019, vehicleColor: 'Silver', licensePlate: plate('H'),
+      driverLicenseUrl: '', vehicleInsuranceUrl: '',
+    } }));
+    expect((await call('PUT', '/api/v1/rider/profile', pc.token, { licensePlate: h })).statusCode).toBe(400);
+    const p2 = plate('P');
+    await sys(() => grantStepUp(app, pc.token));
+    const ok = await call('PUT', '/api/v1/rider/profile', pc.token, { licensePlate: p2 });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await riderOf(pc.userId))!.licensePlate).toBe(p2);
+  });
+
+  it('papers about an H plate held only by a delivery car are reviewed taxi-grade: insurance needs passengers-for-hire cover', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const pc = await privateCar();
+    const h = plate('H');
+    // A delivery car on an H plate (legacy data, or written past the route): its papers must not take the delivery path.
+    await sys(() => app.prisma.rider.update({ where: { id: pc.riderId }, data: { licensePlate: h } }));
+    const insurance = await pendingVehiclePaper(pc.userId, h, 'vehicle_insurance');
+    await expect(sys(() => verification.approveDocument(insurance.id, reviewerId, undefined, { insurerName: 'Synthetic', policyNumber: 'X2', coverageClass: 'HIRE', hireClassConfirmed: false, plateCrossChecked: true })))
+      .rejects.toMatchObject({ code: 'INSURANCE_SCOPE_INSUFFICIENT', message: expect.stringContaining('cover for passengers carried for hire') });
+    // A P plate on the same kind of car keeps the delivery words (the private-car path).
+    const pc2 = await privateCar();
+    const ins2 = await pendingVehiclePaper(pc2.userId, pc2.plate, 'vehicle_insurance');
+    await expect(sys(() => verification.approveDocument(ins2.id, reviewerId, undefined, { insurerName: 'Synthetic', policyNumber: 'X3', coverageClass: 'HIRE', hireClassConfirmed: false, plateCrossChecked: true })))
+      .rejects.toMatchObject({ code: 'INSURANCE_SCOPE_INSUFFICIENT', message: expect.stringContaining('A motor vehicle that delivers') });
   });
 });

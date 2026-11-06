@@ -278,6 +278,24 @@ describe('[CARS-DELIVER] one weekly fee for a mover who both delivers and drives
     expect(reads.filter((p) => p === '/api/v1/driver/subscription').length).toBeGreaterThan(0);
   });
 
+  // [CARS-PLATES · REVIEW-G22 S4-1] the delivery fee waits for the taxi read: a failed taxi read is said (the page's own
+  // "Couldn't load your earner profile", with a retry), never a blank fee card.
+  it('a rider whose taxi read fails: the page says it could not load, with a retry — never a blank fee card', async () => {
+    mockApi(({ url }) => {
+      const path = url.pathname;
+      if (path === '/api/v1/rider/profile') return { body: { data: { id: 'rider-1' } } };
+      if (path === '/api/v1/driver/profile') return { status: 500, body: { error: 'down' } };
+      if (path === '/api/v1/rider/earnings/summary') return { body: { data: windows(1000) } };
+      if (path === '/api/v1/rider/cash-settlements') return { body: { data: { unsettled: [], settled: [], summary: { owed: 0, count: 0 } } } };
+      if (path.startsWith('/api/v1/verification/status')) return { body: { data: { roleVerified: true, checklist: [], missing: [] } } };
+      return { status: 404, body: { error: 'not here' } };
+    });
+    renderWithQuery(<PortalHome />);
+    expect(await screen.findByText(/your earner profile/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
+    expect(screen.queryByText('Delivery subscription')).toBeNull();
+  });
+
   it('one profile: its own card, as before', async () => {
     officeWithReads({ rider: false, driver: true });
     renderWithQuery(<PortalHome />);
