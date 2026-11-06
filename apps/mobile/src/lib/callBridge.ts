@@ -92,6 +92,7 @@ function recipientRefusal(code: string | null | undefined): string {
     case 'CALL_LIMIT_REACHED': return 'Swift has connected as many calls as it can for this order. Message the sender in chat, or ask support.';
     case 'CALL_NO_NUMBER': return 'Swift has no number for the recipient. Message the sender in chat, or ask support.';
     case 'CALL_DAILY_LIMIT_REACHED': return 'Swift calls are busy right now. Message the sender in chat, or ask support.';
+    case 'CALL_USER_DAILY_LIMIT_REACHED': return 'You have used your Swift calls for today. Message the sender in chat, or ask support.';
     default: return 'Swift could not place the call right now. Try again, or message the sender in chat.';
   }
 }
@@ -109,6 +110,8 @@ export function bridgeErrorText(code: string | null | undefined, target?: CallTa
     case 'CALL_LIMIT_REACHED': return 'Swift has connected as many calls as it can for this order. Message them in chat, or ask support.';
     case 'CALL_NO_NUMBER': return 'Swift has no number to call for this. Message them in chat, or ask support.';
     case 'CALL_DAILY_LIMIT_REACHED': return DAILY_LIMIT_WORDS;
+    // [CALL-RELAY-ON] This person's own daily cap (CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY).
+    case 'CALL_USER_DAILY_LIMIT_REACHED': return 'You have used your Swift calls for today. Message them in chat, or ask support.';
     default: return 'Swift could not place the call right now. Try again, or message them in chat.';
   }
 }

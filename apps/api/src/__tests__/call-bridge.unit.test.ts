@@ -5,6 +5,7 @@ import {
   assertCallRelayConfig,
   CALL_RELAY_DEFAULT_MAX_ATTEMPTS,
   CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY,
   CALL_RING_SECONDS,
   CALL_TIME_LIMIT_SECONDS,
   readCallRelayConfig,
@@ -188,11 +189,30 @@ describe('[O-1] the settings and the boot guard', () => {
     expect(() => assertCallRelayConfig({ CALL_RELAY_MAX_CALLS_PER_DAY: '0' }), 'off: nothing is checked').not.toThrow();
   });
 
+  // [CALL-RELAY-ON · security review] One person must not be able to use up everyone's day: a per-person cap too.
+  it('the per-person daily cap: 10 calls in any 24 hours by default, a whole number from 1 to 200', () => {
+    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY).toBe(10);
+    const unset = readCallRelayConfig(full());
+    expect(unset.ok && unset.config.maxCallsPerUserPerDay).toBe(10);
+    for (const [raw, want] of [['1', 1], ['25', 25], [' 3 ', 3], ['200', 200], ['', 10]] as const) {
+      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: raw }));
+      expect(read.ok && read.config.maxCallsPerUserPerDay, JSON.stringify(raw)).toBe(want);
+    }
+    for (const raw of ['0', '201', '-1', '2.5', 'ten', '1000']) {
+      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: raw }));
+      expect(read.ok, JSON.stringify(raw)).toBe(false);
+      if (!read.ok) expect(read.problems.join(' ')).toMatch(/CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY must be a whole number from 1 to 200/);
+    }
+    expect(() => assertCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: '0' }))).toThrow(/CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY/);
+  });
+
   it('both env examples document the daily cap next to the per-order cap', () => {
     const apiExample = readFileSync(join(__dirname, '..', '..', '.env.example'), 'utf8');
     const deployExample = readFileSync(join(__dirname, '..', '..', '..', '..', 'deploy', '.env.deploy.example'), 'utf8');
     expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_DAY=/m);
     expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_DAY=100$/m);
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY=/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY=10$/m);
   });
 
   it('CALL_RELAY=1 half-configured refuses to start in every mode; off, nothing is checked', () => {

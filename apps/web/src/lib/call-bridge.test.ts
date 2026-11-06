@@ -25,6 +25,7 @@ describe('[O-1] what the Call control does on the website', () => {
     expect(callerLine('+15005550006')).toBe('Swift calls you from +1 500 555 0006 (save it as Swift).');
     expect(callerLine('+5926001234')).toBe('Swift calls you from +592 600 1234 (save it as Swift).');
     expect(bridgeErrorText('CALL_DAILY_LIMIT_REACHED')).toBe('Swift calls are busy right now. Message them in chat, or ask support.');
+    expect(bridgeErrorText('CALL_USER_DAILY_LIMIT_REACHED')).toBe('You have used your Swift calls for today. Message them in chat, or ask support.');
     expect(bridgeErrorText('CALL_LIMIT_REACHED')).toMatch(/as many calls/);
     expect(bridgeErrorText(undefined)).toMatch(/could not place the call/);
   });
@@ -34,7 +35,7 @@ describe('[O-1] what the Call control does on the website', () => {
 describe('[CALL-RELAY-ON] the caller line and the contact card', () => {
   it('words are GSM-7 safe and short (they read the same in a text message)', () => {
     const GSM7_PLAIN = /^[A-Za-z0-9 +().,:;'!?-]*$/;
-    for (const words of [callerLine('+18785550123')!, ...Object.values(CALLER_LINE_WORDS), bridgeErrorText('CALL_DAILY_LIMIT_REACHED')]) {
+    for (const words of [callerLine('+18785550123')!, ...Object.values(CALLER_LINE_WORDS), bridgeErrorText('CALL_DAILY_LIMIT_REACHED'), bridgeErrorText('CALL_USER_DAILY_LIMIT_REACHED')]) {
       expect(words, words).toMatch(GSM7_PLAIN);
       expect(words.length, words).toBeLessThanOrEqual(90);
     }

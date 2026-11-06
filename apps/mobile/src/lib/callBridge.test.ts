@@ -43,13 +43,13 @@ describe('[O-1] the words', () => {
   });
   it('every caller-line word is GSM-7 safe and short', () => {
     const GSM7_PLAIN = /^[A-Za-z0-9 +().,:;'!?-]*$/;
-    for (const words of [callerLine('+18785550123')!, ...Object.values(CALLER_LINE_WORDS), CALL_WORDS.startedHow, bridgeErrorText('CALL_DAILY_LIMIT_REACHED')]) {
+    for (const words of [callerLine('+18785550123')!, ...Object.values(CALLER_LINE_WORDS), CALL_WORDS.startedHow, bridgeErrorText('CALL_DAILY_LIMIT_REACHED'), bridgeErrorText('CALL_USER_DAILY_LIMIT_REACHED'), bridgeErrorText('CALL_USER_DAILY_LIMIT_REACHED', 'recipient')]) {
       expect(words, words).toMatch(GSM7_PLAIN);
       expect(words.length, words).toBeLessThanOrEqual(90);
     }
   });
   it('every refusal the server can give has its own words; anything else a safe general line', () => {
-    for (const code of ['CALL_RELAY_OFF', 'CALL_ORDER_NOT_LIVE', 'CALL_IN_PROGRESS', 'CALL_LIMIT_REACHED', 'CALL_NO_NUMBER', 'CALL_DAILY_LIMIT_REACHED']) {
+    for (const code of ['CALL_RELAY_OFF', 'CALL_ORDER_NOT_LIVE', 'CALL_IN_PROGRESS', 'CALL_LIMIT_REACHED', 'CALL_NO_NUMBER', 'CALL_DAILY_LIMIT_REACHED', 'CALL_USER_DAILY_LIMIT_REACHED']) {
       expect(bridgeErrorText(code), code).not.toBe(bridgeErrorText(undefined));
       expect(bridgeErrorText(code), code).toMatch(/chat|Answer it|try again/i);
     }
@@ -78,6 +78,8 @@ describe('[O-1] the parcel recipient (the courier rider calls them through Swift
       expect(words, String(code)).toMatch(/sender|support|Answer it|try again/i);
     }
     expect(bridgeErrorText('CALL_NO_NUMBER', 'recipient')).toMatch(/no number for the recipient/);
+    expect(bridgeErrorText('CALL_USER_DAILY_LIMIT_REACHED', 'recipient')).toBe('You have used your Swift calls for today. Message the sender in chat, or ask support.');
+    expect(bridgeErrorText('CALL_USER_DAILY_LIMIT_REACHED')).toBe('You have used your Swift calls for today. Message them in chat, or ask support.');
     // everyone else keeps their words
     expect(bridgeErrorText('CALL_LIMIT_REACHED', 'rider')).toBe(bridgeErrorText('CALL_LIMIT_REACHED'));
   });

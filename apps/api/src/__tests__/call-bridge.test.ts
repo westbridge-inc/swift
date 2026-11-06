@@ -37,7 +37,7 @@ const BASE = 'https://api.example.test/api/v1/calls/voice';
 const ENV = {
   CALL_RELAY: '1', CALL_RELAY_CALLER_ID: CALLER_ID, CALL_RELAY_WEBHOOK_BASE: BASE, CALL_RELAY_MAX_ATTEMPTS_PER_ORDER: '3',
   // [CALL-RELAY-ON] The daily cap's own tests set it; every other test runs well under it.
-  CALL_RELAY_MAX_CALLS_PER_DAY: '10000',
+  CALL_RELAY_MAX_CALLS_PER_DAY: '10000', CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: '200',
   TWILIO_ACCOUNT_SID: SID, TWILIO_API_KEY_SID: KEY, TWILIO_API_KEY_SECRET: 'bridge-test-secret', TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN,
 };
 const NUM = String(Date.now()).slice(-5);
@@ -398,7 +398,7 @@ describe('[O-1] starting a call', () => {
 // [CALL-RELAY-ON · 6 Nov 2026] Swift pays for every bridged call (~US$0.75/min, two Guyana legs). The per-order cap
 // does not bound a day (many orders x 6 attempts), so every start also counts the calls started in the last 24 hours.
 describe('[CALL-RELAY-ON] the daily cap (CALL_RELAY_MAX_CALLS_PER_DAY): calls started in any 24 hours, all orders', () => {
-  const startedToday = () => system(() => app.prisma.callSession.count({ where: { createdAt: { gte: new Date(Date.now() - DAY) } } }));
+  const startedToday = () => system(() => app.prisma.callSession.count({ where: { createdAt: { gte: new Date(Date.now() - DAY) }, status: { not: 'FAILED' } } }));
   const finish = async (res: { json(): { data: { callId: string } } }) => { await hook('status', res.json().data.callId, { CallStatus: 'completed' }); };
 
   it('at the cap the next start on ANY order is refused before anything is dialled, written or pushed', async () => {
@@ -464,6 +464,63 @@ describe('[CALL-RELAY-ON] the daily cap (CALL_RELAY_MAX_CALLS_PER_DAY): calls st
     expect([x.statusCode, y.statusCode].sort()).toEqual([200, 429]);
     expect(placed).toHaveLength(1);
     await finish(x.statusCode === 200 ? x : y);
+  });
+});
+
+// [CALL-RELAY-ON · security review] The daily cap is shared, so one person could use it up and block everyone.
+// Each person also has their own rolling 24-hour cap (CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY), checked first.
+// A start the voice provider refused (FAILED, nothing dialled, nothing paid) uses no daily slot of either kind.
+describe('[CALL-RELAY-ON] the per-person daily cap (CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY)', () => {
+  const startedToday = () => system(() => app.prisma.callSession.count({ where: { createdAt: { gte: new Date(Date.now() - DAY) }, status: { not: 'FAILED' } } }));
+  const finish = async (res: { json(): { data: { callId: string } } }) => { await hook('status', res.json().data.callId, { CallStatus: 'completed' }); };
+  let seq = 30;
+  const freshCustomer = async () => person(seq++, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
+  const foodFor = (customerId: string) => order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
+
+  it('one person at their cap is refused on any order, while another person can still call', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY'] = '2';
+    const [ana, ben] = [await freshCustomer(), await freshCustomer()];
+    const [a1, a2, a3, b1] = [await foodFor(ana.id), await foodFor(ana.id), await foodFor(ana.id), await foodFor(ben.id)];
+    for (const o of [a1, a2]) {
+      const res = await bridge(ana.token, o.id, 'rider');
+      expect(res.statusCode, res.body).toBe(200);
+      await finish(res);
+    }
+    const over = await bridge(ana.token, a3.id, 'rider');
+    expect([over.statusCode, over.json().error.code]).toEqual([429, 'CALL_USER_DAILY_LIMIT_REACHED']);
+    expect(over.json().error.message).toBe('You have used your Swift calls for today. Message them in chat, or ask support.');
+    expect(await system(() => app.prisma.callSession.count({ where: { orderId: a3.id } }))).toBe(0);
+    expect(placed).toHaveLength(2);
+    const other = await bridge(ben.token, b1.id, 'rider');
+    expect(other.statusCode, other.body).toBe(200);
+    await finish(other);
+  });
+
+  it('the person\'s cap is checked before the shared one: at both, the person is told it is their own limit', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY'] = '1';
+    const cid = await freshCustomer();
+    const [o1, o2] = [await foodFor(cid.id), await foodFor(cid.id)];
+    const first = await bridge(cid.token, o1.id, 'rider');
+    expect(first.statusCode, first.body).toBe(200);
+    await finish(first);
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String(await startedToday());
+    expect((await bridge(cid.token, o2.id, 'rider')).json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+    // and the shared cap still stops someone under their own cap
+    const fresh = await freshCustomer();
+    expect((await bridge(fresh.token, (await foodFor(fresh.id)).id, 'rider')).json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');
+  });
+
+  it('a start the voice provider refused uses no daily slot, the person\'s or the shared one', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY'] = '1';
+    const cid = await freshCustomer();
+    const o = await foodFor(cid.id);
+    twilioAnswers = 'refuse';
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String((await startedToday()) + 1);
+    expect((await bridge(cid.token, o.id, 'rider')).json().error.code).toBe('CALL_PROVIDER_FAILED');
+    twilioAnswers = 'ok';
+    const res = await bridge(cid.token, o.id, 'rider');
+    expect(res.statusCode, res.body).toBe(200);
+    await finish(res);
   });
 });
 

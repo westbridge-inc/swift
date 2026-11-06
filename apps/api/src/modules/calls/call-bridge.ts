@@ -26,9 +26,10 @@ import type { NotificationAudience, NotificationPayload } from '../notification/
 // - Swift pays: a hard 30-minute limit on every call and a per-order cap on
 //   ATTEMPTS (connected or not), CALL_RELAY_MAX_ATTEMPTS_PER_ORDER. One live
 //   call per order (a database rule, so two taps start one call).
-// - [CALL-RELAY-ON · 6 Nov] And a daily cap over every order together:
-//   CALL_RELAY_MAX_CALLS_PER_DAY starts in any 24 hours (default 100), counted
-//   under one lock so two orders can never both take the last slot.
+// - [CALL-RELAY-ON · 6 Nov] And daily caps, counted under one lock so two
+//   starts can never both take the last slot: each person's own
+//   CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY (default 10) first, then the shared
+//   CALL_RELAY_MAX_CALLS_PER_DAY over every order (default 100), in any 24 hours.
 // - The caller ID is Swift's number (CALL_RELAY_CALLER_ID), pinned on the
 //   dial, never the number being called. Never recorded.
 // - Just before each leg rings, that person gets a push: "Swift is calling
@@ -256,10 +257,17 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
       if (attempts >= deps.config.maxAttemptsPerOrder) {
         throw new AppError(429, 'CALL_LIMIT_REACHED', 'Swift has connected as many calls as it can for this order. Message them in chat, or ask support.');
       }
-      // [CALL-RELAY-ON] Every order together: one lock (taken after the order row, in the same order by every start),
-      // then the calls started in the last 24 hours. Connected or not, every attempt counts, like the per-order cap.
+      // [CALL-RELAY-ON] The daily caps: one lock (taken after the order row, in the same order by every start), then
+      // the calls started in the last 24 hours, connected or not. A start the provider refused (FAILED: nothing was
+      // dialled or paid) uses no daily slot. [security review] The person's own cap first, so no one person can use
+      // up the shared day and block everyone else; then the shared cap.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CALL_DAILY_CAP_LOCK}))`;
-      const today = await tx.callSession.count({ where: { createdAt: { gte: new Date(now.getTime() - DAY_MS) } } });
+      const inWindow = { createdAt: { gte: new Date(now.getTime() - DAY_MS) }, status: { not: CALL_STATUS.FAILED } };
+      const mine = await tx.callSession.count({ where: { ...inWindow, callerUserId: input.userId } });
+      if (mine >= deps.config.maxCallsPerUserPerDay) {
+        throw new AppError(429, 'CALL_USER_DAILY_LIMIT_REACHED', 'You have used your Swift calls for today. Message them in chat, or ask support.');
+      }
+      const today = await tx.callSession.count({ where: inWindow });
       if (today >= deps.config.maxCallsPerDay) {
         log().warn({ maxCallsPerDay: deps.config.maxCallsPerDay }, '[CALL-RELAY-ON] daily call cap reached: Call via Swift refused until a slot frees');
         throw new AppError(429, 'CALL_DAILY_LIMIT_REACHED', 'Swift calls are busy right now. Message them in chat, or ask support.');

@@ -37,6 +37,11 @@ export const CALL_RELAY_DEFAULT_MAX_ATTEMPTS = 6;
 export const CALL_RELAY_MAX_CALLS_PER_DAY_ENV = 'CALL_RELAY_MAX_CALLS_PER_DAY';
 export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY = 100;
 export const CALL_RELAY_MAX_CALLS_PER_DAY_CEILING = 10_000;
+/** [CALL-RELAY-ON · security review] Calls ONE person may start in any 24 hours, so no one person can use up
+ *  the shared daily cap and block everyone else. Checked before the shared cap. */
+export const CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_ENV = 'CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY';
+export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY = 10;
+export const CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_CEILING = 200;
 /** Owner ruling 22 Oct: a hard 30-minute limit on every call. */
 export const CALL_TIME_LIMIT_SECONDS = 1800;
 /** How long each phone rings before the leg counts as not answered. */
@@ -47,6 +52,7 @@ export interface CallRelayConfig {
   webhookBase: string;
   maxAttemptsPerOrder: number;
   maxCallsPerDay: number;
+  maxCallsPerUserPerDay: number;
   twilio: { accountSid: string; apiKeySid: string; apiKeySecret: string; authToken: string };
 }
 
@@ -76,6 +82,11 @@ export function readCallRelayConfig(
   if (!(maxCallsPerDay >= 1 && maxCallsPerDay <= CALL_RELAY_MAX_CALLS_PER_DAY_CEILING)) {
     problems.push(`${CALL_RELAY_MAX_CALLS_PER_DAY_ENV} must be a whole number from 1 to ${CALL_RELAY_MAX_CALLS_PER_DAY_CEILING}`);
   }
+  const rawPerUser = (env[CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_ENV] ?? '').trim();
+  const maxCallsPerUserPerDay = rawPerUser === '' ? CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY : /^\d{1,3}$/.test(rawPerUser) ? Number(rawPerUser) : NaN;
+  if (!(maxCallsPerUserPerDay >= 1 && maxCallsPerUserPerDay <= CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_CEILING)) {
+    problems.push(`${CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_ENV} must be a whole number from 1 to ${CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_CEILING}`);
+  }
   const accountSid = env['TWILIO_ACCOUNT_SID'] ?? '';
   const apiKeySid = env['TWILIO_API_KEY_SID'] ?? '';
   const apiKeySecret = (env['TWILIO_API_KEY_SECRET'] ?? '').trim();
@@ -85,7 +96,7 @@ export function readCallRelayConfig(
   if (!apiKeySecret) problems.push('TWILIO_API_KEY_SECRET is missing');
   if (!authToken) problems.push('TWILIO_WEBHOOK_AUTH_TOKEN is missing (every call webhook is signature-checked with it)');
   if (problems.length) return { ok: false, problems };
-  return { ok: true, config: { callerId, webhookBase, maxAttemptsPerOrder, maxCallsPerDay, twilio: { accountSid, apiKeySid, apiKeySecret, authToken } } };
+  return { ok: true, config: { callerId, webhookBase, maxAttemptsPerOrder, maxCallsPerDay, maxCallsPerUserPerDay, twilio: { accountSid, apiKeySid, apiKeySecret, authToken } } };
 }
 
 /**
