@@ -398,7 +398,7 @@ describe('[REVIEW-M17 S1-1] the dial guard', () => {
     }
   });
   it('refuses international, premium, service, short, test-range, malformed and Swift\'s own number', () => {
-    for (const raw of ['+447700900123', '+882161234567', '+18005550123', '+5929123456', '+5928123456', '+5920612345', '+5921123456', '911', '6001234', '5926001234', '+59260012345', '+592600123', '', '  ', 'tel:+5926001234', '+5926001234;ext=1']) {
+    for (const raw of ['+447700900123', '+882161234567', '+18005550123', '+5929123456', '+5928123456', testPhone(), '+5921123456', '911', '6001234', '5926001234', '+59260012345', '+592600123', '', '  ', 'tel:+5926001234', '+5926001234;ext=1']) {
       expect(dialableNumber(raw, CALLER_ID), JSON.stringify(raw)).toBeNull();
     }
     expect(dialableNumber(null, CALLER_ID)).toBeNull();
