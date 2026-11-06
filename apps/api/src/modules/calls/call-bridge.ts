@@ -25,7 +25,8 @@ import type { NotificationAudience, NotificationPayload } from '../notification/
 // - Press 1 on BOTH legs (24 Oct: on some Guyana routes the network itself
 //   "answers" in 0.35 s and the phone never rings). A leg the provider calls
 //   answered is not a person: CONNECTED only on the called party's own 1.
-// - Swift pays: a hard 30-minute limit on every call and a per-order cap on
+// - Swift pays: a time limit on every call (CALL_RELAY_MAX_CALL_MINUTES, default
+//   10 minutes, owner 6 Nov; never more than 30, owner 22 Oct) and a per-order cap on
 //   ATTEMPTS (connected or not), CALL_RELAY_MAX_ATTEMPTS_PER_ORDER. One live
 //   call per order (a database rule, so two taps start one call).
 // - [CALL-RELAY-ON · 6 Nov] And daily caps, counted under one lock so two
@@ -71,7 +72,7 @@ export const CALL_WORDS = {
 } as const;
 
 /** A call that has been live this long is over, whatever the provider last said:
- *  the ring on both legs plus the 30-minute limit, with a minute to spare. */
+ *  the ring on both legs plus the longest limit the setting allows (30 minutes), with a minute to spare. */
 export const CALL_STALE_AFTER_MS = (CALL_TIME_LIMIT_SECONDS + 2 * CALL_RING_SECONDS + 60) * 1000;
 
 /**

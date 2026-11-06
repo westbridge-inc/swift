@@ -152,7 +152,7 @@ describe('[O-1] the settings and the boot guard', () => {
     const read = readCallRelayConfig(full());
     expect(read.ok).toBe(true);
     if (read.ok) expect(read.config).toMatchObject({ callerId: CALLER_ID, webhookBase: BASE, maxAttemptsPerOrder: CALL_RELAY_DEFAULT_MAX_ATTEMPTS });
-    // [REVIEW-M17 S2-2] Launch defaults: 4 attempts per order, 40 calls a day, 5 per person, 30 minutes per call.
+    // [REVIEW-M17 S2-2 · owner 6 Nov] Launch defaults: 4 attempts per order, 40 calls a day, 5 per person, 10 minutes per call.
     expect(CALL_RELAY_DEFAULT_MAX_ATTEMPTS).toBe(4);
   });
 
@@ -213,11 +213,12 @@ describe('[O-1] the settings and the boot guard', () => {
   });
 
   // [REVIEW-M17 S2-2] The per-call time limit is a setting (the owner may shorten it), applied to BOTH legs.
-  it('the per-call time limit: 30 minutes by default, a whole number of minutes from 2 to 30', () => {
-    expect(CALL_RELAY_DEFAULT_MAX_CALL_MINUTES).toBe(30);
+  // [owner 6 Nov 2026 ~09:30Z] The longest Swift call is 10 minutes (was 30, owner 22 Oct); the setting may go 2-30.
+  it('the per-call time limit: 10 minutes by default (owner 6 Nov), a whole number of minutes from 2 to 30', () => {
+    expect(CALL_RELAY_DEFAULT_MAX_CALL_MINUTES).toBe(10);
     const unset = readCallRelayConfig(full());
-    expect(unset.ok && unset.config.maxCallSeconds).toBe(1800);
-    for (const [raw, want] of [['2', 120], ['10', 600], [' 30 ', 1800], ['', 1800]] as const) {
+    expect(unset.ok && unset.config.maxCallSeconds).toBe(600);
+    for (const [raw, want] of [['2', 120], ['10', 600], [' 30 ', 1800], ['', 600]] as const) {
       const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALL_MINUTES: raw }));
       expect(read.ok && read.config.maxCallSeconds, JSON.stringify(raw)).toBe(want);
     }
@@ -234,7 +235,8 @@ describe('[O-1] the settings and the boot guard', () => {
     expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_DAY=/m);
     expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_DAY=40$/m);
     expect(deployExample).toMatch(/^# CALL_RELAY_MAX_ATTEMPTS_PER_ORDER=4$/m);
-    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALL_MINUTES=30$/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALL_MINUTES=10$/m);
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALL_MINUTES=.*default 10 = owner ruling 6 Nov/m);
     expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALL_MINUTES=/m);
     expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY=/m);
     expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY=5$/m);

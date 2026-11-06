@@ -45,12 +45,12 @@ export const CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_ENV = 'CALL_RELAY_MAX_CALLS_P
 /** [REVIEW-M17 S2-2] Launch default 5 (was 10). */
 export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY = 5;
 export const CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_CEILING = 200;
-/** Owner ruling 22 Oct: a hard 30-minute limit on every call. The longest a call can ever be; the setting below may
- *  only shorten it. */
+/** Owner ruling 22 Oct: a hard 30-minute limit on every call. The longest the setting below may ever allow. */
 export const CALL_TIME_LIMIT_SECONDS = 1800;
-/** [REVIEW-M17 S2-2] The per-call limit in minutes, on BOTH legs (default 30 = the owner's ruling; 2-30). */
+/** [REVIEW-M17 S2-2] The per-call limit in minutes, on BOTH legs (2-30). [owner 6 Nov 2026 ~09:30Z] Default 10:
+ *  the longest Swift call is 10 minutes. */
 export const CALL_RELAY_MAX_CALL_MINUTES_ENV = 'CALL_RELAY_MAX_CALL_MINUTES';
-export const CALL_RELAY_DEFAULT_MAX_CALL_MINUTES = 30;
+export const CALL_RELAY_DEFAULT_MAX_CALL_MINUTES = 10;
 export const CALL_RELAY_MIN_CALL_MINUTES = 2;
 /** How long each phone rings before the leg counts as not answered. */
 export const CALL_RING_SECONDS = 25;

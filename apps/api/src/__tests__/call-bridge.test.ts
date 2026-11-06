@@ -38,7 +38,8 @@ const CALLER_ID = '+15005550006';
 const BASE = 'https://api.example.test/api/v1/calls/voice';
 const ENV = {
   CALL_RELAY: '1', CALL_RELAY_CALLER_ID: CALLER_ID, CALL_RELAY_WEBHOOK_BASE: BASE, CALL_RELAY_MAX_ATTEMPTS_PER_ORDER: '3',
-  // [CALL-RELAY-ON] The daily cap's own tests set it; every other test runs well under it.
+  // [CALL-RELAY-ON] The daily cap's own tests set it; every other test runs well under it. The time limit is set to
+  // the longest allowed (30) here so the older documents below keep their numbers; the default (10) has its own test.
   CALL_RELAY_MAX_CALLS_PER_DAY: '10000', CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: '200', CALL_RELAY_MAX_CALL_MINUTES: '30',
   TWILIO_ACCOUNT_SID: SID, TWILIO_API_KEY_SID: KEY, TWILIO_API_KEY_SECRET: 'bridge-test-secret', TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN,
 };
@@ -670,8 +671,8 @@ describe('[REVIEW-M17 S2-1] closing the account does not give the day back', () 
 
 // [REVIEW-M17 S2-2] The per-call time limit is a setting, applied to both legs.
 describe('[REVIEW-M17 S2-2] CALL_RELAY_MAX_CALL_MINUTES', () => {
-  it('10 minutes: leg 1 TimeLimit=600 and leg 2 timeLimit="600"', async () => {
-    process.env['CALL_RELAY_MAX_CALL_MINUTES'] = '10';
+  it('[owner 6 Nov] unset: the longest call is 10 minutes on both legs (TimeLimit=600, timeLimit="600")', async () => {
+    delete process.env['CALL_RELAY_MAX_CALL_MINUTES'];
     const o = await liveFood();
     const res = await bridge(diner.token, o.id, 'rider');
     expect(res.statusCode, res.body).toBe(200);
@@ -679,6 +680,18 @@ describe('[REVIEW-M17 S2-2] CALL_RELAY_MAX_CALL_MINUTES', () => {
     await hook('leg1', res.json().data.callId, {});
     const dial = await hook('leg1-gather', res.json().data.callId, { Digits: '1' });
     expect(dial.body).toContain('timeLimit="600"');
+    await hook('dial-done', res.json().data.callId, { DialCallStatus: 'no-answer' });
+  });
+
+  it('set to 5 minutes: leg 1 TimeLimit=300 and leg 2 timeLimit="300"', async () => {
+    process.env['CALL_RELAY_MAX_CALL_MINUTES'] = '5';
+    const o = await liveFood();
+    const res = await bridge(diner.token, o.id, 'rider');
+    expect(res.statusCode, res.body).toBe(200);
+    expect(placed.at(-1)!.get('TimeLimit')).toBe('300');
+    await hook('leg1', res.json().data.callId, {});
+    const dial = await hook('leg1-gather', res.json().data.callId, { Digits: '1' });
+    expect(dial.body).toContain('timeLimit="300"');
     await hook('dial-done', res.json().data.callId, { DialCallStatus: 'no-answer' });
   });
 });
