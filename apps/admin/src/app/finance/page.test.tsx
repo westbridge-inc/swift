@@ -45,6 +45,9 @@ function financeHandler(mutation: (_request: ApiRequest) => { body: unknown; sta
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/finance/payment-mix') {
       return { body: { success: true, data: { byMethod: [], mmgUnconfirmed: 0 } } };
     }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/finance/in-person-payments') {
+      return { body: { success: true, data: { windowDays: 30, totals: [], cashOnHandGyd: 0, rows: [] } } };
+    }
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/finance/cash-settlements') {
       return {
         body: {

@@ -155,6 +155,45 @@ describe('rendered weekly fee', () => {
 });
 
 
+describe('[owner 5 Nov 2026] paying in person', () => {
+  const fee = (inPerson: unknown, status = 'ACTIVE') => ({ status, amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }, { id: 'CARD', state: 'off' }], recentCheckouts: [], ...(inPerson === undefined ? {} : { inPerson }) });
+
+  it.each(['vendor', 'rider'] as const)('%s: where the door accepts it says so, and the link is a door that exists', async (family) => {
+    mockApi(() => ({ body: { success: true, data: fee({ open: true, waitingGyd: null }) } }));
+    const view = renderWithQuery(<WeeklyFee family={family} />);
+    const line = await screen.findByTestId('pay-in-person');
+    expect(line.textContent).toContain('pay Swift directly, in person, by cash, cheque or bank transfer');
+    expect(line.textContent).toContain('A cheque counts once it clears');
+    expect(line.textContent).toContain('A payment counts once Swift records it, and your status here changes then');
+    expect(line.textContent).toContain('Never give it to anyone else');
+    expect(within(line).getByRole('link', { name: 'Ask Swift to arrange it' }).getAttribute('href')).toBe(family === 'vendor' ? '/dashboard/help' : '/portal/help');
+    expect(line.textContent).not.toContain('Get help');
+    view.unmount();
+  });
+
+  it.each([
+    ['the door is closed', { open: false, waitingGyd: null }],
+    ['an older API says nothing', undefined],
+  ])('%s: no offer', async (_name, inPerson) => {
+    mockApi(() => ({ body: { success: true, data: fee(inPerson) } }));
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await screen.findByText('Nothing to pay for the week from 6 Oct 2026');
+    expect(screen.queryByTestId('pay-in-person')).toBeNull();
+    expect(screen.queryByTestId('in-person-waiting')).toBeNull();
+    view.unmount();
+  });
+
+  it('while a record waits it says so plainly, with the amount, under where the fee stands', async () => {
+    mockApi(() => ({ body: { success: true, data: fee({ open: false, waitingGyd: 5000 }) } }));
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    const words = (await screen.findByTestId('in-person-waiting')).textContent!;
+    expect(words).toContain('Swift has your in-person payment of GY$5,000 and is recording it');
+    expect(words).toContain('Do not pay again');
+    expect(screen.queryByTestId('pay-in-person')).toBeNull();
+    view.unmount();
+  });
+});
+
 describe('own checkout reopen affordance', () => {
   it('reload with MMG off shows Back and Guyana deadline; same page and fresh keys on two taps', async () => {
     const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});

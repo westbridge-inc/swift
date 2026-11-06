@@ -3,9 +3,9 @@ import { join, relative } from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
-// [OWNER 8 Oct 23:58 (4) · 29 Sep] Partners pay the weekly fee ONLY through the
-// MMG checkout page (card later): never at an MMG agent, never to a Swift
-// Number. The server still sends the account's Swift Number (san /
+// [OWNER 8 Oct 23:58 (4) · 29 Sep · 5 Nov] Partners pay the weekly fee on the
+// MMG checkout page (card later) or directly to the company in person: never at
+// an MMG agent, never to a Swift Number. The server still sends the account's Swift Number (san /
 // sanFormatted) for older builds; the phone app and the website never show it
 // and never name a Swift Number or an agent as a way to pay.
 

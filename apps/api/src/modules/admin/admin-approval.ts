@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { ADMIN_ACTION_CLASSES, type AdminActionClass, type AdminRouteAuthority } from './admin-authority';
 import { lockCreditRefundAsks, PAID_ACTION, validatePaidAsk } from '../billing/credit-refund';
+import { IN_PERSON_ACTION, validateInPersonAsk } from '../billing/in-person-payment';
 import { lockClaimPaymentAsks, validateClaimPayAsk } from '../cash/claim-payout';
 import { SOLO_ROLE, isSoleApprover } from './solo-approval';
 
@@ -350,6 +351,8 @@ export async function resolveApproval(
     // An ask to record a payment on a case is the same kind of marker, under that case's lock: a reject either sees it
     // or has finished, and then the ask is refused.
     const claimEntity = data.action === PAY_ASK_ACTION ? data.entityId : null;
+    // [OWNER 5 Nov 2026] A fee paid in person that could never be recorded is refused now, not after the wait.
+    if (data.action === IN_PERSON_ACTION && data.entityId) await validateInPersonAsk(prisma, data.entityId, subject.body);
     const asked: AskResult = await prisma.$transaction(async (tx): Promise<AskResult> => {
       if (refundEntity) await lockCreditRefundAsks(tx, refundEntity);
       if (claimEntity) await lockClaimPaymentAsks(tx, claimEntity);

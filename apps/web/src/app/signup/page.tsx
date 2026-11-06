@@ -53,7 +53,7 @@ function safeReturnPath(): string {
 
 const ROLES: { role: Role; title: string; desc: string; pictogram: PictogramName }[] = [
   { role: 'CUSTOMER', title: 'Order on Swift', desc: 'Food, groceries, shops, parcels and rides.', pictogram: 'food' },
-  { role: 'VENDOR', title: 'Put my business on Swift', desc: 'Take orders and keep 100% of your prices. A flat weekly fee, paid through MMG checkout.', pictogram: 'shops' },
+  { role: 'VENDOR', title: 'Put my business on Swift', desc: 'Take orders and keep 100% of your prices. A flat weekly fee, paid through MMG checkout or in person.', pictogram: 'shops' },
   { role: 'RIDER', title: 'Deliver with Swift', desc: 'Motorbike or bicycle deliveries on your own schedule.', pictogram: 'send' },
   { role: 'DRIVER', title: 'Drive a taxi with Swift', desc: 'Take ride requests with your car. Documents are checked before your first trip.', pictogram: 'taxi' },
 ];

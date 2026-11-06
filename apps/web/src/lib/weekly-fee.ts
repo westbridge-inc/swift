@@ -26,6 +26,8 @@ export interface FeeSubscription {
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
   /** [owner legal plan R12] The weekly-fee receipts, printed by the API (one source for every screen). */
   feeReceipts?: FeeReceipt[];
+  /** [OWNER 5 Nov 2026] Paying in person: `open` only where the door accepts. Absent from an older API: nothing is shown. */
+  inPerson?: { open: boolean; waitingGyd: number | null };
   /** The partner's newest card session of the last day (CARD-CHECKOUT-API section 4), read by the card lib only. */
   latestCardSession?: unknown;
 }

@@ -42,5 +42,6 @@ export function feeCoveredLine(amount: number, currencyCode: string, opts: { fir
   return `${opts.first ? 'Your first weekly fee' : 'The weekly fee'} of ${formatMoney(amount, currencyCode)} is already paid.`;
 }
 
-/** What happens after paying: true on every rail, promising no way to pay. */
-export const FEE_RESTORE_LINE = 'Your access comes back as soon as your payment is received.';
+/** What happens after paying: true on every rail, promising no way to pay. "Recorded", not "received": money paid
+ *  in person counts only once a person has recorded it [OWNER 5 Nov 2026]. */
+export const FEE_RESTORE_LINE = 'Your access comes back as soon as your payment is recorded.';

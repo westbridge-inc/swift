@@ -46,6 +46,21 @@ const FAQ: QA[] = [
     ),
   },
   {
+    // [OWNER 5 Nov 2026] MMG checkout stays; in person is recorded by a person, directly to the company.
+    q: 'How do businesses, riders and drivers pay the weekly fee?',
+    a: (
+      <>
+        In the Swift app or on swiftgy.com, on MMG&apos;s checkout page. Or in person, directly to {site.legalEntityName}, by
+        cash, cheque or bank transfer:{' '}
+        <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/contact">
+          contact Swift
+        </Link>{' '}
+        to arrange it. A cheque counts once it clears, a payment counts once Swift records it, and you get a receipt.
+        Never give it to anyone else.
+      </>
+    ),
+  },
+  {
     q: 'How do businesses and drivers actually get paid?',
     a: (
       <>

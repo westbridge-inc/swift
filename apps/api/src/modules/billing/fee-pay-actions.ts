@@ -37,7 +37,7 @@ export { FEE_CHECKOUT_PLATFORMS_KEY };
 export const FEE_CHECKOUT_REOPEN_PLATFORMS_KEY = 'billing.feeCheckout.reopen.platforms';
 const SWITCH_TTL_MS = 60_000;
 /** Paying rejoins a CHURNED account; PAUSED (billing stopped) and CANCELLED do not pay. */
-const PAYABLE: ReadonlySet<SubscriptionStatus> = new Set<SubscriptionStatus>([...OPERABLE_STATUSES, 'SUSPENDED', 'CHURNED']);
+export const PAYABLE: ReadonlySet<SubscriptionStatus> = new Set<SubscriptionStatus>([...OPERABLE_STATUSES, 'SUSPENDED', 'CHURNED']);
 
 type PayableSub = Pick<Subscription, 'status' | 'feeWaived' | 'currencyCode' | 'weeklyRate' | 'customRate'>;
 

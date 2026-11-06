@@ -11,6 +11,7 @@ import {
   processSettlement,
   type CashSettlementRow,
 } from '@/lib/api';
+import { InPersonPayments } from '@/components/finance/InPersonPayments';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { gyCalendarDay, gyDate } from '@/lib/dates';
@@ -279,6 +280,9 @@ export default function FinancePage() {
 
       {/* Manual vendor payouts awaiting a transfer reference */}
       <SettlementsSection />
+
+      {/* Weekly fees paid directly to Westbridge Inc., apart from MMG */}
+      <InPersonPayments />
 
       {/* MMG visibility — payment mix + the store⇄rider fee ledger */}
       <MmgSection />

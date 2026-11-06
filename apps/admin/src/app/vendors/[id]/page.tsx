@@ -92,8 +92,8 @@ function vendorVerdict(c: VendorActivationChecklist, name: string): { tone: Tone
     case 'FEE_UNPAID':
       // [MC-AD2] Billing lifts a fee hold when a payment is confirmed; the console never does.
       return { tone: 'warn', text: c.suspensionSource === 'BILLING'
-        ? 'Suspended, and its weekly fee is unpaid or its billing is stopped. It comes back by itself when the fee is paid through MMG checkout.'
-        : 'Suspended, and its weekly fee is unpaid or its billing is stopped. Pay through MMG checkout first. After payment, refresh this checklist and reinstate the admin suspension.' };
+        ? 'Suspended, and its weekly fee is unpaid or its billing is stopped. It comes back by itself when the fee is paid, on MMG checkout or recorded in person.'
+        : 'Suspended, and its weekly fee is unpaid or its billing is stopped. The fee must be paid first, on MMG checkout or in person. After payment, refresh this checklist and reinstate the admin suspension.' };
     case 'OWNER_ACCOUNT_RESTRICTED':
       return { tone: 'bad', text: "The owner's account is banned or suspended. Reinstate the owner's account first, then refresh this store's checklist." };
     case 'ACCOUNT_CLOSED':

@@ -28,9 +28,22 @@ describe('partner checkout surface census', () => {
     expect(source('src/modules/vendor/screens/VendorPayAllScreen.tsx')).toContain("WebBrowser.openAuthSessionAsync(url, 'swift://pay/mmg/return')");
     expect(source('src/services/api.ts')).toContain("config.headers['x-client-platform'] = Platform.OS");
   });
+  it('[owner 5 Nov 2026] the phone offers paying in person only where the door accepts, with a door to ask, and says when one waits', () => {
+    const screen = source('src/modules/billing/screens/WeeklyFeeScreen.tsx');
+    expect(screen).toMatch(/\{sub\.inPerson\?\.open \? <View testID="pay-in-person">[\s\S]{0,120}\{PAY_IN_PERSON\}/);
+    expect(screen).toMatch(/testID="pay-in-person-ask"[\s\S]{0,240}navigate\?\.\('GetHelp', \{ category: 'PAYMENT'/);
+    expect(screen).toContain('testID="in-person-waiting"');
+    expect(screen).toContain('inPersonWaiting(sub.inPerson.waitingGyd)');
+    const faq = source('src/modules/profile/screens/FaqScreen.tsx');
+    expect(faq).toContain('directly to Westbridge Inc., by cash, cheque or bank transfer');
+    expect(faq).toContain('a payment counts once Swift records it');
+    expect(faq).toContain('Never give it to anyone else');
+  });
   it('the mobile and web state machines cannot drift', () => {
     expect(source('src/lib/weeklyFee.ts')).toBe(source('../web/src/lib/weekly-fee.ts'));
     expect(source('src/lib/weeklyFeeReopen.ts')).toBe(source('../web/src/lib/weekly-fee-reopen.ts'));
+    // [OWNER 5 Nov 2026] Paying in person: its words, kept out of the web page's first load, shared the same way.
+    expect(source('src/lib/weeklyFeeInPerson.ts')).toBe(source('../web/src/lib/weekly-fee-in-person.ts'));
     // [FEE-STATUS · REVIEW-F S4-1] The fee status words, shared the same way.
     expect(source('src/lib/fee-status.ts')).toBe(source('../web/src/lib/fee-status.ts'));
     // [ENTERPRISE E1b] "Pay all my branches": the list, its words and the checkout follow, shared the same way.

@@ -68,7 +68,8 @@ describe('[hard rule 2] test_no_customer_funds_ingress — order money never ent
     // (owner ruling 2026-10-07), subledgered the same way: fee money, never order money.
     const names = Object.keys(LEDGER_ACCOUNTS).sort();
     expect(names).toEqual([
-      'BANK_LOCAL', 'CHARGEBACK_LOSS', 'CHARGEBACK_RESERVE', 'CLEARING_CARD', 'CLEARING_MMG',
+      // CASH_ON_HAND: a PARTNER's weekly fee paid in person to Westbridge Inc. (owner 5 Nov 2026), never order money.
+      'BANK_LOCAL', 'CASH_ON_HAND', 'CHARGEBACK_LOSS', 'CHARGEBACK_RESERVE', 'CLEARING_CARD', 'CLEARING_MMG',
       // FEE_RECEIVABLE: a weekly fee a PARTNER owes again after MMG returned it (subledger = subscriptionId), never order money.
       'DEFERRED_REVENUE', 'FEE_RECEIVABLE', 'FEE_REVENUE', 'FX_VARIANCE', 'OPENING_BALANCES', 'PROMO_EXPENSE',
       'PROVIDER_FEES', 'REFUND_PAYABLE', 'SUSPENSE_LIABILITY', 'WALLET_LIABILITY',
@@ -76,6 +77,7 @@ describe('[hard rule 2] test_no_customer_funds_ingress — order money never ent
     expect(LEDGER_ACCOUNTS['WALLET_LIABILITY']!.name).toMatch(/subscriptionId/);
     expect(LEDGER_ACCOUNTS['REFUND_PAYABLE']!.name).toMatch(/subscriptionId/);
     expect(LEDGER_ACCOUNTS['FEE_RECEIVABLE']!.name).toMatch(/subscriptionId/);
+    expect(LEDGER_ACCOUNTS['CASH_ON_HAND']!.name).toMatch(/Weekly-fee cash/);
   });
 
   it('User.walletBalance stays dormant — a customer balance Swift owes is custody by another name', () => {
