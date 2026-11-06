@@ -193,7 +193,7 @@ Every number of weeks from 1 to `PAY_AHEAD_MAX_WEEKS` (4) that fits the limit no
 
 `POST /api/v1/{family}/subscription/mmg-checkout`
 
-Body: `{}` (one week), or `{ "weeks": 1..4 }` (owner 6 Nov 2026). Any other `weeks` is `400 VALIDATION_ERROR`. A tap that names its weeks while another open checkout asks a different amount is `409 CHECKOUT_OPEN_OTHER_AMOUNT` (`details.ref`, `amountGyd`, `expiresAt`); a tap with no `weeks` is handed the open one, as before. Past the limit: `409 PAY_AHEAD_LIMIT`.
+Body: `{}` (one week), or `{ "weeks": 1..4 }` (owner 6 Nov 2026). Any other `weeks` is `400 VALIDATION_ERROR`. A tap whose weeks (none = one week) cost a different amount than the open checkout asks is `409 CHECKOUT_OPEN_OTHER_AMOUNT` (`details.ref`, `amountGyd`, `expiresAt`): never handed a page for another amount; the same amount is handed the open one, as before. Past the limit: `409 PAY_AHEAD_LIMIT`.
 
 The body is `{}`. The server prices the checkout; a client amount would be ignored.
 

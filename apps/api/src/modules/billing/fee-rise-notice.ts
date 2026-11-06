@@ -93,8 +93,15 @@ export interface HeldFeeRise {
   appliesFrom: string | null;
   /** The inbox row that told it. */
   inboxId: string | null;
-  /** A week held paid at the old price already moved it once. */
+  /** A week held paid at the old price already moved it. */
   deferredOnce?: boolean;
+  /** [REVIEW-M16 S2-1] The whole weeks at the old price still owed the old price, counted at the first deferral and
+   *  never raised after it: each later check keeps the old price for at most this many, and never for more than the
+   *  credit still holds, so money that arrives after the notice cannot stretch it. */
+  oldWeeksLeft?: number;
+  /** The next fee date when oldWeeksLeft was counted: every week charged from it on (a captured weekly fee whose period
+   *  starts there or later) uses one of them, whatever the calendar did meanwhile (a stop and resume, a fee pause). */
+  oldWeeksFrom?: string;
   /** [ENTERPRISE E2] CHAIN_DEAL only: the chain deal the branch is on now (its customRate) ... */
   customFrom?: number;
   /** ... and what its customRate becomes (null: the deal ends, the branch pays its own tier fee). */
@@ -162,6 +169,8 @@ export function readHeldFeeRise(value: unknown): HeldFeeRise | null {
     from, to, currencyCode: v['currencyCode'], source: v['source'] as FeeRiseSource, heldAt: v['heldAt'], noticeAt, appliesFrom,
     inboxId: typeof v['inboxId'] === 'string' ? v['inboxId'] : null,
     ...(v['deferredOnce'] === true ? { deferredOnce: true } : {}),
+    ...(Number.isInteger(v['oldWeeksLeft']) && (v['oldWeeksLeft'] as number) >= 0 ? { oldWeeksLeft: v['oldWeeksLeft'] as number } : {}),
+    ...(isIso(v['oldWeeksFrom']) ? { oldWeeksFrom: v['oldWeeksFrom'] } : {}),
     ...chain,
     ...basis,
   };

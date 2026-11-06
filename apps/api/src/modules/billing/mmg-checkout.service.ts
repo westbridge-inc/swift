@@ -801,13 +801,12 @@ export class MmgCheckoutService {
         throw new AppError(409, 'CHECKOUT_CONFIRMING', 'An earlier MMG payment is being confirmed. Do not pay again.', { ref: open.id });
       }
       if (open && open.expiresAt > now) {
-        // [owner 6 Nov 2026] A tap that chose its weeks is handed the open page only when that page asks the amount
-        // those weeks cost now: never sent to pay a different amount than the one it chose (another device's).
-        if (input.weeks !== undefined) {
-          const asked = checkoutAmountForWeeks(await payInfo(this.prisma, sub), weeks);
-          if (Number(open.amount) !== asked) {
-            throw new AppError(409, 'CHECKOUT_OPEN_OTHER_AMOUNT', `An MMG payment of ${formatMoney(Number(open.amount), 'GYD')} is already open. Finish it on MMG's page, or wait until it closes, then choose again.`, { ref: open.id, amountGyd: Number(open.amount), expiresAt: open.expiresAt.toISOString() });
-          }
+        // [owner 6 Nov 2026 · REVIEW-G21 S3-1] A tap is handed the open page only when that page asks the amount the
+        // weeks it chose cost now (no weeks, an older app: one week): never sent to pay a different amount than its
+        // screen showed, such as another device's four-week page.
+        const asked = checkoutAmountForWeeks(await payInfo(this.prisma, sub), weeks);
+        if (Number(open.amount) !== asked) {
+          throw new AppError(409, 'CHECKOUT_OPEN_OTHER_AMOUNT', `An MMG payment of ${formatMoney(Number(open.amount), 'GYD')} is already open. Finish it on MMG's page, or wait until it closes, then choose again.`, { ref: open.id, amountGyd: Number(open.amount), expiresAt: open.expiresAt.toISOString() });
         }
         return (await this.bindKey(who, open, now)).answer();
       }

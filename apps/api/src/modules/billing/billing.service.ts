@@ -5645,7 +5645,8 @@ export class BillingService {
    * once every week that started before its told date is settled: the next
    * weekly fee to be charged is due on or after that date. Every whole week
    * held in the fee credit at the old price keeps it: the rise moves past all
-   * of them, once [owner 6 Nov 2026, four weeks ahead]. `drop` = the hourly pass may drop a rise that no longer
+   * of them, counted in weeks (oldWeeksLeft), so a stop and resume or a fee
+   * pause never lets it reach one [owner 6 Nov 2026, four weeks ahead]. `drop` = the hourly pass may drop a rise that no longer
    * matches (the paid-week transaction leaves that to it).
    */
   private async applyHeldFeeRiseInTx(
@@ -5680,17 +5681,25 @@ export class BillingService {
         return { dropped: true, held, feeNow: sub!.status !== 'CANCELLED' ? weeklyFeeAmount(sub!) : null };
       }
     }
-    if (!held.deferredOnce) {
+    {
       const credit = await tx.prepaidBalance.findUnique({ where: { subscriptionId }, select: { balance: true, currencyCode: true } });
-      // [owner 6 Nov 2026 · four weeks ahead] Every whole week held at the old fee keeps it, not only the first: the rise
-      // moves past all of them at once. Bounded by the most that can be held lawfully (the week due plus the four-week
-      // limit); anything above that is over the limit and is refunded (pageIfPayAheadOverCap), not kept at a price. Once
-      // told, no new payment reaches a week from the told date (pay-ahead.ts), so nothing paid later is caught by it.
-      const weeksHeld = credit && credit.currencyCode === sub!.currencyCode
-        ? Math.min(PAY_AHEAD_MAX_WEEKS + 1, Math.floor(Number(credit.balance) / held.from + 1e-9)) : 0;
+      // [owner 6 Nov 2026 · four weeks ahead · REVIEW-M16 S2-1] Every whole week held at the old fee keeps it, counted
+      // in WEEKS, not as one date: a stop and resume, or a fee pause, moves the next fee date past any date set here
+      // while those weeks are still held. The first deferral counts what is held now, bounded by the most that can be
+      // held lawfully (the week due plus the four-week limit; anything above it is over the limit and is refunded,
+      // pageIfPayAheadOverCap). Every later check keeps the old fee for at most that count less the weeks charged since,
+      // and never for more than the credit still holds, so it only falls; once told, no door takes a payment for a week from the told date
+      // (pay-ahead.ts), and money that arrives later cannot stretch it.
+      const wholeOld = credit && credit.currencyCode === sub!.currencyCode ? Math.floor(Number(credit.balance) / held.from + 1e-9) : 0;
+      // Weeks charged since the count was taken each used one of them (a row per paid week, whatever the calendar did).
+      const usedSince = held.deferredOnce && held.oldWeeksFrom
+        ? await tx.subscriptionPayment.count({ where: { subscriptionId, status: 'CAPTURED', periodStart: { gte: new Date(held.oldWeeksFrom) } } })
+        : 0;
+      const counted = held.deferredOnce ? (held.oldWeeksLeft ?? 0) - usedSince : PAY_AHEAD_MAX_WEEKS + 1;
+      const weeksHeld = Math.max(0, Math.min(counted, wholeOld));
       if (weeksHeld >= 1) {
         const later = new Date(sub!.nextBillingDate.getTime() + weeksHeld * 7 * 86_400_000);
-        const value: HeldFeeRise = { ...held, appliesFrom: later.toISOString(), deferredOnce: true };
+        const value: HeldFeeRise = { ...held, appliesFrom: later.toISOString(), deferredOnce: true, oldWeeksLeft: weeksHeld, oldWeeksFrom: sub!.nextBillingDate.toISOString() };
         await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
         await tx.auditLog.create({ data: {
           action: 'BILLING_FEE_RISE_DEFERRED', entity: 'Subscription', entityId: subscriptionId,

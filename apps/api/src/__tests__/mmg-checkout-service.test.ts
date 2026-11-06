@@ -514,12 +514,21 @@ describe('[owner 6 Nov] up to four weeks ahead', () => {
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
   });
 
-  it('a tap that chose its weeks is never handed an open page for another amount; a tap that chose none still is', async () => {
+  it('a tap is never handed an open page for another amount than its weeks cost; the same amount is handed back', async () => {
     const s = await makeSub();
     const first = await startWeeks(s, 1);
     await expect(startWeeks(s, 3)).rejects.toMatchObject({ statusCode: 409, code: 'CHECKOUT_OPEN_OTHER_AMOUNT', details: { ref: first.checkout.ref, amountGyd: 2100 } });
     expect((await startWeeks(s, 1)).checkout.ref).toBe(first.checkout.ref);
     expect((await start(s)).checkout.ref).toBe(first.checkout.ref);
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
+  });
+
+  it('[REVIEW-G21 S3-1] an older app (no weeks: one week) is never handed another device\'s four-week page', async () => {
+    const s = await makeSub();
+    const four = await startWeeks(s, 4);
+    expect(four.checkout.amountGyd).toBe(8400);
+    await expect(start(s)).rejects.toMatchObject({ statusCode: 409, code: 'CHECKOUT_OPEN_OTHER_AMOUNT', details: { ref: four.checkout.ref, amountGyd: 8400 } });
+    expect((await startWeeks(s, 4)).checkout.ref).toBe(four.checkout.ref);
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
   });
 
