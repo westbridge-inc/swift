@@ -1,11 +1,10 @@
 'use client';
 
-import Link from 'next/link';
 import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutWords, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -19,6 +18,9 @@ const WeeklyFeeReopen = lazyRetry(() => import('./weekly-fee-reopen'));
 
 // [owner 6 Nov 2026] The choice of weeks: loaded only when there is more than one (perf budget).
 const WeeklyFeeWeeks = lazyRetry(() => import('./weekly-fee-weeks'));
+
+// [PERF · 6 Nov 2026] Recent checkouts and receipts, below the fold: their own chunk (perf budget).
+const WeeklyFeeHistory = lazyRetry(() => import('./weekly-fee-history'));
 
 // [OWNER 5 Nov 2026] Paying in person: loaded only when the server offers it or a record waits (perf budget).
 const WeeklyFeeInPerson = lazyRetry(() => import('./weekly-fee-in-person'));
@@ -121,24 +123,7 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
     {sub.inPerson?.open ? <Suspense fallback={null}><WeeklyFeeInPerson family={family} /></Suspense> : null}
-    <h2 className="text-lg font-bold">Recent checkouts</h2>
-    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {
-      const shown = c.ref === view.checkout?.ref ? view.checkout : c;
-      return <div key={c.ref} className="space-y-2 rounded-2xl border border-black/5 bg-white p-5">
-        <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</p>
-        <p>{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</p>
-        {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
-        {checkoutReferences(shown).map((r) => <p key={r.label} className="text-sm text-[var(--swift-muted)]">{r.label}: <span className="font-mono">{r.value}</span></p>)}
-        {/* [Owner 15 Oct 2026 · ruling #63] who sold the weekly fee, as the API states it */}
-        {checkoutSeller(shown) ? <p className="text-sm text-[var(--swift-muted)]" data-testid="fee-seller">{checkoutSeller(shown)}</p> : null}
-      </div>;
-    }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
-    {/* [Row 156] The refunds page's own promise, word for word: no new promise, and no time for MMG's part. */}
-    <p className="text-sm text-[var(--swift-muted)]">Charged twice, or by mistake? Tell support and Swift refunds the extra or mistaken charge in full, within 14 days, to the method you paid with. <Link href="/legal/refunds" className="underline">How refunds work</Link></p>
-    <h2 className="text-lg font-bold">Receipts</h2>
-    {/* [owner legal plan R12] Printed by the API, line by line: the same receipt support and the accountant see. */}
-    {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <div key={r.receiptNumber} aria-label={`Receipt ${r.receiptNumber}`} className="space-y-1 rounded-2xl border border-black/5 bg-white p-5 text-sm">
-      {r.lines.map((line, i) => <p key={i} className={i === 0 ? 'font-semibold' : undefined}>{line}</p>)}
-    </div>) : <p className="text-sm text-[var(--swift-muted)]">No receipts yet.</p>}
+    {/* [PERF · 6 Nov 2026] Below the fold: recent checkouts, the refunds promise and the receipts (weekly-fee-history.tsx). */}
+    <Suspense fallback={null}><WeeklyFeeHistory sub={sub} view={view} /></Suspense>
   </section>;
 }

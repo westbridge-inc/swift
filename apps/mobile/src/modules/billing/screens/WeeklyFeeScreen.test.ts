@@ -104,7 +104,8 @@ describe('actual phone weekly fee element tree', () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const phone = readFileSync(join(process.cwd(), 'src/modules/billing/screens/WeeklyFeeScreen.tsx'), 'utf8');
-    const web = readFileSync(join(process.cwd(), '../web/src/components/weekly-fee.tsx'), 'utf8');
+    // The web console's receipts live in its weekly-fee page's lower half (weekly-fee-history.tsx, its own chunk).
+    const web = readFileSync(join(process.cwd(), '../web/src/components/weekly-fee-history.tsx'), 'utf8');
     for (const [name, src] of [['phone', phone], ['web', web]] as const) {
       expect(src, name).toMatch(/sub\.feeReceipts\?\.length \? sub\.feeReceipts\.map\(\(r\) =>/);
       expect(src, name).toMatch(/r\.lines\.map\(\(line, i\) =>/);
