@@ -34,6 +34,15 @@ describe('taxi reviewer hints', () => {
     expect(reviewerHint('national_id')).toBeUndefined();
   });
 
+  // [CARS-PLATES · owner 6 Nov 2026] the reviewer is the person who confirms the plate's letter: the hint says so, and
+  // that a private (P) plate car is approved for deliveries only.
+  it('the registration hint makes the reviewer match the plate and says a P car delivers only', async () => {
+    const { reviewerHint } = await import('./review-center');
+    expect(reviewerHint('vehicle_registration')).toMatch(/must match the plate the mover gave: its first letter decides the work/);
+    expect(reviewerHint('vehicle_registration')).toMatch(/private \(P\) plate car may do deliveries only/);
+    expect(reviewerHint('drivers_licence')).toMatch(/must cover motor cars, and so must a car delivery driver's/);
+  });
+
   it('the review screen shows the hint under the document heading', async () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');

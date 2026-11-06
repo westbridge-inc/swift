@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { formatAmount } from '@/lib/money';
 import { feeMoney } from '@/lib/fee-status';
-import { FEE_ASK, feeLadderLine, feeQuote, feeSteps, feeTermsOf, fetchSignupPricing, stepTrialLines, trialDaysOf, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
+import { FEE_ASK, feeLadderLine, feeQuote, feeSteps, feeTermsOf, fetchSignupPricing, privateCarsOpen, stepTrialLines, trialDaysOf, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
 import styles from '../auth-flow.module.css';
 
 /**
@@ -14,11 +14,15 @@ import styles from '../auth-flow.module.css';
  * the tick is given to exactly the amount and words on screen, so another vehicle or business type,
  * or a price read again, clears it. Loaded only on these steps (weekly-fee-loader.ts).
  */
-export function WeeklyFee({ role, type, onChange }: {
+export function WeeklyFee({ role, type, onChange, privateCar = false, onPrivateCars }: {
   role: FeeChoice['role'];
   /** The business type (a store) or the vehicle (a rider or driver). */
   type: string;
   onChange: (_state: FeeState) => void;
+  /** [CARS-PLATES] A car on a private (P) plate: the delivery rider's fee. */
+  privateCar?: boolean;
+  /** [CARS-PLATES] Told whether the server says private cars deliver (the delivery door then offers a car). */
+  onPrivateCars?: (_open: boolean) => void;
 }) {
   const [pricing, setPricing] = useState<SignupPricing | 'loading' | 'error'>('loading');
   const [attempt, setAttempt] = useState(0);
@@ -32,7 +36,7 @@ export function WeeklyFee({ role, type, onChange }: {
 
   const view = useMemo(() => {
     if (typeof pricing !== 'object') return { state: { ask: pricing === 'loading' ? FEE_ASK.loading : FEE_ASK.error } as FeeState };
-    const choice: FeeChoice = role === 'VENDOR' ? { role, vendorType: type } : { role, vehicleType: type };
+    const choice: FeeChoice = role === 'VENDOR' ? { role, vendorType: type } : { role, vehicleType: type, privateCar };
     const rate = feeQuote(pricing, choice);
     if (rate === null) return { state: { ask: FEE_ASK.missing } as FeeState };
     const terms = feeTermsOf(pricing);
@@ -51,8 +55,9 @@ export function WeeklyFee({ role, type, onChange }: {
       ? { ask: null, ack: { version: terms.version, amount: rate, currencyCode: pricing.currencyCode } }
       : { ask: FEE_ASK.tick, tick: true };
     return { amount, steps, terms, key, state };
-  }, [pricing, role, type, tickedFor]);
+  }, [pricing, role, type, privateCar, tickedFor]);
   useEffect(() => { onChange(view.state); }, [onChange, view.state]);
+  useEffect(() => { if (typeof pricing === 'object') onPrivateCars?.(privateCarsOpen(pricing)); }, [pricing, onPrivateCars]);
 
   if (!view.amount) {
     return (

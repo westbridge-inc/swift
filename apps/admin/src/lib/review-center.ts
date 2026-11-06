@@ -82,10 +82,12 @@ export const docLabel = (type: string) => LABELS[type] ?? 'Document';
 const REVIEWER_HINTS: Record<string, string> = {
   // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] the licence must cover the vehicle: motorcycles for a motorbike rider
   // (an e-bike or e-scooter rider signs up as one), motor cars for a taxi driver. No certificate of fitness for a motorbike.
-  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry, and that it covers the vehicle: a motorbike rider's licence must cover motorcycles (an e-bike or e-scooter counts as a motorbike); a taxi driver's must cover motor cars. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
+  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry, and that it covers the vehicle: a motorbike rider's licence must cover motorcycles (an e-bike or e-scooter counts as a motorbike); a taxi driver's must cover motor cars, and so must a car delivery driver's. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
   hire_car_driver_licence: "Hire Car Driver's Licence (GRA, its own document): same name as the driver's licence, and a current date (usually 3 years).",
   hire_car_vehicle_licence: "The car's yearly hire licence: the plate matches the registration, and the date is current.",
-  vehicle_registration: 'For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234) and match the plate the driver gave.',
+  // [CARS-PLATES · owner 6 Nov 2026] The person checking the certificate is what makes the plate's letter count: P-plate
+  // (private) cars deliver only; H-plate (hire) cars drive taxi rides and deliver.
+  vehicle_registration: 'The plate on the certificate must match the plate the mover gave: its first letter decides the work. For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234). A private (P) plate car may do deliveries only — approve it for that; Swift never offers it a ride.',
   // [R13 · owner 15 Oct 2026, research D6] every motor vehicle, not only a taxi
   vehicle_insurance: "Read 'Limitations as to use': it must permit use for hire or reward (taxi: passengers for hire; delivery: commercial use). A policy for social, domestic and pleasure use only is rejected as 'Insurance does not permit use for hire or reward'.",
 };
