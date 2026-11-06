@@ -8,10 +8,10 @@ import { formatGuyanaTime, guyanaDayKey, startOfGuyanaDay } from '../../utils/gu
 // A HELD weekly-fee rise, told 14 days ahead, applied only from the weekly fee
 // it was told for.
 //
-// The Agreements say: "Swift may change the weekly fee. We will tell you in
-// the app at least 14 days before the change. The new fee applies from your
-// first weekly fee due after that date. If you do not accept it, stop your
-// plan before then; you will not pay the new fee." Two paths find that a
+// The Agreements say: "Swift may change the weekly fee. If it goes up, we will
+// tell you in the app at least 14 days before the change, and the new fee
+// applies from your first weekly fee due after that date. If you do not accept
+// it, stop your plan before then; you will not pay the new fee." Two paths find that a
 // partner's card rate is now HIGHER than the weekly fee they pay, and neither
 // raises it at once (COORD 17 Oct 23:41Z):
 //   - a finance fee-hold resolution (mover-fee-authority resolveMoverFeeHold,

@@ -330,12 +330,15 @@ describe('GET/POST /auth/legal-acceptance', () => {
     const v251 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-25.1')!.summary;
     const v27 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-27')!.summary;
     const v281 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-28.1')!.summary;
-    // served now under 2026-11-04 (the waiting charge cap: non-material)
-    expect(LEGAL_VERSION).toBe('2026-11-04');
-    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-28.1');
+    const v1105 = MATERIAL_CHANGES.find((c) => c.version === '2026-11-05')!.summary;
+    // served now under 2026-11-05 (the 5 Nov batch: material)
+    expect(LEGAL_VERSION).toBe('2026-11-05');
+    expect(materialVersion('2026-11-04')).toBe('2026-10-28.1');
+    expect(materialVersion(LEGAL_VERSION)).toBe('2026-11-05');
     for (const [accepted, summary] of [
-      ['2026-10-17', [...v21, ...v251, ...v27, ...v281]], ['2026-10-18', [...v21, ...v251, ...v27, ...v281]], ['2026-10-21', [...v251, ...v27, ...v281]], ['2026-10-25', [...v251, ...v27, ...v281]],
-      ['2026-10-25.1', [...v27, ...v281]], ['2026-10-25.2', [...v27, ...v281]], ['2026-10-27', [...v281]], ['2026-10-28', [...v281]],
+      ['2026-10-17', [...v21, ...v251, ...v27, ...v281, ...v1105]], ['2026-10-18', [...v21, ...v251, ...v27, ...v281, ...v1105]], ['2026-10-21', [...v251, ...v27, ...v281, ...v1105]], ['2026-10-25', [...v251, ...v27, ...v281, ...v1105]],
+      ['2026-10-25.1', [...v27, ...v281, ...v1105]], ['2026-10-25.2', [...v27, ...v281, ...v1105]], ['2026-10-27', [...v281, ...v1105]], ['2026-10-28', [...v281, ...v1105]],
+      ['2026-10-28.1', [...v1105]], ['2026-11-04', [...v1105]],
     ] as const) {
       const person = await mkUser(['CUSTOMER'] as UserRole[], accepted);
       expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: accepted, needsAcceptance: true, summary: [...summary] });
@@ -343,9 +346,8 @@ describe('GET/POST /auth/legal-acceptance', () => {
       expect((await call('GET', person.token)).json().data).toMatchObject({ acceptedVersion: LEGAL_VERSION, needsAcceptance: false, summary: [] });
     }
     expect(v281.join(' ')).toContain('no fee and no strike');
-    // A person at 2026-10-28.1 is not asked.
-    const atV281 = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-28.1');
-    expect((await call('GET', atV281.token)).json().data).toMatchObject({ currentVersion: LEGAL_VERSION, acceptedVersion: '2026-10-28.1', needsAcceptance: false, summary: [] });
+    // Up to the 5 Nov batch, a person at 2026-10-28.1 was not asked.
+    expect(acceptanceStatus({ tosVersion: '2026-10-28.1', roles: ['CUSTOMER'] as UserRole[] }, '2026-11-04')).toMatchObject({ acceptedVersion: '2026-10-28.1', needsAcceptance: false, summary: [] });
   });
 
   it('a person already at the served version is not asked', async () => {

@@ -370,16 +370,26 @@ const PUBLISHED: Record<
     driver_agreement: 'a4bc5e874eb2b2ae9d3992ba910bb22b38071d31f741cf3d627d915d515a4c4f',
     vendor_agreement: '942975fc7e4fc9a4dc54890daf2c80479b62d3009bfc9c416361afe38121f38d',
   },
+  // [2026-11-05 batch · wording delegated by the owner 5 Nov 2026 · MATERIAL · DRAFT until a Guyana attorney reads it] The
+  // words listed at LEGAL_VERSION in legal.routes.ts. Repinned while unpublished. Undoing exactly those edits
+  // the date and the page's .brand colour (the rider of 30 Oct) reproduces all four 2026-11-04 pins above (checked
+  // mechanically before pinning).
+  '2026-11-05': {
+    terms: '2365859aa57a5777914aa76208eae63f69f66ae915731ecb677c67ae3a4cb625',
+    privacy: '387335ef2d9a1d7d84f332e0ec46360a804841bc1712d9387d652b4785d46023',
+    driver_agreement: '25d51d7e642d7986ef409ebd9c84baf7c37990e7304d32a7677918b5435db9b0',
+    vendor_agreement: '34271e4cde4a38af83c44cea9aeb5ac6e2bad50d29ac40329881363c826c776a',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
   it.each([
     ['Mover Agreement', DRIVER_AGREEMENT],
     ['Business Agreement', VENDOR_AGREEMENT],
-  ])('%s directs weekly-fee payment to checkout in the Swift app', (_name, agreement) => {
+  ])('%s directs weekly-fee payment to checkout in the Swift app or on swiftgy.com', (_name, agreement) => {
     expect(agreement).not.toMatch(/MMG\s+agent|Swift\s+Number|account\s+number/i);
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
-    expect(feeParagraph).toContain("payable in the Swift app through MMG's checkout, or by card where the app offers it.");
+    expect(feeParagraph).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, by card where the app offers it, or directly to Westbridge Inc., in person by cash or cheque, or by bank transfer.");
   });
 
   it.each([
@@ -388,7 +398,7 @@ describe('legal version binding [F-035-08]', () => {
   ])('%s states one week at a time (no paying ahead) and the refund of an unstarted week at closing [owner #62, 14 Oct]', (_name, agreement) => {
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
     expect(feeParagraph).toContain('You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you.');
-    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from, records the refund, and then deletes the account; a week that has started is not refunded.');
+    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from or, if you paid in person, by a way you and Swift agree, records the refund, and then deletes the account; a week that has started is not refunded.');
     expect(feeParagraph, 'the four-week limit is gone [owner #62]').not.toMatch(/four weeks|paid ahead|pay ahead/i);
   });
 

@@ -180,7 +180,7 @@ describe('[BOOK-S7] instant confirmation and the business\'s duty', () => {
   it('Privacy 6: what the missed-appointment record holds, why, and how long (with its order\'s record)', () => {
     expect(PRIVACY_S6).toContain("If a Business records that a customer did not come to an appointment, Swift keeps that record (which booking it was, when the Business recorded it, and who at the Business recorded it) with its order's record, for as long as that order's record is kept, so that a person at Swift can review repeated missed appointments; it carries no fee or strike.");
     // The retention it borrows is the order record's own, stated in the same section.
-    expect(PRIVACY_S6).toContain('Order, ride and settlement history is retained for the period required for disputes, guarantees, tax and legal obligations');
+    expect(PRIVACY_S6).toContain('Order, ride and settlement history is retained for the period required for disputes, payments Swift has decided to make, tax and legal obligations');
   });
 
   it('Business Agreement 5: keep availability current, honour bookings, or cancel in the app with a reason', () => {

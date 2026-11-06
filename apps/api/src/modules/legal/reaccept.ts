@@ -79,6 +79,20 @@ export const MATERIAL_CHANGES: ReadonlyArray<MaterialChange> = [
       'If you publish a list of services with bookable times, you accept in advance the bookings customers make from it at the times it shows as free. Honour them, or cancel or move them in the app as early as you can.',
     ],
   },
+  {
+    // [2026-11-05 batch · owner delegated the wording 5 Nov 2026 · MATERIAL: new terms, a limit on customers, and personal
+    // records the old words did not state (as 2026-10-28.1). The smaller corrections alone would not need a tick]
+    version: '2026-11-05',
+    summary: [
+      'Riders and drivers: the Mover Agreement has a new section on a customer who does not pay at the door. What a customer owes is the customer\u2019s debt, not Swift\u2019s. A person at Swift looks at each case and Swift may choose to help, one order at a time, but you do not have a right to this help, and it is not part of what your weekly fee pays for.',
+      'Privacy: if you pay a business by MMG, your order keeps the references from that payment: any reference you enter, the reference and amount the business records, and the reference of any refund it records.',
+      'Privacy: riders and drivers can now read exactly what is kept of their position: the latest position, a short trail deleted 3 hours after the last position, a job\u2019s distance but never its route, single positions at steps of a job, positions that look false, and positions during an open SOS.',
+      'Orders: you can place at most 6 store orders and parcels in an hour. A store order or a parcel is held for one minute, and you can cancel it free in that minute. A delivery or a parcel can be refused when no rider is near.',
+      'Privacy: order and job chat is deleted one year after the order or job ended, unless it is still needed; resolved support tickets after 3 years; closed safety records after 7 years.',
+      `Partners: the weekly fee can be paid on swiftgy.com, or directly to ${OPERATOR.name}, in person by cash or cheque, or by bank transfer, never through an agent; a payment counts once Swift records it. Each branch of a business pays its own weekly fee.`,
+      'Also: a taxi fare can go directly to the driver\u2019s own MMG where the driver offers it.',
+    ],
+  },
 ];
 
 /** [BILL-PRO · COORD 29 Oct 16:13Z] The first version whose Business Agreement covers a Provider (s.12), including

@@ -4,14 +4,14 @@ import { describe, expect, it } from 'vitest';
 import { color } from '@swift/ui';
 import { renderReceiptHtml } from '../modules/order/receipt';
 import { renderStatementHtml } from '../modules/order/statement';
+import { CHILD_SAFETY, DRIVER_AGREEMENT, MARKETING_CONSENT, PRIVACY, TERMS, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
 
 // ---------------------------------------------------------------------------
 // [FOLLOWUPS · brand colour, 30 Oct 2026] Swift's brand colour is maroon #803B3B (deep #5C2A2C), as in the shipped
 // app icon and the @swift/ui tokens. The receipt and the earnings statements still printed the "Swift" name in the
 // old bright red (E8 19 2C). Their `.brand` rule now reads the brand token, and the old red is gone from the API's and
-// the admin's source with ONE logged exception: the legal pages. Their .brand colour sits inside the HTML the consent
-// ledger hashes, so changing it needs a LEGAL_VERSION bump; COORD ruled (30 Oct) not to bump for a colour. It rides
-// along with the next MATERIAL legal version change.
+// the admin's source. The legal pages' .brand colour sits inside the HTML the consent ledger hashes, so it rode along
+// with the next MATERIAL legal version (COORD ruling 30 Oct): 2026-11-05.
 // ---------------------------------------------------------------------------
 
 const OLD_RED = ['E8', '19', '2C'].join(''); // split so this file never matches its own census
@@ -43,7 +43,7 @@ const receipt = renderReceiptHtml({
 } as never);
 const statement = renderStatementHtml({ currencyCode: 'GYD', title: 'Earnings', holder: 'X', periodLabel: 'Sep', lines: [{ date: new Date('2026-09-02T12:00:00Z'), label: 'SW-1 · delivery fee', amount: 700 }], totalLabel: 'Total', totalAmount: 700, footNote: '' });
 
-const PAGES: Record<string, string> = { receipt, statement };
+const PAGES: Record<string, string> = { receipt, statement, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT, MARKETING_CONSENT, CHILD_SAFETY };
 
 describe('the API pages print "Swift" in the brand maroon, never the old bright red', () => {
   it('the brand token is the maroon of the shipped app icon', () => {
@@ -78,14 +78,11 @@ describe('census: the old bright red is gone from the API and admin source', () 
     return out;
   };
 
-  // The one exception, logged as a rider for the next MATERIAL legal version (COORD ruling 30 Oct 2026).
-  const LEGAL_RIDER = 'apps/api/src/modules/legal/legal.routes.ts';
-
-  it('no file under apps/api/src or apps/admin/src names the old red, except the legal pages (rider)', () => {
+  it('no file under apps/api/src or apps/admin/src names the old red', () => {
     const hits = [path.join(ROOT, 'apps/api/src'), path.join(ROOT, 'apps/admin/src')]
       .flatMap((d) => walk(d))
       .filter((f) => readFileSync(f, 'utf8').toUpperCase().includes(OLD_RED))
       .map((f) => path.relative(ROOT, f));
-    expect(hits).toEqual([LEGAL_RIDER]);
+    expect(hits).toEqual([]);
   });
 });

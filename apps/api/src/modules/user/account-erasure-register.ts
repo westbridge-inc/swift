@@ -79,11 +79,11 @@ export const ERASURE_DEIDENTIFIED: Readonly<Record<string, string>> = {
 
 /** Link -> why the person's rows stay after erasure (they point at the de-identified account row). */
 export const ERASURE_KEPT: Readonly<Record<string, string>> = {
-  'Order.customerId': 'order history, kept for disputes, guarantees, tax and legal duties (Privacy Policy §6)',
+  'Order.customerId': 'order history, kept for disputes, payments Swift has decided to make, tax and legal duties (Privacy Policy §6)',
   'Order.riderId': 'order history (Privacy Policy §6)',
   'Order.driverId': 'ride history (Privacy Policy §6)',
   'Booking.customerId': 'ride history (Privacy Policy §6)',
-  'ServiceJob.customerId': 'order history, kept for disputes, guarantees, tax and legal duties (Privacy Policy §6)',
+  'ServiceJob.customerId': 'order history, kept for disputes, payments Swift has decided to make, tax and legal duties (Privacy Policy §6)',
   'ServiceJob.providerId': 'job history (Privacy Policy §6)',
   'ServiceQualification.providerId': 'the qualification a kept job was done under (job history, Privacy Policy §6); its document is purged',
   // [BOOK-P1]
