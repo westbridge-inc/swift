@@ -1,10 +1,10 @@
 import type { PrismaClient, CountryConfig, VehicleType, Prisma } from '@prisma/client';
 import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, OWN_NAME_LIST_SUFFIX, OWN_NAME_TIER } from '../verification/doc-registry';
-import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
+import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS, PRIVATE_CAR_PHOTO_DOC } from '../ops/platform-config';
 import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
 import { readDeliveryRates } from './pricing-config';
-import { PRIVATE_CAR_PHOTO_DOC, docProfilesFor, feeBandFor, isPassengerVehicle, type MoverRole } from '../../config/vehicle-classes';
+import { docProfilesFor, feeBandFor, isPassengerVehicle, type MoverRole } from '../../config/vehicle-classes';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 

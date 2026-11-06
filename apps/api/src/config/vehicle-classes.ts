@@ -238,9 +238,6 @@ export function goodsSizeCarriableToday(size: string | null | undefined, env: Re
  *  or reward), never the hire licences only an H-plate taxi can hold. Without a kind (or as a DRIVER) the list is the
  *  vehicle's own, exactly as before. */
 export const TAXI_DOC_PROFILE = 'MOVER_TAXI_EXTRA';
-/** [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car's delivery profile adds ONE car photo with the plate showing, so a
- *  person can match the plate's letter (no certificate of fitness): the same document type a taxi uploads. */
-export const PRIVATE_CAR_PHOTO_DOC = 'vehicle_exterior_photo';
 export function docProfilesFor(vehicleType: VehicleType, kind: MoverRole | null = null): string[] {
   const profiles = VEHICLE_CLASSES[vehicleType]?.docProfiles ?? [];
   return kind === 'RIDER' && isPassengerVehicle(vehicleType) ? profiles.filter((key) => key !== TAXI_DOC_PROFILE) : profiles;
