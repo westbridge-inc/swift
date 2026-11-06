@@ -234,6 +234,10 @@ jobs:
       # merges their coverage into the one suite-wide number.
       - name: Merge the shard results and coverage
         working-directory: apps/api
+        # Four shards' results and V8 coverage in one process, on the 8 GB
+        # standard runner (Node's default heap there is ~2 GB).
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npx vitest run --merge-reports=ci-shard-report/blob --coverage --reporter=default
       # SWIFT-165: publish the coverage number to the run summary. Measured, not
       # gated — no thresholds yet (ratchet later once the baseline is watched).
@@ -267,7 +271,14 @@ jobs:
       # compiled CommonJS API requires the package's built "require" export),
       # then the API's production build (tsconfig.build.json).
       - run: pnpm --filter @swift/ui build
+      # The repo is private since 5 Nov 2026, so jobs run on the standard
+      # runner: 2 CPUs, 8 GB (was 4 CPUs, 16 GB). Node's default heap scales
+      # with RAM; on 8 GB tsc died at ~2 GB ("JavaScript heap out of memory",
+      # exit 134). Same heap apps/api/Dockerfile gives this build on the 8 GB
+      # staging host.
       - run: pnpm --filter @swift/api build
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
       - name: Keep the compiled API for the API Boot Smoke
         uses: actions/upload-artifact@v7
         with:
@@ -795,6 +806,18 @@ jobs:
         run: node scripts/secret-canary.js --scan apps/mobile/dist
       - name: No secret-shaped value in the mobile bundles
         run: bash scripts/fetch-gitleaks.sh && ./gitleaks detect --no-git --source apps/mobile/dist --redact --exit-code 1
+      # The standard runner (private repo since 5 Nov 2026) ran out of disk in
+      # :app:packageReleaseBundle ("No space left on device"). The image carries
+      # toolchains this job never uses; remove them before the NDK, Gradle
+      # caches and the build land. The Android SDK, Java, Node and Docker
+      # itself are kept. df before and after puts the numbers in the log.
+      - name: Free runner disk for the Android build
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost /usr/local/julia* /usr/local/share/powershell /opt/microsoft /opt/az
+          docker image prune --all --force > /dev/null
+          df -h /
+          free -m
       # Reference ARM64 builds measure native overhead without signing credentials,
       # stores or EAS. These are CI measurements, never distributed binaries.
       - uses: actions/setup-java@v5
@@ -848,6 +871,9 @@ jobs:
           -x lintVitalAnalyzeRelease
           "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1536m"
           "-Pkotlin.daemon.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=1g"
+      - name: Disk after the Android build
+        if: always()
+        run: df -h /
       - name: Save the Android NDK and CMake (main only)
         if: github.ref == 'refs/heads/main' && steps.android-ndk.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
