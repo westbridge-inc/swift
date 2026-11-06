@@ -61,7 +61,7 @@ type SubscriptionFee = {
 };
 
 type PayAction =
-  | { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' }
+  | { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD'; weekOptions: Array<{ weeks: number; amountGyd: number }> }
   | { id: 'MMG_CHECKOUT'; state: 'off' }
   | { id: 'CARD'; state: 'off' };
 ```
@@ -181,6 +181,10 @@ here is an MMG fact; these are the questions (`providers/mmg/CHECKOUT-CONTRACT.m
 
 Button label: `Pay GY$<amountGyd, grouped> with MMG`.
 
+### `weekOptions` (owner 6 Nov 2026: up to four weeks ahead)
+
+Every number of weeks from 1 to `PAY_AHEAD_MAX_WEEKS` (4) that fits the limit now, in order, each with what that checkout charges: the one-week amount above plus one whole weekly fee for each week after it (`checkoutAmountForWeeks`). `weekOptions[0]` is always 1 week at `amountGyd`. A client shows the choice when there is more than one, sends the chosen `weeks` in the start body, and labels the button with that option's amount. An app that ignores it pays one week, as before.
+
 ### `CARD`
 
 `CARD` stays `off` until the card rail exists (PT-4).
@@ -188,6 +192,8 @@ Button label: `Pay GY$<amountGyd, grouped> with MMG`.
 ## 4. Start a checkout
 
 `POST /api/v1/{family}/subscription/mmg-checkout`
+
+Body: `{}` (one week), or `{ "weeks": 1..4 }` (owner 6 Nov 2026). Any other `weeks` is `400 VALIDATION_ERROR`. A tap whose weeks (none = one week) cost a different amount than the open checkout asks is `409 CHECKOUT_OPEN_OTHER_AMOUNT` (`details.ref`, `amountGyd`, `expiresAt`): never handed a page for another amount; the same amount is handed the open one, as before. Past the limit: `409 PAY_AHEAD_LIMIT`.
 
 The body is `{}`. The server prices the checkout; a client amount would be ignored.
 

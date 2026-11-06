@@ -2,7 +2,7 @@ import type { PrismaClient, Subscription, SubscriptionStatus } from '@prisma/cli
 import { log } from '../../utils/logger';
 import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 import { payInfo } from './agent-cash.service';
-import { payAheadAllows } from './pay-ahead';
+import { PAY_AHEAD_MAX_WEEKS, readPayAhead } from './pay-ahead';
 import { weeklyFeeAmount } from './subscription-fee';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import type { CardPayAction } from './card-pay-action';
@@ -24,8 +24,13 @@ import { FEE_CHECKOUT_PLATFORMS_KEY, platformSwitches, type PlatformSwitches } f
 
 export type ClientPlatform = 'ios' | 'android' | 'web' | 'unknown';
 
+/** [owner 6 Nov 2026] One choice on the MMG card: pay this many weeks now, for this amount. */
+export interface WeekOption { weeks: number; amountGyd: number }
+
 export type PayAction =
-  | { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' }
+  /** `amountGyd` is one week (what older apps show); `weekOptions` lists every number of weeks (1 to the four-week
+   *  limit) that fits now, in order, 1 first. */
+  | { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD'; weekOptions: WeekOption[] }
   | { id: 'MMG_CHECKOUT'; state: 'off' }
   | CardPayAction;
 
@@ -51,8 +56,20 @@ export function clientPlatform(headers: Record<string, unknown>): ClientPlatform
  *  takes whole dollars; the part of a dollar above the due banks as credit),
  *  or one week's fee when nothing is due. */
 export function checkoutAmountGyd(fee: { weeklyFeeGyd: number; amountDueGyd: number }): number {
+  return checkoutAmountForWeeks(fee, 1);
+}
+
+/** [owner 6 Nov 2026 · I1] What a checkout for `weeks` weeks charges: what one week asks (the amount due, or one
+ *  week's fee when nothing is due), plus one whole weekly fee for each week after it, rounded UP to whole GYD. The
+ *  four-week limit is the door's (pay-ahead.ts): this only prices. */
+export function checkoutAmountForWeeks(fee: { weeklyFeeGyd: number; amountDueGyd: number }, weeks: number): number {
   const owed = fee.amountDueGyd > 0 ? fee.amountDueGyd : fee.weeklyFeeGyd;
-  return Math.ceil(Math.round(owed * 100) / 100);
+  return Math.ceil(Math.round((owed + (weeks - 1) * fee.weeklyFeeGyd) * 100) / 100);
+}
+
+/** Whole numbers of weeks a partner may ask a checkout for (1 to the limit). */
+export function isCheckoutWeeks(weeks: unknown): weeks is number {
+  return typeof weeks === 'number' && Number.isInteger(weeks) && weeks >= 1 && weeks <= PAY_AHEAD_MAX_WEEKS;
 }
 
 let switchCache: { at: number; switches: PlatformSwitches } | null = null;
@@ -147,12 +164,21 @@ export async function feePayActions(
   checkout?: () => MmgCheckoutProvider,
 ): Promise<PayAction[]> {
   const live = await mmgCheckoutLive(prisma, sub, platform, checkout);
-  const amountGyd = live ? checkoutAmountGyd(await payInfo(prisma, sub)) : 0;
-  // [owner #62 · DS1114 S3] One week at a time: once the coming week is paid the
-  // checkout could only refuse, so there is no button (the screen still says
-  // when the next fee is due).
-  const mmg: PayAction = live && await payAheadAllows(prisma, sub.id, amountGyd, new Date())
-    ? { id: 'MMG_CHECKOUT', state: 'live', amountGyd, currencyCode: 'GYD' }
+  // [owner 6 Nov 2026 · DS1114 S3] Up to four weeks ahead: each number of weeks is offered only when it fits now.
+  // Once even one week would go past the limit the checkout could only refuse, so there is no button (the screen
+  // still says when the next fee is due).
+  const weekOptions: WeekOption[] = [];
+  if (live) {
+    const fee = await payInfo(prisma, sub);
+    const position = await readPayAhead(prisma, sub.id, new Date());
+    for (let weeks = 1; weeks <= PAY_AHEAD_MAX_WEEKS; weeks += 1) {
+      const amountGyd = checkoutAmountForWeeks(fee, weeks);
+      if (position && Math.round(amountGyd * 100) / 100 > position.room) break;
+      weekOptions.push({ weeks, amountGyd });
+    }
+  }
+  const mmg: PayAction = weekOptions.length > 0
+    ? { id: 'MMG_CHECKOUT', state: 'live', amountGyd: weekOptions[0]!.amountGyd, currencyCode: 'GYD', weekOptions }
     : { id: 'MMG_CHECKOUT', state: 'off' };
   return [mmg, { id: 'CARD', state: 'off' }];
 }

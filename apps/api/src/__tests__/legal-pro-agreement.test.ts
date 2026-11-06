@@ -69,7 +69,7 @@ describe('the fresh tick is asked of Providers, and nobody else', () => {
   // [EXPRESS-FEE · owner 1 Nov] Served now under 2026-11-01 (non-material): the agreement version stays 2026-10-29.2.
   it('is a material version for Providers only, served (now under 2026-11-01); the version everyone else answers to is unchanged', () => {
     // served now under 2026-11-05 (the 5 Nov batch: material)
-    expect(LEGAL_VERSION).toBe('2026-11-05');
+    expect(LEGAL_VERSION).toBe('2026-11-06');
     expect(PRO_AGREEMENT_VERSION).toBe('2026-10-29.2');
     expect(compareLegalVersions(PRO_AGREEMENT_VERSION, LEGAL_VERSION)).toBeLessThan(0);
     expect(MATERIAL_CHANGES.find((c) => c.version === PRO_AGREEMENT_VERSION)).toMatchObject({ audience: 'provider' });

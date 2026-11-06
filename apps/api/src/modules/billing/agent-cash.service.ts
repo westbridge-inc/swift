@@ -546,7 +546,7 @@ export class AgentCashService {
         throw new Error('DESTINATION_TENANT_MISMATCH');
       }
 
-      // [OWNER RULING 8 Oct (2) · owner #62] One week ahead at most, decided under
+      // [OWNER RULING 8 Oct (2) · owner 6 Nov 2026] Four weeks ahead at most, decided under
       // the payer lock and BEFORE the provider transaction is marked credited.
       // Arriving money past the cap is held for a person (refund), never
       // credited and never dropped; an admin attaching it is refused in words.
@@ -640,7 +640,7 @@ export class AgentCashService {
       return { status: 'reconciled', paymentId, originalPaymentId: committed.refundedAs };
     }
     if ('payAheadLimit' in committed && committed.payAheadLimit) {
-      log().warn({ paymentId, subscriptionId: committed.subscriptionId }, 'agent payment held: it would take the weekly fee past one week ahead; a person refunds it');
+      log().warn({ paymentId, subscriptionId: committed.subscriptionId }, 'agent payment held: it would take the weekly fee past the four-week limit; a person refunds it');
       return { status: 'received_unmatched', paymentId, failureCode: PAY_AHEAD_LIMIT };
     }
     if (committed.duplicateOf) {

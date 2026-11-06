@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
+import { PAY_AHEAD_MAX_WEEKS_WORD } from '../modules/billing/pay-ahead';
 
 // ---------------------------------------------------------------------------
 // [REPORT-035 F-035-08 · S1] Every served legal text is BOUND to its version.
@@ -380,6 +381,17 @@ const PUBLISHED: Record<
     driver_agreement: '25d51d7e642d7986ef409ebd9c84baf7c37990e7304d32a7677918b5435db9b0',
     vendor_agreement: '34271e4cde4a38af83c44cea9aeb5ac6e2bad50d29ac40329881363c826c776a',
   },
+  // [2026-11-06 · PAYAHEAD-4W · owner ruling 6 Nov 2026 "one month at a time", replaces owner #62 · MATERIAL for partners
+  // · DRAFT until a Guyana attorney reads it] Mover and Business Agreements section 2: up to four weeks ahead; a rise
+  // keeps the old fee for a week paid before the notice and takes no payment past its date; a cut reaches weeks paid
+  // ahead. Proven the only change: putting the three old sentences and the 5 Nov date back reproduces all four
+  // 2026-11-05 pins above exactly (checked mechanically before pinning). Terms and Privacy change by their date only.
+  '2026-11-06': {
+    terms: '6b98de410a681e5ae1c6066e9e44c299889c8fcd18880035985720d1a6cd13f7',
+    privacy: 'acd0a5ef15b1edddb1e645798b1a36b27dfa6fe477aef909ef8fbfc99b629687',
+    driver_agreement: 'bc4d65166549aaa4205cdfa1084618abe36737617490bcedd99c7eaa944da516',
+    vendor_agreement: '22c1763a78a89c22a6831e7e2f55abd234e4fd4fcb8b037db0f09bc0eff443de',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -395,11 +407,14 @@ describe('legal version binding [F-035-08]', () => {
   it.each([
     ['Mover Agreement', DRIVER_AGREEMENT],
     ['Business Agreement', VENDOR_AGREEMENT],
-  ])('%s states one week at a time (no paying ahead) and the refund of an unstarted week at closing [owner #62, 14 Oct]', (_name, agreement) => {
+  ])('%s states up to four weeks ahead and the refund of every unstarted week at closing [owner 6 Nov 2026, replaces #62]', (_name, agreement) => {
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
-    expect(feeParagraph).toContain('You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you.');
+    expect(feeParagraph).toContain(`You may pay the weekly fee up to ${PAY_AHEAD_MAX_WEEKS_WORD} weeks ahead: while a week runs you may pay for the ${PAY_AHEAD_MAX_WEEKS_WORD} weeks after it, and no further. Money received beyond that is returned to you.`);
+    expect(feeParagraph).toContain('it is used only for your weekly fees and cannot be withdrawn or sent to anyone.');
+    expect(feeParagraph).toContain('you will not pay the new fee. A week you paid for before we told you keeps the old fee, and once we have told you, Swift takes payment only for weeks that start before the change until the new fee applies.');
+    expect(feeParagraph).toContain('If it goes down, the lower fee applies from your next weekly fee not yet charged, even one you have already paid for, with a notice in the app; what you paid above the lower fee counts toward your later weekly fees.');
     expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from or, if you paid in person, by a way you and Swift agree, records the refund, and then deletes the account; a week that has started is not refunded.');
-    expect(feeParagraph, 'the four-week limit is gone [owner #62]').not.toMatch(/four weeks|paid ahead|pay ahead/i);
+    expect(feeParagraph, 'one week at a time is gone [owner 6 Nov]').not.toMatch(/one week at a time|the coming week, and no further|paid ahead/i);
   });
 
   it('the Terms name no cancellation fee — Swift never charges one [owner #46/#50/#52]', () => {

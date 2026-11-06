@@ -13,7 +13,7 @@ const ROOTS = ['app/dashboard', 'app/portal', 'app/advertiser'];
 const FILES = ['components/console-shell.tsx', 'components/schedule-block-time.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx',
   // The weekly-fee page every partner pays through, and its MMG and card words (lib/card-fee.ts
   // is byte-identical to the phone copy by census; both now say "kept for your next weekly fee").
-  'components/weekly-fee.tsx', 'components/weekly-fee-reopen.tsx', 'components/weekly-fee-in-person.tsx', 'lib/weekly-fee-in-person.ts', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts', 'lib/weekly-fee-reopen.ts', 'lib/card-fee.ts', 'lib/chain-fee.ts',
+  'components/weekly-fee.tsx', 'components/weekly-fee-reopen.tsx', 'components/weekly-fee-weeks.tsx', 'components/weekly-fee-history.tsx', 'components/weekly-fee-in-person.tsx', 'lib/weekly-fee-in-person.ts', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts', 'lib/weekly-fee-reopen.ts', 'lib/card-fee.ts', 'lib/chain-fee.ts',
   'lib/subscription-words.ts',
   // Everything else a console draws: the new-order takeover, the Switch app
   // sheet, the error and notice blocks, and the API helpers whose messages
@@ -21,7 +21,7 @@ const FILES = ['components/console-shell.tsx', 'components/schedule-block-time.t
   'components/NewOrderTakeover.tsx', 'components/customer-shell.tsx', 'components/account-chrome.tsx', 'components/data-unavailable.tsx', 'components/mutation-notice.tsx',
   'lib/vendor-api.ts', 'lib/mover-api.ts', 'lib/partner-api.ts', 'lib/catalogue-name.ts',
   // The Orders home's cards and the app helpers they read (PR A).
-  'components/orders-home.tsx', 'lib/vendor-hub.ts', 'lib/store-role.ts', 'lib/profile-store.ts', 'lib/mmg-pay-words.ts'];
+  'components/orders-home.tsx', 'components/orders-home-guides.tsx', 'lib/vendor-hub.ts', 'lib/store-role.ts', 'lib/profile-store.ts', 'lib/mmg-pay-words.ts'];
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {

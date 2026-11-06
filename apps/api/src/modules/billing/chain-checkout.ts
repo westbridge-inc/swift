@@ -15,8 +15,10 @@ import { lockBillingAuthority, type ConfirmationSource } from './dunning-clock';
 // Money rules (GUARDRAILS s1, MMG-CHECKOUT-API.md section 12):
 // - The quote is each branch's OWN Pay amount, priced exactly as that branch's
 //   fee screen prices it (checkoutAmountGyd over payInfo), for every branch
-//   whose own MMG Pay button is live now (nothing being confirmed, one week
-//   ahead at most). The owner sees that list first and confirms it.
+//   whose own MMG Pay button is live now (nothing being confirmed, within the
+//   four-week limit). Each branch's part is its one-week Pay amount (the week
+//   owed, or the coming week); more weeks ahead (up to four, owner 6 Nov 2026)
+//   are chosen on a branch's own screen. The owner sees that list first and confirms it.
 // - The checkout is re-priced under every branch's billing locks before the
 //   MMG page exists. Any difference from what the owner confirmed refuses it
 //   (409 PAYMENT_QUOTE_CHANGED): nothing is ever adjusted after a payment.
@@ -41,7 +43,7 @@ export type ChainBranchFeeState =
   | 'DUE'
   /** Free trial: nothing to pay yet. */
   | 'TRIAL'
-  /** Paid up as far as Swift takes payment (one week ahead), or nothing owed. */
+  /** Nothing owed now (the coming week is paid), or paid as far as Swift takes payment (four weeks ahead). */
   | 'NOTHING_DUE'
   /** A payment for this branch is being confirmed (its own or a pay-all). */
   | 'PAYMENT_CONFIRMING'

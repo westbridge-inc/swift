@@ -285,10 +285,10 @@ function EarningsTools({
   statementError: boolean;
 }) {
   const source = serverRecord(sub);
-  // [OWNER RULING 8 Oct, NO "WALLET" · owner #62, NO PAYING AHEAD] Money paid
-  // before its week starts is shown as the next weekly fee being paid, never
-  // "paid ahead" or a count of weeks; the action is "Pay weekly fee". Swift
-  // holds no money for anyone: this is Swift's own fee, paid early.
+  // [OWNER RULING 8 Oct, NO "WALLET" · owner 6 Nov 2026, up to four weeks ahead]
+  // Money paid before its week starts is shown as the next weekly fees being
+  // paid, never "paid ahead"; the action is "Pay weekly fee". Swift holds no
+  // money for anyone: this is Swift's own fee, paid early.
   const paidAhead = serverNumber(source?.['walletBalanceGyd']);
   const showPaidAhead = paidAhead != null && paidAhead > 0;
   const weeks = weeksCovered(paidAhead, serverNumber(source?.['weeklyFeeGyd'] ?? source?.['customRate'] ?? source?.['weeklyRate']));
@@ -301,7 +301,7 @@ function EarningsTools({
             <T variant="numM">{money(paidAhead)}</T>
           </View>
           {weeks >= 1 ? (
-            <T variant="caption" tone="muted">Your next weekly fee is already paid</T>
+            <T variant="caption" tone="muted">{weeks >= 2 ? `Your next ${weeks} weekly fees are already paid` : 'Your next weekly fee is already paid'}</T>
           ) : null}
         </View>
       ) : null}

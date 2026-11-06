@@ -38,10 +38,13 @@ import { formatGuyanaTime, guyanaDayKey, startOfGuyanaDay } from '../../utils/gu
 //      is checked in the transaction where a paid week moves the next fee
 //      date (billing.service applySuccessfulChargeInTx) and by the hourly
 //      run, so the coming week is quoted (and paid) at the new fee from that
-//      moment, never sooner. A week already paid keeps its price: if a whole
-//      week at the old price is held in the fee credit when the rise would
-//      apply, that week keeps the old price and the rise moves one week
-//      later, once.
+//      moment, never sooner. A week already paid keeps its price: every whole
+//      week at the old price held in the fee credit when the rise would apply
+//      keeps the old price, and the rise moves past all of them, once (up to
+//      four weeks can be paid ahead, owner 6 Nov 2026). Once told, a new
+//      payment reaches only weeks that start before the told date
+//      (pay-ahead.ts), so nothing paid at the old fee lands on a week the
+//      rise then charges more for.
 //   4. DROPPED: a rise that no longer matches the subscription (its rate moved
 //      under it, a negotiated or waived fee, the plan ended) is dropped, with
 //      an audit row; a partner who was told is told it will not happen.
@@ -90,8 +93,15 @@ export interface HeldFeeRise {
   appliesFrom: string | null;
   /** The inbox row that told it. */
   inboxId: string | null;
-  /** A week held paid at the old price already moved it once. */
+  /** A week held paid at the old price already moved it. */
   deferredOnce?: boolean;
+  /** [REVIEW-M16 S2-1] The whole weeks at the old price still owed the old price, counted at the first deferral and
+   *  never raised after it: each later check keeps the old price for at most this many, and never for more than the
+   *  credit still holds, so money that arrives after the notice cannot stretch it. */
+  oldWeeksLeft?: number;
+  /** The next fee date when oldWeeksLeft was counted: every week charged from it on (a captured weekly fee whose period
+   *  starts there or later) uses one of them, whatever the calendar did meanwhile (a stop and resume, a fee pause). */
+  oldWeeksFrom?: string;
   /** [ENTERPRISE E2] CHAIN_DEAL only: the chain deal the branch is on now (its customRate) ... */
   customFrom?: number;
   /** ... and what its customRate becomes (null: the deal ends, the branch pays its own tier fee). */
@@ -159,6 +169,8 @@ export function readHeldFeeRise(value: unknown): HeldFeeRise | null {
     from, to, currencyCode: v['currencyCode'], source: v['source'] as FeeRiseSource, heldAt: v['heldAt'], noticeAt, appliesFrom,
     inboxId: typeof v['inboxId'] === 'string' ? v['inboxId'] : null,
     ...(v['deferredOnce'] === true ? { deferredOnce: true } : {}),
+    ...(Number.isInteger(v['oldWeeksLeft']) && (v['oldWeeksLeft'] as number) >= 0 ? { oldWeeksLeft: v['oldWeeksLeft'] as number } : {}),
+    ...(isIso(v['oldWeeksFrom']) ? { oldWeeksFrom: v['oldWeeksFrom'] } : {}),
     ...chain,
     ...basis,
   };

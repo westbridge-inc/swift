@@ -1,11 +1,10 @@
 'use client';
 
-import Link from 'next/link';
 import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutWords, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -16,6 +15,12 @@ const WeeklyFeeNotStarted = lazyRetry(() => import('./weekly-fee-not-started'));
 // [MMG reopen] Loaded only when the server grants a reopen (switch off by default): not in the first load,
 // and neither is its rule or its words (lib/weekly-fee-reopen).
 const WeeklyFeeReopen = lazyRetry(() => import('./weekly-fee-reopen'));
+
+// [owner 6 Nov 2026] The choice of weeks: loaded only when there is more than one (perf budget).
+const WeeklyFeeWeeks = lazyRetry(() => import('./weekly-fee-weeks'));
+
+// [PERF · 6 Nov 2026] Recent checkouts and receipts, below the fold: their own chunk (perf budget).
+const WeeklyFeeHistory = lazyRetry(() => import('./weekly-fee-history'));
 
 // [OWNER 5 Nov 2026] Paying in person: loaded only when the server offers it or a record waits (perf budget).
 const WeeklyFeeInPerson = lazyRetry(() => import('./weekly-fee-in-person'));
@@ -49,7 +54,7 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
   };
   const refreshFee = useCallback(() => { void client.invalidateQueries({ queryKey }); }, [client, queryKey]);
   const session = useMemo(() => new FeeCheckoutSession({
-    start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
+    start: (key, weeks) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: JSON.stringify({ weeks }), headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     reopen: (ref, key) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}/reopen`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, undefined, { storeId }).then((r) => r.data),
     open: async (url) => { window.location.assign(url); },
@@ -107,32 +112,18 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
             <p className="text-sm text-[var(--swift-muted)]">Opens MMG&apos;s page, then brings you back to Swift.</p>
           </div>
         </div>
-        <button disabled={view.busy || checkingLatest} onClick={() => void session.pay()} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
-          {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
-        </button>
+        {/* [owner 6 Nov 2026] A choice of weeks (1-4, each only when it fits): its card, its words and its own Pay button
+            load only when the server offers more than one week (perf budget). Otherwise one week, as before. */}
+        {action.weekOptions?.[1] ? <Suspense fallback={null}><WeeklyFeeWeeks choices={action.weekOptions} disabled={view.busy || checkingLatest} session={session} /></Suspense>
+          : <button disabled={view.busy || checkingLatest} onClick={() => void session.pay()} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
+            {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
+          </button>}
       </section>}
       <CardPay family={family} storeId={storeId} card={card} latestSession={sub.latestCardSession} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
     {sub.inPerson?.open ? <Suspense fallback={null}><WeeklyFeeInPerson family={family} /></Suspense> : null}
-    <h2 className="text-lg font-bold">Recent checkouts</h2>
-    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {
-      const shown = c.ref === view.checkout?.ref ? view.checkout : c;
-      return <div key={c.ref} className="space-y-2 rounded-2xl border border-black/5 bg-white p-5">
-        <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</p>
-        <p>{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</p>
-        {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
-        {checkoutReferences(shown).map((r) => <p key={r.label} className="text-sm text-[var(--swift-muted)]">{r.label}: <span className="font-mono">{r.value}</span></p>)}
-        {/* [Owner 15 Oct 2026 · ruling #63] who sold the weekly fee, as the API states it */}
-        {checkoutSeller(shown) ? <p className="text-sm text-[var(--swift-muted)]" data-testid="fee-seller">{checkoutSeller(shown)}</p> : null}
-      </div>;
-    }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
-    {/* [Row 156] The refunds page's own promise, word for word: no new promise, and no time for MMG's part. */}
-    <p className="text-sm text-[var(--swift-muted)]">Charged twice, or by mistake? Tell support and Swift refunds the extra or mistaken charge in full, within 14 days, to the method you paid with. <Link href="/legal/refunds" className="underline">How refunds work</Link></p>
-    <h2 className="text-lg font-bold">Receipts</h2>
-    {/* [owner legal plan R12] Printed by the API, line by line: the same receipt support and the accountant see. */}
-    {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <div key={r.receiptNumber} aria-label={`Receipt ${r.receiptNumber}`} className="space-y-1 rounded-2xl border border-black/5 bg-white p-5 text-sm">
-      {r.lines.map((line, i) => <p key={i} className={i === 0 ? 'font-semibold' : undefined}>{line}</p>)}
-    </div>) : <p className="text-sm text-[var(--swift-muted)]">No receipts yet.</p>}
+    {/* [PERF · 6 Nov 2026] Below the fold: recent checkouts, the refunds promise and the receipts (weekly-fee-history.tsx). */}
+    <Suspense fallback={null}><WeeklyFeeHistory sub={sub} view={view} /></Suspense>
   </section>;
 }

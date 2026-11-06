@@ -349,10 +349,11 @@ describe('the door, read before anyone takes money', () => {
   it('says the most, and the least while a week is due, and changes nothing', async () => {
     const coming = await makeSub();
     await settle(coming.id);
-    expect((await door(coming.id)).json().data).toEqual({ open: true, refused: null, mostGyd: 5000, leastGyd: 0 });
+    // [owner 6 Nov] Up to four weeks ahead: four weekly fees while a week runs, and the week due on top of them.
+    expect((await door(coming.id)).json().data).toEqual({ open: true, refused: null, mostGyd: 20_000, leastGyd: 0 });
     const behind = await makeSub({ status: 'PAST_DUE', nextBillingDate: new Date(Date.now() - 3_600_000) });
     await settle(behind.id);
-    expect((await door(behind.id)).json().data).toEqual({ open: true, refused: null, mostGyd: 10_000, leastGyd: 5000 });
+    expect((await door(behind.id)).json().data).toEqual({ open: true, refused: null, mostGyd: 25_000, leastGyd: 5000 });
     expect(await credits(behind.id)).toBe(0);
     expect(await asks(behind.id)).toBe(0);
   });
@@ -377,7 +378,7 @@ describe('the door, read before anyone takes money', () => {
     expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: false, waitingGyd: null });
   });
 
-  it('the partner sees the offer only while the door accepts: never paused, never with the next week paid', async () => {
+  it('the partner sees the offer only while the door accepts: never paused, never with four weeks paid', async () => {
     const sub = await makeSub();
     await settle(sub.id);
     expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: true, waitingGyd: null });
@@ -386,6 +387,9 @@ describe('the door, read before anyone takes money', () => {
     expect((await inPersonFeeView(app.prisma, sub.id)).open).toBe(false);
     delete process.env['MMG_DRIVER'];
     expect((await pay(sub.id, cash())).statusCode).toBe(200);
+    // One week paid: three more still fit, so the offer stays.
+    expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: true, waitingGyd: null });
+    expect((await pay(sub.id, cash({ amount: 15_000 }))).statusCode).toBe(200);
     expect(await inPersonFeeView(app.prisma, sub.id)).toEqual({ open: false, waitingGyd: null });
     const refused = (await door(sub.id)).json().data.refused as string;
     expect(refused).toContain('already paid');
@@ -445,19 +449,19 @@ describe('an ask names a real account of this market', () => {
 });
 
 describe('the MMG door\'s rules', () => {
-  it('the one-week limit: the next week fits, the one after does not, and the refusal names what is left', async () => {
+  it('the four-week limit: four weeks fit, a fifth does not, and the refusal names what is left', async () => {
     const sub = await makeSub();
-    const over = await ask(sub.id, cash({ amount: 6000 }));
+    const over = await ask(sub.id, cash({ amount: 20_001 }));
     expect(over.statusCode).toBe(409);
     expect(code(over)).toBe('PAY_AHEAD_LIMIT');
-    expect(JSON.stringify(over.json())).toContain('5,000');
+    expect(JSON.stringify(over.json())).toContain('20,000');
     // [M15-R2 S4-1] Nothing was taken in yet: the words say hand the rest back, never "refund".
     const overWords = over.json().error.message as string;
     expect(overWords).toContain('Nothing was recorded');
     expect(overWords).toContain('hand the rest back');
     expect(overWords).not.toMatch(/refund/i);
     expect(await asks(sub.id)).toBe(0);
-    expect((await pay(sub.id, cash())).statusCode).toBe(200);
+    expect((await pay(sub.id, cash({ amount: 20_000 }))).statusCode).toBe(200);
     const full = await ask(sub.id, cash({ amount: 1000 }));
     expect(code(full)).toBe('PAY_AHEAD_LIMIT');
     expect(full.json().error.message).toContain('If you already took it, hand it back.');
@@ -471,11 +475,11 @@ describe('the MMG door\'s rules', () => {
     expect(asked.statusCode).toBe(202);
     const id = asked.json().error.details.approvalId as string;
     await approve(id);
-    await billing.recordTopUp(sub.id, 5000, 'test-other-channel', undefined, `attempt-${nanoid(12)}`);
+    await billing.recordTopUp(sub.id, 20_000, 'test-other-channel', undefined, `attempt-${nanoid(12)}`);
     const applied = await execute(id);
     expect(applied.statusCode).toBe(409);
     expect(JSON.stringify(applied.json())).toContain('already paid');
-    expect(await balance(sub.id)).toBe(5000);
+    expect(await balance(sub.id)).toBe(20_000);
     expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `in-person:${body.reference}` } })).toBe(0);
   });
 
@@ -490,14 +494,24 @@ describe('the MMG door\'s rules', () => {
 
   it('a week that is due is not ahead: it fits on top of the limit', async () => {
     const sub = await makeSub({ status: 'PAST_DUE', nextBillingDate: new Date(Date.now() - 3_600_000) });
-    expect((await ask(sub.id, cash({ amount: 10_001 }))).statusCode).toBe(409);
-    expect((await pay(sub.id, cash({ amount: 10_000 }))).statusCode).toBe(200);
+    expect((await ask(sub.id, cash({ amount: 25_001 }))).statusCode).toBe(409);
+    expect((await pay(sub.id, cash({ amount: 25_000 }))).statusCode).toBe(200);
+  });
+
+  it('[owner 6 Nov] a monthly cheque for four weeks is recorded once it has cleared, and counts as four weekly fees', async () => {
+    const sub = await makeSub();
+    expect((await pay(sub.id, cheque({ amount: 20_000 }))).statusCode).toBe(200);
+    expect(await balance(sub.id)).toBe(20_000);
+    // A cheque not cleared is never recorded, whatever it covers.
+    const other = await makeSub();
+    expect((await ask(other.id, cheque({ amount: 20_000, cleared: false }))).statusCode).toBe(400);
+    expect(await asks(other.id)).toBe(0);
   });
 
   it('during a free trial the weeks of the trial are not ahead, and the limit still stands', async () => {
     const end = new Date(Date.now() + 10 * 86_400_000);
     const sub = await makeSub({ status: 'TRIAL', isTrialActive: true, trialEndDate: end, nextBillingDate: end });
-    expect((await ask(sub.id, cash({ amount: 5001 }))).statusCode).toBe(409);
+    expect((await ask(sub.id, cash({ amount: 20_001 }))).statusCode).toBe(409);
     expect((await pay(sub.id, cash())).statusCode).toBe(200);
     const fresh = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(fresh).toMatchObject({ status: 'TRIAL', isTrialActive: true });

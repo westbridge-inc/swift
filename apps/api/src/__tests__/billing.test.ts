@@ -310,9 +310,9 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
   });
 
   it('an admin top-up bills instantly and reinstates — vendor returns to browse', async () => {
-    // [OWNER #62 · 14 Oct] At most one week ahead (was four, 8 Oct): with
-    // GY$10,000 already held and the owed week of GY$20,000, the most an
-    // operator can record is GY$30,000 (the owed week and the coming one).
+    // [OWNER 6 Nov 2026] Up to four weeks ahead: with GY$10,000 already held
+    // and the owed week of GY$20,000, GY$30,000 (the owed week and the coming
+    // one) is well inside the limit.
     const res = await injectWithApproval(app, {
       method: 'POST',
       url: `/api/v1/admin/subscriptions/${subId}/topup`,
@@ -326,7 +326,7 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     expect(sub.failedAttempts).toBe(0);
 
     const balance = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } });
-    expect(Number(balance.balance)).toBe(10000 + 30000 - 20000); // the coming week held: one week ahead, the cap
+    expect(Number(balance.balance)).toBe(10000 + 30000 - 20000); // the coming week held
 
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
     expect(vendor.status).toBe('ACTIVE');

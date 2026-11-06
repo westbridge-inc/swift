@@ -451,17 +451,38 @@ describe('behind the flag: MMG_CHECKOUT_ENABLED unset (the default)', () => {
 describe('live: payActions per the contract (section 3)', () => {
   beforeEach(() => enable(true));
 
-  it('MMG_CHECKOUT is live with the amount due; once the coming week is paid there is no button (one week at a time, owner #62); CARD stays off', async () => {
+  it('MMG_CHECKOUT is live with the amount due and a choice of 1-4 weeks that fit; once four weeks are paid there is no button (owner 6 Nov); CARD stays off', async () => {
     const owing = await makeStore({ balance: 600 });
-    expect((await subscriptionOf(owing)).json().data.payActions).toEqual([{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD' }, { id: 'CARD', state: 'off' }]);
-    const paidUp = await makeStore({ balance: 2100 });
+    expect((await subscriptionOf(owing)).json().data.payActions).toEqual([{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD', weekOptions: [{ weeks: 1, amountGyd: 1500 }, { weeks: 2, amountGyd: 3600 }, { weeks: 3, amountGyd: 5700 }, { weeks: 4, amountGyd: 7800 }] }, { id: 'CARD', state: 'off' }]);
+    // Two weeks held: two more fit, never a third.
+    const twoHeld = await makeStore({ balance: 4200 });
+    expect((await subscriptionOf(twoHeld)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: [{ weeks: 1, amountGyd: 2100 }, { weeks: 2, amountGyd: 4200 }] });
+    const paidUp = await makeStore({ balance: 4 * 2100 });
     expect((await subscriptionOf(paidUp)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
     const fresh = await makeStore();
-    expect((await subscriptionOf(fresh)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' });
+    expect((await subscriptionOf(fresh)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: [{ weeks: 1, amountGyd: 2100 }, { weeks: 2, amountGyd: 4200 }, { weeks: 3, amountGyd: 6300 }, { weeks: 4, amountGyd: 8400 }] });
     const rider = await makeRider({ balance: 1000 });
     expect((await subscriptionOf(rider)).json().data.payActions[0]).toMatchObject({ state: 'live', amountGyd: 5000 });
     const driver = await makeDriver();
     expect((await subscriptionOf(driver)).json().data.payActions[0]).toMatchObject({ state: 'live', amountGyd: 8000 });
+  });
+
+  it('[owner 6 Nov] the start body may name 1-4 weeks: priced on the server, anything else refused before anything is opened', async () => {
+    const startWith = (p: Partner, payload: unknown) => app.inject({ method: 'POST', url: `/api/v1/${p.family}/subscription/mmg-checkout`, headers: { 'content-type': 'application/json', 'idempotency-key': key(), ...headersOf(p) }, payload: payload as Record<string, unknown> });
+    const bad = await makeStore();
+    for (const weeks of [0, 5, '4', 2.5, null]) {
+      const res = await startWith(bad, { weeks });
+      expect(res.statusCode, JSON.stringify(weeks)).toBe(400);
+      expect(res.json().error).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Choose how many weeks to pay: 1 to 4.' });
+    }
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: bad.subId } })).toBe(0);
+    const four = await makeStore();
+    const res = await startWith(four, { weeks: 4 });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data).toMatchObject({ amountGyd: 8400, currencyCode: 'GYD' });
+    // An older app sends no weeks: one week, as before.
+    const old = await makeStore();
+    expect((await start(old)).json().data).toMatchObject({ amountGyd: 2100 });
   });
 
   it('a PAUSED subscription and a waived fee are off (hidden, never teased)', async () => {
@@ -508,7 +529,7 @@ describe('live: payActions per the contract (section 3)', () => {
   });
 
   it('[#1393] never live while a weekly-fee payment is being confirmed, nor before the billing clock covers the subscription', async () => {
-    const LIVE = { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' };
+    const LIVE = { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: expect.arrayContaining([{ weeks: 1, amountGyd: 2100 }]) };
     const MMG_OFF = { id: 'MMG_CHECKOUT', state: 'off' };
     const mmgOf = async (p: Partner) => (await subscriptionOf(p)).json().data.payActions[0];
 
@@ -1638,7 +1659,7 @@ describe('[BILL-PRO PR4 · REVIEW-M #2230 S4-3] a pro pays their OWN weekly fee 
 
   it('start -> MMG\'s success answer + lookup -> CONFIRMED, exactly one credit to the pro\'s own fee, told under the pro kind', async () => {
     const p = await makePro({ balance: 600, status: 'PAST_DUE' });
-    expect((await isolated(() => subscriptionOf(p))).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD' });
+    expect((await isolated(() => subscriptionOf(p))).json().data.payActions[0]).toMatchObject({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD', weekOptions: expect.arrayContaining([{ weeks: 1, amountGyd: 1500 }]) });
     const { ref, row } = await isolated(() => started(p));
     expect(row).toMatchObject({ subscriptionId: p.subId, amount: expect.anything() });
     const txn = tx('PRO0');

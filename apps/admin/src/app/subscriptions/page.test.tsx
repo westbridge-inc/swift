@@ -381,8 +381,8 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
 // ---------------------------------------------------------------------------
 // [OWNER 8 Oct (4)] Production holds the top-up and agent routes (BILLING_TOPUP_HOLD).
 // The server says when the hold is on, and the console then offers no "Record fee payment"
-// button. When it is offered and the server refuses (the hold, or more than one week ahead,
-// owner #62), its words show. [OWNER 5 Nov 2026] Money paid in person has its own button.
+// button. When it is offered and the server refuses (the hold, or more than four weeks ahead,
+// owner 6 Nov 2026). its words show. [OWNER 5 Nov 2026] Money paid in person has its own button.
 // ---------------------------------------------------------------------------
 describe('[owner 8 Oct] recording a fee payment by hand', () => {
   it('is not offered while the server says the hold is on', async () => {
@@ -397,7 +397,7 @@ describe('[owner 8 Oct] recording a fee payment by hand', () => {
   });
 
   it('shows the server’s words when it refuses one', async () => {
-    const refusal = 'This would pay more than one week ahead on this account. Record at most GY$8,400 now and refund the rest to the partner (finance procedure: weekly fee refunds).';
+    const refusal = 'This would pay more than four weeks ahead on this account. Record at most GY$8,400 now and refund the rest to the partner (finance procedure: weekly fee refunds).';
     mockApi(handler(() => ({ status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT', message: refusal } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();

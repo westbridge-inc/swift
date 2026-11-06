@@ -181,8 +181,8 @@ export async function cardPayAction(
     return CARD_OFF; // nothing to pay (waived, zero), under review, or no price: no button
   }
   if (!(await readFeePaymentDecision(prisma, sub.id)).allowed) return CARD_OFF;
-  // [owner #62 · DS1114 S3] A Pay now pays a whole week: when that would go past
-  // one week ahead the door could only refuse, so there is no card button.
+  // [owner 6 Nov 2026 · DS1114 S3] A Pay now pays a whole week: when that would go
+  // past the four-week limit the door could only refuse, so there is no card button.
   if (!(await payAheadAllows(prisma, sub.id, payNow.amount, new Date()))) return CARD_OFF;
   const addCard = decision.provider.savesCards && cardEnrollEnabled();
   const cardOnFile = addCard

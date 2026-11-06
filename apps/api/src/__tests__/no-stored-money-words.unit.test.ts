@@ -4,6 +4,7 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { DRIVER_AGREEMENT, MARKETING_CONSENT, PRIVACY, TERMS, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
 import { feeCoveredLine } from '../modules/billing/fee-notice-copy';
+import { PAY_AHEAD_MAX_WEEKS, PAY_AHEAD_MAX_WEEKS_WORD } from '../modules/billing/pay-ahead';
 
 // [OWNER RULING 8 Oct, NO "WALLET" · legal] Swift holds no money for anyone, so
 // nothing the server says to a person may call anything a "wallet", a "top up",
@@ -111,22 +112,25 @@ describe('the server never says stored-money words [owner ruling 8 Oct]', () => 
   });
 });
 
-// [OWNER #62 · 14 Oct, NO PAYING AHEAD] "shouldn't they just pay the weekly
-// fee, no paying ahead": partners pay one week at a time, so nothing the server
-// says to a person offers or describes paying ahead or covering several weeks —
-// the published legal documents included (their version 2026-10-14 says one
-// week at a time).
-const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\b(?:two|three|four|five|several|many|\d+) weeks ahead\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
-const offersPayingAhead = (text: string) => PAYING_AHEAD_WORDS.test(text);
+// [OWNER #62 · 14 Oct, NO PAYING AHEAD → OWNER 6 Nov 2026, UP TO FOUR WEEKS AHEAD]
+// Partners may now pay up to four weeks ahead. The words that say so name THE
+// limit, from the one constant ("up to four weeks ahead", or "more than four
+// weeks ahead" in a refusal); nothing the server says to a person offers any
+// other number of weeks, "several" or "many" weeks, "paid ahead" (owner 8 Oct:
+// a week paid early is "already paid"), or paying ahead without the limit —
+// the published legal documents included.
+const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\b(?:two|three|four|five|six|seven|eight|nine|ten|several|many|\d+) weeks ahead\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
+const THE_LIMIT = new RegExp(`\\b(?:up to|more than) (?:${PAY_AHEAD_MAX_WEEKS_WORD}|${PAY_AHEAD_MAX_WEEKS}) weeks ahead\\b`, 'gi');
+const offersPayingAhead = (text: string) => PAYING_AHEAD_WORDS.test(text.replace(THE_LIMIT, ''));
 
-describe('[owner #62] the server never offers paying ahead', () => {
-  it('no error message, notification, operations page, fee reason or copy module says "paid ahead" or several weeks', () => {
+describe('[owner 6 Nov] the server offers paying ahead only up to the four-week limit', () => {
+  it('no error message, notification, operations page, fee reason or copy module says "paid ahead" or weeks ahead other than the limit', () => {
     const hits = files(SRC).flatMap((file) => shownWords(file, readFileSync(file, 'utf8'), offersPayingAhead)
       .map((hit) => `${relative(SRC, file)}:${hit.line} ${hit.text}`));
     expect([...new Set(hits)]).toEqual([]);
   }, 120_000);
 
-  it('the published legal documents never offer paying ahead either', () => {
+  it('the published legal documents offer paying ahead only up to the limit', () => {
     for (const [name, text] of Object.entries({ TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT, MARKETING_CONSENT })) {
       expect(offersPayingAhead(text), name).toBe(false);
     }
@@ -140,7 +144,13 @@ describe('[owner #62] the server never offers paying ahead', () => {
     expect(probe("log().warn({ n }, 'agent payment past the weeks paid ahead');")).toBe(false);
     expect(probe("import { assertPayAheadRoom } from './pay-ahead';")).toBe(false);
     expect(probe("throw new AppError(409, 'PAY_AHEAD_LIMIT', 'Your next weekly fee is already paid.');")).toBe(false);
-    expect(probe("export const FEE_COPY = { x: 'You may pay up to four weeks ahead.' };")).toBe(true);
+    // [owner 6 Nov] The limit itself may be said; any other number, or no limit, may not.
+    expect(probe("export const FEE_COPY = { x: 'You may pay up to four weeks ahead.' };")).toBe(false);
+    expect(probe("throw new AppError(409, 'PAY_AHEAD_LIMIT', 'This would pay more than four weeks ahead on this account.');")).toBe(false);
+    expect(probe("export const FEE_COPY = { x: 'You may pay up to five weeks ahead.' };")).toBe(true);
+    expect(probe("export const FEE_COPY = { x: 'You may pay up to 8 weeks ahead.' };")).toBe(true);
+    expect(probe("export const FEE_COPY = { x: 'Pay ahead as far as you like.' };")).toBe(true);
+    expect(probe("export const FEE_COPY = { x: 'Your fee is paid four weeks ahead.' };")).toBe(true);
     expect(probe("export const FEE_COPY = { x: 'The coming weekly fee is paid.' };")).toBe(true);
     expect(probe("throw new AppError(409, 'PAY_AHEAD_LIMIT', 'This would pay more than one week ahead on this account.');")).toBe(false);
   });
