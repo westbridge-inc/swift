@@ -4,7 +4,7 @@ import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-conf
 import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
 import { readDeliveryRates } from './pricing-config';
-import { docProfilesFor, feeBandFor, type MoverRole } from '../../config/vehicle-classes';
+import { PRIVATE_CAR_PHOTO_DOC, docProfilesFor, feeBandFor, isPassengerVehicle, type MoverRole } from '../../config/vehicle-classes';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -404,7 +404,9 @@ export function moverRequiredFrom(lists: Record<string, string[]>, vehicleType: 
   const base = lists['MOVER'] ?? [];
   // [CARS-PLATES] A car's delivery profile (kind RIDER) reads the delivery rider's list, without the taxi extras.
   const extra = docProfilesFor(vehicleType, kind).flatMap((key) => lists[key] ?? []);
-  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
+  // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] …plus the one car photo with the plate showing (a person matches the letter).
+  const carPhoto = kind === 'RIDER' && isPassengerVehicle(vehicleType) ? [PRIVATE_CAR_PHOTO_DOC] : [];
+  return [...new Set([...base, ...extra, ...carPhoto])].filter((docType) => !isNeverAcceptedDocType(docType));
 }
 
 /** The union of the keys' `_OPTIONAL` lists, without anything already required. */

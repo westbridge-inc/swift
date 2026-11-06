@@ -43,6 +43,16 @@ describe('taxi reviewer hints', () => {
     expect(reviewerHint('drivers_licence')).toMatch(/must cover motor cars, and so must a car delivery driver's/);
   });
 
+  // [CARS-PLATES · owner 6 Nov ~05:20Z] the car photo is where a person matches the plate letter, next to the registration.
+  it('the car photo hint says to match the plate letter, and the photo sits right after the registration', async () => {
+    const { reviewerHint, groupApplicants } = await import('./review-center');
+    expect(reviewerHint('vehicle_exterior_photo')).toMatch(/match the Certificate of Registration and the plate the mover gave/);
+    expect(reviewerHint('vehicle_exterior_photo')).toMatch(/P \(private\) = deliveries only/);
+    const doc = (id: string, docType: string) => ({ id, docType, userId: 'u1', role: 'MOVER', createdAt: '2026-11-06T00:00:00Z', user: { firstName: 'A', lastName: 'B', phone: '' } });
+    const [applicant] = groupApplicants([doc('1', 'vehicle_exterior_photo'), doc('2', 'drivers_licence'), doc('3', 'vehicle_registration'), doc('4', 'vehicle_insurance')] as never);
+    expect(applicant!.documents.map((d) => d.docType)).toEqual(['drivers_licence', 'vehicle_registration', 'vehicle_exterior_photo', 'vehicle_insurance']);
+  });
+
   it('the review screen shows the hint under the document heading', async () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');

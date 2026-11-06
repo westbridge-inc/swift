@@ -30,7 +30,7 @@ import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { offerEstLoad, offerLoadFields, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
-import { carDeliveriesEnabled, goodsVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, goodsVehicleTypesForPackageSize, parcelVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { hireVehicleTypes, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { hirePlateSql, isHirePlate, TAXI_NEEDS_HIRE_PLATE } from '../verification/hire-plate';
@@ -113,6 +113,11 @@ export function vehiclesForPackageSize(size: string | null | undefined): string[
 /** Can this vehicle carry goods (a parcel, a store order) of this size today? */
 export function vehicleCanCarry(vehicleType: string, size: string | null | undefined): boolean {
   return vehiclesForPackageSize(size).includes(vehicleType);
+}
+
+/** [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A courier parcel: capacity, the switch, and never a car (food and shop only). */
+export function vehicleCanCarryParcel(vehicleType: string, size: string | null | undefined): boolean {
+  return parcelVehicleTypesForPackageSize(size).includes(vehicleType as never);
 }
 
 const BASE_RADIUS_KM = 5;
@@ -1140,7 +1145,8 @@ export class DispatchService {
     const locationFreshSince = new Date(Date.now() - DISPATCH_LOCATION_FRESH_SECONDS * 1000);
 
     // SWIFT-062: a courier parcel only goes to a vehicle that can carry it.
-    const capableVehicles = vehiclesForPackageSize(packageSize);
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] …and a parcel never goes to a car (food and shop orders only).
+    const capableVehicles = (courierWork ?? !!packageSize) ? parcelVehicleTypesForPackageSize(packageSize) : vehiclesForPackageSize(packageSize);
     // [Owner ruling 15 Oct 2026] Emitted for every goods search, sized or not: a taxi car is never a goods
     // candidate while car deliveries are off (an unsized order still excludes it).
     const vehicleFilter = Prisma.sql`AND r."vehicleType"::text = ANY(${capableVehicles})`;

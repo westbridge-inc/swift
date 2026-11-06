@@ -322,7 +322,9 @@ export class PartnerService {
     const details = vehicle
       ? { vehicleMake: vehicle.make, vehicleModel: vehicle.model, vehicleYear: vehicle.year, vehicleColor: vehicle.color, licensePlate: vehicle.licensePlate }
       : {};
-    const rider = existing ?? (await tx.rider.create({ data: { userId, riderType: 'BOTH', vehicleType, ...details } }));
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car takes food and shop orders only, never courier parcels: DELIVERY.
+    const riderType = isPassengerVehicle(vehicleType) ? 'DELIVERY' as const : 'BOTH' as const;
+    const rider = existing ?? (await tx.rider.create({ data: { userId, riderType, vehicleType, ...details } }));
     // D.3 — seed the new rider's float limit from their trust level + country.
     if (!existing) await new FloatService(tx).recomputeForUser(userId);
     const updatedRoles = await this.ensureRoles(tx, userId, roles, ['MOVER', 'RIDER']);
@@ -634,7 +636,11 @@ export class PartnerService {
           data: {
             // [CARS-DELIVER] A taxi car's delivery profile (store orders only) that now carries a goods vehicle
             // is an ordinary rider: it serves both kinds of work, as onboarding provisions one.
-            ...(rider && isPassengerVehicle(rider.vehicleType) ? { riderType: 'BOTH' as const } : {}),
+            // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] …and a delivery profile that now carries a car takes food and shop
+            // orders only (never courier parcels), whatever it did before.
+            ...(isPassengerVehicle(input.vehicleType)
+              ? { riderType: 'DELIVERY' as const }
+              : rider && isPassengerVehicle(rider.vehicleType) ? { riderType: 'BOTH' as const } : {}),
             vehicleType: input.vehicleType,
             // The details describe THIS vehicle or nothing: a bicycle keeps no plate of the canter it replaced.
             vehicleMake: details.make, vehicleModel: details.model, vehicleYear: details.year,

@@ -38,8 +38,10 @@ const SIZES: { key: Size; letter: string; label: string; hint: string }[] = [
   // it (a LARGE parcel is a motorcycle's ceiling; P-19/P-20 pinned exactly
   // that). A sender with a backpack-sized box was forced to over-declare XL
   // and lose every motorbike in town.
-  { key: 'LARGE', letter: 'L', label: 'Fits a backpack', hint: 'Motorbike or car' },
-  { key: 'EXTRA_LARGE', letter: 'XL', label: 'Needs a trunk', hint: 'Car or larger' },
+  // [CARS-PLATES · owner 6 Nov 2026] Cars take food and shop orders only, never courier parcels: a parcel rides a bicycle
+  // or a motorbike, and one bigger than a motorbike carries is refused by the server (PARCEL_TOO_BIG) with its own words.
+  { key: 'LARGE', letter: 'L', label: 'Fits a backpack', hint: 'Motorbike' },
+  { key: 'EXTRA_LARGE', letter: 'XL', label: 'Needs a trunk', hint: 'Bigger than a motorbike carries' },
 ];
 const SPEEDS: { key: Speed; label: string; icon: React.ComponentProps<typeof Feather>['name']; hint: string }[] = [
   { key: 'STANDARD', label: 'Standard', icon: 'clock', hint: 'Lowest price' },

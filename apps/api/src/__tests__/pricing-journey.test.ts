@@ -414,11 +414,25 @@ describe('courier — estimate = job = rider offer = receipt', () => {
     ['8 km extra large (+2,000), rush ×2', 8, 'EXTRA_LARGE', 'RUSH', 7520],
     ['2.37 km small (1,084.40 → 1,084)', 2.37, 'SMALL', 'STANDARD', 1084],
   ] as const)('%s → %s', async (_label, km, packageSize, speed, fee) => {
-    // [Owner ruling 15 Oct 2026] TRANSFORMED: an extra-large parcel is carried only by a car or the heavy fleet, so
-    // its row runs with CAR_DELIVERIES=1 (the re-enable path); with the switch off it is refused: PARCEL_TOO_BIG.
-    if (packageSize === 'EXTRA_LARGE') { vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); }); }
+    // [Owner ruling 15 Oct 2026] TRANSFORMED: an extra-large parcel is carried only by a car or the heavy fleet.
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] TRANSFORMED AGAIN: cars take food and shop orders only, never parcels, and
+    // the heavy fleet is not taken on yet, so even with cars delivering (CAR_DELIVERIES=1) its quote and its request are
+    // refused before anything is written (PARCEL_TOO_BIG). Its price stays the formula above (courier-rates suites).
     const dropoff = at({ lat: 6.775 - Math.round(km * 100) * 0.00001, lng: -58.05 - (speed === 'STANDARD' ? 0 : 0.001) }, km);
     const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    if (packageSize === 'EXTRA_LARGE') {
+      vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
+      const refusedQuote = await call('POST', '/api/v1/courier/estimate', sender.token, { pickup: STABROEK, dropoff, packageSize, speed });
+      expect(refusedQuote.statusCode, refusedQuote.body).toBe(409);
+      expect(refusedQuote.json().error.code).toBe('PARCEL_TOO_BIG');
+      const refusedJob = await call('POST', '/api/v1/courier/order', sender.token, {
+        pickup: STABROEK, dropoff, pickupAddress: 'Stabroek Market', dropoffAddress: 'Journey parcel stop', packageSize, speed,
+        recipientName: 'Aunty Pat', recipientPhone: '+5926001234', expectedFee: fee,
+      });
+      expect(refusedJob.statusCode, refusedJob.body).toBe(409);
+      expect(refusedJob.json().error.code).toBe('PARCEL_TOO_BIG');
+      return;
+    }
     const est = await call('POST', '/api/v1/courier/estimate', sender.token, { pickup: STABROEK, dropoff, packageSize, speed });
     expect(est.statusCode, est.body).toBe(200);
     expect(est.json().data.totalFee).toBe(fee);

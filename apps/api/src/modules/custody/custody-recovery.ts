@@ -12,7 +12,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs, VEHICLE_PASSENGERS_ONLY } from '../dispatch/concurrency-policy';
 import { vehicleCanCarry } from '../dispatch/dispatch.service';
-import { carriesGoods } from '../../config/vehicle-classes';
+import { carriesGoods, carriesParcels } from '../../config/vehicle-classes';
 import { assertDispatchPairEligible, safetyExcludedMovers } from '../dispatch/pair-safety';
 import { handoverAttemptState } from '../handover/handover-security';
 import { assertActiveMoverAccount, assertMoverRoleAuthority, lockUserRoleAuthority } from '../mover-authority';
@@ -714,6 +714,8 @@ export async function assignRelay(
     if (!serves) throw new AppError(400, 'WRONG_SERVICE_TYPE', `That rider does not do ${needsCourier ? 'courier' : 'delivery'} work.`);
     // [Owner ruling 15 Oct 2026] A taxi car carries no goods while car deliveries are off (the claim refuses it too).
     if (!carriesGoods(relay.vehicleType)) throw new AppError(400, VEHICLE_PASSENGERS_ONLY, 'That rider’s vehicle is a car, and car deliveries are paused right now. Choose another rider.');
+    // [CARS-PLATES · owner 6 Nov 2026] a car never takes a courier parcel (food and shop orders only).
+    if (needsCourier && !carriesParcels(relay.vehicleType)) throw new AppError(400, 'CAR_NO_PARCELS', 'That rider’s vehicle is a car, and cars take food and shop orders only. Choose another rider.');
     if (needsCourier && order.courierPackageSize && !vehicleCanCarry(relay.vehicleType, order.courierPackageSize)) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', 'That rider’s vehicle cannot carry this parcel.');
     }

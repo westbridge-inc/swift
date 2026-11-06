@@ -12,7 +12,7 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { carDeliveriesEnabled, carriesGoods, isPassengerVehicle, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, carriesGoods, carriesParcels, isPassengerVehicle, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { carDeliveryLivePreview, hasTaxiTwin, isCarDeliveryProfile, isTaxiTwin, lockCarDeliveryAuthority, syncCarDeliveryProfile } from '../driver/car-deliveries';
 import { isHirePlate, PRIVATE_CAR_H_PLATE, PRIVATE_CAR_H_PLATE_COPY } from '../verification/hire-plate';
 import { normalizeRegistrationMark } from '../verification/subjects';
@@ -33,10 +33,10 @@ import { CashRulesService, customerTrustSummaries, gpsEvidence } from '../cash/c
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
-import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
+import { makeDispatchService, vehicleCanCarry, vehicleCanCarryParcel } from '../dispatch/dispatch.service';
 import { FloatService, riderFloatForOrder, floatAdvice } from '../dispatch/float.service';
 import { explainEarning } from '../../utils/explain-earning';
-import { passengersOnlyRefusal, riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
+import { carNoParcelsClaim, passengersOnlyRefusal, riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
@@ -565,6 +565,8 @@ export async function riderRoutes(app: FastifyInstance) {
     if (body.vehicleType !== undefined && body.vehicleType !== rider.vehicleType) {
       throw new AppError(409, 'USE_VEHICLE_CHANGE', 'Change your vehicle from the vehicle screen — a new vehicle needs its own documents.');
     }
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car takes food and shop orders only: it never signs up for courier parcels.
+    if (body.riderType !== undefined && body.riderType !== 'DELIVERY' && isPassengerVehicle(rider.vehicleType)) throw carNoParcelsClaim();
     // [CARS-PLATES · REVIEW-G22 S2-1] A delivery car never takes an H (hire) plate of its own: an H plate is a taxi car's,
     // so only the taxi car's own twin (the account's taxi profile on that very plate) carries one. Refused before step-up.
     if (body.licensePlate !== undefined && isPassengerVehicle(rider.vehicleType) && isHirePlate(body.licensePlate)
@@ -1238,6 +1240,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // (vehicleCanCarry reads the switch; an unsized order is asked too).
     const carriable = candidates.filter((order) => {
       const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
+      // [CARS-PLATES · owner 6 Nov 2026] a car's board never shows a courier parcel (food and shop orders only).
+      if (order.orderType === 'COURIER') return vehicleCanCarryParcel(rider.vehicleType, requiredSize);
       return vehicleCanCarry(rider.vehicleType, requiredSize);
     });
     const orders = await safeBoardOrders(app.prisma, carriable, request.user.userId, 'RIDER');
@@ -1481,6 +1485,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] A taxi car takes no goods work while the
     // CAR_DELIVERIES switch is off, said in its own words before any size rule (the claim refuses it too).
     if (!carriesGoods(rider.vehicleType)) throw passengersOnlyRefusal();
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car takes food and shop orders only: never a courier parcel.
+    if (order.orderType === 'COURIER' && !carriesParcels(rider.vehicleType)) throw carNoParcelsClaim();
 
     // SWIFT-062: the board-grab entrance must respect vehicle capability too — a
     // parcel can't be grabbed by a mover whose vehicle can't carry it (the offer

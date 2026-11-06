@@ -20,6 +20,7 @@ import { CountryConfigService, partnerRateFor, type SubscriptionTiers } from '..
 import { privateCarPrices } from '../modules/country/partner-pricing';
 import { signupQuote, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
 import { moverRoleForVehicle } from '../modules/verification/hire-plate';
+import { carriesParcels, parcelSizeCarriableToday } from '../config/vehicle-classes';
 import { docProfilesFor } from '../config/vehicle-classes';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { grantStepUp } from './helpers/step-up';
@@ -90,11 +91,11 @@ const driverOf = (userId: string) => sys(() => app.prisma.driver.findUnique({ wh
 const tiers = async () => (await sys(() => app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } }))).subscriptionTiers as unknown as SubscriptionTiers;
 
 /** A private (P) plate delivery car, as sign-up leaves it, with the legacy grant and a running delivery plan. */
-async function privateCar(opts: { vehicleType?: VehicleType } = {}) {
+async function privateCar(opts: { vehicleType?: VehicleType; riderType?: 'DELIVERY' | 'BOTH' | 'COURIER' } = {}) {
   const u = await makeUser(['CUSTOMER', 'MOVER', 'RIDER'], 'RIDER', { lastMoverRole: 'RIDER' });
   const p = plate('P');
   const rider = await sys(() => app.prisma.rider.create({ data: {
-    userId: u.userId, riderType: 'BOTH', vehicleType: opts.vehicleType ?? 'CAR', ...{ vehicleMake: 'Toyota', vehicleModel: 'Premio', vehicleYear: 2017, vehicleColor: 'White' },
+    userId: u.userId, riderType: opts.riderType ?? 'DELIVERY', vehicleType: opts.vehicleType ?? 'CAR', ...{ vehicleMake: 'Toyota', vehicleModel: 'Premio', vehicleYear: 2017, vehicleColor: 'White' },
     licensePlate: p, profilePhotoUrl: `avatars/synthetic/${nanoid(6)}.jpg`, vehiclePhotoUrl: `vehicles/synthetic/${nanoid(6)}.jpg`,
     documentsVerified: true, documentsVerifiedAt: new Date(Date.now() - DAY), documentsVerifiedBy: 'cars-by-plate-test',
     floatLimit: 20_000, isOnline: false, isAvailable: false,
@@ -155,7 +156,7 @@ async function makeRide(customerId: string) {
 }
 
 /** A pending vehicle paper about `mark`, bound to its vehicle subject (as submission binds it). */
-async function pendingVehiclePaper(userId: string, mark: string, docType: 'vehicle_registration' | 'vehicle_insurance' = 'vehicle_registration') {
+async function pendingVehiclePaper(userId: string, mark: string, docType: 'vehicle_registration' | 'vehicle_insurance' | 'vehicle_exterior_photo' = 'vehicle_registration') {
   return sys(async () => {
     const subject = await app.prisma.subject.create({ data: { kind: 'VEHICLE', countryCode: 'GY', createdById: userId } });
     await app.prisma.vehicleProfile.create({ data: { subjectId: subject.id, countryCode: 'GY', registrationMark: mark.replace(/\s+/g, ''), vehicleKind: 'CAR', registeredById: userId } });
@@ -272,7 +273,8 @@ describe('[CARS-PLATES] sign-up: the plate decides, the fee follows the work', (
     const res = await become(u.token, 'CAR', p);
     expect(res.statusCode, res.body).toBe(201);
     expect(res.json().data).toMatchObject({ kind: 'RIDER', activeRole: 'RIDER', lastMoverRole: 'RIDER' });
-    expect(await riderOf(u.userId)).toMatchObject({ vehicleType: 'CAR', riderType: 'BOTH', licensePlate: p, vehicleMake: 'Toyota', vehicleModel: 'Premio', vehicleYear: 2017, vehicleColor: 'White' });
+    // [owner 6 Nov ~05:20Z] food and shop orders only: never courier parcels.
+    expect(await riderOf(u.userId)).toMatchObject({ vehicleType: 'CAR', riderType: 'DELIVERY', licensePlate: p, vehicleMake: 'Toyota', vehicleModel: 'Premio', vehicleYear: 2017, vehicleColor: 'White' });
     expect(await driverOf(u.userId)).toBeNull();
   });
 
@@ -320,11 +322,12 @@ describe('[CARS-PLATES] sign-up: the plate decides, the fee follows the work', (
 });
 
 describe('[CARS-PLATES] papers: a P car is checked as a delivery car; a taxi on a P plate is still refused', () => {
-  it('the P car’s own list is the delivery rider’s: licence, registration, insurance — no hire licences', async () => {
+  it('the P car’s own list is the delivery rider’s plus one car photo: licence, registration, insurance, photo — no hire licences, no fitness', async () => {
     process.env['CAR_DELIVERIES'] = '1';
     const pc = await privateCar();
     const status = await sys(() => verification.getStatus(pc.userId, 'MOVER'));
-    expect([...(status as { checklist: string[] }).checklist].sort()).toEqual(['drivers_licence', 'vehicle_insurance', 'vehicle_registration']);
+    // [owner 6 Nov ~05:20Z] + ONE car photo with the plate showing, so a person can match the plate letter (no fitness).
+    expect([...(status as { checklist: string[] }).checklist].sort()).toEqual(['drivers_licence', 'vehicle_exterior_photo', 'vehicle_insurance', 'vehicle_registration']);
     const taxiList = await sys(() => new CountryConfigService(app.prisma).getMoverChecklist('GY', 'CAR', app.prisma, 'DRIVER'));
     expect(taxiList).toEqual(expect.arrayContaining(['hire_car_driver_licence', 'hire_car_vehicle_licence']));
   });
@@ -439,5 +442,67 @@ describe('[CARS-PLATES · REVIEW-G22 S2-1] an H plate is always a taxi car’s: 
     const ins2 = await pendingVehiclePaper(pc2.userId, pc2.plate, 'vehicle_insurance');
     await expect(sys(() => verification.approveDocument(ins2.id, reviewerId, undefined, { insurerName: 'Synthetic', policyNumber: 'X3', coverageClass: 'HIRE', hireClassConfirmed: false, plateCrossChecked: true })))
       .rejects.toMatchObject({ code: 'INSURANCE_SCOPE_INSUFFICIENT', message: expect.stringContaining('A motor vehicle that delivers') });
+  });
+});
+
+async function makeParcel(customerId: string, courierPackageSize: 'SMALL' | 'LARGE' = 'SMALL') {
+  const order = await sys(() => app.prisma.order.create({
+    data: {
+      orderNumber: `PLT-C-${nanoid(10)}`, orderType: 'COURIER', fulfillment: 'DELIVERY', customerId, status: 'READY_FOR_PICKUP', readyAt: new Date(),
+      courierPackageSize,
+      pickupAddress: 'South sender', pickupLat: SPOT.lat, pickupLng: SPOT.lng,
+      deliveryAddress: 'South recipient', deliveryLat: SPOT.lat + 0.004, deliveryLng: SPOT.lng + 0.004,
+      subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 800, totalAmount: 800, paymentMethod: 'CASH',
+    },
+  }));
+  orderIds.push(order.id);
+  return order;
+}
+
+describe('[CARS-PLATES · owner 6 Nov ~05:20Z] a car takes food and shop orders only — never a courier parcel', () => {
+  it('the rule: a car carries no parcel even while cars deliver; a parcel only a car could carry cannot be placed', () => {
+    const on = { CAR_DELIVERIES: '1' };
+    expect(carriesParcels('CAR', on)).toBe(false);
+    expect(carriesParcels('WAGON_CAR', on)).toBe(false);
+    expect(carriesParcels('MOTORCYCLE', on)).toBe(true);
+    expect(parcelSizeCarriableToday('SMALL', on)).toBe(true);
+    expect(parcelSizeCarriableToday('EXTRA_LARGE', on)).toBe(false);
+  });
+
+  it('a P car — even one left as BOTH by older data — is never a parcel candidate, and never claims one; a store order it does', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const pc = await privateCar({ riderType: 'BOTH' });
+    expect((await call('POST', '/api/v1/rider/go-online', pc.token, here)).statusCode).toBe(200);
+    const parcelPool = (await dispatch.findCandidates(`probe-${nanoid(6)}`, SPOT, 5, 'RIDER', 0, null, null, 'SMALL', null)).map((c) => c.riderId);
+    expect(parcelPool).not.toContain(pc.riderId);
+    const unsized = (await dispatch.findCandidates(`probe-${nanoid(6)}`, SPOT, 5, 'RIDER', 0, null, null, null, null, null, undefined, true)).map((c) => c.riderId);
+    expect(unsized).not.toContain(pc.riderId);
+    expect((await dispatch.findCandidates(`probe-${nanoid(6)}`, SPOT, 5, 'RIDER', 0, null, null, null, null)).map((c) => c.riderId)).toContain(pc.riderId);
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const parcel = await makeParcel(customer.userId);
+    await expect(sys(() => app.prisma.$transaction((tx) => reserveRiderLeg(tx, pc.riderId, parcel.id, 1))))
+      .rejects.toMatchObject({ code: 'CAR_NO_PARCELS' });
+    expect((await riderOf(pc.userId))!.currentOrderId).toBeNull();
+    // The board grab says the same, before anything is bound.
+    const grab = await call('POST', `/api/v1/rider/orders/${parcel.id}/accept`, pc.token, {});
+    expect(grab.statusCode, grab.body).toBe(403);
+    expect(grab.json().error.code).toBe('CAR_NO_PARCELS');
+    expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: parcel.id } }))).riderId).toBeNull();
+  });
+
+  it('a car cannot sign up for parcels on its profile', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const pc = await privateCar();
+    const res = await call('PUT', '/api/v1/rider/profile', pc.token, { riderType: 'BOTH' });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error.code).toBe('CAR_NO_PARCELS');
+    expect((await riderOf(pc.userId))!.riderType).toBe('DELIVERY');
+  });
+
+  it('a person can approve the P car’s photo (the plate shown) on the delivery path', async () => {
+    process.env['CAR_DELIVERIES'] = '1';
+    const pc = await privateCar();
+    const photo = await pendingVehiclePaper(pc.userId, pc.plate, 'vehicle_exterior_photo');
+    expect(await sys(() => verification.approveDocument(photo.id, reviewerId))).toMatchObject({ status: 'APPROVED' });
   });
 });
