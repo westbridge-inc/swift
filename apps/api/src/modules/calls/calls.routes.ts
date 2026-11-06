@@ -7,7 +7,7 @@ import { NotificationService } from '../notification/notification.service';
 import type { CallProvider } from '../../providers/voice/call-provider';
 import { TwilioVoiceProvider } from '../../providers/voice/twilio-voice';
 import { callRelayEnabled, readCallRelayConfig, type CallRelayConfig } from './call-relay-switch';
-import { CALL_STEPS, CALL_TARGETS, handleVoiceStep, startBridgeCall, type CallBridgeDeps, type CallStepName } from './call-bridge';
+import { CALL_STEPS, CALL_TARGETS, handleVoiceStep, startBridgeCall, type CallBridgeDeps, type CallerDayLedger, type CallStepName } from './call-bridge';
 
 // ---------------------------------------------------------------------------
 // [O-1] The Swift call bridge's two doors.
@@ -27,6 +27,27 @@ import { CALL_STEPS, CALL_TARGETS, handleVoiceStep, startBridgeCall, type CallBr
 export interface CallRoutesOptions {
   /** Tests inject a provider that never reaches a network. */
   provider?: (config: CallRelayConfig) => CallProvider;
+  /** Tests may inject the phone's daily ledger; by default it lives in Redis. */
+  ledger?: CallerDayLedger;
+}
+
+/** A day plus an hour: the ledger forgets a phone on its own once nothing in it can count. */
+const LEDGER_TTL_MS = 25 * 3600_000;
+
+/** [REVIEW-M17 S2-1] The phone's daily call ledger in Redis: one sorted set per keyed phone hash, self-expiring. */
+export function redisCallerDayLedger(redis: FastifyInstance['redis']): CallerDayLedger {
+  return {
+    async count(key, sinceMs) {
+      await redis.zremrangebyscore(key, '-inf', `(${sinceMs}`);
+      return redis.zcard(key);
+    },
+    async add(key, member, atMs) {
+      await redis.multi().zadd(key, atMs, member).pexpire(key, LEDGER_TTL_MS).exec();
+    },
+    async remove(key, member) {
+      await redis.zrem(key, member);
+    },
+  };
 }
 
 const defaultProvider = (config: CallRelayConfig): CallProvider => new TwilioVoiceProvider(config.twilio);
@@ -61,7 +82,7 @@ export async function callsRoutes(app: FastifyInstance, opts: CallRoutesOptions 
       throw new AppError(403, 'CALL_RELAY_OFF', 'Calls through Swift are not on yet. Message them in chat, or ask support to connect you.');
     }
     const { orderId, target } = bridgeBody.parse(request.body);
-    const deps: CallBridgeDeps = { prisma: app.prisma, provider: providerFor(config), config, notifications };
+    const deps: CallBridgeDeps = { prisma: app.prisma, provider: providerFor(config), config, notifications, ledger: opts.ledger ?? redisCallerDayLedger(app.redis) };
     const result = await startBridgeCall(deps, { orderId, target, userId: request.user.userId });
     return { success: true, data: result };
   });
