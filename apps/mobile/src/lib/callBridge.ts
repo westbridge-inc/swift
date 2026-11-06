@@ -94,6 +94,7 @@ function recipientRefusal(code: string | null | undefined): string {
     case 'CALL_DAILY_LIMIT_REACHED': return 'Swift calls are busy right now. Message the sender in chat, or ask support.';
     case 'CALL_USER_DAILY_LIMIT_REACHED': return 'You have used your Swift calls for today. Message the sender in chat, or ask support.';
     case 'CALL_CALLER_BUSY': return CALLER_BUSY_WORDS;
+    case 'CALL_CALLER_NUMBER_UNSUPPORTED': return 'Swift calls only Guyana numbers, not yours. Message the sender in chat, or ask support.';
     default: return 'Swift could not place the call right now. Try again, or message the sender in chat.';
   }
 }
@@ -115,6 +116,8 @@ export function bridgeErrorText(code: string | null | undefined, target?: CallTa
     case 'CALL_DAILY_LIMIT_REACHED': return DAILY_LIMIT_WORDS;
     // [REVIEW-M17 S3-1] One live Swift call per person at a time.
     case 'CALL_CALLER_BUSY': return CALLER_BUSY_WORDS;
+    // [REVIEW-G23 S4-4] The caller's OWN number is not one Swift can ring.
+    case 'CALL_CALLER_NUMBER_UNSUPPORTED': return 'Swift calls only Guyana numbers, not yours. Message them in chat, or ask support.';
     // [CALL-RELAY-ON] This person's own daily cap (CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY).
     case 'CALL_USER_DAILY_LIMIT_REACHED': return 'You have used your Swift calls for today. Message them in chat, or ask support.';
     default: return 'Swift could not place the call right now. Try again, or message them in chat.';

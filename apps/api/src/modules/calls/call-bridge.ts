@@ -6,7 +6,6 @@ import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import type { CallProvider, CallStep, ProviderWebhook } from '../../providers/voice/call-provider';
 import { CALL_RING_SECONDS, CALL_TIME_LIMIT_SECONDS, type CallRelayConfig } from './call-relay-switch';
 import { dialableNumber } from '../../providers/voice/dialable';
-import { hashSignal, normalizePhone as phoneDigits } from '../integrity/normalize';
 import type { NotificationAudience, NotificationPayload } from '../notification/notification.service';
 
 // ---------------------------------------------------------------------------
@@ -30,8 +29,8 @@ import type { NotificationAudience, NotificationPayload } from '../notification/
 //   ATTEMPTS (connected or not), CALL_RELAY_MAX_ATTEMPTS_PER_ORDER. One live
 //   call per order (a database rule, so two taps start one call).
 // - [CALL-RELAY-ON · 6 Nov] And daily caps, counted under one lock so two
-//   starts can never both take the last slot: each person's own
-//   CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY (default 10) first, then the shared
+//   starts can never both take the last slot: each person's own first, by
+//   their role on the order (customer 5, partner 20), then the shared
 //   CALL_RELAY_MAX_CALLS_PER_DAY over every order (default 100), in any 24 hours.
 // - The caller ID is Swift's number (CALL_RELAY_CALLER_ID), pinned on the
 //   dial, never the number being called. Never recorded.
@@ -76,22 +75,32 @@ export const CALL_WORDS = {
 export const CALL_STALE_AFTER_MS = (CALL_TIME_LIMIT_SECONDS + 2 * CALL_RING_SECONDS + 60) * 1000;
 
 /**
- * [REVIEW-M17 S2-1] The day's calls, also kept OUTSIDE the call rows. Account erasure deletes a person's call rows
- * (the Privacy Policy says so), which on its own would give their calls back to the day. So every start is also
- * written to two self-expiring lists (25 hours) that erasure never touches:
- * - the whole service's day (call ids and times, nothing about a person);
- * - the caller's PHONE (a keyed hash, hashSignal; never the number), so a delete and a new sign-up with the same
- *   SIM starts no fresh day.
- * Each cap counts the larger of the rows and its list.
+ * [REVIEW-M17 S2-1 · REVIEW-G23 S2-1] The service's day, also kept OUTSIDE the call rows. Account erasure deletes a
+ * person's call rows (the Privacy Policy says so), which on its own would give their calls back to the shared day. So
+ * every start is also written to one self-expiring list (25 hours) holding call ids and times only, nothing about a
+ * person, which erasure never needs to touch. The shared cap counts the larger of the rows and the list.
+ * Nothing is kept about a person's phone: a delete and a new sign-up with the same SIM starts that one person's day
+ * afresh (accepted, COORD 6 Nov); the shared cap still holds.
  */
-export interface CallerDayLedger {
-  count(key: string, sinceMs: number): Promise<number>;
-  add(key: string, member: string, atMs: number): Promise<void>;
-  remove(key: string, member: string): Promise<void>;
+export interface ServiceDayLedger {
+  count(sinceMs: number): Promise<number>;
+  add(member: string, atMs: number): Promise<void>;
+  remove(member: string): Promise<void>;
 }
 export const CALL_DAY_PREFIX = 'swift:call-day:';
 export const SERVICE_DAY_KEY = `${CALL_DAY_PREFIX}all`;
-export const callerDayKey = (phone: string): string => `${CALL_DAY_PREFIX}phone:${hashSignal(phoneDigits(phone))}`;
+/** [REVIEW-G23 S3-3] The longest Swift waits for the list: a down Redis refuses the start fast (503), never a hung transaction. */
+export const LEDGER_WAIT_MS = 1_000;
+function withinLedgerWait<T>(work: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('call day list did not answer')), LEDGER_WAIT_MS);
+    timer.unref?.();
+    work.then((v) => { clearTimeout(timer); resolve(v); }, (e: unknown) => { clearTimeout(timer); reject(e); });
+  });
+}
+
+/** [owner 6 Nov ~11:10Z] A rider, driver or store on the order is a partner; the order's customer is a customer. */
+const PARTNER_ROLES = ['rider', 'driver', 'store'] as const;
 
 /** [CALL-RELAY-ON] The one lock every start takes before it counts the day's calls. */
 export const CALL_DAILY_CAP_LOCK = 'swift:call-relay-daily-cap';
@@ -108,7 +117,9 @@ export interface CallBridgeDeps {
   config: CallRelayConfig;
   notifications: Notifier;
   /** [REVIEW-M17 S2-1] Required to START a call (a start without it is refused); the webhooks do not use it. */
-  ledger?: CallerDayLedger;
+  ledger?: ServiceDayLedger;
+  /** [REVIEW-G23 S3-2] Tells the platform operators the shared daily cap tripped (best effort, once a day). */
+  alertDailyCap?: (maxCallsPerDay: number) => Promise<void>;
   now?: () => Date;
 }
 
@@ -266,13 +277,19 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
   const caller = await deps.prisma.user.findUnique({ where: { id: input.userId }, select: { phone: true } });
   // [REVIEW-M17 S1-1] Both legs through the one dial guard: Swift rings only complete Guyana lines.
   const callerNumber = dialableNumber(caller?.phone, deps.config.callerId);
-  if (!callerNumber || !dialFor(order, input.target, deps.config.callerId)) {
+  if (!callerNumber) {
+    // [REVIEW-G23 S4-4] Say it is THEIR number Swift cannot call, not the other person's.
+    throw new AppError(409, 'CALL_CALLER_NUMBER_UNSUPPORTED', 'Swift calls only Guyana numbers, not yours. Message them in chat, or ask support.');
+  }
+  if (!dialFor(order, input.target, deps.config.callerId)) {
     throw new AppError(409, 'CALL_NO_NUMBER', 'Swift has no number to call for this. Message them in chat, or ask support.');
   }
   const ledger = deps.ledger;
-  if (!ledger) throw new AppError(503, 'CALL_PROVIDER_FAILED', 'Swift could not place the call right now. Try again, or message them in chat.');
-  const dayKey = callerDayKey(callerNumber);
   const ledgerDown = () => new AppError(503, 'CALL_PROVIDER_FAILED', 'Swift could not place the call right now. Try again, or message them in chat.');
+  if (!ledger) throw ledgerDown();
+  // [owner 6 Nov ~11:10Z] The person's cap by their role ON THIS ORDER.
+  const asPartner = (PARTNER_ROLES as readonly string[]).includes(callerRole);
+  const personCap = asPartner ? deps.config.maxCallsPerPartnerPerDay : deps.config.maxCallsPerCustomerPerDay;
 
   let callId: string;
   try {
@@ -315,17 +332,17 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
       }
       const inWindow = { createdAt: { gte: new Date(now.getTime() - DAY_MS) }, status: { not: CALL_STATUS.FAILED } };
       const since = now.getTime() - DAY_MS;
-      // [REVIEW-M17 S2-1] The person's day is the larger of their account's rows and their phone's list.
-      const byAccount = await tx.callSession.count({ where: { ...inWindow, callerUserId: input.userId } });
-      const byPhone = await ledger.count(dayKey, since).catch(() => { throw ledgerDown(); });
-      const mine = Math.max(byAccount, byPhone);
-      if (mine >= deps.config.maxCallsPerUserPerDay) {
+      // The person's day in this role: their calls as a customer, or their calls as a partner.
+      const mine = await tx.callSession.count({
+        where: { ...inWindow, callerUserId: input.userId, callerRole: asPartner ? { in: [...PARTNER_ROLES] } : 'customer' },
+      });
+      if (mine >= personCap) {
         throw new AppError(429, 'CALL_USER_DAILY_LIMIT_REACHED', 'You have used your Swift calls for today. Message them in chat, or ask support.');
       }
       // [REVIEW-M17 S2-1] The service's day: the larger of the rows and the service list (erasure deletes rows).
       const today = Math.max(
         await tx.callSession.count({ where: inWindow }),
-        await ledger.count(SERVICE_DAY_KEY, since).catch(() => { throw ledgerDown(); }),
+        await withinLedgerWait(ledger.count(since)).catch(() => { throw ledgerDown(); }),
       );
       if (today >= deps.config.maxCallsPerDay) {
         log().warn({ maxCallsPerDay: deps.config.maxCallsPerDay }, '[CALL-RELAY-ON] daily call cap reached: Call via Swift refused until a slot frees');
@@ -336,13 +353,16 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
         select: { id: true },
       });
       // Recorded under the same lock; a start that fails after this takes it back below.
-      await ledger.add(dayKey, row.id, now.getTime()).catch(() => { throw ledgerDown(); });
-      await ledger.add(SERVICE_DAY_KEY, row.id, now.getTime()).catch(() => { throw ledgerDown(); });
+      await withinLedgerWait(ledger.add(row.id, now.getTime())).catch(() => { throw ledgerDown(); });
       return row.id;
     });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
       throw new AppError(409, 'CALL_IN_PROGRESS', 'A Swift call on this order is already ringing. Answer it, or try again in a minute.');
+    }
+    // [REVIEW-G23 S3-2] The shared cap tripped: the platform operators hear it (once a day; never blocks the answer).
+    if (err instanceof AppError && err.code === 'CALL_DAILY_LIMIT_REACHED' && deps.alertDailyCap) {
+      await deps.alertDailyCap(deps.config.maxCallsPerDay).catch(() => undefined);
     }
     throw err;
   }
@@ -360,9 +380,8 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
     await deps.prisma.callSession.update({ where: { id: callId }, data: { providerCallId: placed.providerCallId } });
   } catch {
     await deps.prisma.callSession.update({ where: { id: callId }, data: { status: CALL_STATUS.FAILED, endedAt: deps.now?.() ?? new Date() } });
-    // Nothing was dialled or paid: the start uses no daily slot (the row is FAILED; both lists forget it).
-    await ledger.remove(dayKey, callId).catch(() => undefined);
-    await ledger.remove(SERVICE_DAY_KEY, callId).catch(() => undefined);
+    // Nothing was dialled or paid: the start uses no daily slot (the row is FAILED; the list forgets it).
+    await withinLedgerWait(ledger.remove(callId)).catch(() => undefined);
     throw new AppError(502, 'CALL_PROVIDER_FAILED', 'Swift could not place the call right now. Try again, or message them in chat.');
   }
   return { callId, status: CALL_STATUS.DIALING_CALLER };

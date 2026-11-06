@@ -36,15 +36,17 @@ export const CALL_RELAY_DEFAULT_MAX_ATTEMPTS = 4;
 /** [CALL-RELAY-ON · 6 Nov 2026] Calls started in any 24 hours, every order together. Swift pays ~US$0.75 a
  *  minute for a bridged call (two Guyana legs), and the per-order cap alone does not bound a day. The owner tunes it. */
 export const CALL_RELAY_MAX_CALLS_PER_DAY_ENV = 'CALL_RELAY_MAX_CALLS_PER_DAY';
-/** [REVIEW-M17 S2-2] Launch default 40 (was 100). */
-export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY = 40;
+/** [owner 6 Nov ~11:10Z] Service-wide 100 a day. */
+export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY = 100;
 export const CALL_RELAY_MAX_CALLS_PER_DAY_CEILING = 10_000;
-/** [CALL-RELAY-ON · security review] Calls ONE person may start in any 24 hours, so no one person can use up
- *  the shared daily cap and block everyone else. Checked before the shared cap. */
-export const CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_ENV = 'CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY';
-/** [REVIEW-M17 S2-2] Launch default 5 (was 10). */
-export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY = 5;
-export const CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_CEILING = 200;
+/** [CALL-RELAY-ON · security review · owner 6 Nov ~11:10Z] Calls ONE person may start in any 24 hours, so no one person
+ *  can use up the shared daily cap and block everyone else. Checked before the shared cap, by the caller's role ON THAT
+ *  ORDER: as a customer 5 a day; as a partner (a rider, driver, or a store's owner or staff) 20 a day. */
+export const CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY_ENV = 'CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY';
+export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_CUSTOMER_PER_DAY = 5;
+export const CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY_ENV = 'CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY';
+export const CALL_RELAY_DEFAULT_MAX_CALLS_PER_PARTNER_PER_DAY = 20;
+export const CALL_RELAY_MAX_CALLS_PER_PERSON_CEILING = 200;
 /** Owner ruling 22 Oct: a hard 30-minute limit on every call. The longest the setting below may ever allow. */
 export const CALL_TIME_LIMIT_SECONDS = 1800;
 /** [REVIEW-M17 S2-2] The per-call limit in minutes, on BOTH legs (2-30). [owner 6 Nov 2026 ~09:30Z] Default 10:
@@ -60,7 +62,10 @@ export interface CallRelayConfig {
   webhookBase: string;
   maxAttemptsPerOrder: number;
   maxCallsPerDay: number;
-  maxCallsPerUserPerDay: number;
+  /** Per person, as the customer on the order. */
+  maxCallsPerCustomerPerDay: number;
+  /** Per person, as a partner on the order (rider, driver, store). */
+  maxCallsPerPartnerPerDay: number;
   /** Seconds a call may last, on both legs. */
   maxCallSeconds: number;
   twilio: { accountSid: string; apiKeySid: string; apiKeySecret: string; authToken: string };
@@ -92,11 +97,14 @@ export function readCallRelayConfig(
   if (!(maxCallsPerDay >= 1 && maxCallsPerDay <= CALL_RELAY_MAX_CALLS_PER_DAY_CEILING)) {
     problems.push(`${CALL_RELAY_MAX_CALLS_PER_DAY_ENV} must be a whole number from 1 to ${CALL_RELAY_MAX_CALLS_PER_DAY_CEILING}`);
   }
-  const rawPerUser = (env[CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_ENV] ?? '').trim();
-  const maxCallsPerUserPerDay = rawPerUser === '' ? CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY : /^\d{1,3}$/.test(rawPerUser) ? Number(rawPerUser) : NaN;
-  if (!(maxCallsPerUserPerDay >= 1 && maxCallsPerUserPerDay <= CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_CEILING)) {
-    problems.push(`${CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_ENV} must be a whole number from 1 to ${CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY_CEILING}`);
-  }
+  const perPerson = (name: string, fallback: number): number => {
+    const raw = (env[name] ?? '').trim();
+    const value = raw === '' ? fallback : /^\d{1,3}$/.test(raw) ? Number(raw) : NaN;
+    if (!(value >= 1 && value <= CALL_RELAY_MAX_CALLS_PER_PERSON_CEILING)) problems.push(`${name} must be a whole number from 1 to ${CALL_RELAY_MAX_CALLS_PER_PERSON_CEILING}`);
+    return value;
+  };
+  const maxCallsPerCustomerPerDay = perPerson(CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY_ENV, CALL_RELAY_DEFAULT_MAX_CALLS_PER_CUSTOMER_PER_DAY);
+  const maxCallsPerPartnerPerDay = perPerson(CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY_ENV, CALL_RELAY_DEFAULT_MAX_CALLS_PER_PARTNER_PER_DAY);
   const rawMinutes = (env[CALL_RELAY_MAX_CALL_MINUTES_ENV] ?? '').trim();
   const maxCallMinutes = rawMinutes === '' ? CALL_RELAY_DEFAULT_MAX_CALL_MINUTES : /^\d{1,2}$/.test(rawMinutes) ? Number(rawMinutes) : NaN;
   if (!(maxCallMinutes >= CALL_RELAY_MIN_CALL_MINUTES && maxCallMinutes * 60 <= CALL_TIME_LIMIT_SECONDS)) {
@@ -112,7 +120,7 @@ export function readCallRelayConfig(
   if (!apiKeySecret) problems.push('TWILIO_API_KEY_SECRET is missing');
   if (!authToken) problems.push('TWILIO_WEBHOOK_AUTH_TOKEN is missing (every call webhook is signature-checked with it)');
   if (problems.length) return { ok: false, problems };
-  return { ok: true, config: { callerId, webhookBase, maxAttemptsPerOrder, maxCallsPerDay, maxCallsPerUserPerDay, maxCallSeconds, twilio: { accountSid, apiKeySid, apiKeySecret, authToken } } };
+  return { ok: true, config: { callerId, webhookBase, maxAttemptsPerOrder, maxCallsPerDay, maxCallsPerCustomerPerDay, maxCallsPerPartnerPerDay, maxCallSeconds, twilio: { accountSid, apiKeySid, apiKeySecret, authToken } } };
 }
 
 /**

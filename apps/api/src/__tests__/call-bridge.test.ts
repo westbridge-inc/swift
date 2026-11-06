@@ -18,10 +18,11 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { callsRoutes, callVoiceRoutes, INBOUND_CALL_WORDS } from '../modules/calls/calls.routes';
+import { callsRoutes, callVoiceRoutes, INBOUND_CALL_WORDS, redisServiceDayLedger } from '../modules/calls/calls.routes';
 import { TwilioVoiceProvider } from '../providers/voice/twilio-voice';
 import { twilioSignature } from '../modules/notification/sms-inbound.routes';
-import { CALL_DAILY_CAP_LOCK, CALL_DAY_PREFIX, CALL_WORDS, SERVICE_DAY_KEY } from '../modules/calls/call-bridge';
+import { CALL_DAILY_CAP_LOCK, CALL_DAY_PREFIX, CALL_WORDS, SERVICE_DAY_KEY, type ServiceDayLedger } from '../modules/calls/call-bridge';
+import { AccountService } from '../modules/user/account.service';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { testPhone } from './helpers/fixture-ids';
@@ -40,7 +41,7 @@ const ENV = {
   CALL_RELAY: '1', CALL_RELAY_CALLER_ID: CALLER_ID, CALL_RELAY_WEBHOOK_BASE: BASE, CALL_RELAY_MAX_ATTEMPTS_PER_ORDER: '3',
   // [CALL-RELAY-ON] The daily cap's own tests set it; every other test runs well under it. The time limit is set to
   // the longest allowed (30) here so the older documents below keep their numbers; the default (10) has its own test.
-  CALL_RELAY_MAX_CALLS_PER_DAY: '10000', CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: '200', CALL_RELAY_MAX_CALL_MINUTES: '30',
+  CALL_RELAY_MAX_CALLS_PER_DAY: '10000', CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY: '200', CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY: '200', CALL_RELAY_MAX_CALL_MINUTES: '30',
   TWILIO_ACCOUNT_SID: SID, TWILIO_API_KEY_SID: KEY, TWILIO_API_KEY_SECRET: 'bridge-test-secret', TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN,
 };
 const NUM = String(Date.now()).slice(-5);
@@ -60,6 +61,14 @@ const http = (async (_url: string, init: FetchInit) => {
 }) as unknown as typeof fetch;
 
 let app: FastifyInstance;
+/** [REVIEW-G23 S3-3] The real service list, except that its reads or writes fail on demand. */
+let ledgerFault: 'none' | 'count-throws' | 'add-throws' | 'hang' = 'none';
+const realLedger = () => redisServiceDayLedger(app.redis);
+const faultyLedger: ServiceDayLedger = {
+  count: async (since) => { if (ledgerFault === 'count-throws') throw new Error('redis down'); if (ledgerFault === 'hang') await new Promise(() => undefined); return realLedger().count(since); },
+  add: async (member, at) => { if (ledgerFault === 'add-throws') throw new Error('redis down'); return realLedger().add(member, at); },
+  remove: async (member) => realLedger().remove(member),
+};
 const users: string[] = [];
 const orderIds: string[] = [];
 
@@ -104,6 +113,8 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   const provider = (config: { twilio: ConstructorParameters<typeof TwilioVoiceProvider>[0] }) => new TwilioVoiceProvider(config.twilio, http);
   await app.register(callsRoutes, { prefix: '/api/v1/calls', provider });
+  // [REVIEW-G23 S3-3] The same door with a service list that can be made to fail (throw, or never answer).
+  await app.register(callsRoutes, { prefix: '/api/v1/calls-faulty', provider, ledger: faultyLedger });
   await app.register(callVoiceRoutes, { prefix: '/api/v1/calls/voice', provider });
   await app.ready();
   // [REVIEW-M17 S2-1] The day's lists live in Redis for 25 hours: start this run from empty ones, and move call rows
@@ -487,17 +498,18 @@ describe('[CALL-RELAY-ON] the daily cap (CALL_RELAY_MAX_CALLS_PER_DAY): calls st
   });
 });
 
-// [CALL-RELAY-ON · security review] The daily cap is shared, so one person could use it up and block everyone.
-// Each person also has their own rolling 24-hour cap (CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY), checked first.
-// A start the voice provider refused (FAILED, nothing dialled, nothing paid) uses no daily slot of either kind.
-describe('[CALL-RELAY-ON] the per-person daily cap (CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY)', () => {
+// [CALL-RELAY-ON · security review · owner 6 Nov ~11:10Z] The shared cap is shared, so one person could use it up. Each
+// person also has a rolling 24-hour cap, checked first, by their role ON THAT ORDER: as a customer
+// (CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY, default 5) or as a partner, a rider, driver or store
+// (CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY, default 20). A start the voice provider refused uses no daily slot.
+describe('[CALL-RELAY-ON] the per-person daily caps, by the caller\'s role on the order', () => {
   const finish = async (res: { json(): { data: { callId: string } } }) => { await hook('status', res.json().data.callId, { CallStatus: 'completed' }); };
   let seq = 30;
   const freshCustomer = async () => person(seq++, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
-  const foodFor = (customerId: string) => order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
+  const foodFor = (customerId: string, rider = riderId) => order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId, vendorId, riderId: rider, status: 'PICKED_UP', acceptedAt: new Date() });
 
-  it('one person at their cap is refused on any order, while another person can still call', async () => {
-    process.env['CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY'] = '2';
+  it('a customer at their cap is refused on any order, while another customer can still call', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '2';
     const [ana, ben] = [await freshCustomer(), await freshCustomer()];
     const [a1, a2, a3, b1] = [await foodFor(ana.id), await foodFor(ana.id), await foodFor(ana.id), await foodFor(ben.id)];
     for (const o of [a1, a2]) {
@@ -515,8 +527,44 @@ describe('[CALL-RELAY-ON] the per-person daily cap (CALL_RELAY_MAX_CALLS_PER_USE
     await finish(other);
   });
 
+  it('the role is the one on THAT order: a rider calling as a partner uses the partner cap, the same person ordering food uses the customer cap', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
+    process.env['CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY'] = '2';
+    const worker = await person(seq++, ['RIDER', 'CUSTOMER'], 'RIDER', { customer: { create: {} } });
+    const workerRider = (await system(() => app.prisma.rider.create({ data: { userId: worker.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }))).id;
+    const custs = [await freshCustomer(), await freshCustomer(), await freshCustomer()];
+    const jobs = [await foodFor(custs[0]!.id, workerRider), await foodFor(custs[1]!.id, workerRider), await foodFor(custs[2]!.id, workerRider)];
+    // as a partner: 2 calls, then the partner cap (2), not the customer cap (1)
+    for (const job of jobs.slice(0, 2)) {
+      const res = await bridge(worker.token, job.id, 'customer');
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await session(res.json().data.callId)).callerRole).toBe('rider');
+      await finish(res);
+    }
+    expect((await bridge(worker.token, jobs[2]!.id, 'customer')).json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+    // the same person as a CUSTOMER on their own food order: their partner calls do not count against it
+    const own = [await foodFor(worker.id), await foodFor(worker.id)];
+    const mine = await bridge(worker.token, own[0]!.id, 'rider');
+    expect(mine.statusCode, mine.body).toBe(200);
+    expect((await session(mine.json().data.callId)).callerRole).toBe('customer');
+    await finish(mine);
+    expect((await bridge(worker.token, own[1]!.id, 'rider')).json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+  });
+
+  it('a store\'s staff member is a partner: the partner cap applies to calls from the store desk', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
+    process.env['CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY'] = String(await system(() => app.prisma.callSession.count({ where: { callerUserId: staff.id, createdAt: { gte: new Date(Date.now() - DAY) }, status: { not: 'FAILED' } } })) + 2);
+    for (let i = 0; i < 2; i += 1) {
+      const res = await bridge(staff.token, (await liveFood()).id, 'customer');
+      expect(res.statusCode, res.body).toBe(200);
+      expect((await session(res.json().data.callId)).callerRole).toBe('store');
+      await finish(res);
+    }
+    expect((await bridge(staff.token, (await liveFood()).id, 'customer')).json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+  });
+
   it('the person\'s cap is checked before the shared one: at both, the person is told it is their own limit', async () => {
-    process.env['CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY'] = '1';
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
     const cid = await freshCustomer();
     const [o1, o2] = [await foodFor(cid.id), await foodFor(cid.id)];
     const first = await bridge(cid.token, o1.id, 'rider');
@@ -530,7 +578,7 @@ describe('[CALL-RELAY-ON] the per-person daily cap (CALL_RELAY_MAX_CALLS_PER_USE
   });
 
   it('a start the voice provider refused uses no daily slot, the person\'s or the shared one', async () => {
-    process.env['CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY'] = '1';
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
     const cid = await freshCustomer();
     const o = await foodFor(cid.id);
     twilioAnswers = 'refuse';
@@ -540,6 +588,52 @@ describe('[CALL-RELAY-ON] the per-person daily cap (CALL_RELAY_MAX_CALLS_PER_USE
     const res = await bridge(cid.token, o.id, 'rider');
     expect(res.statusCode, res.body).toBe(200);
     await finish(res);
+  });
+});
+
+// [REVIEW-G23 S3-3] The service list fails closed, fast: a read or write that fails, or never answers, refuses the start
+// (503) before anything is dialled or written.
+describe('[REVIEW-G23 S3-3] the service list fails closed', () => {
+  const faulty = (token: string, orderId: string) =>
+    app.inject({ method: 'POST', url: '/api/v1/calls-faulty/bridge', headers: { authorization: `Bearer ${token}` }, payload: { orderId, target: 'rider' } });
+  for (const fault of ['count-throws', 'add-throws', 'hang'] as const) {
+    it(`${fault}: 503, no call row, nothing dialled${fault === 'hang' ? ', and quickly' : ''}`, async () => {
+      ledgerFault = fault;
+      try {
+        const o = await liveFood();
+        const t0 = Date.now();
+        const res = await faulty(diner.token, o.id);
+        expect([res.statusCode, res.json().error.code]).toEqual([503, 'CALL_PROVIDER_FAILED']);
+        expect(Date.now() - t0, 'answers within the list wait, not a hung transaction').toBeLessThan(4000);
+        expect(await system(() => app.prisma.callSession.count({ where: { orderId: o.id } }))).toBe(0);
+        expect(placed).toHaveLength(0);
+      } finally { ledgerFault = 'none'; }
+    });
+  }
+  it('with the list healthy the same door starts a call (the seam is real)', async () => {
+    const o = await liveFood();
+    const res = await faulty(diner.token, o.id);
+    expect(res.statusCode, res.body).toBe(200);
+    await hook('status', res.json().data.callId, { CallStatus: 'completed' });
+  });
+});
+
+// [REVIEW-G23 S3-2] When the shared daily cap trips, the platform operators hear it once a day (admin inbox and push).
+describe('[REVIEW-G23 S3-2] the shared cap tripping tells the operators, once a day', () => {
+  it('two refusals at the cap: one admin notice, plain words, no number', async () => {
+    const op = await person(45, ['SUPER_ADMIN'], 'SUPER_ADMIN');
+    const notices = () => system(() => app.prisma.notification.findMany({ where: { userId: op.id, title: 'Swift calls: daily limit reached' } }));
+    const before = (await notices()).length;
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String(await startedToday());
+    for (let i = 0; i < 2; i += 1) {
+      expect((await bridge(diner.token, (await liveFood()).id, 'rider')).json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');
+    }
+    const after = await notices();
+    expect(after.length - before).toBe(1);
+    const n = after.at(-1)!;
+    expect(n.body).toMatch(/^Swift calls reached the daily limit of \d+\. Call via Swift is refused until a slot frees\. Check Ops for misuse\.$/);
+    expect(`${n.title} ${n.body}`).toMatch(/^[A-Za-z0-9 +().,:;'!?-]*$/);
+    for (const p of allPhones()) expect(JSON.stringify(n).includes(p)).toBe(false);
   });
 });
 
@@ -586,7 +680,10 @@ describe('[REVIEW-M17 S1-1] Swift dials only a complete Guyana line', () => {
   it('a caller whose own number is in the +5920 test range is never rung', async () => {
     const tester = await person(40, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } }, testPhone());
     const o = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: tester.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
-    expect((await bridge(tester.token, o.id, 'rider')).json().error.code).toBe('CALL_NO_NUMBER');
+    // [REVIEW-G23 S4-4] The words say it is THEIR number Swift cannot call, not the other person's.
+    const res = await bridge(tester.token, o.id, 'rider');
+    expect([res.statusCode, res.json().error.code]).toEqual([409, 'CALL_CALLER_NUMBER_UNSUPPORTED']);
+    expect(res.json().error.message).toBe('Swift calls only Guyana numbers, not yours. Message them in chat, or ask support.');
     expect(placed).toHaveLength(0);
   });
 
@@ -640,29 +737,37 @@ describe('[REVIEW-M17 S3-1] one live call per person at a time', () => {
   });
 });
 
-// [REVIEW-M17 S2-1] Closing an account deletes its call rows (the Privacy Policy says so). The day still counts them:
-// the service list (call ids and times) and the phone's list (a keyed hash) live outside the rows, so a delete and a
-// new sign-up with the same SIM gives back no slot, the person's or everyone's.
-describe('[REVIEW-M17 S2-1] closing the account does not give the day back', () => {
-  it('after the erasure deletes the rows: a new account on the same SIM keeps the old count, and the service day too', async () => {
-    process.env['CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY'] = '1';
+// [REVIEW-M17 S2-1 · REVIEW-G23 S2-1] Closing an account deletes the person's call rows, as the Privacy Policy says, and
+// Swift keeps nothing about their phone. The service list (call ids and times, nothing about a person) is untouched, so
+// the shared day still counts the calls. Accepted (COORD 6 Nov): a delete and a new sign-up with the same SIM starts
+// that one person's day afresh; the shared cap still holds.
+describe('[REVIEW-M17 S2-1] the REAL account erasure and the day', () => {
+  it('deleteAccount removes the call rows and leaves no per-phone record; the shared day still counts the call', async () => {
+    process.env['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY'] = '1';
     const sim = gyPhone();
     const first = await person(41, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } }, sim);
     const o1 = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: first.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
     const call = await bridge(first.token, o1.id, 'rider');
     expect(call.statusCode, call.body).toBe(200);
-    await hook('status', call.json().data.callId, { CallStatus: 'completed' });
-    const full = await startedToday();
-    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String(full);
-    // what account erasure does (account.service.ts): the person's call rows go, the phone is tombstoned
-    await system(() => app.prisma.callSession.deleteMany({ where: { callerUserId: first.id } }));
-    await system(() => app.prisma.user.update({ where: { id: first.id }, data: { phone: `deleted:${first.id}` } }));
+    const callId = call.json().data.callId as string;
+    await hook('status', callId, { CallStatus: 'completed' });
+    await system(() => app.prisma.order.update({ where: { id: o1.id }, data: { status: 'DELIVERED', deliveredAt: new Date() } as never }));
+    const dayBefore = await startedToday();
+    await new AccountService(app).deleteAccount(first.id);
+    // the real erasure: the row is gone, the phone tombstoned, and Redis holds nothing keyed to a person
+    expect(await system(() => app.prisma.callSession.count({ where: { id: callId } }))).toBe(0);
+    expect((await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: first.id }, select: { phone: true } }))).phone).toMatch(/^deleted:/);
+    expect(await app.redis.keys(`${CALL_DAY_PREFIX}*`)).toEqual([SERVICE_DAY_KEY]);
+    expect(await app.redis.zscore(SERVICE_DAY_KEY, callId), 'the service list keeps the call (id and time only)').not.toBeNull();
+    expect(await startedToday(), 'the shared day did not shrink').toBe(dayBefore);
+    // accepted: the same SIM signing up again starts that one person's day afresh ...
     const again = await person(42, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } }, sim);
     const o2 = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: again.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
-    const over = await bridge(again.token, o2.id, 'rider');
-    expect([over.statusCode, over.json().error.code]).toEqual([429, 'CALL_USER_DAILY_LIMIT_REACHED']);
-    // and the service day did not shrink: someone else, under their own cap, meets the shared cap
-    process.env['CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY'] = '200';
+    const fresh = await bridge(again.token, o2.id, 'rider');
+    expect(fresh.statusCode, fresh.body).toBe(200);
+    await hook('status', fresh.json().data.callId, { CallStatus: 'completed' });
+    // ... and the shared cap still holds, erased call included
+    process.env['CALL_RELAY_MAX_CALLS_PER_DAY'] = String(await startedToday());
     const other = await person(43, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
     const o3 = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: other.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
     expect((await bridge(other.token, o3.id, 'rider')).json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');

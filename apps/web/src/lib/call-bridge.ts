@@ -76,6 +76,8 @@ export function bridgeErrorText(code: string | null | undefined): string {
     case 'CALL_NO_NUMBER': return 'Swift has no number to call for this. Message them in chat, or ask support.';
     // [CALL-RELAY-ON] The server's daily cap on Swift calls (CALL_RELAY_MAX_CALLS_PER_DAY) was reached.
     case 'CALL_DAILY_LIMIT_REACHED': return 'Swift calls are busy right now. Message them in chat, or ask support.';
+    // [REVIEW-G23 S4-4] The caller's OWN number is not one Swift can ring.
+    case 'CALL_CALLER_NUMBER_UNSUPPORTED': return 'Swift calls only Guyana numbers, not yours. Message them in chat, or ask support.';
     // [REVIEW-M17 S3-1] One live Swift call per person at a time.
     case 'CALL_CALLER_BUSY': return 'You already have a Swift call ringing. Answer it, or try again in a minute.';
     // [CALL-RELAY-ON] This person's own daily cap (CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY).

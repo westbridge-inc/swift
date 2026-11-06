@@ -5,7 +5,8 @@ import {
   assertCallRelayConfig,
   CALL_RELAY_DEFAULT_MAX_ATTEMPTS,
   CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY,
-  CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_CUSTOMER_PER_DAY,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_PARTNER_PER_DAY,
   CALL_RELAY_DEFAULT_MAX_CALL_MINUTES,
   CALL_RING_SECONDS,
   CALL_TIME_LIMIT_SECONDS,
@@ -20,6 +21,8 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CallStep } from '../providers/voice/call-provider';
 import { GY_DIALABLE, dialableNumber } from '../providers/voice/dialable';
+import { SERVICE_DAY_KEY } from '../modules/calls/call-bridge';
+import { redisServiceDayLedger } from '../modules/calls/calls.routes';
 
 /** fetch's own init type (the DOM name is not a lint global here). */
 type FetchInit = NonNullable<Parameters<typeof fetch>[1]>;
@@ -152,7 +155,7 @@ describe('[O-1] the settings and the boot guard', () => {
     const read = readCallRelayConfig(full());
     expect(read.ok).toBe(true);
     if (read.ok) expect(read.config).toMatchObject({ callerId: CALLER_ID, webhookBase: BASE, maxAttemptsPerOrder: CALL_RELAY_DEFAULT_MAX_ATTEMPTS });
-    // [REVIEW-M17 S2-2 · owner 6 Nov] Launch defaults: 4 attempts per order, 40 calls a day, 5 per person, 10 minutes per call.
+    // [REVIEW-M17 S2-2 · owner 6 Nov] Launch defaults: 4 attempts per order, 10 minutes per call.
     expect(CALL_RELAY_DEFAULT_MAX_ATTEMPTS).toBe(4);
   });
 
@@ -174,11 +177,12 @@ describe('[O-1] the settings and the boot guard', () => {
 
   // [CALL-RELAY-ON · 6 Nov 2026] Swift pays ~US$0.75 a minute for every bridged call (two Guyana legs), and the
   // per-order cap alone does not bound a day: many orders x 6 attempts. One account-wide cap per 24 hours.
-  it('the daily cap: 40 calls in any 24 hours by default, a whole number from 1 to 10000, named never echoed', () => {
-    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY).toBe(40);
+  // [owner 6 Nov ~11:10Z] Service-wide 100 a day.
+  it('the daily cap: 100 calls in any 24 hours by default (owner 6 Nov), a whole number from 1 to 10000, named never echoed', () => {
+    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY).toBe(100);
     const unset = readCallRelayConfig(full());
-    expect(unset.ok && unset.config.maxCallsPerDay).toBe(40);
-    for (const [raw, want] of [['1', 1], ['250', 250], [' 40 ', 40], ['10000', 10000], ['', 40]] as const) {
+    expect(unset.ok && unset.config.maxCallsPerDay).toBe(100);
+    for (const [raw, want] of [['1', 1], ['250', 250], [' 40 ', 40], ['10000', 10000], ['', 100]] as const) {
       const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_DAY: raw }));
       expect(read.ok && read.config.maxCallsPerDay, JSON.stringify(raw)).toBe(want);
     }
@@ -195,21 +199,43 @@ describe('[O-1] the settings and the boot guard', () => {
     expect(() => assertCallRelayConfig({ CALL_RELAY_MAX_CALLS_PER_DAY: '0' }), 'off: nothing is checked').not.toThrow();
   });
 
-  // [CALL-RELAY-ON · security review] One person must not be able to use up everyone's day: a per-person cap too.
-  it('the per-person daily cap: 5 calls in any 24 hours by default, a whole number from 1 to 200', () => {
-    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_USER_PER_DAY).toBe(5);
+  // [CALL-RELAY-ON · security review · owner 6 Nov ~11:10Z] One person must not use up everyone's day: a per-person cap,
+  // by the caller's role ON THE ORDER: 5 a day as a customer, 20 a day as a partner (rider, driver, store).
+  it('the per-person daily caps: customers 5, partners 20 by default, each a whole number from 1 to 200', () => {
+    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_CUSTOMER_PER_DAY).toBe(5);
+    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_PARTNER_PER_DAY).toBe(20);
     const unset = readCallRelayConfig(full());
-    expect(unset.ok && unset.config.maxCallsPerUserPerDay).toBe(5);
-    for (const [raw, want] of [['1', 1], ['25', 25], [' 3 ', 3], ['200', 200], ['', 5]] as const) {
-      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: raw }));
-      expect(read.ok && read.config.maxCallsPerUserPerDay, JSON.stringify(raw)).toBe(want);
+    expect(unset.ok && unset.config.maxCallsPerCustomerPerDay).toBe(5);
+    expect(unset.ok && unset.config.maxCallsPerPartnerPerDay).toBe(20);
+    for (const [name, field, dflt] of [['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY', 'maxCallsPerCustomerPerDay', 5], ['CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY', 'maxCallsPerPartnerPerDay', 20]] as const) {
+      for (const [raw, want] of [['1', 1], ['25', 25], [' 3 ', 3], ['200', 200], ['', dflt]] as const) {
+        const read = readCallRelayConfig(full({ [name]: raw }));
+        expect(read.ok && read.config[field], `${name}=${JSON.stringify(raw)}`).toBe(want);
+      }
+      for (const raw of ['0', '201', '-1', '2.5', 'ten', '1000']) {
+        const read = readCallRelayConfig(full({ [name]: raw }));
+        expect(read.ok, `${name}=${JSON.stringify(raw)}`).toBe(false);
+        if (!read.ok) expect(read.problems.join(' ')).toContain(`${name} must be a whole number from 1 to 200`);
+      }
+      expect(() => assertCallRelayConfig(full({ [name]: '0' }))).toThrow(new RegExp(name));
     }
-    for (const raw of ['0', '201', '-1', '2.5', 'ten', '1000']) {
-      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: raw }));
-      expect(read.ok, JSON.stringify(raw)).toBe(false);
-      if (!read.ok) expect(read.problems.join(' ')).toMatch(/CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY must be a whole number from 1 to 200/);
-    }
-    expect(() => assertCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY: '0' }))).toThrow(/CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY/);
+  });
+
+  // [REVIEW-G23 S3-3] The service list fails closed: a MULTI that resolves with a command error is a failure, not a count.
+  it('the Redis service list: add trims, adds and sets the expiry in one MULTI, and any command error in it rejects', async () => {
+    const seen: unknown[][] = [];
+    let execResult: unknown = [[null, 0], [null, 1], [null, 1]];
+    const multi = { zremrangebyscore: (...a: unknown[]) => { seen.push(['zremrangebyscore', ...a]); return multi; }, zadd: (...a: unknown[]) => { seen.push(['zadd', ...a]); return multi; }, pexpire: (...a: unknown[]) => { seen.push(['pexpire', ...a]); return multi; }, exec: async () => execResult };
+    const redis = { multi: () => multi } as never;
+    const ledger = redisServiceDayLedger(redis);
+    await ledger.add('c1', 1_000_000_000);
+    expect(seen.map((c) => c[0])).toEqual(['zremrangebyscore', 'zadd', 'pexpire']);
+    expect(seen[0]).toEqual(['zremrangebyscore', SERVICE_DAY_KEY, '-inf', `(${1_000_000_000 - 86_400_000}`]);
+    expect(seen[2]).toEqual(['pexpire', SERVICE_DAY_KEY, 25 * 3600_000]);
+    execResult = [[null, 0], [new Error('OOM command not allowed'), null], [null, 1]];
+    await expect(ledger.add('c2', 1_000_000_001)).rejects.toThrow('call day list write failed');
+    execResult = null;
+    await expect(ledger.add('c3', 1_000_000_002)).rejects.toThrow('call day list write failed');
   });
 
   // [REVIEW-M17 S2-2] The per-call time limit is a setting (the owner may shorten it), applied to BOTH legs.
@@ -233,13 +259,16 @@ describe('[O-1] the settings and the boot guard', () => {
     const apiExample = readFileSync(join(__dirname, '..', '..', '.env.example'), 'utf8');
     const deployExample = readFileSync(join(__dirname, '..', '..', '..', '..', 'deploy', '.env.deploy.example'), 'utf8');
     expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_DAY=/m);
-    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_DAY=40$/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_DAY=100$/m);
     expect(deployExample).toMatch(/^# CALL_RELAY_MAX_ATTEMPTS_PER_ORDER=4$/m);
     expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALL_MINUTES=10$/m);
     expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALL_MINUTES=.*default 10 = owner ruling 6 Nov/m);
     expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALL_MINUTES=/m);
-    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY=/m);
-    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY=5$/m);
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY=/m);
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY=/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY=5$/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY=20$/m);
+    expect(apiExample + deployExample, 'the retired one-size setting is gone').not.toMatch(/CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY/);
   });
 
   it('CALL_RELAY=1 half-configured refuses to start in every mode; off, nothing is checked', () => {
