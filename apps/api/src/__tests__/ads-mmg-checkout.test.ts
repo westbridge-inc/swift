@@ -355,6 +355,51 @@ describe('opening the page', () => {
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: f.invoice.id } })).toBe(1);
   });
 
+  /** The window the same-instant taps hit by chance: this tap's first look finds no page, then another tap's page is
+   *  written before this tap goes on. `whileWaiting` runs in that window, after the other tap has its answer. */
+  async function tapAcrossAnotherTap(f: { invoice: { id: string }; owner: { token: string } }, whileWaiting: (other: Awaited<ReturnType<typeof start>>) => Promise<void> = async () => {}) {
+    const read = app.prisma.mmgCheckoutIntent.findFirst.bind(app.prisma.mmgCheckoutIntent);
+    let other: Awaited<ReturnType<typeof start>> | undefined;
+    let looked = false;
+    let sawNoPage = false;
+    const spy = vi.spyOn(app.prisma.mmgCheckoutIntent, 'findFirst').mockImplementation((async (args?: Prisma.MmgCheckoutIntentFindFirstArgs) => {
+      const result = await read(args);
+      if (!looked && args?.where?.adInvoiceId === f.invoice.id) {
+        looked = true;
+        sawNoPage = result === null;
+        other = await start(f.invoice.id, f.owner.token);
+        await whileWaiting(other);
+      }
+      return result;
+    }) as typeof read);
+    try {
+      const res = await start(f.invoice.id, f.owner.token);
+      expect(sawNoPage).toBe(true);
+      expect(other?.statusCode, other?.body).toBe(201);
+      return { other: other!, res };
+    } finally { spy.mockRestore(); }
+  }
+
+  it('A3: a tap whose first look found no page, while another tap opened one, is handed that page, never refused', async () => {
+    const f = await invoiced();
+    const { other, res } = await tapAcrossAnotherTap(f);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.ref).toBe(other.json().data.ref);
+    expect(res.json().data.checkoutUrl).toBe(other.json().data.checkoutUrl);
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: f.invoice.id } })).toBe(1);
+  });
+
+  it('A3: the same window, but that page is already being confirmed: refused, and no second page', async () => {
+    const f = await invoiced();
+    const { res } = await tapAcrossAnotherTap(f, async (other) => {
+      await raw.mmgCheckoutIntent.update({ where: { id: other.json().data.ref }, data: { status: 'CONFIRMING' } });
+    });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(['CHECKOUT_CONFIRMING', 'PAYMENT_CONFIRMING']).toContain(res.json().error.code);
+    expect(res.body).not.toContain('checkoutUrl');
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { adInvoiceId: f.invoice.id } })).toBe(1);
+  });
+
   it('a key used for one invoice never answers for another', async () => {
     const a = await invoiced();
     const b = await invoiced();
