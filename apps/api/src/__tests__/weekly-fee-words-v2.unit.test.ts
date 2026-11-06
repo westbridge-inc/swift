@@ -10,7 +10,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
-  assertWeeklyFeeAck, WEEKLY_FEE_ACK_HONOURED_VERSIONS, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TEXT_V2, WEEKLY_FEE_ACK_VERSION, WEEKLY_FEE_TERMS_V1,
+  assertWeeklyFeeAck, WEEKLY_FEE_ACK_HONOURED_VERSIONS, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TEXT_V2, WEEKLY_FEE_ACK_TEXT_V3, WEEKLY_FEE_ACK_VERSION, WEEKLY_FEE_TERMS_V1,
   weeklyFeeTerms,
 } from '../modules/partner/weekly-fee-ack';
 import { latestStoreFeeTick } from '../modules/partner/store-fee';
@@ -42,13 +42,17 @@ const HOW_YOU_PAY_V3 = 'In the Swift app or on swiftgy.com, on MMG’s checkout 
 const PRICE_CHANGES_V3 = 'If the price goes up, Swift tells you in the app at least 14 days before, and the new price applies only from your first weekly fee due after that, never to a week you have already paid. If it goes down, the lower price applies from your next weekly fee not yet paid or charged, with a notice in the app.';
 /** The v3 words as ticked, pinned (the integration test anchors the ledger row to the same text). */
 const V3_SHA256 = '9d8c7559e85aedb9ad3a178fe0f0d6927599a2439d6d97b1e06a5481e3dc9c05';
-const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V3, 'When it starts': WHEN_IT_STARTS_V2, 'If the price changes': PRICE_CHANGES_V3 };
+/** [PAYAHEAD-4W · owner 6 Nov 2026] v4: up to four weeks ahead (was one week at a time), and a cut reaches weeks paid ahead. */
+const HOW_YOU_PAY_V4 = 'In the Swift app or on swiftgy.com, on MMG’s checkout page, for one week or up to four weeks ahead. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.';
+const PRICE_CHANGES_V4 = 'If the price goes up, Swift tells you in the app at least 14 days before, and the new price applies only from your first weekly fee due after that, never to a week you have already paid. If it goes down, the lower price applies from your next weekly fee not yet charged, even one you have already paid for, with a notice in the app; what you paid above it counts toward your later weekly fees.';
+const V4_SHA256 = '2b3ef2cdccc4813f42f4f6f7dca6262cd89dbc91cc9c7c50d0b1f795e03fe36d';
+const CHANGED: Record<string, string> = { 'How you pay': HOW_YOU_PAY_V4, 'When it starts': WHEN_IT_STARTS_V2, 'If the price changes': PRICE_CHANGES_V4 };
 
 describe('[D3] the weekly fee words v2', () => {
-  it('serves v3: "How you pay" names the website and in person, "When it starts" says the trial, "If the price changes" splits a rise from a cut; the other line and the tick are v1’s', () => {
+  it('serves v4: "How you pay" names the website, in person and up to four weeks ahead, "When it starts" says the trial, "If the price changes" splits a rise from a cut; the other line and the tick are v1’s', () => {
     const served = weeklyFeeTerms();
-    expect(WEEKLY_FEE_ACK_VERSION).toBe('v3');
-    expect(served.version).toBe('v3');
+    expect(WEEKLY_FEE_ACK_VERSION).toBe('v4');
+    expect(served.version).toBe('v4');
     expect(served.items.map((i) => i.heading)).toEqual(WEEKLY_FEE_TERMS_V1.items.map((i) => i.heading));
     served.items.forEach((item, i) => {
       expect(item.text, item.heading).toBe(CHANGED[item.heading] ?? WEEKLY_FEE_TERMS_V1.items[i]!.text);
@@ -72,15 +76,21 @@ describe('[D3] the weekly fee words v2', () => {
     expect(when).not.toMatch(/Your free trial starts once/);
   });
 
-  it('[REVIEW-G18 S3-1] the price line is true to the code: 14 days’ notice before a rise only, a cut from the next fee not yet paid or charged', () => {
+  it('[REVIEW-G18 S3-1 · owner 6 Nov] the price line is true to the code: 14 days’ notice before a rise only, a cut from the next fee not yet charged, weeks paid ahead included', () => {
     const price = weeklyFeeTerms().items.find((i) => i.heading === 'If the price changes')!.text;
     expect([FEE_RISE_NOTICE_DAYS, PRICE_BOOK_NOTICE_DAYS]).toEqual([14, 14]);
     expect(price).toMatch(new RegExp(`^If the price goes up, Swift tells you in the app at least ${FEE_RISE_NOTICE_DAYS} days before, `));
     expect(price).toContain('never to a week you have already paid.');
-    expect(price).toContain('If it goes down, the lower price applies from your next weekly fee not yet paid or charged');
+    expect(price).toContain('If it goes down, the lower price applies from your next weekly fee not yet charged, even one you have already paid for');
     // The v1/v2 line promised a 14-day wait for ANY change; a cut never waits.
     expect(price).not.toMatch(/^Swift tells you in the app at least 14 days before\./);
-    expect(sha256(WEEKLY_FEE_ACK_TEXT)).toBe(V3_SHA256);
+    expect(sha256(WEEKLY_FEE_ACK_TEXT)).toBe(V4_SHA256);
+  });
+
+  it('v3 keeps its exact words (live on production; the ledger rows already anchored to them)', () => {
+    expect(sha256(WEEKLY_FEE_ACK_TEXT_V3)).toBe(V3_SHA256);
+    expect(WEEKLY_FEE_ACK_TEXT_V3).toContain(`How you pay: ${HOW_YOU_PAY_V3}`);
+    expect(WEEKLY_FEE_ACK_TEXT_V3).toContain(`If the price changes: ${PRICE_CHANGES_V3}`);
   });
 
   it('v1 keeps its exact words (the ledger rows already anchored to them)', () => {
@@ -93,19 +103,19 @@ describe('[D3] the weekly fee words v2', () => {
     expect(WEEKLY_FEE_ACK_TEXT_V2).not.toContain('in person');
   });
 
-  it('a NEW tick is taken on the served version only: a tab that read v1 or v2 is asked to read the words again', () => {
-    for (const version of ['v1', 'v2']) {
+  it('a NEW tick is taken on the served version only: a tab that read v1, v2 or v3 is asked to read the words again', () => {
+    for (const version of ['v1', 'v2', 'v3']) {
       expect(() => assertWeeklyFeeAck(true, { version, amount: 6000, currencyCode: 'GYD' })).toThrow(expect.objectContaining({ code: 'WEEKLY_FEE_TERMS_CHANGED' }));
     }
-    expect(() => assertWeeklyFeeAck(true, { version: 'v3', amount: 6000, currencyCode: 'GYD' })).not.toThrow();
+    expect(() => assertWeeklyFeeAck(true, { version: 'v4', amount: 6000, currencyCode: 'GYD' })).not.toThrow();
   });
 
   it('a partner who ticked v1 is not asked again: the store-fee and pro-fee ticks are read across every version', async () => {
-    expect([...WEEKLY_FEE_ACK_HONOURED_VERSIONS]).toEqual(['v1', 'v2', 'v3']);
+    expect([...WEEKLY_FEE_ACK_HONOURED_VERSIONS]).toEqual(['v1', 'v2', 'v3', 'v4']);
     const seen: unknown[] = [];
     const db = { consentRecord: { findFirst: async (args: { where: unknown }) => { seen.push(args.where); return { action: 'granted', evidence: { weeklyFee: { amount: 15000, currencyCode: 'GYD' } } }; } } } as never;
     expect(await latestStoreFeeTick(db, 'owner-1', 'store-1')).toEqual({ amount: 15000, currencyCode: 'GYD' });
     expect(await latestProFeeTick(db, 'pro-1')).toEqual({ amount: 15000, currencyCode: 'GYD' });
-    for (const where of seen) expect(where).toMatchObject({ documentType: 'weekly_fee_acknowledgement', documentVersion: { in: ['v1', 'v2', 'v3'] } });
+    for (const where of seen) expect(where).toMatchObject({ documentType: 'weekly_fee_acknowledgement', documentVersion: { in: ['v1', 'v2', 'v3', 'v4'] } });
   });
 });

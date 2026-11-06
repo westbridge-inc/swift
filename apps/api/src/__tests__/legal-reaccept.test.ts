@@ -332,7 +332,7 @@ describe('GET/POST /auth/legal-acceptance', () => {
     const v281 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-28.1')!.summary;
     const v1105 = MATERIAL_CHANGES.find((c) => c.version === '2026-11-05')!.summary;
     // served now under 2026-11-05 (the 5 Nov batch: material)
-    expect(LEGAL_VERSION).toBe('2026-11-05');
+    expect(LEGAL_VERSION).toBe('2026-11-06');
     expect(materialVersion('2026-11-04')).toBe('2026-10-28.1');
     expect(materialVersion(LEGAL_VERSION)).toBe('2026-11-05');
     for (const [accepted, summary] of [

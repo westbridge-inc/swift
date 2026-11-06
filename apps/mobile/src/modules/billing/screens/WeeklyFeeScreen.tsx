@@ -6,11 +6,11 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { space } from '@swift/ui';
-import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { Card, ChoiceChip, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, weekChoices, weeksWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 import { inPersonWaiting, PAY_IN_PERSON, PAY_IN_PERSON_ASK } from '../../../lib/weeklyFeeInPerson';
 import { feeExpiry, reopenableMmg, REOPEN_ALREADY_PAID } from '../../../lib/weeklyFeeReopen';
 import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
@@ -34,6 +34,8 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
   // A card Pay now that may still take money hides the MMG button too: one payment at a time.
   const [cardPending, setCardPending] = useState(false);
+  // [owner 6 Nov 2026] How many weeks to pay with MMG: 1 to 4, each offered only when the server says it fits.
+  const [weeks, setWeeks] = useState(1);
   const refreshRef = React.useRef(refresh); refreshRef.current = refresh;
   const session = useMemo(() => {
     const owner = getAuthSessionSnapshot();
@@ -79,6 +81,8 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
     setChecked((c) => ({ busy: false, at: ok ? Date.now() : c.at }));
   };
   const action = liveMmg(sub);
+  const choices = action ? weekChoices(action) : [];
+  const chosen = choices.find((c) => c.weeks === weeks) ?? choices[0];
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
   const reopen = reopenableMmg(sub, checkout);
   const mmgPending = contextPending || view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
@@ -148,7 +152,14 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
         {action && !blocked ? <Card>
           <T variant="heading">Pay with MMG</T>
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>Opens MMG&apos;s page, then brings you back to Swift.</T>
-          <PillButton label={`Pay ${feeMoney(action.amountGyd)} with MMG`} loading={view.busy} disabled={checkingLatest} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} />
+          {choices.length > 1 ? <View testID="mmg-weeks" style={{ marginTop: space.lg, gap: space.sm }}>
+            <T variant="label" weight="semibold">How many weeks?</T>
+            <T variant="caption" tone="muted">You can pay up to four weeks ahead.</T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+              {choices.map((c) => <ChoiceChip key={c.weeks} label={`${weeksWords(c.weeks)} · ${feeMoney(c.amountGyd)}`} active={chosen?.weeks === c.weeks} onPress={() => setWeeks(c.weeks)} />)}
+            </View>
+          </View> : null}
+          <PillButton label={`Pay ${feeMoney(chosen?.amountGyd ?? action.amountGyd)} with MMG`} loading={view.busy} disabled={checkingLatest} style={{ marginTop: space.lg }} onPress={() => { void session.pay(action.weekOptions ? chosen?.weeks : undefined); }} />
         </Card> : null}
         {showCard ? <CardPaySection family={family} card={card} latestSession={sub?.latestCardSession} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>

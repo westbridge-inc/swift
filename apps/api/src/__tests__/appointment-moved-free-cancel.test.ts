@@ -175,7 +175,7 @@ describe('the words: Terms s7, the refunds page and both FAQs, from the same num
   // a customer is still not asked. [EXPRESS-FEE · owner 1 Nov] ... and under 2026-11-01 (non-material) on top of that.
   it('published as 2026-10-29.1 (served now under 2026-11-01), classed non-material: nobody is asked again (a person at 2026-10-29 or 2026-10-28.1 stays)', () => {
     // served now under 2026-11-05 (the 5 Nov batch: material)
-    expect(LEGAL_VERSION).toBe('2026-11-05');
+    expect(LEGAL_VERSION).toBe('2026-11-06');
     expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-10-29.1')).toHaveLength(1);
     expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-29.1');
     // Up to the last version before the 5 Nov batch, which is material on its own account.

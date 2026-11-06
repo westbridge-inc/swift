@@ -9,12 +9,15 @@ import { site, launch } from '@/site.config';
  *    money — so Swift cannot refund order money itself;
  *  - cancelling follows the ONE cancel-policy predicate in the API
  *    (modules/order/cancel-policy.ts) and its charge path (order.service.ts);
- *  - the weekly partner fee is paid in advance, one week at a time, and
- *    stopping a plan ends future charges (modules/billing/billing.service.ts);
- *  - it is paid one week at a time: while a week runs the coming week may be
- *    paid, and no further (modules/billing/pay-ahead.ts, owner #62), and
- *    closing an account waits until a fee paid for a week that has not
- *    started is refunded (modules/user/partner-wind-down.ts, FEE_CREDIT).
+ *  - the weekly partner fee is paid in advance, and stopping a plan ends
+ *    future charges (modules/billing/billing.service.ts); money paid for weeks
+ *    that have not started stays for the weekly fee (prepaidBalance) and is
+ *    never charged while the plan is stopped;
+ *  - it may be paid up to four weeks ahead: while a week runs the four weeks
+ *    after it may be paid, and no further (modules/billing/pay-ahead.ts
+ *    PAY_AHEAD_MAX_WEEKS, owner 6 Nov 2026), and closing an account waits
+ *    until every fee paid for a week that has not started is refunded
+ *    (modules/user/partner-wind-down.ts, FEE_CREDIT counts the whole credit).
  *  - [BOOK-S7 · owner B1/B2 28 Oct 2026] while instant appointment booking
  *    (INSTANT_BOOKING) is switched on, a confirmed appointment cancels free
  *    until 2 hours before it starts, never less than 1 minute after it was
@@ -33,10 +36,10 @@ import { site, launch } from '@/site.config';
  *    if sooner, even inside the 2-hour cut-off.
  * Approved by the owner, 1 Oct 2026: the business commitments marked below.
  * Owner ruling, 8 Oct 2026: the refund at closing. Owner #62, 14 Oct 2026: one
- * week at a time, no paying ahead (was a four-week limit).
+ * week at a time. Owner, 6 Nov 2026: up to four weeks ahead (replaces #62).
  */
 
-const UPDATED = '5 November 2026';
+const UPDATED = '6 November 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -147,7 +150,7 @@ export default function RefundsPage() {
       </p>
       <ul>
         <li>
-          <b>Paid in advance.</b> Each payment covers the week that starts on its due date. Today the fee is paid by
+          <b>Paid in advance.</b> Each weekly fee covers the week that starts on its due date. Today the fee is paid by
           MMG, or directly to {site.legalEntityName}, in person by cash or cheque, or by bank transfer; a cheque counts once it clears,
           and a payment counts once {site.tradeName} records it.
           You get a receipt for every payment. Never pay the fee through an agent or anyone else.{' '}
@@ -159,13 +162,15 @@ export default function RefundsPage() {
           {site.supportReplyBusinessDays} business days.
         </li>
         <li>
-          <b>One week at a time.</b> You pay the fee one week at a time: while a week runs you can pay for the coming
-          week, and no further. Money received beyond that is returned to you. A fee paid before its week starts is only
-          ever used for that weekly fee.
+          <b>Up to four weeks ahead.</b> You can pay the fee for one week, or up to four weeks ahead: while a week runs
+          you can pay for the four weeks after it, and no further. Money received beyond that is returned to you. A fee
+          paid before its week starts is only ever used for your weekly fees.
         </li>
         <li>
           <b>Stopping your plan.</b> When you stop your weekly plan, {site.tradeName} stops charging for the weeks
-          after it. A week that has already started is not refunded, and a fee already owed stays owed.
+          after it. A week that has already started is not refunded, and a fee already owed stays owed. Weeks you paid
+          for that have not started are not used while your plan is stopped: they pay your fee if you start again, or
+          are refunded when you close your account.
         </li>
         <li>
           <b>Closing your account.</b> {site.tradeName} refunds any weekly fee you paid for a week that has not started,

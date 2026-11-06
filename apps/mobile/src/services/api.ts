@@ -1648,8 +1648,9 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
     ? capturedVendorAuthConfig(current(), storeId, { headers })
     : capturedAuthConfig(current(), { headers });
   return {
-    start: async (key: string): Promise<import('../lib/weeklyFee').CheckoutStart> => {
-      const response = await api.post(base, {}, config({ 'Idempotency-Key': key }));
+    start: async (key: string, weeks?: number): Promise<import('../lib/weeklyFee').CheckoutStart> => {
+      // [owner 6 Nov 2026] `weeks` only when the server offered a choice; an older API takes one week.
+      const response = await api.post(base, weeks === undefined ? {} : { weeks }, config({ 'Idempotency-Key': key }));
       current(); return response.data.data;
     },
     /** Back to MMG's page: only the named checkout's open page, never a new checkout. */

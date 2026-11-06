@@ -144,19 +144,20 @@ describe('weeksCovered', () => {
 });
 
 // [OWNER RULING 8 Oct, NO "WALLET"] weekly fees paid before they are due are
-// [owner #62] One week at a time: "Next weekly fee already paid", never "paid ahead",
-// never a count of weeks; and never a wallet, a balance or "banked".
+// [owner 6 Nov 2026] Up to four weeks ahead: the whole weeks paid are counted, never "paid ahead";
+// and never a wallet, a balance or "banked".
 describe('feePaidAheadLine', () => {
   it('is null when nothing is paid ahead', () => {
     expect(feePaidAheadLine(0, 12000)).toBeNull();
     expect(feePaidAheadLine(null, 12000)).toBeNull();
   });
 
-  it('says the next weekly fee is paid when a whole week is received, and never counts weeks', () => {
+  it('says the next weekly fees are paid, counting whole weeks only (never rounded up)', () => {
     expect(feePaidAheadLine(12000, 12000)).toBe('Next weekly fee already paid');
-    // weeks paid ahead before owner #62 (staging only) are honoured, but never shown as several weeks
-    expect(feePaidAheadLine(24000, 12000)).toBe('Next weekly fee already paid');
-    expect(feePaidAheadLine(30000, 12000)).toBe('Next weekly fee already paid');
+    expect(feePaidAheadLine(23999, 12000)).toBe('Next weekly fee already paid');
+    expect(feePaidAheadLine(24000, 12000)).toBe('Next 2 weekly fees already paid');
+    expect(feePaidAheadLine(48000, 12000)).toBe('Next 4 weekly fees already paid');
+    expect(feePaidAheadLine(48000, 12000)).not.toMatch(/paid ahead|wallet|balance/i);
   });
 
   it('names the amount when it covers less than a week, or the fee is unknown', () => {

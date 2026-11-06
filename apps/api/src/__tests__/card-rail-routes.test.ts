@@ -761,18 +761,20 @@ describe('payActions CARD: the server alone decides, per platform, whether the P
     }
   });
 
-  it('[owner #62] one week at a time: no card button once the coming week is paid, or while part of it is held (a whole week would be too much)', async () => {
+  it('[owner 6 Nov] four weeks ahead at most: no card button once four weeks are paid, or while part of the fourth is held (a whole week would be too much)', async () => {
     railOverride = realProvider({ savesCards: false });
-    const paidByCard = await makeStore({ due: new Date(Date.now() + 10 * DAY) });
+    // Three weeks paid by card beyond the running one: a fourth still fits.
+    expect((await cardActionOf(await makeStore({ due: new Date(Date.now() + 24 * DAY) })))['state']).toBe('live');
+    const paidByCard = await makeStore({ due: new Date(Date.now() + 31 * DAY) });
     expect(await cardActionOf(paidByCard)).toEqual({ id: 'CARD', state: 'off' });
     const part = await makeStore();
-    await app.prisma.prepaidBalance.update({ where: { subscriptionId: part.subId }, data: { balance: 600 } });
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: part.subId }, data: { balance: 3 * 2100 + 600 } });
     expect(await cardActionOf(part)).toEqual({ id: 'CARD', state: 'off' });
     // and the door says so truthfully, never "already paid"
     const res = await startSession(part, 'PAY_NOW');
     expect(res.statusCode, res.body).toBe(409);
     expect(res.json().error).toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
-    expect(res.json().error.message).toBe('Swift takes the weekly fee one week at a time. GY$600 is already paid toward weeks that have not started, so you can pay at most GY$1,500 now.');
+    expect(res.json().error.message).toBe('Swift takes the weekly fee up to four weeks ahead. GY$6,900 is already paid toward weeks that have not started, so you can pay at most GY$1,500 now.');
     // nothing held while a week runs: the coming week can be paid by card
     expect((await cardActionOf(await makeStore()))['state']).toBe('live');
   });

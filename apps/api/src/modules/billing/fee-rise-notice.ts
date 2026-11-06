@@ -38,10 +38,13 @@ import { formatGuyanaTime, guyanaDayKey, startOfGuyanaDay } from '../../utils/gu
 //      is checked in the transaction where a paid week moves the next fee
 //      date (billing.service applySuccessfulChargeInTx) and by the hourly
 //      run, so the coming week is quoted (and paid) at the new fee from that
-//      moment, never sooner. A week already paid keeps its price: if a whole
-//      week at the old price is held in the fee credit when the rise would
-//      apply, that week keeps the old price and the rise moves one week
-//      later, once.
+//      moment, never sooner. A week already paid keeps its price: every whole
+//      week at the old price held in the fee credit when the rise would apply
+//      keeps the old price, and the rise moves past all of them, once (up to
+//      four weeks can be paid ahead, owner 6 Nov 2026). Once told, a new
+//      payment reaches only weeks that start before the told date
+//      (pay-ahead.ts), so nothing paid at the old fee lands on a week the
+//      rise then charges more for.
 //   4. DROPPED: a rise that no longer matches the subscription (its rate moved
 //      under it, a negotiated or waived fee, the plan ended) is dropped, with
 //      an audit row; a partner who was told is told it will not happen.

@@ -307,15 +307,15 @@ describe('P1 the list: each branch with its own Pay amount, confirmed by the own
   it('lists every branch: due ones at their own Pay amount, a trial and a paid-ahead branch not charged, and the total', async () => {
     const o = await makeChain([
       { balance: 600, name: 'A Branch' }, { status: 'SUSPENDED', name: 'B Branch' }, { status: 'TRIAL', name: 'C Branch' }, { balance: 4200, name: 'D Branch' },
-      // E paid the coming week already (its next fee is due in 10 days): it owes the week after, but Swift takes one week ahead at most.
-      { dueInDays: 10, name: 'E Branch' },
+      // E paid four weeks by date already (its next fee is due in 31 days): Swift takes four weeks ahead at most [owner 6 Nov].
+      { dueInDays: 31, name: 'E Branch' },
     ]);
     const res = await listOf(o);
     expect(res.statusCode, res.body).toBe(200);
     const data = res.json().data;
     const byName = Object.fromEntries((data.branches as Array<{ branchName: string; state: string; amountGyd: number | null }>).map((b) => [b.branchName, b]));
     // A owes the coming week less its credit (2,100 - 600); B is suspended and owes the week; C is in its free trial;
-    // D holds two weeks already (more than one week ahead is never taken).
+    // D holds two weeks already: nothing is owed now (pay-all pays the week owed or the coming week, never more).
     expect(byName['A Branch']).toMatchObject({ state: 'DUE', amountGyd: 1500 });
     expect(byName['B Branch']).toMatchObject({ state: 'DUE', amountGyd: 2100 });
     expect(byName['C Branch']).toMatchObject({ state: 'TRIAL', amountGyd: null });

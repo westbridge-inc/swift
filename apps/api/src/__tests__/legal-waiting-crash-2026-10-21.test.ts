@@ -113,8 +113,8 @@ describe('[2026-10-21] one material version: everyone re-accepts once, with the 
   // [BILL-PRO] 2026-10-29.2 is material for Providers only: the newest material version for everyone stays 2026-10-28.1.
   // [EXPRESS-FEE] 2026-11-01 (non-material) is served on top: the same.
   it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-11-01 (newest material: 2026-10-28.1, no-show record)', () => {
-    // served now under 2026-11-05 (the 5 Nov batch: material)
-    expect(LEGAL_VERSION).toBe('2026-11-05');
+    // served now under 2026-11-06 (four weeks ahead: material for partners only; the version everyone answers to stays 2026-11-05)
+    expect(LEGAL_VERSION).toBe('2026-11-06');
     expect(materialVersion('2026-10-25')).toBe('2026-10-21');
     expect(materialVersion('2026-10-25.2')).toBe('2026-10-25.1');
     expect(materialVersion('2026-11-04')).toBe('2026-10-28.1');
@@ -122,8 +122,9 @@ describe('[2026-10-21] one material version: everyone re-accepts once, with the 
     expect(materialVersion('2026-10-28')).toBe('2026-10-27');
     expect(MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-21');
     expect(NON_MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-21');
-    expect(MATERIAL_CHANGES.map((c) => c.version).slice(-6), 'newest last').toEqual(['2026-10-21', '2026-10-25.1', '2026-10-27', '2026-10-28.1', '2026-10-29.2', '2026-11-05']);
-    expect(MATERIAL_CHANGES.filter((c) => c.audience).map((c) => c.version), 'provider-only versions').toEqual(['2026-10-29.2']);
+    expect(MATERIAL_CHANGES.map((c) => c.version).slice(-7), 'newest last').toEqual(['2026-10-21', '2026-10-25.1', '2026-10-27', '2026-10-28.1', '2026-10-29.2', '2026-11-05', '2026-11-06']);
+    expect(MATERIAL_CHANGES.filter((c) => c.audience === 'provider').map((c) => c.version), 'provider-only versions').toEqual(['2026-10-29.2']);
+    expect(MATERIAL_CHANGES.filter((c) => c.audience === 'partner').map((c) => c.version), 'partner-only versions').toEqual(['2026-11-06']);
   });
 
   it('the summary names both changes', () => {

@@ -5,7 +5,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } f
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, weekChoices, weeksWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 import { lazyRetry } from '@/lib/chunk-retry';
@@ -35,6 +35,8 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
   // A card Pay now that may still take money hides the MMG button too: one payment at a time.
   const [cardPending, setCardPending] = useState(false);
+  // [owner 6 Nov 2026] How many weeks to pay with MMG: 1 to 4, each offered only when the server says it fits.
+  const [weeks, setWeeks] = useState(1);
   // [FEE-STATUS · owner 25 Oct] Refresh status says it is checking, then when it last checked. A failed
   // re-read shows the page's own error (the query's), never "Checked at".
   const [checked, setChecked] = useState<{ busy: boolean; at: number | null }>({ busy: false, at: null });
@@ -49,7 +51,7 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
   };
   const refreshFee = useCallback(() => { void client.invalidateQueries({ queryKey }); }, [client, queryKey]);
   const session = useMemo(() => new FeeCheckoutSession({
-    start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
+    start: (key, weeks) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: JSON.stringify(weeks === undefined ? {} : { weeks }), headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     reopen: (ref, key) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}/reopen`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, undefined, { storeId }).then((r) => r.data),
     open: async (url) => { window.location.assign(url); },
@@ -69,6 +71,8 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
   if (q.isError || !q.data) return <div role="alert"><p>Could not load your weekly fee.</p><button onClick={() => void q.refetch()}>Try again</button></div>;
   const sub = q.data;
   const action = liveMmg(sub);
+  const choices = action ? weekChoices(action) : [];
+  const chosen = choices.find((c) => c.weeks === weeks) ?? choices[0];
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
   const mmgPending = view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
   // [MMG reopen] Only a server grant loads the Back card, which decides (reopenableMmg) whether it shows.
@@ -107,8 +111,19 @@ function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; store
             <p className="text-sm text-[var(--swift-muted)]">Opens MMG&apos;s page, then brings you back to Swift.</p>
           </div>
         </div>
-        <button disabled={view.busy || checkingLatest} onClick={() => void session.pay()} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
-          {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
+        {choices.length > 1 && <fieldset className="space-y-2">
+          <legend className="text-sm font-semibold">How many weeks?</legend>
+          <p className="text-sm text-[var(--swift-muted)]">You can pay up to four weeks ahead.</p>
+          <div className="grid grid-cols-2 gap-2">
+            {choices.map((c) => <label key={c.weeks} className={`flex min-h-11 cursor-pointer flex-col justify-center rounded-xl border px-3 py-2 text-sm ${chosen?.weeks === c.weeks ? 'border-[var(--swift-red)] bg-[var(--swift-red-50)]' : 'border-black/10'}`}>
+              <input type="radio" name="mmg-weeks" className="sr-only" value={c.weeks} checked={chosen?.weeks === c.weeks} onChange={() => setWeeks(c.weeks)} />
+              <span className="font-semibold">{weeksWords(c.weeks)}</span>
+              <span className="text-[var(--swift-muted)]">{feeMoney(c.amountGyd)}</span>
+            </label>)}
+          </div>
+        </fieldset>}
+        <button disabled={view.busy || checkingLatest} onClick={() => void session.pay(action.weekOptions ? chosen?.weeks : undefined)} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
+          {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(chosen?.amountGyd ?? action.amountGyd)} with MMG`}
         </button>
       </section>}
       <CardPay family={family} storeId={storeId} card={card} latestSession={sub.latestCardSession} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />

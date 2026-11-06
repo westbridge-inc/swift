@@ -39,7 +39,7 @@ import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { amountDueNow } from './amount-due';
 import { weeklyFeeAmount } from './subscription-fee';
 import { payInfo } from './agent-cash.service';
-import { assertPayAheadRoom, readPayAhead, PAY_AHEAD_MAX_WEEKS } from './pay-ahead';
+import { assertPayAheadRoom, readPayAhead, PAY_AHEAD_MAX_WEEKS, PAY_AHEAD_MAX_WEEKS_WORD } from './pay-ahead';
 import { claimProviderPaymentInTx, ProviderIdentityError, subscriptionTenantInTx } from './provider-identity';
 import { cardRailKilled, cardRailV2Enabled } from '../../utils/card-rail';
 import {
@@ -2144,7 +2144,7 @@ export class BillingService {
     if (settled.disposition === 'skipped' || settled.disposition === 'held') return false;
     if (settled.disposition === 'advanced') await this.afterSuccessfulCharge({ ...sub, currencyCode: settled.currencyCode! }, settled.amount!, settled.periodKey!);
     // [REVIEW S3-1] A card capture banked, or one that moved the paid week on,
-    // is kept; past one week ahead [owner #62] the operators are paged to refund it.
+    // is kept; past the four-week limit [owner 6 Nov 2026] the operators are paged to refund it.
     await this.pageIfPayAheadOverCap(sub.id);
     return true;
   }
@@ -4598,7 +4598,7 @@ export class BillingService {
       /** The ledger account it lands in, when it is not MMG's (in-person-payment.ts). */
       rail?: TopupRail;
       /** [OWNER RULING 8 Oct (2)] A payment a person records by hand is refused
-       *  past one week ahead [owner #62] (they refund the rest). Money that arrived
+       *  past the four-week limit [owner 6 Nov 2026] (they refund the rest). Money that arrived
        *  without anyone choosing it (a checkout MMG confirmed) is never refused:
        *  afterTopUpCommitted pages the operators to refund any excess. */
       payAheadLimit?: 'refuse';
@@ -4699,7 +4699,7 @@ export class BillingService {
   /** [OWNER RULING 8 Oct (2)] Money that reached a weekly fee without anyone
    *  choosing to pay ahead (a checkout MMG confirmed, an agent payment, a late
    *  approval or card capture for a week already paid) is never refused once it
-   *  is Swift's to hold. When it leaves more than one week ahead [owner #62], the
+   *  is Swift's to hold. When it leaves more than the four-week limit [owner 6 Nov 2026], the
    *  operators are paged, once per amount, to refund the part above the cap.
    *  Best-effort and after the commit: it moves no money. */
   async pageIfPayAheadOverCap(subscriptionId: string): Promise<void> {
@@ -4709,7 +4709,7 @@ export class BillingService {
       const money = (n: number) => formatMoney(n, position.currencyCode);
       await notifyAdmins(this.prisma, this.notifications, {
         tenantId: await tenantOfSubscription(this.prisma, subscriptionId),
-        title: 'Weekly fee paid more than one week ahead — refund owed',
+        title: `Weekly fee paid more than ${PAY_AHEAD_MAX_WEEKS_WORD} weeks ahead — refund owed`,
         body: `A partner now has ${money(position.heldAhead)} received for weeks that have not started, more than the ${PAY_AHEAD_MAX_WEEKS}-week limit (${money(position.cap)}${position.due ? `, plus ${money(position.weeklyFee)} for the week now due` : ''}). Refund the ${money(position.excess)} above the limit to the partner (finance procedure: weekly fee refunds). The money had already arrived, so nothing was refused.`,
         data: { kind: 'billing_invariants', alert: 'pay-ahead-over-cap', subscriptionId, excess: position.excess, currencyCode: position.currencyCode },
         dedupeKey: `pay-ahead-over-cap:${subscriptionId}:${position.heldAhead}`,
@@ -5643,9 +5643,9 @@ export class BillingService {
   /**
    * Move a told rise in, in the caller's transaction (the payer is locked),
    * once every week that started before its told date is settled: the next
-   * weekly fee to be charged is due on or after that date. A whole week held
-   * in the fee credit at the old price keeps it: the rise moves one week
-   * later, once. `drop` = the hourly pass may drop a rise that no longer
+   * weekly fee to be charged is due on or after that date. Every whole week
+   * held in the fee credit at the old price keeps it: the rise moves past all
+   * of them, once [owner 6 Nov 2026, four weeks ahead]. `drop` = the hourly pass may drop a rise that no longer
    * matches (the paid-week transaction leaves that to it).
    */
   private async applyHeldFeeRiseInTx(
@@ -5682,13 +5682,19 @@ export class BillingService {
     }
     if (!held.deferredOnce) {
       const credit = await tx.prepaidBalance.findUnique({ where: { subscriptionId }, select: { balance: true, currencyCode: true } });
-      if (credit && credit.currencyCode === sub!.currencyCode && Number(credit.balance) >= held.from) {
-        const later = new Date(sub!.nextBillingDate.getTime() + 7 * 86_400_000);
+      // [owner 6 Nov 2026 · four weeks ahead] Every whole week held at the old fee keeps it, not only the first: the rise
+      // moves past all of them at once. Bounded by the most that can be held lawfully (the week due plus the four-week
+      // limit); anything above that is over the limit and is refunded (pageIfPayAheadOverCap), not kept at a price. Once
+      // told, no new payment reaches a week from the told date (pay-ahead.ts), so nothing paid later is caught by it.
+      const weeksHeld = credit && credit.currencyCode === sub!.currencyCode
+        ? Math.min(PAY_AHEAD_MAX_WEEKS + 1, Math.floor(Number(credit.balance) / held.from + 1e-9)) : 0;
+      if (weeksHeld >= 1) {
+        const later = new Date(sub!.nextBillingDate.getTime() + weeksHeld * 7 * 86_400_000);
         const value: HeldFeeRise = { ...held, appliesFrom: later.toISOString(), deferredOnce: true };
         await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
         await tx.auditLog.create({ data: {
           action: 'BILLING_FEE_RISE_DEFERRED', entity: 'Subscription', entityId: subscriptionId,
-          changes: { from: held.from, to: held.to, paidAtOldPrice: Number(credit.balance), weekKeepsOldPrice: sub!.nextBillingDate.toISOString(), appliesFrom: later.toISOString() },
+          changes: { from: held.from, to: held.to, paidAtOldPrice: Number(credit!.balance), weeksKeepOldPrice: weeksHeld, weekKeepsOldPrice: sub!.nextBillingDate.toISOString(), appliesFrom: later.toISOString() },
         } });
         return 'deferred';
       }

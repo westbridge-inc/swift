@@ -294,6 +294,49 @@ describe('[F2] a held weekly-fee rise is told 14 days ahead and applies only fro
     expect(await heldOf(rider.subId)).toBeNull();
   });
 
+  it('[owner 6 Nov · four weeks ahead] every whole week held at the old fee keeps it: the rise waits until all of them are used', async () => {
+    const t = new Date();
+    const due = new Date(t.getTime() + 3 * DAY);
+    // Four weeks paid before the rise was held or told.
+    const rider = await makeRider({ weeklyRate: 6000, due, prepaid: 4 * 6000 });
+    await hold(rider.subId, 6000, 8000, t);
+    await billing.sweepFeeRises(t);
+    const firstNewFee = new Date(due.getTime() + 2 * WEEK);
+    expect((await heldOf(rider.subId))?.appliesFrom).toBe(firstNewFee.toISOString());
+    expect(await bill(rider.subId, new Date(due.getTime() + 60_000))).toBe('succeeded');
+    expect(await bill(rider.subId, new Date(due.getTime() + WEEK + 60_000))).toBe('succeeded');
+    // Two whole weeks are still held at the old fee when the rise would apply: it moves past both, once.
+    expect(await rate(rider.subId)).toBe(6000);
+    expect(await heldOf(rider.subId)).toMatchObject({ deferredOnce: true, appliesFrom: new Date(firstNewFee.getTime() + 2 * WEEK).toISOString() });
+    expect((await audits(rider.subId, 'BILLING_FEE_RISE_DEFERRED')).map((a) => a.changes)).toEqual([
+      expect.objectContaining({ paidAtOldPrice: 12_000, weeksKeepOldPrice: 2, weekKeepsOldPrice: firstNewFee.toISOString() }),
+    ]);
+    // Each of the four paid weeks is charged the old fee ...
+    for (const week of [2, 3]) {
+      const start = new Date(due.getTime() + week * WEEK);
+      expect(await bill(rider.subId, new Date(start.getTime() + 60_000))).toBe('succeeded');
+      expect(Number((await capturedFor(rider.subId, start))!.amount)).toBe(6000);
+    }
+    for (const week of [0, 1]) expect(Number((await capturedFor(rider.subId, new Date(due.getTime() + week * WEEK)))!.amount)).toBe(6000);
+    // ... and the rise moves in only after them, with nothing paid at the old fee left over.
+    expect(await rate(rider.subId)).toBe(8000);
+    expect(await heldOf(rider.subId)).toBeNull();
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: rider.subId } })).balance)).toBe(0);
+  });
+
+  it('[owner 6 Nov] once a rise is told, a new payment reaches only weeks that start before its date', async () => {
+    const t = new Date();
+    const due = new Date(t.getTime() + 3 * DAY);
+    const rider = await makeRider({ weeklyRate: 6000, due });
+    expect(await readPayAhead(app.prisma, rider.subId, t)).toMatchObject({ openWeeks: 4, room: 4 * 6000, riseFrom: null });
+    await hold(rider.subId, 6000, 8000, t);
+    // Held but not told: it applies to nothing, and limits nothing.
+    expect(await readPayAhead(app.prisma, rider.subId, t)).toMatchObject({ openWeeks: 4, room: 4 * 6000 });
+    await billing.sweepFeeRises(t);
+    const told = new Date((await heldOf(rider.subId))!.appliesFrom!);
+    expect(await readPayAhead(app.prisma, rider.subId, t)).toMatchObject({ openWeeks: 2, room: 2 * 6000, riseFrom: told });
+  });
+
   it('a told rise that no longer matches is dropped and the partner is told it will not happen; an untold one is dropped silently', async () => {
     const t = new Date();
     const due = new Date(t.getTime() + 3 * DAY);

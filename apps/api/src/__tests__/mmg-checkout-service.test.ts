@@ -19,6 +19,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MMG_CHECKOUT_TTL_MS, MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
 import { FakeMmgHistory, mmgHistoryRow, mmgTimeOf } from './helpers/mmg-history-fake';
 import { FEE_CHECKOUT_PLATFORMS_KEY, resetFeeCheckoutSwitchCache } from '../modules/billing/fee-pay-actions';
+import { readPayAhead } from '../modules/billing/pay-ahead';
 import { openCheckoutUrl } from '../modules/billing/checkout-url-seal';
 import {
   PROVIDER_IDENTITY_BACKFILL_KEY,
@@ -164,6 +165,9 @@ const RUN = nanoid(6).toUpperCase().replace(/[^A-Z0-9]/g, 'Q');
 const tx = (name: string) => `${name}${RUN}`;
 const start = (s: { subId: string; userId: string }, clientKey = key(), platform: 'ios' | 'android' | 'web' | 'unknown' = 'ios') =>
   service.createCheckout({ subscriptionId: s.subId, userId: s.userId, platform, clientKey });
+/** [owner 6 Nov 2026] A start that names how many weeks to pay. */
+const startWeeks = (s: { subId: string; userId: string }, weeks: number, clientKey = key()) =>
+  service.createCheckout({ subscriptionId: s.subId, userId: s.userId, platform: 'ios', clientKey, weeks });
 const intentOf = (ref: string) => app.prisma.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: ref } });
 const topups = (subscriptionId: string) => app.prisma.billingEvent.findMany({ where: { subscriptionId, type: 'PREPAID_TOPUP' } });
 const walletOf = async (subscriptionId: string) => Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId } })).balance);
@@ -448,37 +452,82 @@ describe('[F3] an Idempotency-Key keeps its answer', () => {
 });
 
 // ---------------------------------------------------------------------------
-// [OWNER #62 · 14 Oct, NO PAYING AHEAD; was four weeks, 8 Oct] Weekly fees are
-// paid one week at a time: at most the coming week is held. The checkout is the
-// partner's door: it refuses a payment that would go past the cap, in plain
-// words, before any page exists. Money that still lands
-// past the cap (something else filled the room while the page was open) is
-// Swift's to hold for the partner: it is credited, never refused or dropped,
-// and the operators are paged to refund the part above the cap.
+// [OWNER · 6 Nov 2026, UP TO A MONTH AHEAD; replaces owner #62's one week] A
+// partner may pay up to four weeks ahead, choosing 1 to 4 weeks on the
+// checkout. The checkout is the partner's door: it refuses a payment that would
+// go past the limit, in plain words, before any page exists. Money that still
+// lands past the limit (something else filled the room while the page was
+// open) is Swift's to hold for the partner: it is credited, never refused or
+// dropped, and the operators are paged to refund the part above the limit.
 // ---------------------------------------------------------------------------
-describe('[owner #62] one week ahead at most', () => {
+describe('[owner 6 Nov] up to four weeks ahead', () => {
   const capPages = async (subscriptionId: string) => (await app.prisma.notification.findMany({
     where: { data: { path: ['alert'], equals: 'pay-ahead-over-cap' } },
   })).filter((n) => (n.data as Record<string, unknown>)['subscriptionId'] === subscriptionId);
 
-  it('a checkout when the coming week is already paid is refused; nothing is opened', async () => {
-    const full = await makeSub({ balance: 2100 });
+  it('a checkout when four weeks are already paid is refused; nothing is opened', async () => {
+    const full = await makeSub({ balance: 4 * 2100 });
     await expect(start(full)).rejects.toMatchObject({
       statusCode: 409, code: 'PAY_AHEAD_LIMIT',
-      message: 'Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.',
+      message: 'Your weekly fee is already paid as far as Swift takes it, up to four weeks ahead. You can pay again once the next week has started.',
     });
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: full.subId } })).toBe(0);
-    // Weeks paid ahead before owner #62 (staging only) are kept, and nothing is added to them.
-    const old = await makeSub({ balance: 3 * 2100 });
-    await expect(start(old)).rejects.toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
-    // Part of the coming week held: the checkout is for the rest of that one week only.
+    // More than four held (it arrived anyway): kept, and nothing is added to it.
+    const over = await makeSub({ balance: 6 * 2100 });
+    await expect(start(over)).rejects.toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
+    // Part of a week held: the checkout is for the rest of that week, or that plus whole weeks, up to the limit.
     const part = await makeSub({ balance: 600 });
     expect((await start(part)).checkout.amountGyd).toBe(1500);
+    const part4 = await makeSub({ balance: 600 });
+    expect((await startWeeks(part4, 4)).checkout.amountGyd).toBe(1500 + 3 * 2100);
   });
 
-  it('a week that is owed is paid whatever is held, up to the one week allowed', async () => {
-    const owed = await makeSub({ status: 'PAST_DUE', due: new Date(Date.now() - DAY), balance: 2100 });
+  it('four weeks in one checkout: priced at four weekly fees, credited whole once MMG confirms, no refund page, and a fifth is refused', async () => {
+    const s = await makeSub();
+    const { checkout } = await startWeeks(s, 4);
+    expect(checkout.amountGyd).toBe(4 * 2100);
+    const row = await intentOf(checkout.ref);
+    expect(Number(row.amount)).toBe(8400);
+    const txn = `MMGTX${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, '7')}4`;
+    approved(row, txn, 8400, echoOf(row));
+    expect(await reply(row, txn)).toBe('CONFIRMED');
+    expect(await walletOf(s.subId)).toBe(4 * 2100);
+    expect(await capPages(s.subId)).toEqual([]);
+    await expect(start(s)).rejects.toMatchObject({ statusCode: 409, code: 'PAY_AHEAD_LIMIT' });
+  });
+
+  it('a choice past the room left is refused with the most that can be paid now; a smaller one opens', async () => {
+    const s = await makeSub({ balance: 2 * 2100 });
+    await expect(startWeeks(s, 4)).rejects.toMatchObject({
+      statusCode: 409, code: 'PAY_AHEAD_LIMIT', details: { maxWeeks: 4, roomGyd: 4200 },
+      message: 'Swift takes the weekly fee up to four weeks ahead. GY$4,200 is already paid toward weeks that have not started, so you can pay at most GY$4,200 now.',
+    });
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
+    expect((await startWeeks(s, 2)).checkout.amountGyd).toBe(4200);
+  });
+
+  it('weeks must be a whole number from 1 to 4; nothing is opened otherwise', async () => {
+    const s = await makeSub();
+    for (const weeks of [0, 5, 1.5, -1]) {
+      await expect(startWeeks(s, weeks)).rejects.toMatchObject({ statusCode: 400, code: 'VALIDATION_ERROR', message: 'Choose how many weeks to pay: 1 to 4.' });
+    }
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
+  });
+
+  it('a tap that chose its weeks is never handed an open page for another amount; a tap that chose none still is', async () => {
+    const s = await makeSub();
+    const first = await startWeeks(s, 1);
+    await expect(startWeeks(s, 3)).rejects.toMatchObject({ statusCode: 409, code: 'CHECKOUT_OPEN_OTHER_AMOUNT', details: { ref: first.checkout.ref, amountGyd: 2100 } });
+    expect((await startWeeks(s, 1)).checkout.ref).toBe(first.checkout.ref);
+    expect((await start(s)).checkout.ref).toBe(first.checkout.ref);
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(1);
+  });
+
+  it('a week that is owed is paid whatever is held, up to the four weeks allowed beyond it', async () => {
+    const owed = await makeSub({ status: 'PAST_DUE', due: new Date(Date.now() - DAY), balance: 4 * 2100 });
     expect((await start(owed)).checkout.amountGyd).toBe(2100);
+    const owed2 = await makeSub({ status: 'PAST_DUE', due: new Date(Date.now() - DAY), balance: 4 * 2100 });
+    await expect(startWeeks(owed2, 2)).rejects.toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
   });
 
   it('money that lands past the cap anyway is credited, and the operators are paged once to refund the part above it', async () => {
@@ -486,11 +535,11 @@ describe('[owner #62] one week ahead at most', () => {
     const { checkout } = await start(s);
     const row = await intentOf(checkout.ref);
     // Something else filled the room while the page was open.
-    await app.prisma.prepaidBalance.update({ where: { subscriptionId: s.subId }, data: { balance: 2100 } });
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: s.subId }, data: { balance: 4 * 2100 } });
     const txn = `MMGTX${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, '7')}8`;
     approved(row, txn, 2100, echoOf(row));
     expect(await reply(row, txn)).toBe('CONFIRMED');
-    expect(await walletOf(s.subId)).toBe(2 * 2100);
+    expect(await walletOf(s.subId)).toBe(5 * 2100);
     const pages = await capPages(s.subId);
     expect(pages.length).toBeGreaterThan(0);
     expect(pages[0]!.body).toContain('Refund the GY$2,100 above the limit');
@@ -2089,9 +2138,10 @@ describe('shared confirmation authority fences a new MMG page', () => {
       expect((await pending).error).toMatchObject({ code: 'PAYMENT_QUOTE_CHANGED' });
       expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: s.subId } })).toBe(0);
     } finally { release.release(); await pending; spy.mockRestore(); }
-    // [owner #62] When the period moved, the coming week is paid: a new checkout is refused (one week at a time).
-    if (kind === 'period') await expect(start(s)).rejects.toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
-    else expect((await start(s)).checkout.amountGyd).toBe(kind === 'rate' ? 2500 : 1500);
+    // [owner 6 Nov] When the period moved, the coming week is paid and counts as one of the four: a new checkout is
+    // for one more week, priced fresh.
+    expect((await start(s)).checkout.amountGyd).toBe(kind === 'rate' ? 2500 : kind === 'wallet' ? 1500 : 2100);
+    if (kind === 'period') expect((await readPayAhead(app.prisma, s.subId, new Date()))!.weeksAheadByDate).toBe(1);
   });
   it.each(['same-key', 'new-key'] as const)('a %s replay keeps its intent but cannot emit a URL after a cross-rail hold wins during unseal', async (kind) => {
     const s = await makeSub();

@@ -84,7 +84,8 @@ describe('[row 658] the weekly fee is payable in the app or on swiftgy.com', () 
     expect(fee).toContain('within 14 days, to the account you paid from or, if you paid in person, by a way you and Swift agree, records the refund');
     // [REVIEW-G18 S3-2 + S4-3] the rise and the cut are told apart where the change is first named; a cut never reaches a week paid or charged.
     expect(fee).toContain('Swift may change the weekly fee. If it goes up, we will tell you in the app at least 14 days before the change, and the new fee applies from your first weekly fee due after that date.');
-    expect(fee).toContain('If it goes down, the lower fee applies from your next weekly fee not yet paid or charged, with a notice in the app.');
+    // [2026-11-06 · owner 6 Nov] A cut also reaches weeks paid ahead (money paid ahead is charged at the rate of the week it pays).
+    expect(fee).toContain('If it goes down, the lower fee applies from your next weekly fee not yet charged, even one you have already paid for, with a notice in the app; what you paid above the lower fee counts toward your later weekly fees.');
     expect(fee).not.toMatch(/We will tell you in the app at least 14 days before the change\./);
   });
 });
@@ -226,8 +227,8 @@ describe('[5 Nov read] what ships now, in the words', () => {
 });
 
 describe('classification', () => {
-  it('2026-11-05 is material, and classed once', () => {
-    expect(LEGAL_VERSION).toBe('2026-11-05');
+  it('2026-11-05 is material, and classed once (served now under 2026-11-06, partner-only)', () => {
+    expect(LEGAL_VERSION).toBe('2026-11-06');
     expect(MATERIAL_CHANGES.filter((c) => c.version === '2026-11-05')).toHaveLength(1);
     expect(NON_MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-11-05');
   });

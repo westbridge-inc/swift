@@ -25,9 +25,9 @@ import { isDuplicateOn } from '../money/evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import type { BillingService } from './billing.service';
 import { payInfo } from './agent-cash.service';
-import { assertPayAheadRoom } from './pay-ahead';
+import { assertPayAheadRoom, PAY_AHEAD_MAX_WEEKS } from './pay-ahead';
 import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
-import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
+import { checkoutAmountForWeeks, isCheckoutWeeks, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
 import { MMG_HISTORY_CLOCK_TOLERANCE_MS, mmgHistoryQueryFor, mmgHistoryTruncated } from '../../providers/mmg/mmg-history';
 import { liveServicesStoreFeeWhere, PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
@@ -762,11 +762,19 @@ export class MmgCheckoutService {
 
   /** Start a checkout, or hand back the one already open [I4]. `created`
    *  tells the route whether this call made it (201) or found it (200). */
-  async createCheckout(input: { subscriptionId: string; userId: string; platform: ClientPlatform; clientKey: unknown; now?: Date }): Promise<{ created: boolean; checkout: StartedCheckout }> {
+  async createCheckout(input: {
+    subscriptionId: string; userId: string; platform: ClientPlatform; clientKey: unknown; now?: Date;
+    /** [owner 6 Nov 2026] How many weeks to pay now, 1 to the four-week limit. Absent (older apps): one week. */
+    weeks?: number;
+  }): Promise<{ created: boolean; checkout: StartedCheckout }> {
     const clientKey = typeof input.clientKey === 'string' && CLIENT_KEY.test(input.clientKey) ? input.clientKey : null;
     if (!clientKey) {
       throw new AppError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'Starting a checkout needs an Idempotency-Key header of 8-128 letters, digits, - or _. The same key on a retry returns the same checkout.');
     }
+    if (input.weeks !== undefined && !isCheckoutWeeks(input.weeks)) {
+      throw new AppError(400, 'VALIDATION_ERROR', `Choose how many weeks to pay: 1 to ${PAY_AHEAD_MAX_WEEKS}.`);
+    }
+    const weeks = input.weeks ?? 1;
     const now = input.now ?? new Date();
     const who: KeyOwner = { userId: input.userId, subscriptionId: input.subscriptionId, chainOwnerId: null, clientKey };
 
@@ -793,6 +801,14 @@ export class MmgCheckoutService {
         throw new AppError(409, 'CHECKOUT_CONFIRMING', 'An earlier MMG payment is being confirmed. Do not pay again.', { ref: open.id });
       }
       if (open && open.expiresAt > now) {
+        // [owner 6 Nov 2026] A tap that chose its weeks is handed the open page only when that page asks the amount
+        // those weeks cost now: never sent to pay a different amount than the one it chose (another device's).
+        if (input.weeks !== undefined) {
+          const asked = checkoutAmountForWeeks(await payInfo(this.prisma, sub), weeks);
+          if (Number(open.amount) !== asked) {
+            throw new AppError(409, 'CHECKOUT_OPEN_OTHER_AMOUNT', `An MMG payment of ${formatMoney(Number(open.amount), 'GYD')} is already open. Finish it on MMG's page, or wait until it closes, then choose again.`, { ref: open.id, amountGyd: Number(open.amount), expiresAt: open.expiresAt.toISOString() });
+          }
+        }
         return (await this.bindKey(who, open, now)).answer();
       }
       if (open) {
@@ -804,9 +820,9 @@ export class MmgCheckoutService {
 
       // [I1] Priced here, from payInfo's own amount due.
       const priced = await payInfo(this.prisma, sub);
-      const amountGyd = checkoutAmountGyd(priced);
-      // [OWNER RULING 8 Oct (2) · owner #62] One week ahead at most: refused before
-      // any page exists (and again under the locks below).
+      const amountGyd = checkoutAmountForWeeks(priced, weeks);
+      // [owner 6 Nov 2026] Up to four weeks ahead at most: refused before any page exists (and again under the locks
+      // below). The amount stays far below every limit the MMG page enforces in Swift's code (the platform ceiling).
       await assertPayAheadRoom(this.prisma, sub.id, amountGyd, now, 'partner');
       const quoteBasis = checkoutQuoteBasis(sub);
       const quotedAuthority = await readFeeCollectionAuthority(this.prisma, sub.id);
@@ -836,7 +852,7 @@ export class MmgCheckoutService {
           const after = currentAuthority.mover?.revision ?? null;
           const sameRevision = before === after || (before === 0 && after === 1);
           const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: sub.id }, select: { balance: true } });
-          const freshAmount = checkoutAmountGyd({ weeklyFeeGyd: weeklyFeeAmount(fresh), amountDueGyd: await amountDueNow(tx, fresh) });
+          const freshAmount = checkoutAmountForWeeks({ weeklyFeeGyd: weeklyFeeAmount(fresh), amountDueGyd: await amountDueNow(tx, fresh) }, weeks);
           if (!sameRevision || (quotedAuthority.mover?.feeType ?? sub.type) !== (currentAuthority.mover?.feeType ?? fresh.type)
             || quoteBasis !== checkoutQuoteBasis(fresh) || freshAmount !== amountGyd
             || Number(wallet?.balance ?? 0) !== priced.walletBalanceGyd
@@ -949,7 +965,8 @@ export class MmgCheckoutService {
       if (!sameChainQuote(due, quote.totalGyd, input.confirmed)) throw quoteChanged();
       const shares = due.map((b) => ({ subscriptionId: b.subscriptionId!, amountGyd: b.amountGyd! }))
         .sort((a, b) => (a.subscriptionId < b.subscriptionId ? -1 : a.subscriptionId > b.subscriptionId ? 1 : 0));
-      // [OWNER RULING 8 Oct (2) · owner #62] One week ahead at most, per branch: refused before any page exists.
+      // [owner 6 Nov 2026] The four-week limit, per branch: refused before any page exists. (Each part is the branch's
+      // one-week Pay amount; more weeks are chosen on a branch's own screen.)
       for (const share of shares) await assertPayAheadRoom(this.prisma, share.subscriptionId, share.amountGyd, now, 'partner');
       const quoted = new Map<string, { basis: string; wallet: number }>();
       for (const share of shares) {
@@ -986,7 +1003,7 @@ export class MmgCheckoutService {
           for (const share of shares) {
             const fresh = await tx.subscription.findUniqueOrThrow({ where: { id: share.subscriptionId } });
             const wallet = await tx.prepaidBalance.findUnique({ where: { subscriptionId: fresh.id }, select: { balance: true } });
-            const freshAmount = checkoutAmountGyd({ weeklyFeeGyd: weeklyFeeAmount(fresh), amountDueGyd: await amountDueNow(tx, fresh) });
+            const freshAmount = checkoutAmountForWeeks({ weeklyFeeGyd: weeklyFeeAmount(fresh), amountDueGyd: await amountDueNow(tx, fresh) }, 1);
             const before = quoted.get(fresh.id)!;
             if (before.basis !== checkoutQuoteBasis(fresh) || freshAmount !== share.amountGyd || Number(wallet?.balance ?? 0) !== before.wallet
               || !(await amountDueNow(tx, fresh) > 0) || !await mmgCheckoutLive(tx, fresh, input.platform, this.checkout)) return { kind: 'quoteChanged' as const };

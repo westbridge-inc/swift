@@ -4,6 +4,43 @@ import { WeeklyFee } from './weekly-fee';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 import { apiFetch, setSelectedStore } from '@/lib/auth';
 
+describe('[owner 6 Nov 2026] up to four weeks ahead on the website', () => {
+  const FOUR = [{ weeks: 1, amountGyd: 2100 }, { weeks: 2, amountGyd: 4200 }, { weeks: 3, amountGyd: 6300 }, { weeks: 4, amountGyd: 8400 }];
+  it('offers the weeks the server says fit, labels Pay with the chosen amount, and sends the chosen weeks', async () => {
+    const bodies: string[] = [];
+    mockApi(({ method, init }) => {
+      if (method === 'POST') {
+        bodies.push(String(init?.body));
+        return { status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT' } } };
+      }
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: FOUR }] } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="rider" />);
+    await screen.findByRole('button', { name: 'Pay GY$2,100 with MMG' });
+    const group = screen.getByRole('group', { name: 'How many weeks?' });
+    expect(within(group).getAllByRole('radio')).toHaveLength(4);
+    expect(group.textContent).toContain('You can pay up to four weeks ahead.');
+    await view.user.click(within(group).getByLabelText(/4 weeks/));
+    await view.user.click(screen.getByRole('button', { name: 'Pay GY$8,400 with MMG' }));
+    await screen.findByText("Swift can't take that many weeks now. Refresh to see what is already paid and what you can pay.");
+    expect(bodies).toEqual(['{"weeks":4}']);
+    view.unmount();
+  });
+
+  it('an older API (no weekOptions) shows no choice and sends {} as before', async () => {
+    const bodies: string[] = [];
+    mockApi(({ method, init }) => {
+      if (method === 'POST') { bodies.push(String(init?.body)); return { status: 503, body: { success: false, error: { code: 'MMG_CHECKOUT_UNAVAILABLE' } } }; }
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' }] } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await view.user.click(await screen.findByRole('button', { name: 'Pay GY$2,100 with MMG' }));
+    expect(screen.queryByRole('group', { name: 'How many weeks?' })).toBeNull();
+    await waitFor(() => expect(bodies).toEqual(['{}']));
+    view.unmount();
+  });
+});
+
 describe('rendered weekly fee', () => {
   it('opens new and handed-back OPEN checkouts in the same tab with a fresh key per tap', async () => {
     const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});

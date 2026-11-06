@@ -246,9 +246,9 @@ describe('a Swift-paid free-delivery code covers the normal fee, never the expre
 describe('LEGAL_VERSION 2026-11-01 for the express Delivery-policy wording [owner 1 Nov 2026]', () => {
   it('is served, and classed non-material exactly once', () => {
     // served now under 2026-11-05 (the 5 Nov batch: material)
-    expect(LEGAL_VERSION).toBe('2026-11-05');
-    expect(TERMS).toContain('5 November 2026');
-    expect(PRIVACY).toContain('5 November 2026');
+    expect(LEGAL_VERSION).toBe('2026-11-06');
+    expect(TERMS).toContain('6 November 2026');
+    expect(PRIVACY).toContain('6 November 2026');
     expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-11-01')).toHaveLength(1);
     expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-11-01');
     expect(NON_MATERIAL_CHANGES.find((c) => c.version === '2026-11-01')!.why).toMatch(/express/i);

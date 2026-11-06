@@ -18,7 +18,8 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { BillingService } from './billing.service';
 import { MmgCheckoutService, type CheckoutStatus, type CheckoutView, type ReturnState } from './mmg-checkout.service';
 import { inPersonFeeView, type InPersonFeeView } from './in-person-payment';
-import { clientPlatform, feePayActions, mmgCheckoutLive, mmgReopenSwitchedOn, type ClientPlatform, type PayAction } from './fee-pay-actions';
+import { clientPlatform, feePayActions, isCheckoutWeeks, mmgCheckoutLive, mmgReopenSwitchedOn, type ClientPlatform, type PayAction } from './fee-pay-actions';
+import { PAY_AHEAD_MAX_WEEKS } from './pay-ahead';
 import { readReopenableMmgCheckout, type ReopenableMmgCheckout } from './mmg-checkout-reopen';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
 import { FEE_SELLER } from './fee-seller';
@@ -247,7 +248,8 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
     return { payActions, latestMmgCheckout, recentCheckouts, reopenableMmgCheckout, inPerson };
   };
 
-  /** POST …/subscription/mmg-checkout — the server prices it; the body is ignored. */
+  /** POST …/subscription/mmg-checkout — the server prices it. [owner 6 Nov 2026] The body may name `weeks` (1 to the
+   *  four-week limit); anything else in it is ignored, and no `weeks` (older apps) is one week. */
   app.post('/subscription/mmg-checkout', { preHandler: [app.authenticate], config: { rateLimit: { ...MMG_CHECKOUT_START_RATE, ...rateLimited } } }, async (request, reply) => {
     // The family's gate first: an outsider is 403 before any key or flag is looked at.
     const sub = await options.subscriptionFor(request);
@@ -257,11 +259,16 @@ export function registerPartnerMmgCheckoutRoutes(app: FastifyInstance, options: 
     if (!(await payerIsProduction(app.prisma, sub.id))) {
       throw new AppError(409, 'PAY_ACTION_OFF', 'Paying with MMG is not available for this account here.');
     }
+    const asked = request.body && typeof request.body === 'object' ? (request.body as { weeks?: unknown }).weeks : undefined;
+    if (asked !== undefined && !isCheckoutWeeks(asked)) {
+      throw new AppError(400, 'VALIDATION_ERROR', `Choose how many weeks to pay: 1 to ${PAY_AHEAD_MAX_WEEKS}.`);
+    }
     const { created, checkout } = await rt().service.createCheckout({
       subscriptionId: sub.id,
       userId: request.user.userId,
       platform: clientPlatform(request.headers),
       clientKey: request.headers['idempotency-key'],
+      ...(asked !== undefined ? { weeks: asked } : {}),
     });
     return reply.status(created ? 201 : 200).send({ success: true, data: checkout });
   });
