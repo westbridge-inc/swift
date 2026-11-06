@@ -196,6 +196,8 @@ describe('[R11] never a VAT line while Westbridge Inc. is not VAT-registered', (
       join(process.cwd(), 'src/modules/subscription/subscription.service.ts'),
       join(root, 'web/src/components/weekly-fee.tsx'),
       join(root, 'web/src/lib/weekly-fee.ts'),
+      join(root, 'web/src/components/weekly-fee-in-person.tsx'),
+      join(root, 'web/src/lib/weekly-fee-in-person.ts'),
       join(root, 'mobile/src/modules/billing/screens/WeeklyFeeScreen.tsx'),
       join(root, 'admin/src/app/mmg-payments/page.tsx'),
       join(root, 'admin/src/app/subscriptions/page.tsx'),

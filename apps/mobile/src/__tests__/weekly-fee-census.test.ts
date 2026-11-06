@@ -42,6 +42,8 @@ describe('partner checkout surface census', () => {
   it('the mobile and web state machines cannot drift', () => {
     expect(source('src/lib/weeklyFee.ts')).toBe(source('../web/src/lib/weekly-fee.ts'));
     expect(source('src/lib/weeklyFeeReopen.ts')).toBe(source('../web/src/lib/weekly-fee-reopen.ts'));
+    // [OWNER 5 Nov 2026] Paying in person: its words, kept out of the web page's first load, shared the same way.
+    expect(source('src/lib/weeklyFeeInPerson.ts')).toBe(source('../web/src/lib/weekly-fee-in-person.ts'));
     // [FEE-STATUS · REVIEW-F S4-1] The fee status words, shared the same way.
     expect(source('src/lib/fee-status.ts')).toBe(source('../web/src/lib/fee-status.ts'));
     // [ENTERPRISE E1b] "Pay all my branches": the list, its words and the checkout follow, shared the same way.
