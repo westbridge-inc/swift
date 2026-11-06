@@ -241,3 +241,47 @@ describe('[board 13a] the office shows CASH COLLECTED like the phone', () => {
     expect(screen.queryByText('Cash collected')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// [CARS-DELIVER · owner 8 + 25 Oct 2026] A taxi driver whose car also delivers (or any mover with a delivery AND a
+// taxi profile) pays ONE weekly fee: the server keeps one fee per person across both profiles, and both
+// subscription routes answer with that same fee. The office showed it twice ("Delivery subscription" and "Taxi
+// subscription"), which reads as two fees. One card now names both kinds of work; one read.
+// ---------------------------------------------------------------------------
+
+function officeWithReads(roles: { rider: boolean; driver: boolean }) {
+  const reads: string[] = [];
+  mockApi(({ url }) => {
+    const path = url.pathname;
+    reads.push(path);
+    if (path === '/api/v1/rider/profile') return roles.rider ? { body: { data: { id: 'rider-1' } } } : { status: 404, body: { error: 'No rider profile' } };
+    if (path === '/api/v1/driver/profile') return roles.driver ? { body: { data: { id: 'driver-1' } } } : { status: 404, body: { error: 'No driver profile' } };
+    if (path === '/api/v1/rider/earnings/summary') return { body: { data: windows(1000) } };
+    if (path === '/api/v1/driver/earnings/summary') return { body: { data: windows(1500) } };
+    if (path === '/api/v1/rider/subscription' || path === '/api/v1/driver/subscription') return { body: { data: { status: 'ACTIVE', weeklyRate: '8000.00' } } };
+    if (path === '/api/v1/rider/cash-settlements') return { body: { data: { unsettled: [], settled: [], summary: { owed: 0, count: 0 } } } };
+    throw new Error(`Unexpected request: ${path}`);
+  });
+  return reads;
+}
+
+describe('[CARS-DELIVER] one weekly fee for a mover who both delivers and drives', () => {
+  it('both profiles: ONE weekly-fee card naming both kinds of work, read once', async () => {
+    const reads = officeWithReads({ rider: true, driver: true });
+    renderWithQuery(<PortalHome />);
+    expect(await screen.findByText('Weekly fee — taxi rides and deliveries')).toBeTruthy();
+    expect(screen.queryByText('Delivery subscription')).toBeNull();
+    expect(screen.queryByText('Taxi subscription')).toBeNull();
+    expect(screen.getAllByText('Weekly fee — view and pay')).toHaveLength(1);
+    expect(screen.getByText(/8,000\/week/)).toBeTruthy();
+    expect(reads.filter((p) => p === '/api/v1/rider/subscription')).toHaveLength(0);
+    expect(reads.filter((p) => p === '/api/v1/driver/subscription').length).toBeGreaterThan(0);
+  });
+
+  it('one profile: its own card, as before', async () => {
+    officeWithReads({ rider: false, driver: true });
+    renderWithQuery(<PortalHome />);
+    expect(await screen.findByText('Taxi subscription')).toBeTruthy();
+    expect(screen.queryByText('Weekly fee — taxi rides and deliveries')).toBeNull();
+  });
+});

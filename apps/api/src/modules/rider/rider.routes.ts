@@ -12,13 +12,15 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { carriesGoods, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, carriesGoods, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveryLivePreview, isCarDeliveryProfile, lockCarDeliveryAuthority, syncCarDeliveryProfile } from '../driver/car-deliveries';
+import { returnToTaxiAndDeliveries } from '../driver/car-deliveries-return';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
 import { noteLiveEta } from '../eta/promise';
 import { z } from '../../lib/zod';
-import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
+import { Prisma, RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { riderDispatchableStatusesFor, riderDispatchReadinessFilter, withheldAwaitingReadiness, dispatchHoldExpired } from '../dispatch/dispatch-trigger';
 import { earningsWindow, jobsIn } from '../order/earnings-window';
@@ -69,6 +71,7 @@ import {
   assertMoverRoleAuthority,
   assertActiveMoverAccount,
   lockAndRetireDriverSupply,
+  completeUserRoleAuthorityTransition,
   lockUserRoleAuthority,
   staleMoverAuthorityError,
 } from '../mover-authority';
@@ -651,6 +654,10 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!isVehicleOffered(rider.vehicleType)) {
       throw new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Change your vehicle to go online.');
     }
+    // [CARS-DELIVER] A taxi car's delivery profile goes online only while CAR_DELIVERIES is on (taxi cars carry
+    // passengers only until counsel verifies goods carriage), and only as its owner's verified taxi car.
+    const carDelivery = isCarDeliveryProfile(rider.vehicleType);
+    if (carDelivery && !carDeliveriesEnabled()) throw passengersOnlyRefusal();
     if (!locationSessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
@@ -672,7 +679,11 @@ export async function riderRoutes(app: FastifyInstance) {
     // legacy flag; known invalid evidence also refuses an unchanged legacy profile.
     // Fast-fail preview for honest copy — the AUTHORITATIVE check re-runs
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
-    const verified = await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
+    // [CARS-DELIVER] A taxi car previews the taxi verdict on the car its taxi profile names today (the
+    // delivery profile is re-synced to that car under the locks below).
+    const verified = carDelivery
+      ? await carDeliveryLivePreview(app.prisma, request.user.userId)
+      : await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
       throw goOnlineRefusal('DOCUMENTS', 'RIDER');
     }
@@ -756,16 +767,35 @@ export async function riderRoutes(app: FastifyInstance) {
       // revocation committing after the preview above can no longer slip a
       // stale "verified" through to the online write. The legacy flag comes
       // from the LOCKED profile snapshot, not the preview.
+      // [CARS-DELIVER] The delivery profile goes online as the car the taxi profile names now (Rider -> Driver).
+      if (carDelivery) await syncCarDeliveryProfile(tx, request.user.userId);
       const liveDocuments = await lockMoverDocuments(tx, request.user.userId, 'RIDER');
       assertMoverDocuments(liveDocuments);
+      const carDocuments = carDelivery ? await lockCarDeliveryAuthority(tx, request.user.userId) : null;
+      if (carDocuments) assertMoverDocuments(carDocuments);
+      // [REVIEW-G #2138 NOTE] Identity locks are per profile (liveness.service): delivery GO on the taxi's car also
+      // refuses while the TAXI profile is identity-locked or safety-suspended (its row is locked just above), so
+      // switching to the same car's deliveries never gets around a lock. Selfie-check freshness stays this
+      // profile's own (assertShiftLiveness above): a check passed on one profile never refreshes the other.
+      if (carDelivery) {
+        const taxi = await tx.driver.findUnique({
+          where: { userId: request.user.userId },
+          select: { lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
+        });
+        if (taxi?.livenessLockedAt) assertShiftLiveness(taxi);
+        if (taxi) assertNotSafetySuspended(taxi);
+      }
       const retiredDriverId = await lockAndRetireDriverSupply(tx, request.user.userId);
       const available = (await riderLiveLegCount(tx, rider.id)) < (await riderStackingCapacity(app.prisma));
       const activated = await tx.$queryRaw<Array<{ isOnline: boolean; isAvailable: boolean }>>`
         UPDATE riders SET "isOnline" = true, "isAvailable" = ${available},
           "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
           "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
+          -- [CARS-DELIVER PR4] Deliveries the mover chose themselves never send them back to taxi work.
+          "returnsToTaxi" = false,
           "updatedAt" = clock_timestamp()
         WHERE id = ${rider.id} AND ${documentDeadlineSql(liveDocuments)}
+          AND ${carDocuments ? documentDeadlineSql(carDocuments) : Prisma.sql`TRUE`}
         RETURNING "isOnline", "isAvailable"`;
       if (!activated[0]) throw expiredDocumentAuthority();
       await tx.user.update({
@@ -849,6 +879,26 @@ export async function riderRoutes(app: FastifyInstance) {
 
     if (!rider.isOnline && !rider.currentOrderId) {
       return { success: true, data: { accepted: false, reason: 'OFFLINE' } };
+    }
+
+    // [CARS-DELIVER PR4 · COORD 26 Oct] A delivery taken from "taxi + deliveries" is done: the first heartbeat
+    // after its last leg returns the account to taxi work (car-deliveries-return.ts). The phone is told, so it
+    // refetches and its location stream follows the taxi profile.
+    if (rider.returnsToTaxi && rider.isOnline && !rider.currentOrderId) {
+      const back = await returnToTaxiAndDeliveries(app.prisma, request.user.userId, locationSessionId, { latitude, longitude });
+      if (back) {
+        await completeUserRoleAuthorityTransition(app, {
+          userId: request.user.userId, riderId: rider.id, driverId: null, activeRole: 'DRIVER', lastMoverRole: 'DRIVER',
+        }).catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'return to taxi cleanup failed'));
+        if (back === 'RETURNED') {
+          const driverRow = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+          if (driverRow) {
+            await app.redis.set(`driver:location_db_ts:${driverRow.id}`, Date.now().toString())
+              .catch((error) => request.log.warn({ err: error, driverId: driverRow.id }, 'return to taxi Redis bookkeeping failed'));
+          }
+        }
+        return { success: true, data: { accepted: false, reason: 'RETURNED_TO_TAXI' } };
+      }
     }
 
     // Migration compatibility is first-writer-wins for a legacy null owner;

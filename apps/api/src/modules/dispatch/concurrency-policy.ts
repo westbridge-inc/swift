@@ -8,7 +8,8 @@ import type { DispatchPool } from './dispatch.service';
 import type { PrismaClient } from '@prisma/client';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { algoValue } from '../algo/algo-config';
-import { carriesGoods } from '../../config/vehicle-classes';
+import { carriesGoods, isPassengerVehicle } from '../../config/vehicle-classes';
+import { lockCarDeliveryAuthority } from '../driver/car-deliveries';
 import { AppError } from '../../utils/errors';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
@@ -147,6 +148,10 @@ export async function reserveRiderLeg(
   const locked = await tx.rider.findUniqueOrThrow({ where: { id: riderId }, select: { vehicleType: true } });
   if (!carriesGoods(locked.vehicleType)) throw passengersOnlyRefusal();
   assertMoverDocuments(documents);
+  // [CARS-DELIVER] A taxi car's delivery profile claims only as its owner's verified taxi car: the taxi
+  // document verdict on the same car (car-deliveries.ts), read under this Rider lock (Rider -> Driver).
+  const carDocuments = isPassengerVehicle(locked.vehicleType) ? await lockCarDeliveryAuthority(tx, rider.userId) : null;
+  if (carDocuments) assertMoverDocuments(carDocuments);
   const rows = await tx.$executeRaw`
     UPDATE "riders" r SET
       "currentOrderId" = COALESCE(r."currentOrderId", ${orderId}),
@@ -158,6 +163,7 @@ export async function reserveRiderLeg(
     FROM "users" u
     WHERE r."id" = ${riderId}
       AND ${documentDeadlineSql(documents)}
+      AND ${carDocuments ? documentDeadlineSql(carDocuments) : Prisma.sql`TRUE`}
       AND u."id" = r."userId"
       AND u."status" = 'ACTIVE'
       AND u."activeRole"::text IN ('MOVER', 'RIDER')
