@@ -40,6 +40,7 @@ import { getTenantId } from '../../plugins/tenant-context';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
 import { mmgDispatchBlocked, mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { FloatService, riderFloatForOrder } from './float.service';
+import { assertCashShown } from './cash-limit';
 import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
 import {
   hasTaxiPassengerCustody,
@@ -419,6 +420,9 @@ const ORDER_HELD_CLAIM_CODES: ReadonlySet<string> = new Set(['ORDER_NOT_READY', 
 const LOST_RACE_CLAIM_CODES: ReadonlySet<string> = new Set(['ALREADY_TAKEN', 'OFFER_TAKEN', 'ORDER_CANCELLED']);
 const MOVER_INELIGIBLE_CLAIM_CODES: ReadonlySet<string> = new Set([
   'MOVER_INACTIVE', 'CAPACITY_EXCEEDED', 'DRIVER_BUSY', 'FLOAT_EXCEEDED', 'STACK_INELIGIBLE', 'SELF_OWN_ORDER',
+  // [O1] this rider's card showed no cash (an older app, or no cash split): a rider whose card shows it can take it.
+  // A CASH_AMOUNT_CHANGED is charged to nobody ('unknown'): the next card shows the new amount.
+  'CASH_AMOUNT_NOT_SHOWN',
   // [TAXI multi-stop 4/8] this driver's app cannot run a ride's stops; another driver's can.
   'APP_UPDATE_REQUIRED',
 ]);
@@ -2445,7 +2449,15 @@ export class DispatchService {
   /** [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The third argument is a
    *  retired slot: a mover never sets the price (base fee plus km, as booked),
    *  so whatever an older app sent there is never read. */
-  async acceptOffer(orderId: string, moverUserId: string, _retiredMoverFare?: number, offerAttemptId?: string) {
+  async acceptOffer(
+    orderId: string,
+    moverUserId: string,
+    _retiredMoverFare?: number,
+    offerAttemptId?: string,
+    /** [O1 · riders choose] What the rider's offer card SHOWED: the pay-the-store cash it sent back (none from an
+     *  older app, or a card that showed no cash split). Rider offers only; the claim refuses cash not shown. */
+    shown: { shownPayToVendor?: number } = {},
+  ) {
     const pool = await this.poolOf(orderId);
     const mover = await this.requireMover(moverUserId, pool);
 
@@ -2511,7 +2523,7 @@ export class DispatchService {
       // is it safe to advance the cascade.
       const claimed = await this.claimOrder(orderId, mover.id, pool, {
         ...(pool === 'RIDER'
-          ? { expectedDeliveryAuthorityVersion: offeredVersion }
+          ? { expectedDeliveryAuthorityVersion: offeredVersion, cashShown: { payToVendor: shown.shownPayToVendor } }
           : {}),
         preserveRescueIncentive: pool === 'RIDER',
       });
@@ -2702,6 +2714,9 @@ export class DispatchService {
       /** Internal accept-card handoff: acceptOffer consumes this generation's
        * incentive immediately after the durable claim returns. */
       preserveRescueIncentive?: boolean;
+      /** [O1 · riders choose] A rider's offer accept: the pay-the-store cash the card showed (undefined: none shown).
+       *  Present only on that path; the locked amount must not exceed it (cash-limit assertCashShown). */
+      cashShown?: { payToVendor?: number };
     } = {},
   ) {
     const assignedStatus = pool === 'DRIVER' ? 'DRIVER_ASSIGNED' : 'RIDER_ASSIGNED';
@@ -2950,6 +2965,13 @@ export class DispatchService {
         // the whole claim back (order CAS, reservation, log) — same one-winner
         // semantics as the board entrance.
         const floatAmt = riderFloatForOrder(lockedOrder);
+        // [O1 · reviewer A S2-1/S2-2] The rider accepts only the cash their card showed: a dearer substitute approved
+        // while the offer was out, or a card that showed no cash split (above UNSHOWN_CASH_MAX), is refused here, from
+        // the LOCKED amount, before anything is committed.
+        if (floatAmt > 0 && options.cashShown) {
+          const store = await tx.order.findUnique({ where: { id: orderId }, select: { vendor: { select: { name: true } } } });
+          assertCashShown(floatAmt, options.cashShown.payToVendor, store?.vendor?.name);
+        }
         if (floatAmt > 0 && !(await new FloatService(tx).commit(tx, moverId, floatAmt))) {
           throw new AppError(
             409,

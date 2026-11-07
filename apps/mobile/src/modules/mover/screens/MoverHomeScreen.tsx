@@ -1038,7 +1038,10 @@ export function MoverHomeScreen({ navigation }: any) {
                     ) : null}
                     {/* Who you'd front cash for — trust before float (§4d) */}
                     <CustomerTrustBadge trust={j.customerTrust} cash={j.paymentMethod === 'CASH'} />
-                    <PillButton label={accept.isPending ? 'Checking acceptance…' : 'Accept'} size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id })} />
+                    {/* [O1 · riders choose] The cash to collect and to pay the store, BEFORE accepting, as on the offer
+                        card; the grab sends back the amount shown, so a changed basket is never taken blind. */}
+                    <OfferCashMath cashMath={j.cashMath} vendorName={j.vendor?.name} />
+                    <PillButton label={accept.isPending ? 'Checking acceptance…' : 'Accept'} size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id, ...(j.cashMath ? { payToVendor: Number(j.cashMath.payToVendor) } : {}) })} />
                     {accept.isPending ? <T variant="label" tone="muted">Checking acceptance… Keep this screen open.</T> : null}
                   </DCard>
                 ))}
@@ -1068,7 +1071,7 @@ export function MoverHomeScreen({ navigation }: any) {
           job={jobs.find((j) => j.id === offer.orderId)}
           kind={offerKind}
           accepting={answerAccept.isPending}
-          onAccept={() => !answerAccept.isPending && answerAccept.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
+          onAccept={() => !answerAccept.isPending && answerAccept.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId, ...(offer.cashMath ? { payToVendor: Number(offer.cashMath.payToVendor) } : {}) }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {

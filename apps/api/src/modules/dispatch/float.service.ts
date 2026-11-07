@@ -159,7 +159,7 @@ export class FloatService {
   async recomputeForUser(userId: string): Promise<void> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { trustLevel: true, countryCode: true, rider: { select: { id: true } } },
+      select: { trustLevel: true, countryCode: true, rider: { select: { id: true, floatLimit: true } } },
     });
     if (!user?.rider) return;
     let level = floatTrustLevel(user.trustLevel);
@@ -168,6 +168,8 @@ export class FloatService {
       if (!approved) level = 'L1';
     }
     const limit = await this.floatLimitFor(user.countryCode, level);
+    // [O1] Unchanged → no write: go-online calls this on every GO, and a write would move the row's updatedAt.
+    if (Number(user.rider.floatLimit) === limit) return;
     await this.prisma.rider.update({ where: { id: user.rider.id }, data: { floatLimit: limit } });
   }
 

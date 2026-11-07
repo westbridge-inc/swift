@@ -168,13 +168,17 @@ export const RIDE_03: Journey<Ctx> = {
   id: 'RIDE-03',
   estimateSeconds: 150,
   title: 'Cash float at pickup',
-  cases: 'float commit; cap denial; assignment rollback/retry',
+  cases: 'float commit; cap denial; cash not shown; assignment rollback/retry',
   async run(rec, ctx) {
     rec.require('the 4500 feast item and two riders', !!ctx.world.items['R1-feast'] && riders(ctx).length >= 2, '');
     const feast = ctx.world.items['R1-feast']!;
-    // cap at checkout: no L1 rider (float 8000) can front 2 × 4500
-    const big = await placeExpress(ctx, 'C4', 'R1', 'R1-feast', 'ride03-big', 2);
-    rec.deny('a cash basket above every rider’s float is refused at checkout', big.res, [409], ['DELIVERY_NO_RIDERS'], `store price ${2 * feast.price} > L1 float 8000`);
+    // [O1 · owner 7 Nov 2026] Guyana's rider cash limit is GY$100,000 at every level (seed 2026-11-07.1).
+    const LIMIT = 100_000;
+    const bigQty = Math.floor(LIMIT / feast.price) + 1; // 23 × 4500 = 103,500
+    const nearQty = Math.floor(LIMIT / feast.price); // 22 × 4500 = 99,000: fits alone, not beside a first order
+    // cap at checkout: no rider can front more than the limit
+    const big = await placeExpress(ctx, 'C4', 'R1', 'R1-feast', 'ride03-big', bigQty);
+    rec.deny('a cash basket above every rider’s cash limit is refused at checkout', big.res, [409], ['DELIVERY_NO_RIDERS'], `store price ${bigQty * feast.price} > limit ${LIMIT}`);
 
     const first = await assignedExpress(rec, ctx, 'C4', 'ride03-f1', 'R1-feast');
     rec.require('a rider holds the first feast order', !!first, '');
@@ -183,24 +187,29 @@ export const RIDE_03: Journey<Ctx> = {
     rec.check('the float is committed at claim', Number(pa?.float?.committed ?? pa?.committedFloat) === feast.price,
       `float=${JSON.stringify(pa?.float ?? { committed: pa?.committedFloat, limit: pa?.floatLimit })}`);
 
-    const second = await placeExpress(ctx, 'C6', 'R1', 'R1-feast', 'ride03-f2');
-    rec.expect('a second feast order', second.res, [200, 201]);
+    const second = await placeExpress(ctx, 'C6', 'R1', 'R1-feast', 'ride03-f2', nearQty);
+    const secondCash = nearQty * feast.price;
+    rec.expect('a second, near-limit feast order', second.res, [200, 201]);
     rec.expect('the store accepts it', await storeAccepts(ctx, 'R1', second.id!), 200);
-    const denied = await POST(`/rider/orders/${second.id}/accept`, {}, a.session.token);
-    rec.deny(`${first!.riderId} cannot take a second 4500 cash order on an 8000 float`, denied, [409], ['FLOAT_EXCEEDED']);
+    // an app that shows no amount cannot take a cash job above GY$8,000 from the board
+    const blind = await POST(`/rider/orders/${second.id}/accept`, {}, a.session.token);
+    rec.deny('a board grab that showed no amount is refused above GY$8,000', blind, [409], ['CASH_AMOUNT_NOT_SHOWN']);
+    const denied = await POST(`/rider/orders/${second.id}/accept`, { payToVendor: secondCash }, a.session.token);
+    rec.deny(`${first!.riderId} cannot take ${secondCash} more cash beside ${feast.price} on a ${LIMIT} limit`, denied, [409], ['FLOAT_EXCEEDED']);
     const pa2 = (await GET('/rider/profile', a.session.token)).json?.data;
     rec.check('the refused claim committed nothing (rollback)', Number(pa2?.float?.committed ?? pa2?.committedFloat) === feast.price, `committed=${pa2?.float?.committed ?? pa2?.committedFloat}`);
 
-    // retry: another rider with headroom takes it (offer or board)
+    // retry: another rider with headroom takes it (offer or board), sending back the cash it was shown
     const offer = await pollOffer(ctx, second.id!, riders(ctx).filter((id) => id !== first!.riderId), 30_000);
     let bId: string | null = null;
     if (offer) {
-      const r = await POST('/rider/offers/accept', { orderId: second.id, offerAttemptId: offer.offer.offerAttemptId }, mover(ctx, offer.moverId).session.token);
+      const shown = Number((offer.offer as { cashMath?: { payToVendor?: number } }).cashMath?.payToVendor ?? secondCash);
+      const r = await POST('/rider/offers/accept', { orderId: second.id, offerAttemptId: offer.offer.offerAttemptId, payToVendor: shown }, mover(ctx, offer.moverId).session.token);
       if (r.ok) bId = offer.moverId;
     }
     if (!bId) {
       for (const id of riders(ctx).filter((x) => x !== first!.riderId)) {
-        const r = await POST(`/rider/orders/${second.id}/accept`, {}, mover(ctx, id).session.token);
+        const r = await POST(`/rider/orders/${second.id}/accept`, { payToVendor: secondCash }, mover(ctx, id).session.token);
         if (r.ok) { bId = id; break; }
       }
     }

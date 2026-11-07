@@ -50,6 +50,7 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { goOnlineRefusal } from '../subscription/go-online-refusals';
+import { FloatService } from '../dispatch/float.service';
 import { handoverAttemptState, handoverCodeMatches, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { withIdempotency } from '../../utils/idempotency';
@@ -564,6 +565,12 @@ export async function driverRoutes(app: FastifyInstance) {
     await app.redis
       .set(`driver:location_db_ts:${driver.id}`, Date.now().toString())
       .catch((error) => request.log.warn({ err: error, driverId: driver.id }, 'driver go-online Redis bookkeeping failed'));
+
+    // [O1] A taxi car's delivery profile is offered goods work while the taxi is online (CAR_DELIVERIES): its cash
+    // limit follows the market's setting from this GO on, as a rider's does (no write when there is no such profile,
+    // or nothing changed). Best effort: a failure keeps the stored limit, which only ever offers less cash work.
+    await new FloatService(app.prisma).recomputeForUser(request.user.userId)
+      .catch((error) => request.log.warn({ err: error, driverId: driver.id }, 'driver go-online float resync failed'));
 
     if (retiredRiderId) {
       await dispatch

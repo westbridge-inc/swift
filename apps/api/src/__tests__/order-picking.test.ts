@@ -524,7 +524,9 @@ describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 
     expect(Number(fresh.totalAmount)).toBe(800); // money untouched after death
   });
 
-  it('a dearer approval that would breach the assigned rider’s float cap fails closed — full rollback', async () => {
+  // [O1 · reviewer B S2] A dearer swap on a CASH order a rider holds is refused whether or not it would fit the rider's
+  // limit (the next case): either way it fails closed with a full rollback.
+  it('a dearer approval on a CASH order a rider holds fails closed — full rollback', async () => {
     const { item, sub, order, lineId } = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
     const rmover = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
     const rider = await app.prisma.rider.create({
@@ -534,7 +536,7 @@ describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 
     try {
       const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${lineId}/substitution`, customer.token, { approve: true });
       expect(approve.statusCode).toBe(409);
-      expect(approve.json().error?.code ?? approve.json().code).toBe('SUBSTITUTE_FLOAT_EXCEEDED');
+      expect(approve.json().error?.code ?? approve.json().code).toBe('SUBSTITUTE_RAISES_RIDER_CASH');
       // The transaction rolled back EVERYTHING: line, stock, totals, float.
       const line = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: lineId } });
       expect(line.subStatus).toBe('PENDING');
@@ -549,8 +551,9 @@ describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 
     }
   });
 
-  it('float tracks the live subtotal: dearer approval commits the delta, cheaper releases it', async () => {
-    // Dearer within cap
+  it('a rider holding the CASH order never gets cash added by a swap: dearer is refused even within the limit, cheaper releases', async () => {
+    // [O1 · reviewer B S2] Dearer, well within the rider's limit: refused all the same. The rider agreed to the amount
+    // they were shown; a swap the customer approves must not add store cash to their job (was: +200 committed).
     const dearer = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 700 });
     const rmover = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
     const rider = await app.prisma.rider.create({
@@ -559,8 +562,13 @@ describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 
     await app.prisma.order.update({ where: { id: dearer.order.id }, data: { riderId: rider.id } });
     try {
       const up = await inject('POST', `/api/v1/customer/orders/${dearer.order.id}/items/${dearer.lineId}/substitution`, customer.token, { approve: true });
-      expect(up.statusCode).toBe(200);
-      expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } })).committedFloat)).toBe(700); // +200 delta
+      expect(up.statusCode, up.body).toBe(409);
+      expect(up.json().error?.code ?? up.json().code).toBe('SUBSTITUTE_RAISES_RIDER_CASH');
+      expect(up.json().error?.message ?? up.json().message).toContain('same-price option');
+      expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } })).committedFloat)).toBe(500); // nothing added
+      const kept = await app.prisma.order.findUniqueOrThrow({ where: { id: dearer.order.id } });
+      expect(Number(kept.subtotalBase)).toBe(500);
+      expect((await app.prisma.orderItem.findUniqueOrThrow({ where: { id: dearer.lineId } })).subStatus).toBe('PENDING');
       // Cheaper on a second order for the same rider
       const cheaper = await fixtureWithPendingSub({ itemPrice: 500, subPrice: 300 });
       await app.prisma.order.update({ where: { id: cheaper.order.id }, data: { riderId: rider.id } });
