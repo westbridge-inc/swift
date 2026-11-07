@@ -31,13 +31,13 @@ type Db = PrismaClient | Prisma.TransactionClient;
 
 export type HoursRow = { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean };
 
-const HOURS_SELECT = { dayOfWeek: true, openTime: true, closeTime: true, isClosed: true } as const;
+export const HOURS_SELECT = { dayOfWeek: true, openTime: true, closeTime: true, isClosed: true } as const;
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 const CLOCK = /^(\d{1,2})(?:\s*[:.h]\s*(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|a|p)?$/i;
 
-/** Minutes after midnight for a typed time ("08:00", "8:30", "8pm", "20.15", "24:00"); null when it cannot be read. */
-export function clockMinutes(text: string | null | undefined): number | null {
+/** A typed time ("08:00", "8:30", "8pm", "20.15", "24:00"): minutes after midnight, and whether it said am/pm. */
+function clockReading(text: string | null | undefined): { minutes: number; meridiem: boolean } | null {
   const m = CLOCK.exec((text ?? '').trim());
   if (!m) return null;
   let hour = Number(m[1]);
@@ -50,19 +50,38 @@ export function clockMinutes(text: string | null | undefined): number | null {
   } else if (hour > 24 || (hour === 24 && minute > 0)) {
     return null;
   }
-  return hour * 60 + minute;
+  return { minutes: hour * 60 + minute, meridiem: Boolean(meridiem) };
+}
+
+/** Minutes after midnight for a typed time; null when it cannot be read. */
+export function clockMinutes(text: string | null | undefined): number | null {
+  return clockReading(text)?.minutes ?? null;
 }
 
 type DayWindow = 'CLOSED' | 'ALL_DAY' | { open: number; close: number };
 
-/** One day's window. No row for a day that other days have = closed (the store page says "Closed today"). */
+/**
+ * One day's window. No row for a day that other days have = closed (the store page says "Closed today").
+ *
+ * The phone's hours editor is free text, so "8:00 - 10:00" may mean 8 am to 10 pm. When neither time says am/pm and
+ * the closing time is 1:00 to 12:00, it is read whichever way keeps the store open LONGER: as typed, or with the
+ * closing time in the evening (12:00 as midnight). A store's typing never closes it early; at worst it is shown open
+ * (and its switch still decides) for hours it meant to be closed.
+ */
 function dayWindow(hours: readonly HoursRow[], dayOfWeek: number): DayWindow {
   const row = hours.find((h) => h.dayOfWeek === dayOfWeek);
   if (!row || row.isClosed) return 'CLOSED';
-  const open = clockMinutes(row.openTime);
-  const close = clockMinutes(row.closeTime);
-  if (open === null || close === null) return 'ALL_DAY'; // unreadable times: the switch decides
+  const o = clockReading(row.openTime);
+  const c = clockReading(row.closeTime);
+  if (o === null || c === null) return 'ALL_DAY'; // unreadable times: the switch decides
+  const open = o.minutes;
+  let close = c.minutes;
   if (open === close) return 'ALL_DAY'; // "00:00 - 00:00": round the clock
+  if (!o.meridiem && !c.meridiem && close >= 60 && close <= 720) {
+    const evening = close === 720 ? 1440 : close + 720;
+    const asTyped = close > open ? close - open : close + 1440 - open;
+    if (evening > open && evening - open > asTyped) close = evening;
+  }
   return { open, close };
 }
 

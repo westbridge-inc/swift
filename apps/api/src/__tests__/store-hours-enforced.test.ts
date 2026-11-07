@@ -95,6 +95,20 @@ describe('[STORE-HOURS] the rule, at fixed Guyana times', () => {
     expect(hoursAllowNow(week(() => open('00:00', '00:00')), gy(2026, 11, 9, 3))).toBe(true);
   });
 
+  it('times typed without am/pm are read the way that never closes a store early', () => {
+    // "8:00 - 10:00" on the phone's free-text editor may mean 8 am to 10 pm: it is open at 9 pm.
+    expect(hoursAllowNow(week(() => open('8:00', '10:00')), gy(2026, 11, 9, 21))).toBe(true);
+    expect(hoursAllowNow(week(() => open('8:00', '10:00')), gy(2026, 11, 9, 23))).toBe(false);
+    // "8:00 - 12:00" may mean 8 am to midnight.
+    expect(hoursAllowNow(week(() => open('8:00', '12:00')), gy(2026, 11, 9, 23, 30))).toBe(true);
+    // "10:00 - 2:00" is longer as typed (10 am to 2 am) than as 10 am to 2 pm: open at 1 am.
+    expect(hoursAllowNow(week(() => open('10:00', '2:00')), gy(2026, 11, 10, 1))).toBe(true);
+    // am/pm said, or a closing time after noon, is read exactly as written.
+    expect(hoursAllowNow(week(() => open('8:00 am', '10:00 am')), gy(2026, 11, 9, 21))).toBe(false);
+    expect(hoursAllowNow(week(() => open('08:00', '22:00')), gy(2026, 11, 9, 22, 30))).toBe(false);
+    expect(hoursAllowNow(week(() => open('18:00', '02:00')), gy(2026, 11, 9, 12))).toBe(false);
+  });
+
   it('says when it opens next', () => {
     const hours = week((d) => (d === MON ? CLOSED : open('08:00', '22:00')));
     expect(nextOpeningWords(hours, gy(2026, 11, 8, 6))).toBe('today at 8:00 am'); // Sunday 06:00
@@ -137,11 +151,15 @@ const hhmm = (minutes: number) => `${String(Math.floor(minutes / 60) % 24).padSt
 /** Minutes after midnight, Guyana time, now. */
 const nowMinutes = () => { const p = guyanaWallClockParts(new Date()); return p.hour * 60 + p.minute; };
 const today = () => guyanaWallClockParts(new Date()).dayOfWeek;
-/** Hours set around the real time now, with hours of margin either side. */
+/**
+ * Hours set around the real time now, with three hours of margin either side, and the SAME on every day the run could
+ * reach: a window that would pass midnight runs past it (yesterday's hours cover the small hours), and a closed day is
+ * today AND tomorrow, so a run at 23:59 or one that crosses midnight reads the same answer.
+ */
 const FIXTURE_HOURS = {
-  closedToday: () => week((d) => (d === today() ? CLOSED : open('00:00', '23:59'))),
+  closedToday: () => { const d = today(); return week((day) => (day === d || day === (d + 1) % 7 ? CLOSED : open('00:00', '23:59'))); },
   outside: () => { const t = nowMinutes(); return week(() => open(hhmm((t + 180) % 1440), hhmm((t + 360) % 1440))); },
-  inside: () => { const t = nowMinutes(); return week(() => open(hhmm(Math.max(0, t - 180)), hhmm(Math.min(1439, t + 180)))); },
+  inside: () => { const t = nowMinutes(); return week(() => open(hhmm((t + 1260) % 1440), hhmm((t + 180) % 1440))); },
   none: () => [] as HoursRow[],
 };
 
@@ -287,7 +305,8 @@ describe('[STORE-HOURS] checkout is the authority', () => {
     const { a, res } = await buyGoods(store);
     expect(res.statusCode, res.body).toBe(400);
     expect(res.json().error.code).toBe('VENDOR_CLOSED');
-    expect(res.json().error.message).toBe(`${store.name} is closed right now (outside its opening hours). It opens tomorrow at 12:00 am.`);
+    // Today and tomorrow are closed: it opens the day after (or "tomorrow", if the run crossed midnight).
+    expect(res.json().error.message).toMatch(new RegExp(`^${store.name} is closed right now \\(outside its opening hours\\)\\. It opens (tomorrow|on [A-Z][a-z]+day) at 12:00 am\\.$`));
     expect(await ordersOf(a)).toBe(0);
     // The manual switch is never written.
     expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: store.vendorId } })).isCurrentlyOpen).toBe(true);
@@ -350,10 +369,30 @@ describe('[STORE-HOURS] every list agrees with checkout', () => {
     });
   }
 
+  it('open-only browse pages and counts by THE rule: a store closed by its hours never empties page 1 or the total, under any sort', async () => {
+    const tag = wordFreeTag(6);
+    // The store closed by its hours ranks first by rating, so a filter after the cut would empty page 1.
+    const shut = await makeStore(`Paging${tag}`, FIXTURE_HOURS.closedToday());
+    const openStore = await makeStore(`Paging${tag}`, FIXTURE_HOURS.inside());
+    await app.prisma.vendor.update({ where: { id: shut.vendorId }, data: { averageRating: 4.9 } });
+    await app.prisma.vendor.update({ where: { id: openStore.vendorId }, data: { averageRating: 3.1 } });
+    const c = await customer('Pager');
+    for (const sort of ['rating', 'top_rated', 'popular', 'name']) {
+      const res = await call('GET', `/api/v1/customer/vendors?open=true&limit=1&page=1&sort=${sort}&search=${encodeURIComponent(`Paging${tag}`)}`, c.token);
+      expect(res.statusCode, res.body).toBe(200);
+      expect((res.json().data as Array<{ id: string; isCurrentlyOpen: boolean }>).map((v) => [v.id, v.isCurrentlyOpen]), sort).toEqual([[openStore.vendorId, true]]);
+      expect(res.json().meta.total, sort).toBe(1);
+    }
+    // Without open=true a search lists both, the open one first (open-first), whatever the rating.
+    const all = await call('GET', `/api/v1/customer/vendors?limit=1&page=1&search=${encodeURIComponent(`Paging${tag}`)}`, c.token);
+    expect((all.json().data as Array<{ id: string }>).map((v) => v.id)).toEqual([openStore.vendorId]);
+    expect(all.json().meta.total).toBe(2);
+  });
+
   it('the store\'s own dashboard is told its hours close it now, and when they open; the switch stays on', async () => {
     const closed = await makeStore('OwnClosed', FIXTURE_HOURS.closedToday());
     const openStore = await makeStore('OwnOpen', FIXTURE_HOURS.inside());
-    for (const [store, expected] of [[closed, { closedByHoursNow: true, opensNext: 'tomorrow at 12:00 am' }], [openStore, { closedByHoursNow: false, opensNext: null }]] as const) {
+    for (const [store, expected] of [[closed, { closedByHoursNow: true, opensNext: expect.stringMatching(/^(tomorrow|on [A-Z][a-z]+day) at 12:00 am$/) }], [openStore, { closedByHoursNow: false, opensNext: null }]] as const) {
       const res = await call('GET', '/api/v1/vendor/profile', store.owner.token);
       expect(res.statusCode, res.body).toBe(200);
       type Mine = { id: string; isCurrentlyOpen: boolean; closedByHoursNow: boolean; opensNext: string | null };

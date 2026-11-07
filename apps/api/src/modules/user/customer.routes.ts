@@ -95,7 +95,7 @@ import { consentSurfaceOf } from '../legal/consent-surface';
 import { setMarketingConsent } from '../legal/marketing-consent';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
-import { applyOpenNow, storeOpenNow } from '../vendor/store-hours';
+import { applyOpenNow, HOURS_SELECT, storeOpenNow } from '../vendor/store-hours';
 import { promiseView } from '../eta/promise';
 import { sellerVerifiedNow } from '../vendor/seller-verified';
 import { publishedStorePhone } from '../../utils/vendor-public-phone';
@@ -1300,6 +1300,8 @@ export async function customerRoutes(app: FastifyInstance) {
             // "Popular", "Produce" and "Rice & Grains" were one identical image.
             // The column has been on Category the whole time.
             categories: { where: { archivedAt: null }, select: { id: true, name: true, imageUrl: true }, take: 5 },
+            // [STORE-HOURS] Cached with the candidate, so "open now" is worked out per request with no read.
+            operatingHours: { select: HOURS_SELECT },
           },
           orderBy: { averageRating: 'desc' },
           take: HOME_DISCOVERY_SCAN_CAP, // SWIFT-163: bound the per-request scan
@@ -1356,6 +1358,9 @@ export async function customerRoutes(app: FastifyInstance) {
           categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: servedPhotoAddress(c.imageUrl) })),
           isFavorite: favoriteIds.has(v.id),
           ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
+          // [STORE-HOURS] The store's weekly hours, cached (null: the App Review fiction, the switch alone decides).
+          // Never sent: "open now" is worked out from them per request and the field is dropped.
+          openHours: v.isSynthetic ? null : (v.operatingHours ?? []),
         };
       });
 
@@ -1470,7 +1475,10 @@ export async function customerRoutes(app: FastifyInstance) {
     const brandFacts = await brandFactsFor(app.prisma, [...discovery.vendors.map((v) => v.id), ...recentIds, ...discovery.popularItems.map((it) => it.vendorId)]);
     // [STORE-HOURS · owner 6 Nov 2026] "Open" is read per request as checkout decides it (the switch AND the store's
     // weekly hours), never from the cached candidates: hours turn a store open and closed during the day.
-    const enriched = collapseBrands(await applyOpenNow(app.prisma, discovery.vendors), brandFacts, { lat, lng });
+    const now = new Date();
+    const enriched = collapseBrands(discovery.vendors.map(({ openHours, ...v }) => ({
+      ...v, isCurrentlyOpen: storeOpenNow({ isCurrentlyOpen: v.isCurrentlyOpen, isSynthetic: openHours === null }, openHours ?? [], now),
+    })), brandFacts, { lat, lng });
 
     // Sections. "Orderable" must match the checkout gate exactly
     // (order.service.ts: isCurrentlyOpen && acceptingOrders && status ACTIVE —
@@ -1603,24 +1611,31 @@ export async function customerRoutes(app: FastifyInstance) {
 
     let vendors: Awaited<ReturnType<typeof app.prisma.vendor.findMany>>;
     let total: number;
-    if (sort === 'top_rated') {
+    // [STORE-HOURS] "Open" is the switch AND the store's weekly hours, and the hours are not a column: whenever open
+    // filters (open=true) or orders (open-first) the list, the whole ranking population is read as ids first, judged
+    // by THE rule, then paged — so a page is never emptied after the cut and the total counts what is listed.
+    const hoursRanked = open === 'true' || openFirstOrder;
+    if (sort === 'top_rated' || hoursRanked) {
       // R8: Bayesian display lives on ActorRatingStat (relation-less by
       // design), so the global order is computed over an id projection first,
       // then the page is fetched — unrated stores sink, ties break on the raw
       // mean then name so the order is stable.
-      // [STORE-HOURS] Open-first by THE rule (switch AND hours), as checkout decides it.
-      const idRows = await applyOpenNow(app.prisma, await app.prisma.vendor.findMany({
+      let idRows = await applyOpenNow(app.prisma, await app.prisma.vendor.findMany({
         where,
-        select: { id: true, isCurrentlyOpen: true, averageRating: true, name: true },
+        select: { id: true, isCurrentlyOpen: true, averageRating: true, name: true, totalOrders: true },
       }));
-      const surfAll = await ratingSurfaces(app.prisma, 'VENDOR', idRows.map((r) => r.id));
-      idRows.sort(
-        (a, b) =>
-          (openFirstOrder ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) ||
-          (surfAll.get(b.id)!.displayRating ?? -1) - (surfAll.get(a.id)!.displayRating ?? -1) ||
-          b.averageRating - a.averageRating ||
-          a.name.localeCompare(b.name),
-      );
+      if (open === 'true') idRows = idRows.filter((r) => r.isCurrentlyOpen);
+      const surfAll = sort === 'top_rated' ? await ratingSurfaces(app.prisma, 'VENDOR', idRows.map((r) => r.id)) : null;
+      const bySort = (a: (typeof idRows)[number], b: (typeof idRows)[number]): number => {
+        if (surfAll) {
+          return (surfAll.get(b.id)!.displayRating ?? -1) - (surfAll.get(a.id)!.displayRating ?? -1) ||
+            b.averageRating - a.averageRating || a.name.localeCompare(b.name);
+        }
+        if (sort === 'popular') return b.totalOrders - a.totalOrders;
+        if (sort === 'name') return a.name.localeCompare(b.name);
+        return b.averageRating - a.averageRating;
+      };
+      idRows.sort((a, b) => (openFirstOrder ? Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen) : 0) || bySort(a, b) || a.id.localeCompare(b.id));
       // [DL-7 · SX397 F4] THE TOTAL'S CONTRACT: it counts the ranking
       // population as it was when the ranking was computed — the same caller
       // predicate, read once. The page rows are re-read with every caller
@@ -1645,11 +1660,8 @@ export async function customerRoutes(app: FastifyInstance) {
         }),
         app.prisma.vendor.count({ where }),
       ]);
-      // [STORE-HOURS] The page says "open" as checkout decides it (switch AND hours). The switch narrowed the query;
-      // the hours narrow the page (open=true drops a store closed by its hours) and the open-first order is kept.
+      // [STORE-HOURS] Neither filtered nor ordered by "open" here: each card just says it as checkout decides it.
       vendors = await applyOpenNow(app.prisma, vendors);
-      if (open === 'true') vendors = vendors.filter((v) => v.isCurrentlyOpen);
-      else if (openFirstOrder) vendors = [...vendors].sort((a, b) => Number(b.isCurrentlyOpen) - Number(a.isCurrentlyOpen));
     }
 
     // R8: every card carries the one star line — display, bucket, badge.

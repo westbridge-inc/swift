@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { estimateDrivingDistance } from '../../utils/distance';
-import { applyOpenNow } from './store-hours';
+import { applyOpenNow, HOURS_SELECT, storeOpenNow } from './store-hours';
 
 // ---------------------------------------------------------------------------
 // [CHAINS PR3 · owner 29 Oct 2026] "One brand card ('Royal Castle') opening the nearest open branch that delivers to
@@ -39,12 +39,15 @@ export async function brandFactsFor(db: Db, vendorIds: readonly string[]): Promi
     select: {
       id: true, ownerId: true, owner: { select: { brandName: true } },
       isCurrentlyOpen: true, acceptingOrders: true, latitude: true, longitude: true, deliveryRadius: true,
+      // [STORE-HOURS] Read in this same query: a branch is "open" as checkout decides it (switch AND its weekly hours).
+      isSynthetic: true, operatingHours: { select: HOURS_SELECT },
     },
   });
-  // [STORE-HOURS] A branch is "open" as checkout decides it (switch AND its weekly hours).
-  for (const r of await applyOpenNow(db, rows)) {
+  const now = new Date();
+  for (const r of rows) {
     if (!r.owner.brandName) continue;
-    const { owner, ownerId, ...row } = r;
+    const { owner, ownerId, isSynthetic, operatingHours, ...rest } = r;
+    const row = { ...rest, isCurrentlyOpen: storeOpenNow({ isCurrentlyOpen: rest.isCurrentlyOpen, isSynthetic }, operatingHours ?? [], now) };
     out.set(r.id, { ownerId, name: owner.brandName!, row });
   }
   return out;
