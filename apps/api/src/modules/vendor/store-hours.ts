@@ -64,7 +64,8 @@ type DayWindow = 'CLOSED' | 'ALL_DAY' | { open: number; close: number };
  * One day's window. No row for a day that other days have = closed (the store page says "Closed today").
  *
  * The phone's hours editor is free text, so "9:00 - 5:00" means 9 am to 5 pm. A CLOSING time with no am/pm whose hour
- * is 1 to 11, written without a leading zero, is read as pm. Opening times are read as typed, and 24-hour values
+ * is 1 to 11, written without a leading zero, is read as pm, and a closing "12:xx" as just after midnight (12:00 =
+ * end of day). Opening times are read as typed, and 24-hour values
  * ("02:00", "22:00") and am/pm stay exactly as written.
  */
 function dayWindow(hours: readonly HoursRow[], dayOfWeek: number): DayWindow {
@@ -75,8 +76,15 @@ function dayWindow(hours: readonly HoursRow[], dayOfWeek: number): DayWindow {
   if (o === null || c === null) return 'ALL_DAY'; // unreadable times: the switch decides
   const open = o.minutes;
   const closeHour = Math.floor(c.minutes / 60);
-  const close = !c.meridiem && !c.leadingZero && closeHour >= 1 && closeHour <= 11 ? c.minutes + 720 : c.minutes;
-  if (open === close) return 'ALL_DAY'; // "00:00 - 00:00", "12:00 - 12:00": round the clock
+  // "00:00 - 00:00", "12:00 - 12:00": round the clock.
+  if (open === c.minutes && (closeHour === 0 || closeHour === 12)) return 'ALL_DAY';
+  const typed12h = !c.meridiem && !c.leadingZero;
+  const close = typed12h && closeHour >= 1 && closeHour <= 11 ? c.minutes + 720
+    // A typed "12:00" closing is midnight (end of day), "12:30" half past midnight: never noon, which would close
+    // the store all afternoon and evening. "12 pm" said so is noon.
+    : typed12h && closeHour === 12 ? (c.minutes === 720 ? 1440 : c.minutes - 720)
+    : c.minutes;
+  if (open === close) return 'ALL_DAY';
   return { open, close };
 }
 

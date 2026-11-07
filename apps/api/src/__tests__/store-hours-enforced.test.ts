@@ -109,6 +109,9 @@ describe('[STORE-HOURS] the rule, at fixed Guyana times', () => {
     ['8:00 am', '10:00 am', [[7, false], [8, true], [9, true], [10, false], [21, false]]], // am/pm, unchanged
     ['8:00', '5:00 pm', [[7, false], [8, true], [16, true], [17, false]]],
     ['morning', 'late', [[3, true], [15, true]]], // unreadable: open (the switch decides)
+    ['6:00', '12:00', [[5, false], [6, true], [12, true], [18, true], [23, true]]], // 6 am - midnight
+    ['11:00', '12:30', [[10, false], [11, true], [23, true], [0, true], [1, false]]], // 11 am - 00:30 next day
+    ['9:00', '12 pm', [[8, false], [9, true], [11, true], [12, false], [18, false]]], // 9 am - noon, said so
   ];
   it.each(TYPED)('typed "%s" - "%s" is read as the store means it', (from, to, cases) => {
     const hours = week(() => open(from, to));
