@@ -29,9 +29,8 @@ export const PREVIEW_PROFILE = {
   vehicleColor: 'Silver',
   licensePlate: 'PREVIEW',
   rideClass: 'ECONOMY',
-  // Riders show a cash-float ceiling on Home; a driver has none, but the field
-  // is read defensively (`profile?.float`), so a benign value is fine either way.
-  float: { available: 40000, limit: 60000, committed: 20000 },
+  // [O1 · owner 5 Nov 2026] No rider cash limit, so the preview shows no cash-float ceiling (a driver has none
+  // anyway; Home reads `profile?.float` defensively).
 };
 
 /** Verification status: a fully-approved mover (so the GO button reads eligible,

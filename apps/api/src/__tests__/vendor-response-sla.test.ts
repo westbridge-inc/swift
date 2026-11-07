@@ -49,8 +49,8 @@ describe('vendor response SLA — the admin field is the real control', () => {
       create: { key: AUTO_REJECT_KEY, value: value as never },
     });
 
-  it('uses the seeded value — 5 minutes', async () => {
-    expect(await vendorResponseSlaMinutes(app.prisma)).toBe(5);
+  it('uses the seeded value — 10 minutes (owner 7 Nov 2026; was 5)', async () => {
+    expect(await vendorResponseSlaMinutes(app.prisma)).toBe(10);
   });
 
   it('an operator editing the dashboard field actually changes the deadline', async () => {

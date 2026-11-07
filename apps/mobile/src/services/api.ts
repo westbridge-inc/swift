@@ -1110,7 +1110,10 @@ export const riderApi = {
   // [B6] Every live leg, primary first, plus the server-computed run summary.
   activeLegs: () => api.get('/rider/orders/active-legs'),
   // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
-  accept: (id: string) => api.post(`/rider/orders/${id}/accept`, {}),
+  // [O1 · riders choose] `payToVendor` is the store cash the board row SHOWED (its cashMath); the server refuses a grab
+  // whose amount changed since, and a bigger cash job whose amount the app never showed.
+  accept: (id: string, payToVendor?: number) =>
+    api.post(`/rider/orders/${id}/accept`, typeof payToVendor === 'number' ? { payToVendor } : {}),
   // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
   // this path acks the offer so it's never scored as a timeout [SWIFT-016].
   acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),

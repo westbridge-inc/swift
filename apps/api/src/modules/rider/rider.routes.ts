@@ -33,8 +33,9 @@ import { CashRulesService, customerTrustSummaries, gpsEvidence } from '../cash/c
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
-import { makeDispatchService, vehicleCanCarry, vehicleCanCarryParcel } from '../dispatch/dispatch.service';
+import { makeDispatchService, vehicleCanCarry, vehicleCanCarryParcel, cashMathForOffer } from '../dispatch/dispatch.service';
 import { FloatService, riderFloatForOrder, floatAdvice } from '../dispatch/float.service';
+import { isNoCashLimit, BOARD_GRAB_UNSHOWN_CASH_MAX } from '../dispatch/cash-limit';
 import { explainEarning } from '../../utils/explain-earning';
 import { carNoParcelsClaim, passengersOnlyRefusal, riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
@@ -502,7 +503,10 @@ export async function riderRoutes(app: FastifyInstance) {
         ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription ?? null,
         // D.3 float exposure — surfaced so the app can explain "why no offers".
-        float: {
+        // [O1 · owner 5 Nov 2026] No cap: no float card at all (an app that shows "of <limit> free" shows nothing, never
+        // the stored no-cap number); cashNoLimit says so in words for an app that reads it.
+        cashNoLimit: isNoCashLimit(rider.floatLimit),
+        float: isNoCashLimit(rider.floatLimit) ? null : {
           limit: Number(rider.floatLimit),
           committed: Number(rider.committedFloat),
           available: Number(rider.floatLimit) - Number(rider.committedFloat),
@@ -836,6 +840,12 @@ export async function riderRoutes(app: FastifyInstance) {
         .releaseHeldOffer(retiredDriverId)
         .catch((error) => request.log.warn({ err: error, driverId: retiredDriverId }, 'rider GO sibling driver offer cleanup failed'));
     }
+
+    // [O1] The cash limit follows the market's setting from this GO on: a rider sized under an earlier setting (GY$8,000
+    // before the owner's no-cap seed) moves to the current one. Best effort: a failure keeps the stored limit, which
+    // only ever offers less cash work, never more.
+    await new FloatService(app.prisma).recomputeForUser(request.user.userId)
+      .catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'rider go-online float resync failed'));
 
     if (updated.isAvailable) await kickWaiting(rider.id);
 
@@ -1298,6 +1308,10 @@ export async function riderRoutes(app: FastifyInstance) {
           totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
           isExpress: order.isExpress,
           paymentMethod: order.paymentMethod,
+          // [O1 · riders choose] The cash the rider pays the store at pickup, on the board too (the offer card already
+          // shows it): with no cash limit, the amount in view is how a rider decides. Null on MMG, or when the split
+          // does not reconcile (cashMathForOffer refuses rather than guesses).
+          cashMath: cashMathForOffer(order),
           customerTrust: trust.get(order.customerId) ?? null,
           pickupDistanceKm: Math.round(pickupDistance * 10) / 10,
           deliveryDistanceKm: Math.round(deliveryDistance * 10) / 10,
@@ -1423,7 +1437,11 @@ export async function riderRoutes(app: FastifyInstance) {
     // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the
     // price. An older app's `fare` is read (never refused) and ignored: the
     // formula fee set at checkout stands, on CASH and MMG alike.
-    z.object({ fare: zMoneyWhole.optional() }).parse(request.body ?? {});
+    // [O1 · riders choose] `payToVendor`: the cash-to-the-store amount the app SHOWED on the board row (cashMath).
+    const { payToVendor: shownPayToVendor } = z.object({
+      fare: zMoneyWhole.optional(),
+      payToVendor: z.number().finite().nonnegative().optional(),
+    }).parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
 
     // Must be online.
@@ -1569,6 +1587,24 @@ export async function riderRoutes(app: FastifyInstance) {
       // picking refund committing between preview and lock shrinks the cash
       // the rider actually fronts [REPORT-006].
       const lockedFloatAmt = riderFloatForOrder(staged);
+      // [O1 · owner 5 Nov 2026: no cash limit, riders choose] A rider never takes on store cash they were not shown,
+      // read from the LOCKED order: the amount the app showed must be the amount now (a basket can change while the
+      // board sits open), and an app that showed none (an older app) keeps the board it was built under, up to
+      // BOARD_GRAB_UNSHOWN_CASH_MAX; above it the rider takes the job from the offer card, which shows the cash.
+      if (lockedFloatAmt > 0) {
+        const fmt = (n: number) => `GY$${Math.round(n).toLocaleString('en-US')}`;
+        const storeName = order.vendor?.name ?? 'the store';
+        if (shownPayToVendor !== undefined && Math.round(shownPayToVendor * 100) !== Math.round(lockedFloatAmt * 100)) {
+          throw new AppError(409, 'CASH_AMOUNT_CHANGED',
+            `This order changed: you now pay ${storeName} ${fmt(lockedFloatAmt)} in cash at pickup, not ${fmt(shownPayToVendor)}. Look at it again before you accept.`,
+            { payToVendor: lockedFloatAmt });
+        }
+        if (shownPayToVendor === undefined && lockedFloatAmt > BOARD_GRAB_UNSHOWN_CASH_MAX) {
+          throw new AppError(409, 'CASH_AMOUNT_NOT_SHOWN',
+            `This cash job needs you to pay ${storeName} ${fmt(lockedFloatAmt)} at pickup. Accept it when Swift offers it to you (the offer shows the cash), or update the Swift app.`,
+            { payToVendor: lockedFloatAmt });
+        }
+      }
       if (lockedFloatAmt > 0) {
         const floatReserved = await floatService.commit(tx, rider.id, lockedFloatAmt);
         if (!floatReserved) {

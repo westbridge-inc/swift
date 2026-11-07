@@ -1,4 +1,5 @@
 import { PrismaClient, Prisma, TrustLevel } from '@prisma/client';
+import { isNoCashLimit } from './cash-limit';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
 
@@ -26,6 +27,9 @@ export function riderFloatForOrder(order: {
   const amount = Number(order.subtotalBase);
   return Number.isFinite(amount) && amount > 0 ? amount : 0;
 }
+
+// [O1] The ruled "no cap" and its helpers live in cash-limit.ts (no imports, so the seed spine can read it).
+export { RIDER_CASH_NO_LIMIT, isNoCashLimit, BOARD_GRAB_UNSHOWN_CASH_MAX } from './cash-limit';
 
 /**
  * D.3 rider float-limit gate.
@@ -83,7 +87,8 @@ export function floatAdvice(
   const available = Math.max(0, limit - committed);
   const usedPct = limit > 0 ? Math.min(1, committed / limit) : 0;
   const soft = Math.min(1, Math.max(0.1, Number.isFinite(softPct) ? softPct : 0.7));
-  if (limit <= 0) {
+  // [O1] No cap: nothing to warn about, ever.
+  if (limit <= 0 || isNoCashLimit(limit)) {
     return { level: 'ok', limit, committed, available, usedPct, sentence: null };
   }
   if (available <= 0) {
@@ -159,7 +164,7 @@ export class FloatService {
   async recomputeForUser(userId: string): Promise<void> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { trustLevel: true, countryCode: true, rider: { select: { id: true } } },
+      select: { trustLevel: true, countryCode: true, rider: { select: { id: true, floatLimit: true } } },
     });
     if (!user?.rider) return;
     let level = floatTrustLevel(user.trustLevel);
@@ -168,6 +173,8 @@ export class FloatService {
       if (!approved) level = 'L1';
     }
     const limit = await this.floatLimitFor(user.countryCode, level);
+    // [O1] Unchanged → no write: go-online calls this on every GO, and a write would move the row's updatedAt.
+    if (Number(user.rider.floatLimit) === limit) return;
     await this.prisma.rider.update({ where: { id: user.rider.id }, data: { floatLimit: limit } });
   }
 

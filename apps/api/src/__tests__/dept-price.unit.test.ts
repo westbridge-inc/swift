@@ -27,8 +27,9 @@ describe('department tier price — GY$45,000', () => {
 
   it('a new rate card is a new config version (production gets it only through the seed)', () => {
     // [CHECKLIST-LEGAL] 2026-11-01.1 carries this card on, without the self-declared tier's lists (unregistered-tier-removed.test.ts)
-    expect(PLATFORM_CONFIG_VERSION).toBe('2026-11-01.1');
-    expect(desiredPlatformConfig().version).toBe('2026-11-01.1');
+    // [O1] 2026-11-07.1 carries it on, with Guyana's rider cash limit open and the store's 10 minutes (rider-cash-no-limit.test.ts)
+    expect(PLATFORM_CONFIG_VERSION).toBe('2026-11-07.1');
+    expect(desiredPlatformConfig().version).toBe('2026-11-07.1');
   });
 
   it('the USD-pegged markets keep their own launch anchor: re-pricing Guyana re-prices Guyana alone', () => {

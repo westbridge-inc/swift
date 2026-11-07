@@ -12,6 +12,13 @@ function tier(c: any, key: string) {
   return v != null ? `${c.currencySymbol}${Number(v).toLocaleString()}` : '—';
 }
 
+/** [O1 · owner 5 Nov 2026] A rider cash limit the API sends as null is the ruled "no cap": shown in words. */
+function floatLimits(c: any): string {
+  const levels = [c?.floatL1, c?.floatL2, c?.floatL3];
+  if (levels.every((v) => v == null)) return 'No limit';
+  return levels.map((v) => (v == null ? 'No limit' : Number(v).toLocaleString())).join(' / ');
+}
+
 const TIER_COLUMNS: Array<[key: string, label: string]> = [
   ['mover', 'Rider / wk'],
   ['moverHeavy', 'Heavy delivery / wk'],
@@ -30,7 +37,7 @@ export default function MarketsPage() {
   return (
     <div className="mc-page">
       <p className="mc-muted mb-4 max-w-3xl">
-        Every live market&apos;s money rules — currency, ID check threshold, rider float limits, weekly fees. Read-only:
+        Every live market&apos;s money rules — currency, ID check threshold, rider cash limits, weekly fees. Read-only:
         these numbers gate real money, so they change with the billing work, never from a free-text box.
       </p>
 
@@ -42,7 +49,7 @@ export default function MarketsPage() {
               <th className="mc-label">Currency</th>
               <th className="mc-label" data-align="right">per USD</th>
               <th className="mc-label" data-align="right">ID gate (USD)</th>
-              <th className="mc-label" data-align="right">Float L1 / L2 / L3</th>
+              <th className="mc-label" data-align="right">Rider cash limit L1 / L2 / L3</th>
               {TIER_COLUMNS.map(([key, label]) => (
                 <th key={key} className="mc-label" data-align="right">{label}</th>
               ))}
@@ -66,8 +73,8 @@ export default function MarketsPage() {
                   <td data-label="Currency" className="whitespace-nowrap">{c.currencyCode} ({c.currencySymbol})</td>
                   <td data-label="per USD" data-align="right" className="mc-numbers">{Number(c.usdExchangeRate).toLocaleString()}</td>
                   <td data-label="ID gate (USD)" data-align="right" className="mc-numbers">${Number(c.idGateThresholdUsd).toLocaleString()}</td>
-                  <td data-label="Float L1 / L2 / L3" data-align="right" className="mc-muted mc-numbers whitespace-nowrap">
-                    {Number(c.floatL1).toLocaleString()} / {Number(c.floatL2).toLocaleString()} / {Number(c.floatL3).toLocaleString()}
+                  <td data-label="Rider cash limit L1 / L2 / L3" data-align="right" className="mc-muted mc-numbers whitespace-nowrap">
+                    {floatLimits(c)}
                   </td>
                   {TIER_COLUMNS.map(([key, label]) => (
                     <td key={key} data-label={label} data-align="right" className="mc-numbers whitespace-nowrap">{tier(c, key)}</td>

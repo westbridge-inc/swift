@@ -911,6 +911,21 @@ export function MoverHomeScreen({ navigation }: any) {
             <DStat icon="percent" value="0%" label="Commission" />
           </View>
 
+          {/* [O1 · owner 5 Nov 2026] No rider cash limit: the rider chooses each cash job from its amount. */}
+          {!profile?.float && profile?.cashNoLimit === true ? (
+            <DCard style={{ marginTop: space.md }}>
+              <T variant="caption" weight="bold" style={{ color: dk.muted }}>
+                CASH JOBS
+              </T>
+              <T variant="body" weight="bold" style={{ marginTop: 2, color: dk.text }}>
+                No cash limit
+              </T>
+              <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
+                You choose which cash jobs to take. Each one shows the cash you pay the store before you accept.
+              </T>
+            </DCard>
+          ) : null}
+
           {/* D.3 — cash float headroom */}
           {profile?.float ? (
             <DCard style={{ marginTop: space.md }}>
@@ -1038,7 +1053,10 @@ export function MoverHomeScreen({ navigation }: any) {
                     ) : null}
                     {/* Who you'd front cash for — trust before float (§4d) */}
                     <CustomerTrustBadge trust={j.customerTrust} cash={j.paymentMethod === 'CASH'} />
-                    <PillButton label={accept.isPending ? 'Checking acceptance…' : 'Accept'} size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id })} />
+                    {/* [O1 · riders choose] The cash to collect and to pay the store, BEFORE accepting, as on the offer
+                        card; the grab sends back the amount shown, so a changed basket is never taken blind. */}
+                    <OfferCashMath cashMath={j.cashMath} vendorName={j.vendor?.name} />
+                    <PillButton label={accept.isPending ? 'Checking acceptance…' : 'Accept'} size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id, ...(j.cashMath ? { payToVendor: Number(j.cashMath.payToVendor) } : {}) })} />
                     {accept.isPending ? <T variant="label" tone="muted">Checking acceptance… Keep this screen open.</T> : null}
                   </DCard>
                 ))}

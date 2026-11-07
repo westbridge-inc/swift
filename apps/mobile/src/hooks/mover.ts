@@ -525,7 +525,12 @@ function afterStep(qc: QueryClient, jobId: string | undefined, action: string, a
 export function useAcceptJob(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ id }: { id: string }) => unwrap(svc(kind).accept(id)), onSuccess: () => refreshAfterJobStep(qc) });
+  // [O1] A rider board grab sends back the store cash the row showed; a driver's accept takes the id alone.
+  const m = useMutation({
+    mutationFn: ({ id, payToVendor }: { id: string; payToVendor?: number }) =>
+      unwrap(kind === 'RIDER' ? riderApi.accept(id, payToVendor) : driverApi.accept(id)),
+    onSuccess: () => refreshAfterJobStep(qc),
+  });
   return pv ? PV.previewMutation() : m;
 }
 /** Accept a dispatch OFFER (the offer card), not a board grab. Hits

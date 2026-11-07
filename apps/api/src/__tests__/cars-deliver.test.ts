@@ -283,7 +283,10 @@ describe('[CARS-DELIVER] switch ON (CAR_DELIVERIES=1): a verified taxi car also 
       vehicleColor: 'Silver', licensePlate: driver.plate, vehiclePhotoUrl: taxiBefore.vehiclePhotoUrl,
       profilePhotoUrl: taxiBefore.profilePhotoUrl, documentsVerified: true, isOnline: false, currentOrderId: null,
     });
-    expect(Number(rider!.floatLimit)).toBe(8_000); // the float onboarding seeds (L1 until an approved ID earns L2, main #2296)
+    // the float onboarding seeds: Guyana's L1 (until an approved ID earns L2, main #2296); [O1] no cap once the owner's
+    // seed applies, so it is read from the market rather than pinned to GY$8,000
+    const gyL1 = (await sys(() => app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' }, select: { floatL1: true } }))).floatL1;
+    expect(Number(rider!.floatLimit)).toBe(Number(gyL1));
     expect(await userOf(driver.userId)).toEqual({ roles: ['CUSTOMER', 'MOVER', 'DRIVER', 'RIDER'], activeRole: 'DRIVER', lastMoverRole: 'DRIVER' });
     expect(await driverOf(driver.userId)).toEqual(taxiBefore); // the taxi profile is untouched
     expect(await sys(() => app.prisma.auditLog.count({ where: { userId: driver.userId, action: 'MOVER_CAR_DELIVERIES_ADDED', entityId: rider!.id } }))).toBe(1);

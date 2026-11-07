@@ -94,7 +94,8 @@ describe('unassigned boards reveal operational summaries only', () => {
     expect(res.statusCode, res.body).toBe(200);
     const row = res.json().data.find((r: { id: string }) => r.id === order.id);
     expect(row).toBeTruthy();
-    expect(Object.keys(row).sort()).toEqual(['id', 'orderNumber', 'orderType', 'status', 'vendor', 'itemCount', 'estLoad', 'loadSize', 'oversize', 'deliveryFee', 'tipAmount', 'totalEarning', 'isExpress', 'paymentMethod', 'customerTrust', 'pickupDistanceKm', 'deliveryDistanceKm', 'estimatedPrepTime', 'estimatedDeliveryTime', 'placedAt'].sort());
+    expect(Object.keys(row).sort()).toEqual(['id', 'orderNumber', 'orderType', 'status', 'vendor', 'itemCount', 'estLoad', 'loadSize', 'oversize', 'deliveryFee', 'tipAmount', 'totalEarning', 'isExpress', 'paymentMethod', 'cashMath', 'customerTrust', 'pickupDistanceKm', 'deliveryDistanceKm', 'estimatedPrepTime', 'estimatedDeliveryTime', 'placedAt'].sort());
+    // [O1 · riders choose] cashMath is the job's own money (collect / pay the store / keep), never a person's data.
     expect(row.itemCount).toBe(2); expect(row.deliveryFee).toBe(1500);
     // [owner 31 Oct] The load's size class is operational, never personal: a parcel with no declared size has none.
     expect(row.loadSize).toBeNull(); expect(row.oversize).toBe(false);

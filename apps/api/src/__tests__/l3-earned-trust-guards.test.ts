@@ -94,6 +94,16 @@ async function partnerDoc(userId: string, docType: string, byPerson: boolean) {
 }
 
 describe('[CHECKLIST-LEGAL Q2] L3 never raises a rider\'s float by itself', () => {
+  // [O1] Guyana has no cap since the owner's 5 Nov ruling (every level the same), which would make this rule pass
+  // without proving anything: these cases size the float on a market whose levels differ, as the pegged ones do.
+  let gyBefore: { floatL1: unknown; floatL2: unknown; floatL3: unknown } | null = null;
+  beforeAll(async () => {
+    gyBefore = await system(() => app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' }, select: { floatL1: true, floatL2: true, floatL3: true } }));
+    await system(() => app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { floatL1: 8000, floatL2: 20000, floatL3: 40000 } }));
+  });
+  afterAll(async () => {
+    if (gyBefore) await system(() => app.prisma.countryConfig.update({ where: { code: 'GY' }, data: gyBefore as never }));
+  });
   it('a rider who earns L3 on self-placed orders, with documents no person approved, fronts no more than L1', async () => {
     const id = await earner({ rider: true });
     await partnerDoc(id, 'drivers_licence', false);
