@@ -27,6 +27,14 @@ export function addAppointmentDays(dayKey: string, days: number): string {
   return new Date(Date.UTC(year!, month! - 1, day! + days)).toISOString().slice(0, 10);
 }
 
+/** The weekday (0 = Sunday) of a market calendar date: the phone's own rule
+ *  (apps/mobile/src/lib/appointmentTime.ts), read against the slots answer's
+ *  `bookableWeekdays`. */
+export function appointmentWeekday(dayKey: string): number {
+  const [year, month, day] = dayKey.split('-').map(Number);
+  return new Date(Date.UTC(year!, month! - 1, day!)).getUTCDay();
+}
+
 /** A day-strip label, "Thu 24", for a market calendar date. Noon UTC of that
  *  date is inside the same date in Guyana, so the zone-aware formatter names
  *  the day the key means; the parts are composed so the shape never depends

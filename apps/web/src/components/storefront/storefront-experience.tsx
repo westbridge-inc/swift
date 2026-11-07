@@ -10,9 +10,10 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { Suspense, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
+import { lazyRetry } from '@/lib/chunk-retry';
 import {
   addToCart,
   getCart,
@@ -20,7 +21,6 @@ import {
   getPublicVendor,
   readCheckoutAttempt,
   removeCartLine,
-  updateCartLine,
   type Cart,
   type MenuItem,
   type OptionGroup,
@@ -53,6 +53,7 @@ import styles from './storefront.module.css';
 import { SellerInfo } from './seller-info';
 import { AddPlusGlyph } from '@/components/add-plus';
 import { STORE_PICK } from '@/lib/store-pick';
+import type { CartTaps, CartTapsIO } from '@/lib/cart-taps';
 
 export type DisplayItem = MenuItem & {
   description?: string;
@@ -99,6 +100,11 @@ export function loadItemSheet(): Promise<typeof import('./item-sheet')> {
   return itemSheetLoading;
 }
 if (typeof window !== 'undefined') void loadItemSheet().catch(() => undefined);
+
+const CHECKOUT_LOCKED = 'A checkout attempt still has an unresolved server outcome. Check Orders or retry the same order before changing this cart.';
+
+// [BOOK-S6b] A bookable listing's sheet (day, time, where): only a tap on Book needs it.
+const BookingSheet = lazyRetry(() => import('./booking-sheet').then((module) => ({ default: module.BookingSheet })));
 const ITEM_SHEET_UNAVAILABLE = 'Swift could not open this item. Check your connection and try again.';
 
 // `value || 0` used to turn NaN (a missing/unparsable server figure) into
@@ -251,12 +257,19 @@ function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string
   );
 }
 
+let cartTapsModule: Promise<typeof import('@/lib/cart-taps')> | null = null;
+/** [TAP-AUDIT] The store page's cart-tap engine, fetched once (again after a failed fetch). */
+export function loadCartTaps() {
+  cartTapsModule ??= import('@/lib/cart-taps').catch((error: unknown) => { cartTapsModule = null; throw error; });
+  return cartTapsModule;
+}
+
 /**
  * `verticalStyle` is the store's vertical tint, worked out on the server
  * (storefront-page.tsx) so the design-token tables stay out of the page's
  * first-load JavaScript.
  */
-export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle, liveMenu }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties; liveMenu?: ServerStoreMenu | null }) {
+export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle, liveMenu, branches }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties; liveMenu?: ServerStoreMenu | null; /** [CHAINS PR3] The branch switcher, drawn on the server (no script on the page for it). */ branches?: ReactNode }) {
   const router = useRouter();
   // [W6] The store page lives inside the customer app's frame (rail, dock,
   // session). Its session can renew an expired access cookie before sending a
@@ -311,7 +324,6 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     window.addEventListener('swift-guest-merged', changed);
     return () => window.removeEventListener('swift-guest-merged', changed);
   }, []);
-  const [busyItem, setBusyItem] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ message: string; added: boolean } | null>(null);
   const [floatingError, setFloatingError] = useState<string | null>(null);
@@ -321,7 +333,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const [modalError, setModalError] = useState<string | null>(null);
   const [, setItemSheetLoaded] = useState(() => itemSheetModule !== null);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string[]>>({});
-  const mutationBusy = useRef(false);
+  // [BOOK-S6b] The bookable listing whose sheet is open (the sheet owns its Book in flight).
+  const [bookingItem, setBookingItem] = useState<DisplayItem | null>(null);
   const restoringSession = useRef(false);
   const modalReturnFocus = useRef<HTMLElement | null>(null);
   const railHeading = useRef<HTMLHeadingElement | null>(null);
@@ -355,10 +368,30 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     void shellQueries?.invalidateQueries({ queryKey: ['customer', 'cart'] });
   }, [shellQueries]);
 
-  const refreshCart = useCallback(async () => {
-    const next = await getCart();
-    setCart(next);
-    return next;
+  // [TAP-AUDIT] The cart a tap starts from: the newest this page has (a read lands here before the next render).
+  const cartNow = useRef(cart);
+  cartNow.current = cart;
+  const checkoutAfterTaps = useRef(false);
+  const tapIO = useRef<CartTapsIO | null>(null);
+  const [, redrawTaps] = useState(0);
+  // [TAP-AUDIT] One engine for the page's cart changes (lib/cart-taps): the number moves at the tap, only that item
+  // waits, taps add up, and the cart is read once nothing is out. Its code arrives after the page (fetched as soon as
+  // the visitor is signed in); a tap before it waits for it, never dropped.
+  const tapEngine = useRef<CartTaps | null>(null);
+  // [REVIEW-M #2146 S3-1] Changes made before the code has arrived ([item, step]; 0 for a change that is not a + or −):
+  // counted as out (Checkout waits, the dock defers), and a + or − already moves its number. Each is handed to the
+  // engine when it arrives (or said, if the code cannot be fetched).
+  const early = useRef<Array<[string, number]>>([]);
+  const withTaps = useCallback((run: (_engine: CartTaps) => unknown, id = '', step = 0) => {
+    if (tapEngine.current) { run(tapEngine.current); return; }
+    const mark: [string, number] = [id, step];
+    const queue = early.current;
+    queue.push(mark);
+    redrawTaps((n) => n + 1);
+    void loadCartTaps().then((m) => run(tapEngine.current ??= m.cartTaps(() => tapIO.current!)), () => tapIO.current?.failed(null)).finally(() => {
+      queue.splice(queue.indexOf(mark), 1);
+      redrawTaps((n) => n + 1);
+    });
   }, []);
 
   useEffect(() => {
@@ -468,6 +501,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const storeAcceptsOrders = catalog.isCurrentlyOpen && catalog.acceptingOrders;
   const catalogVerified = catalogState === 'ready';
   const orderable = storeAcceptsOrders && catalogVerified;
+  // [BOOK-WEB · #2205] A booking is for a later time: a store closed right now still takes one; paused orders never.
+  const bookable = catalog.acceptingOrders && catalogVerified;
   const cartItems = cart?.items ?? [];
   const cartHydrationPending = !sessionKnown || (signedIn && !cartHydrated);
   const itemCount = cartItems.reduce((sum, line) => sum + line.quantity, 0);
@@ -529,7 +564,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   // until that same order is retried or confirmed on the checkout page.
   const cartMutationLockedByCheckout = () => {
     if (!readCheckoutAttempt()) return false;
-    const message = 'A checkout attempt still has an unresolved server outcome. Check Orders or retry the same order before changing this cart.';
+    const message = CHECKOUT_LOCKED;
     setError(message);
     showFloatingError(message);
     return true;
@@ -543,37 +578,70 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
    */
   const goToCheckout = () => {
     if (signedIn) { router.push('/checkout'); return; }
+    signInThen('/checkout', true);
+  };
+
+  /** A guest's way to `next`: an expired access cookie is renewed first (then `next` opens at once when
+   *  `goWhenRestored`), else the sign-in page brings them back there. [BOOK-S6b] shared with Book. */
+  function signInThen(next: string, goWhenRestored: boolean) {
     if (restoringSession.current) return;
     restoringSession.current = true;
-    const toSignIn = () => router.push(`/login?next=${encodeURIComponent('/checkout')}`);
+    const toSignIn = () => router.push(`/login?next=${encodeURIComponent(next)}`);
     void (shellSession?.ensureSignedIn() ?? Promise.resolve(false)).then((restored) => {
       restoringSession.current = false;
-      if (restored) router.push('/checkout');
-      else toSignIn();
+      if (!restored) toSignIn();
+      else if (goWhenRestored) router.push(next);
     }, () => {
       restoringSession.current = false;
       toSignIn();
     });
-  };
+  }
 
-  const mutateItem = async (itemId: string, work: () => Promise<unknown>, message?: string, added = false) => {
-    if (mutationBusy.current || cartHydrationPending || cartMutationLockedByCheckout()) return;
-    mutationBusy.current = true;
-    setBusyItem(itemId);
-    setError(null);
-    try {
-      await work();
-      await refreshCart();
-      refreshShellCart();
-      if (message) showNotice(message, added);
-    } catch (mutationError) {
+  tapIO.current = {
+    vendorId: catalog.id,
+    show: (next) => { cartNow.current = next; setCart(next); refreshShellCart(); },
+    changed: () => redrawTaps((n) => n + 1),
+    failed: (mutationError) => {
       const message = mutationError instanceof Error ? mutationError.message : 'Could not update your order.';
+      checkoutAfterTaps.current = false;
       setError(message);
       showFloatingError(message);
-    } finally {
-      mutationBusy.current = false;
-      setBusyItem(null);
-    }
+    },
+    added: (name) => showNotice(`${name} added to your order.`, true),
+  };
+  const taps = tapEngine.current;
+  const cartBusyNow = () => early.current.length > 0 || !!tapEngine.current?.pending();
+  const tapsPending = cartBusyNow();
+  const tapBusy = (itemId: string) => !!taps?.busy(itemId);
+  // Fetched as soon as the visitor is signed in (a failed fetch is tried again by the first tap, which says why).
+  useEffect(() => {
+    if (!signedIn) return;
+    let alive = true;
+    let engine: CartTaps | null = null;
+    void loadCartTaps().then((m) => {
+      engine = (tapEngine.current ??= m.cartTaps(() => tapIO.current!));
+      if (alive) { engine.live(true); redrawTaps((n) => n + 1); }
+    }, () => {});
+    return () => { alive = false; engine?.live(false); };
+  }, [signedIn]);
+  // [TAP-AUDIT] The dock's Checkout tapped while a change is still out goes once it has landed (never to a stale cart).
+  useEffect(() => {
+    if (tapsPending || !checkoutAfterTaps.current) return;
+    checkoutAfterTaps.current = false;
+    router.push('/checkout');
+  }, [tapsPending, router]);
+
+  /** A + or − on a row (signed in): the number moves now; the engine tells the server. */
+  const tapItem = (item: DisplayItem, step: 1 | -1) => {
+    setError(null);
+    withTaps((engine) => engine.tap(item.id, item.name, step, cartNow.current), item.id, step);
+  };
+
+  /** A change that is not a tap (an add with choices, a ×): only that item waits for it. */
+  const changeItem = (itemId: string, name: string, work: () => Promise<unknown>, message: string, added = false) => {
+    if (cartHydrationPending || cartMutationLockedByCheckout()) return;
+    setError(null);
+    withTaps((engine) => engine.hold(itemId, name, work).then((done) => { if (done) showNotice(message, added); }));
   };
 
   const openOptions = (item: DisplayItem, trigger?: HTMLElement) => {
@@ -602,6 +670,31 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     } catch (e) { setError((e as Error).message); }
   };
 
+  /**
+   * [BOOK-S6b · owner C3] Book on a bookable row opens its sheet (day, time,
+   * where). The free times are read for a signed-in customer (the slots read
+   * is the phone's, behind sign-in), so a guest signs in first and the sheet
+   * reopens on return, as an item's Add does.
+   */
+  const bookItem = (item: DisplayItem, trigger?: HTMLElement) => {
+    if (!bookable || !item.isAvailable || itemPrice(item) === null || cartHydrationPending || cartMutationLockedByCheckout()) return;
+    if (!signedIn && restoringSession.current) return;
+    modalReturnFocus.current = trigger ?? null;
+    setBookingItem(item);
+  };
+
+  const closeBooking = () => {
+    clearStorefrontContinuation();
+    setBookingItem(null);
+    window.requestAnimationFrame(() => modalReturnFocus.current?.focus());
+  };
+
+  /** [BOOK-S6b] Whether the sheet's Book may write the cart now: the checkout lock (said by the page) or taps still out. */
+  const bookingBlocked = (): string | null => {
+    if (cartMutationLockedByCheckout()) return CHECKOUT_LOCKED;
+    return cartBusyNow() ? 'Your cart is still updating. Try again in a moment.' : null;
+  };
+
   const addItem = (item: DisplayItem, trigger?: HTMLElement) => {
     if (!orderable || !item.isAvailable || cartHydrationPending || cartMutationLockedByCheckout()) return;
     // [W6] One tap adds an item that needs no choice; an item with a required
@@ -612,12 +705,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     }
     if (!signedIn) { addLocal(item, 1, {}); return; }
     // Add sends the complete base selection to the server.
-    void mutateItem(
-      item.id,
-      () => addToCart({ vendorId: catalog.id, itemId: item.id, quantity: 1 }),
-      `${item.name} added to your order.`,
-      true,
-    );
+    tapItem(item, 1);
   };
 
   // [W6] `?item=` (Home's popular rail, the Market, a shared link) opens that
@@ -644,6 +732,11 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     const intent = takeStorefrontContinuation(store.slug);
     if (!intent) return;
     const item = catalog.categories.flatMap(category => category.items).find(item => item.id === intent.itemId);
+    // [BOOK-S6b] A guest's Book reopens the listing's sheet after sign-in (nothing is added until they pick a time).
+    if (item?.fulfillment === 'APPOINTMENT' && catalog.acceptingOrders && item.isAvailable && itemPrice(item) !== null) {
+      setBookingItem(item);
+      return;
+    }
     if (!catalog.isCurrentlyOpen || !catalog.acceptingOrders || !item?.isAvailable
       || item.fulfillment !== 'DELIVERY' || itemPrice(item) === null) {
       setError('This item is not available to order right now. Please check the menu.');
@@ -689,16 +782,14 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   const subtractItem = async (item: DisplayItem) => {
     // [W6] The row's "−" takes one from the item's plain line only (what "+"
     // adds) — in a guest's browser basket exactly as in a saved cart.
-    const line = stepperLine(item.id);
-    if (!line) return;
     if (!signedIn) {
+      const line = stepperLine(item.id);
+      if (!line) return;
       try { const { changeGuestQuantity } = await import('@/lib/basket'); changeGuestQuantity(line.id, line.quantity - 1); } catch (e) { setError((e as Error).message); }
       return;
     }
-    void mutateItem(
-      item.id,
-      () => (line.quantity <= 1 ? removeCartLine(line.id) : updateCartLine(line.id, line.quantity - 1)),
-    );
+    if (cartHydrationPending || cartMutationLockedByCheckout()) return;
+    tapItem(item, -1);
   };
 
   const chooseOption = (group: OptionGroup, optionId: string) => {
@@ -752,8 +843,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     const item = modalItem;
     const quantity = itemQuantity;
     closeOptions();
-    void mutateItem(
+    changeItem(
       item.id,
+      item.name,
       () => addToCart({ vendorId: catalog.id, itemId: item.id, quantity, selectedOptions: selected }),
       `${item.name} added to your order.`,
       true,
@@ -799,6 +891,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
               <li className={styles.fact}>Minimum {gyMoney(Number(catalog.minOrderAmount))}</li>
             ) : null}
           </ul>
+          {/* [CHAINS PR3] Another branch of the same brand, one tap away. */}
+          {branches}
         </section>
 
         {fromQr ? (
@@ -879,7 +973,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                 <h2 className={styles.sectionTitle}>{category.name}</h2>
                 <div className={styles.rows}>
                   {(category.items as DisplayItem[]).map((item) => {
-                    const quantity = quantities.get(item.id) ?? 0;
+                    // [TAP-AUDIT] The tapped number while the item's taps are on their way; the server's otherwise.
+                    const quantity = taps ? taps.shown(item.id, quantities.get(item.id) ?? 0) : Math.max(0, early.current.reduce((n, [id, by]) => (id === item.id ? n + by : n), quantities.get(item.id) ?? 0));
                     const fulfillmentVerified = item.fulfillment === 'DELIVERY' || item.fulfillment === 'PICKUP' || item.fulfillment === 'APPOINTMENT';
                     // [W-13] A price Swift cannot read is not an orderable item. It used
                     // to become GY$0 and stay addable, so a broken row shipped as free.
@@ -889,7 +984,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                     const optional = !choices && (item.optionGroups?.length ?? 0) > 0;
                     const from = choices ? fromPrice(item) : null;
                     const choiceSoldOut = choices && item.isAvailable && requiredChoiceSoldOut(item);
-                    const stepper = quantity > 0 && stepperLine(item.id) !== null;
+                    // A + or − only for an item whose lines are all plain (none yet counts: its first add is on its way).
+                    const stepper = quantity > 0 && cartItems.filter((line) => line.itemId === item.id).every(isPlainLine);
+                    const tapHeld = cartHydrationPending || !!taps?.blocked(item.id);
                     return (
                       <article
                         key={item.id}
@@ -916,7 +1013,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                                 type="button"
                                 className={styles.textButton}
                                 onClick={(event) => openOptions(item, event.currentTarget)}
-                                disabled={cartHydrationPending || busyItem !== null}
+                                disabled={cartHydrationPending || tapBusy(item.id)}
                                 aria-label={`Choose options for ${item.name}`}
                               >
                                 Customise
@@ -933,13 +1030,26 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                             ) : item.fulfillment === 'PICKUP' ? (
                               <span className={styles.unavailableAction}>Pickup checkout unavailable</span>
                             ) : item.fulfillment === 'APPOINTMENT' ? (
-                              <span className={styles.unavailableAction}>Appointment checkout unavailable</span>
+                              // [BOOK-S6b · owner C3] A bookable listing: pick a day and a free time, then checkout books it.
+                              item.isAvailable ? (
+                                <button
+                                  type="button"
+                                  className={styles.chooseButton}
+                                  onClick={(event) => bookItem(item, event.currentTarget)}
+                                  disabled={cartHydrationPending || !bookable || !priced}
+                                  aria-label={bookable ? `Book ${item.name}` : !catalog.acceptingOrders
+                                    ? `${item.name} can’t be booked while the store has paused orders`
+                                    : `${item.name} can’t be booked until the live menu is checked`}
+                                >
+                                  Book
+                                </button>
+                              ) : null
                             ) : choices ? (
                               <button
                                 type="button"
                                 className={styles.chooseButton}
                                 onClick={(event) => addItem(item, event.currentTarget)}
-                                disabled={cartHydrationPending || busyItem !== null || !available}
+                                disabled={cartHydrationPending || tapBusy(item.id) || !available}
                                 aria-label={quantity > 0 ? `Customize another ${item.name}; ${quantity} currently in your order` : `Choose options for ${item.name}`}
                               >
                                 Choose
@@ -950,7 +1060,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                                   type="button"
                                   className={styles.quantityButton}
                                   onClick={() => subtractItem(item)}
-                                  disabled={cartHydrationPending || busyItem !== null}
+                                  disabled={tapHeld}
                                   aria-label={`Remove one ${item.name}`}
                                 >
                                   <Minus size={18} aria-hidden="true" />
@@ -960,7 +1070,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                                   type="button"
                                   className={styles.quantityButton}
                                   onClick={(event) => addItem(item, event.currentTarget)}
-                                  disabled={cartHydrationPending || busyItem !== null || !available}
+                                  disabled={tapHeld || !available}
                                   aria-label={`Add another ${item.name}`}
                                 >
                                   <Plus size={18} aria-hidden="true" />
@@ -971,7 +1081,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                                 type="button"
                                 className={styles.addButton}
                                 onClick={(event) => addItem(item, event.currentTarget)}
-                                disabled={cartHydrationPending || busyItem !== null || !available}
+                                disabled={tapHeld || !available}
                                 aria-label={!fulfillmentVerified
                                   ? `${item.name} unavailable because fulfilment could not be verified`
                                   : storeAcceptsOrders && !catalogVerified
@@ -1033,8 +1143,8 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                           <button
                             type="button"
                             className={styles.removeLineButton}
-                            disabled={busyItem !== null}
-                            onClick={() => { if (!signedIn) { try { void import('@/lib/basket').then(({ changeGuestQuantity }) => changeGuestQuantity(line.id, 0)).catch(e => setError(e.message)); } catch (e) { setError((e as Error).message); } } else void mutateItem(line.itemId, () => removeCartLine(line.id), `${line.name} removed.`); }}
+                            disabled={tapBusy(line.itemId)}
+                            onClick={() => { if (!signedIn) { try { void import('@/lib/basket').then(({ changeGuestQuantity }) => changeGuestQuantity(line.id, 0)).catch(e => setError(e.message)); } catch (e) { setError((e as Error).message); } } else changeItem(line.itemId, line.name, () => removeCartLine(line.id), `${line.name} removed.`); }}
                             aria-label={`Remove ${line.name}${line.selectedOptionNames?.length ? ` with ${line.selectedOptionNames.join(', ')}` : ''} from your order`}
                           >
                             <X size={16} aria-hidden="true" />
@@ -1084,7 +1194,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                   type="button"
                   className={styles.primaryButton}
                   onClick={goToCheckout}
-                  disabled={!itemCount || busyItem !== null || cartHydrationPending}
+                  disabled={!itemCount || tapsPending || cartHydrationPending}
                 >
                   {itemCount ? `Checkout · ${basketLabel}` : 'Add an item to continue'}
                 </button>
@@ -1104,7 +1214,12 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
         // [W4] One tap to the one checkout — never a jump to a panel the
         // phone's bars could cover. [#1590] Hidden while the order panel (with
         // its own Checkout button) is on screen; measured for the page's bottom space.
-        <Link ref={orderDock} href="/checkout" className={styles.mobileDock}>
+        <Link
+          ref={orderDock}
+          href="/checkout"
+          className={styles.mobileDock}
+          onClick={(event) => { if (cartBusyNow()) { event.preventDefault(); checkoutAfterTaps.current = true; } }}
+        >
           <span>Checkout · {itemCount} item{itemCount === 1 ? '' : 's'}</span>
           <span className={styles.mobileTotal}>{basketLabel}</span>
         </Link>
@@ -1113,18 +1228,38 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       {modalItem && itemSheetModule ? (
         <itemSheetModule.ItemSheet
           item={modalItem}
+          // [P35 · board 4b] The server's verdict: a person approved the store's documents and they are still
+          // current (public storefront isVerified, seller-verified.ts). An older API sends nothing: no pill.
+          seller={{ name: store.name, city: store.city, verified: store.isVerified === true }}
           vendorType={catalog.vendorType}
           selectedOptions={selectedOptions}
           onChoose={chooseOption}
           quantity={itemQuantity}
           onQuantity={setItemQuantity}
           error={modalError}
-          busy={busyItem !== null}
+          busy={tapBusy(modalItem.id)}
           cartLoading={cartHydrationPending}
           unitPrice={modalUnitPrice}
           onConfirm={confirmOptions}
           onClose={closeOptions}
         />
+      ) : null}
+
+      {bookingItem ? (
+        <Suspense fallback={<p className={styles.notice} role="status">Opening times…</p>}>
+          <BookingSheet
+            item={bookingItem}
+            vendorName={catalog.name}
+            vendorAddress={storeLabel || null}
+            price={itemPrice(bookingItem)}
+            vendorId={catalog.id}
+            cartLines={() => cartNow.current?.items ?? []}
+            blocked={bookingBlocked}
+            guest={signedIn ? null : { storeSlug: store.slug, returnPath, signIn: () => { setBookingItem(null); signInThen(returnPath, false); } }}
+            onBooked={() => { refreshShellCart(); setBookingItem(null); router.push('/checkout'); }}
+            onClose={closeBooking}
+          />
+        </Suspense>
       ) : null}
 
       {notice ? (

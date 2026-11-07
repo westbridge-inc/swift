@@ -6,7 +6,8 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
 import { createHomeRefreshGate, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { customerApi } from '../../../services/api';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { deliveryNoticeFor, riderBasketKey } from '../deliveryAvailability';
 import {
   useCart,
   useClearCart,
@@ -19,8 +20,9 @@ import {
   useRemoveCartItem,
   useRemoveCartPromo,
   useSetCartTip,
-  useUpdateCartItem,
 } from '../../../hooks/customer';
+import { useCartSteppers } from '../../../hooks/useCartSteppers';
+import { isBooking } from '../../../lib/cartSteppers';
 import { useRowHold } from '../../../lib/useRowHold';
 import { maybePrimeNotifications } from '../../../services/notification-priming';
 import { useAuthStore } from '../../../stores/authStore';
@@ -57,6 +59,7 @@ import { checkoutTipAmount } from '../checkout-tip';
 import {
   cartLineMeta,
   cartStaleCheckoutCode,
+  cartVatRows,
   cartPricingChoices,
   checkoutErrorMessage,
   deliveryFeeRows,
@@ -73,13 +76,13 @@ import {
   checkoutPaymentFields,
   checkoutPaymentMethod,
   normalizeCartPaymentCapabilities,
-  paymentActionForCheckout,
-  placedOrderConfirmationCopy,
   reconcileCartPaymentSelection,
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '../cartPayment';
+import { paymentActionForCheckout, pickupCodeGivenAtCheckout, placedOrderConfirmationCopy } from '../cartPlaced';
 import { touchTarget } from '../../../kit/touch-target';
+import { bookingSummaryNote, checkoutButtonLabel, mmgBookingWaitsNote, placedBookingOutcome, placedPopupTitle, type PlacedBookingOutcome } from '../../../lib/appointmentBooking';
 
 const GUTTER = space['2xl'];
 const TIP_PRESETS = [0, 200, 500, 1000];
@@ -147,7 +150,6 @@ export function CartScreen() {
   const { isAuthenticated, promptLogin } = useAuthStore();
   const { latitude, longitude } = useLocationStore();
 
-  const updateItem = useUpdateCartItem();
   const removeItem = useRemoveCartItem();
   // [BUG-GUARDS C2] One remove per line at a time; another line's trash still goes while it sends.
   const removeLine = useRowHold();
@@ -215,6 +217,7 @@ export function CartScreen() {
   // Alert must not leave the retry dead).
   const [pickupAttempt, setPickupAttempt] = useState(0);
   const [placedPickup, setPlacedPickup] = useState(false);
+  const [placedPickupCode, setPlacedPickupCode] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
   // LIFECYCLE_V2: while held, the store has NOT been told yet — say so honestly.
@@ -225,6 +228,9 @@ export function CartScreen() {
   const [placedMmgPayTo, setPlacedMmgPayTo] = useState<'STORE_NUMBER' | undefined>(undefined);
   // The cart empties after placement — remember it was a booking for the popup.
   const [placedAppt, setPlacedAppt] = useState(false);
+  // [BOOK-S6a · REVIEW-F S3-1 on #2193] What the checkout ANSWER says the booking is: confirmed
+  // (the order came back ACCEPTED) or a request. Never the app's guess.
+  const [placedBooking, setPlacedBooking] = useState<PlacedBookingOutcome | null>(null);
   // The chevron only renders when there is somewhere to go: Cart is a tab, so
   // this is true exactly when the tab navigator (or a stack above it) can pop.
   // A dead back control on a money screen is worse than none.
@@ -249,6 +255,8 @@ export function CartScreen() {
     [fulfillment, express, quoteBasis, selectedTip, appliedPromo],
   );
   const cart = useCart<any>(latitude ?? undefined, longitude ?? undefined, pricing);
+  // [TAP-AUDIT] A line's + and − answer at the tap and add up; only that line has a request out (hooks/useCartSteppers).
+  const steppers = useCartSteppers(cart);
   const c = cart.data; // null = empty cart
   // [E01-B] The retry's own quote, requested only once the customer asked to
   // switch (no riders): every store collects, no express, no tip, promo kept.
@@ -303,6 +311,19 @@ export function CartScreen() {
     [c?.paymentCapabilities],
   );
   const effectivePaySelection = reconcileCartPaymentSelection(paySelection, paymentCapabilities);
+  // [RIDER-SAFE 1] Told BEFORE ordering, in the server's words: riders busy
+  // ("about N min extra"), or delivery off for now — with pickup offered. A
+  // failed read says nothing (checkout still decides).
+  const riderStore: string | null = c?.vendor?.id ?? null;
+  const riderReadOn = !!riderStore && !!c?.deliveryAddress && !quoteBasis.bookingsOnly && fulfillment !== 'PICKUP';
+  const riderRead = useQuery({
+    queryKey: ['delivery-availability', riderStore, c?.deliveryAddress?.id ?? null, effectivePaySelection.method, riderBasketKey(c?.items)],
+    queryFn: async () => (await customerApi.getDeliveryAvailability(riderStore!, effectivePaySelection.method === 'MMG' ? 'MOBILE_MONEY' : 'CASH')).data?.data,
+    enabled: riderReadOn,
+    staleTime: 10_000,
+    retry: false,
+  });
+  const riderNotice = riderReadOn ? deliveryNoticeFor(riderRead.data) : null;
 
   // Tip intent belongs to one logical cart. Never reset it from tipAmount — a
   // late persistence response must not replace the customer's local choice.
@@ -342,7 +363,7 @@ export function CartScreen() {
   // while a promo apply/remove is in flight, so the code in the body is the
   // code the quote on screen was priced with.
   // removeLine.busy: with two lines removing, removeItem.isPending follows only the latest call.
-  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending && !removeLine.busy && !removePromo.isPending && !applyPromo.isPending;
+  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && steppers.settled && !removeItem.isPending && !removeLine.busy && !removePromo.isPending && !applyPromo.isPending;
 
   const items: any[] = c?.items ?? [];
 
@@ -382,6 +403,13 @@ export function CartScreen() {
     if (Number(c?.tipAmount) > 0) setTip.mutate(0);
   };
   const homeVisit = apptOnly && apptPayload.some((a) => (a as { mode?: string }).mode === 'MOBILE');
+  // [BOOK-S6a · owner A3/A4] "Book now" only for bookings the server said are confirmed at once,
+  // paid cash at the appointment; everything else is a request the business confirms.
+  const bookingButton = {
+    appointmentOnly: apptOnly,
+    everyBookingInstant: bookingItems.length > 0 && bookingItems.every((i) => appointments[i.itemId]?.instant === true),
+    payingCash: effectivePaySelection.method === 'CASH',
+  };
   // PU-01 law (caught by the certification pass): a pickup order is collected
   // at the counter — it must NEVER demand a delivery address. Address is for
   // delivery carts and home-visit bookings only.
@@ -423,11 +451,13 @@ export function CartScreen() {
         onSuccess: (data: any) => {
           haptic.success();
           setPlacedPickup(submittingPickup);
+          setPlacedPickupCode(pickupCodeGivenAtCheckout(data));
           const first = data?.orders?.[0];
           const paymentAction = paymentActionForCheckout(data ?? {}, submittedMethod);
           setPlacedOrderId(first?.id ?? null);
           setPlacedHeld(!!(first?.holdExpiresAt && new Date(first.holdExpiresAt) > new Date()));
           setPlacedAppt(apptPayload.length > 0);
+          setPlacedBooking(placedBookingOutcome(data));
           setPlacedSubmittedMethod(submittedMethod);
           setPlacedPaymentAction(paymentAction);
           setPlacedMmgPayTo(submittedMmgPayTo);
@@ -871,15 +901,28 @@ export function CartScreen() {
                           marginTop: space.sm,
                         }}
                       >
-                        {/* A quantity stepper is one of the four things allowed
-                            to wear maroon. */}
-                        <AddMorph
-                          qty={it.quantity}
-                          busy={updateItem.isPending}
-                          onAdd={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                          onInc={() => updateItem.mutate({ id: it.id, quantity: it.quantity + 1 })}
-                          onDec={() => it.quantity > 1 && updateItem.mutate({ id: it.id, quantity: it.quantity - 1 })}
-                        />
+                        {/* [BOOK-POLISH · #2205] A booking line is ONE appointment (the server refuses any other
+                            number): no + / −, its time shows instead; the trash still takes it out. */}
+                        {isBooking(it) ? (
+                          <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Feather name="calendar" size={13} color={color.text.muted} />
+                            <T variant="caption" tone="muted" style={{ flex: 1 }}>
+                              {appointments[it.itemId]
+                                ? `${formatAppointmentSlot(appointments[it.itemId]!.slotStart)}${appointments[it.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}`
+                                : 'No time picked yet'}
+                            </T>
+                          </View>
+                        ) : (
+                          /* A quantity stepper is one of the four things allowed
+                             to wear maroon. */
+                          <AddMorph
+                            qty={steppers.qty(`line:${it.id}`, it)}
+                            busy={false}
+                            onAdd={() => steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) + 1)}
+                            onInc={() => steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) + 1)}
+                            onDec={() => steppers.qty(`line:${it.id}`, it) > 1 && steppers.set(`line:${it.id}`, it, steppers.qty(`line:${it.id}`, it) - 1)}
+                          />
+                        )}
                         {/* Removing a line is an ordinary action, not an error —
                             it stops being red. hitSlop holds the 44pt target. */}
                         <Pressable
@@ -1028,6 +1071,12 @@ export function CartScreen() {
                 value={cart.isPlaceholderData ? 'Updating…' : money(displayedTotal)}
                 strong
               />
+              {/* [STORE-VAT · owner O-5] The VAT a person-approved VAT store's goods already include (never added to the total). */}
+              {cartVatRows(c).map((row) => (
+                <T key={row.vendorId} variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                  {row.text}
+                </T>
+              ))}
             </View>
             {apptOnly ? (
               <View style={{ marginTop: space.sm, gap: 4 }}>
@@ -1043,7 +1092,7 @@ export function CartScreen() {
                   ) : null,
                 )}
                 <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                  Your time is confirmed when the business accepts the booking.
+                  {bookingSummaryNote(bookingButton)}
                 </T>
               </View>
             ) : pickup ? (
@@ -1094,7 +1143,15 @@ export function CartScreen() {
               </T>
             </View>
           ) : null}
-          {noRiders ? (
+          {riderNotice && !noRiders ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }} accessibilityRole="text">
+              <Feather name="clock" size={14} color={color.warning} />
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
+                {riderNotice.text}
+              </T>
+            </View>
+          ) : null}
+          {noRiders || riderNotice?.offerPickup ? (
             <PillButton
               label="Order for pickup instead — no delivery fee"
               variant="outline"
@@ -1112,7 +1169,7 @@ export function CartScreen() {
               on paper, so the only thing wearing the brand is the thing you
               press to spend money. `xl` is the kit's moment tier (64). */}
           <PillButton
-            label={apptOnly ? 'Book now' : pickup ? 'Place pickup order' : 'Place order'}
+            label={checkoutButtonLabel({ ...bookingButton, pickup })}
             // NEVER pass the handler bare: Pressable calls onPress(event) and the
             // cyclical press event would spread into onOrder's `extra` payload,
             // killing JSON serialization — no request ever left the phone
@@ -1125,6 +1182,11 @@ export function CartScreen() {
             disabled={!quoteSettled || !c.meetsMinimum || c.unavailableItemIds?.length > 0 || (needsAddress && !c.deliveryAddress) || unslotted.length > 0 || recovery.recovering || alreadyPlaced || stillPlacing}
             style={{ marginTop: space.xl }}
           />
+          {mmgBookingWaitsNote(bookingButton) ? (
+            <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
+              {mmgBookingWaitsNote(bookingButton)}
+            </T>
+          ) : null}
           {needsAddress && !c.deliveryAddress ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
               {homeVisit ? 'Add your address — the business travels to you.' : 'Add a delivery address to place the order.'}
@@ -1197,12 +1259,14 @@ export function CartScreen() {
             that is still in flight. */}
         <LockInDisc />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          {placedAppt ? 'Booking requested' : 'Your order is placed'}
+          {placedPopupTitle({ appointment: placedAppt, outcome: placedBooking })}
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           {placedOrderConfirmationCopy({
             appointment: placedAppt,
+            appointmentConfirmed: placedBooking === 'confirmed',
             pickup: placedPickup,
+            pickupCodeGiven: placedPickupCode,
             held: placedHeld,
             submittedMethod: placedSubmittedMethod,
             paymentAction: placedPaymentAction,

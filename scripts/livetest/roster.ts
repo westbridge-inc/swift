@@ -32,7 +32,7 @@ export interface Roster {
 const CUSTOMERS = [
   { id: 'C1', phone: '+5920401001', first: 'Aria', lat: 6.8125, lng: -58.1500 },
   { id: 'C2', phone: '+5920401002', first: 'Ben', lat: 6.8060, lng: -58.1585 },
-  { id: 'C3', phone: '+5920401003', first: 'Cleo', lat: 6.8230, lng: -58.1420 }, // L1 tier-gate testbed
+  { id: 'C3', phone: '+5920401003', first: 'Cleo', lat: 6.8230, lng: -58.1420 }, // L1 (no ID on file) testbed: no ID gate since 24 Oct 2026
   { id: 'C4', phone: '+5920401004', first: 'Dev', lat: 6.8045, lng: -58.1633 },
   { id: 'C5', phone: '+5920401005', first: 'Esi', lat: 6.7980, lng: -58.1570 },
   { id: 'C6', phone: '+5920401006', first: 'Femi', lat: 6.8150, lng: -58.1445 },

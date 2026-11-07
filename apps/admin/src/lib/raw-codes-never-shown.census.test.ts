@@ -291,8 +291,7 @@ const AFTER_1942: Record<string, string> = {
   "app/cash/page.tsx | o.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   "app/cash/page.tsx | b['status']": 'BUG-GUARDS C5 admin, after #1942',
   'app/claims/page.tsx | e.kind': 'BUG-GUARDS C5 admin, after #1942',
-  "app/claims/page.tsx | f.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
-  "app/claims/page.tsx | filter.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
+  "app/claims/page.tsx | f.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942', // the flags chip (the tabs use labels now: ADMIN-AUDIT S4-1)
   "app/claims/page.tsx | String(c.reason).replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   "app/claims/page.tsx | it.key.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   "app/compliance/page.tsx | String(v.reason).replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
@@ -319,10 +318,8 @@ const AFTER_1942: Record<string, string> = {
   'app/promos/page.tsx | promo.discountType': 'BUG-GUARDS C5 admin, after #1942',
   'app/returns/page.tsx | r.reason': 'BUG-GUARDS C5 admin, after #1942',
   "app/subscriptions/page.tsx | String(e.kind ?? '').replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
-  "app/subscriptions/page.tsx | f.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   'app/subscriptions/page.tsx | h.kind': 'BUG-GUARDS C5 admin, after #1942',
   "app/support/page.tsx | f.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
-  "app/support/page.tsx | filter.replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   "app/support/page.tsx | String(t.category).replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   "app/support/page.tsx | String(t.resolution).replaceAll('_', ' ')": 'BUG-GUARDS C5 admin, after #1942',
   'components/dashboard/LiveOrderFeed.tsx | order.status': 'BUG-GUARDS C5 admin, after #1942',
@@ -334,6 +331,8 @@ const KNOWN: Record<string, string> = {
   "lib/approvals.ts | segment .replace(/[-_]/g, ' ')": 'describeAction(): the approval queue names the admin ROUTE being approved from its path segments ("Change: Billing → Agent Payments → Refund Flag", pinned in approvals.test.ts), not a status code.',
   "lib/labels.ts | value.toLowerCase().replaceAll('_', ' ')": 'The floor of label(): it runs only for a value ENUM_LABELS has not been taught yet; labels.test.ts keeps it unreachable for every enum listed there.',
   "components/mc/ActivationChecklist.tsx | docType.replaceAll('_', ' ')": 'Fallback after docLabel() for a document type it does not know: document names are nouns (road_service_licence -> "Road service licence"), not a status code.',
+  'app/mmg-payments/page.tsx | c.reason': '[Row 156] What the partner said, as staff typed it on the refund request: free text, never a code.',
+  'app/audit/page.tsx | e.reason': '[ADMIN-AUDIT S3-5] The reason the person TYPED when acting (the audit row\'s changes.reason, free text), shown in quotes: words, not a code.',
 };
 
 const ALL = sources(SRC).flatMap((p) => scan(relative(SRC, p), readFileSync(p, 'utf8')));

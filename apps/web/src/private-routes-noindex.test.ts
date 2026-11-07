@@ -58,6 +58,7 @@ const PRIVATE_PAGES = [
   '(app)/account/favourites/page.tsx',
   '(app)/account/help/page.tsx',
   '(app)/account/profile/page.tsx',
+  '(app)/account/profile/delete/page.tsx', // [WEB-DELETE] the signed-in customer deletes their account
   '(app)/account/safety/page.tsx',
   '(app)/cart/page.tsx', // guest basket is public to browse but stays out of search
   '(app)/checkout/page.tsx', // [W4] the one checkout: a guest's basket is shown, still out of search
@@ -66,21 +67,36 @@ const PRIVATE_PAGES = [
   '(app)/orders/page.tsx',
   '(app)/orders/[id]/page.tsx',
   'dashboard/page.tsx',
+  'dashboard/branches/page.tsx', // [CHAINS PR2] a business's branches, their figures and orders
+  'dashboard/branches/add/page.tsx', // [CHAINS PR2] add a branch (owner)
+  'dashboard/team/page.tsx', // [CHAINS PR2] the store's team (names and phones)
+  'dashboard/documents/page.tsx', // [OPEN-EARLY PR-2] a store's own documents (owner only)
+  'dashboard/promotions/page.tsx', // [WEB-SETTINGS PR-B] a store's own promo codes (managers and owners)
+  'dashboard/categories/page.tsx', // [WEB-SETTINGS PR-B] a store's listings and category suggestions (managers and owners)
   'dashboard/inventory/page.tsx',
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',
   'dashboard/insights/page.tsx',
+  'dashboard/help/page.tsx', // [BUG-HUNT F04] a partner's way to a person
+  'dashboard/qr/page.tsx', // [STORE-LINK] the store's own QR code and share link (owners and managers)
   'dashboard/schedule/page.tsx', // a Services store's bookings (customer first names)
   'dashboard/settings/page.tsx',
+  'dashboard/settings/delete-account/page.tsx', // [WEB-DELETE] a store's people delete (or close) their own account
+  'dashboard/settings/vat-report/page.tsx', // [O-5] a store's own VAT report (its order numbers and VAT figures)
   'dashboard/weekly-fee/page.tsx',
+  'dashboard/weekly-fee/statement/page.tsx', // [ENTERPRISE E3] the owner's fee statement (their own name and fees)
+  'dashboard/weekly-fee/pay-all/page.tsx', // [ENTERPRISE E1b] the owner pays every branch's fee (branch names and fees)
   'portal/page.tsx',
   'portal/account/page.tsx',
+  'portal/account/delete/page.tsx', // [WEB-DELETE] a rider or driver deletes their own account
   'portal/documents/page.tsx',
   'portal/history/page.tsx',
+  'portal/help/page.tsx', // [BUG-HUNT F04] a partner's way to a person
   'portal/weekly-fee/page.tsx',
   'weekly-fee/page.tsx',
   'selfie/page.tsx',
   'login/page.tsx', // identity flows, not public search content
+  '(marketing)/account-deleted/page.tsx', // [WEB-DELETE] one person's deletion receipt, never search content
   'offline/page.tsx', // utility fallback, already intentionally noindex
   'qr/not-found/page.tsx', // QR lifecycle screens, not store content
   'qr/retired/page.tsx',
@@ -91,6 +107,7 @@ const PRIVATE_PAGES = [
 const TOKEN_DISALLOWED_PAGES = [
   'track/[token]/page.tsx',
   'trip/[token]/page.tsx',
+  'safety-check/page.tsx', // [WEB-TAXI] Trip Guardian's texted answer link (its secret is after the #)
 ];
 
 // Token-bearing HTML route handlers carry response headers instead of metadata.

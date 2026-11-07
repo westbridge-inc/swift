@@ -13,7 +13,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { ACCESS_COOKIE, REFRESH_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 import { SESSION_CREDENTIAL_DIGEST_RE, sessionCredentialDigest } from '../lib/session-credential';
@@ -136,7 +136,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.listen({ port: 0, host: '127.0.0.1' });
   url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 

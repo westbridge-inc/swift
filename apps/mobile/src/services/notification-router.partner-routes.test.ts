@@ -69,6 +69,13 @@ describe('a weekly-fee notice keeps the family it names [PUSH-ROUTING]', () => {
     await vi.waitFor(() => expect(fx.navigate).toHaveBeenCalledExactlyOnceWith('WeeklyFee', { feeFamily: 'vendor' }));
   });
 
+  it('[ENTERPRISE E1b] a pay-all payment notice opens "Pay all my branches" on its ref, never a mover\'s fee, even with the Earner app open', async () => {
+    tap({ kind: 'billing_mmg_checkout', ref: 'chain-1', status: 'CONFIRMED', chainCheckout: true, audience: 'business' });
+    await vi.waitFor(() => expect(fx.navigate).toHaveBeenCalledExactlyOnceWith('WeeklyFee', { feeFamily: 'vendor', payAll: true, ref: 'chain-1' }));
+    expect(fx.subscription).not.toHaveBeenCalled();
+    expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-A');
+  });
+
   it('a mover checkout without a store is still a mover’s fee (the build 9 to 11 contract)', async () => {
     tap({ kind: 'billing_mmg_checkout', subscriptionId: 'subscription-M', ref: 'checkout-M', status: 'CONFIRMED', audience: 'earner' });
     await vi.waitFor(() => expect(fx.navigate).toHaveBeenCalledExactlyOnceWith('WeeklyFee', { ref: 'checkout-M', subscriptionId: 'subscription-M', vendorId: undefined, feeFamily: 'mover' }));
@@ -120,7 +127,8 @@ describe('a store notice opens the store it is about, on the tab it is about [PU
 describe('an untagged document notice opens the documents of the app that is open [PUSH-ROUTING]', () => {
   it.each([
     ['mover', 'MoverDocuments', undefined],
-    ['customer', 'IdentityVerification', undefined],
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] no customer ID screen: a customer's document notice opens the app normally
+    ['customer', 'Main', undefined],
   ] as const)('with the %s app open', async (intent, screen, params) => {
     fx.intent = intent;
     tap({ kind: 'verification_rejected' });

@@ -23,6 +23,7 @@ import { MoverDocumentsScreen } from './screens/MoverDocumentsScreen';
 import { MoverVehicleScreen } from './screens/MoverVehicleScreen';
 import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
+import { MoverNoAnswer } from './MoverNoAnswer';
 // [B-support] The ticket screen is role-agnostic (generic create+list); the
 // mover stack simply never registered it — an earner mid-shift had NO route
 // to a human. Registration, not a rewrite.
@@ -40,8 +41,11 @@ const Stack = createNativeStackNavigator();
 // flip itself gets its moment (the went-live popup), Uber-style.
 function MoverRoot({ navigation }: any) {
   const preview = useMoverPreview((s) => s.preview);
-  const { data: status, isLoading } = useVerificationStatus<any>('MOVER', undefined, { poll: true });
-  const live = useWentLive(preview ? undefined : status ? !!status.roleVerified : undefined);
+  const { data: status, isLoading, refetch } = useVerificationStatus<any>('MOVER', undefined, { poll: true });
+  // Documents can be approved before a vehicle is saved. The server's vehicleType is null until a rider or driver
+  // profile exists: Home has nothing to run on then, and the vehicle form is on the onboarding screen.
+  const verified = !!status?.roleVerified && status?.vehicleType !== null;
+  const live = useWentLive(preview ? undefined : status ? verified : undefined);
 
   // Preview (R3): a prospective mover lands straight on the REAL dashboard home
   // fed sample data — no verification gate, no onboarding, no went-live popup.
@@ -55,9 +59,12 @@ function MoverRoot({ navigation }: any) {
     );
   }
 
+  // [BUG-HUNT F11] No answer is not "not signed up": a working rider never reads the sign-up form because of a bad signal.
+  if (!status) return <MoverNoAnswer onRetry={() => void refetch()} />;
+
   return (
     <>
-      {status?.roleVerified ? <MoverHomeScreen navigation={navigation} /> : <MoverOnboardingScreen status={status} />}
+      {verified ? <MoverHomeScreen navigation={navigation} /> : <MoverOnboardingScreen status={status} />}
       <WentLivePopup visible={live.celebrate} onClose={live.dismiss} kind="mover" />
     </>
   );
@@ -118,7 +125,7 @@ export function MoverStack() {
         <Stack.Screen name="MoverRoot" component={MoverRoot} />
         <Stack.Screen name="ActiveJob" component={ActiveJobScreen} />
         <Stack.Screen name="Earnings" component={EarningsScreen} />
-        {/* [DOC-1 §31.4] The guarantee claims a mover filed — status, evidence, settlement SLA. */}
+        {/* [DOC-1 §31.4] A mover's unpaid cash orders — status, evidence. */}
         <Stack.Screen name="Claims" component={ClaimsScreen} />
         <Stack.Screen name="JobHistory" component={JobHistoryScreen} />
         <Stack.Screen name="Account" component={MoverAccountScreen} />

@@ -9,7 +9,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
@@ -115,7 +115,7 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   registerPublicUploads(app, UPLOAD_DIR);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
@@ -187,7 +187,8 @@ describe('POST /auth/selfie — the only writer of the public photo', () => {
 });
 
 describe('Transact gates refuse a selfie-less account', () => {
-  // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A ride needs the ID on file (L2), never a photo.
+  // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A ride never needs a photo; and since the owner's
+  // 24 Oct 2026 ruling it needs no ID on file either (the last case below).
   const rideBody = {
     pickup: CENTRAL, dropoff: SOUTH,
     pickupAddress: 'Selfie Street 1', dropoffAddress: 'Selfie Street 2',
@@ -214,13 +215,19 @@ describe('Transact gates refuse a selfie-less account', () => {
     expect(joined.statusCode, joined.body).toBe(201);
   });
 
-  it('a customer without the ID on file is asked for the ID — the ID door, never a photo door', async () => {
-    const u = await makeUser(['CUSTOMER'], 'CUSTOMER');
-
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] Neither door any more: a customer with no ID on
+  // file (L1) and no photo books a ride and waits in the queue, asked for neither.
+  it('a customer without the ID on file books and queues — asked for neither an ID nor a photo', async () => {
     for (const url of ['/api/v1/rides/request', '/api/v1/rides/queue/join']) {
-      const blocked = await inject('POST', url, rideBody, u.token);
-      expect(blocked.statusCode, url).toBe(403);
-      expect(blocked.json().error.code, url).toBe('ID_VERIFICATION_REQUIRED');
+      // One account per path: a live ride would (rightly) keep the same account out of the queue.
+      const u = await makeUser(['CUSTOMER'], 'CUSTOMER');
+      const res = await inject('POST', url, rideBody, u.token);
+      expect(res.body, url).not.toContain('ID_VERIFICATION_REQUIRED');
+      expect(res.body, url).not.toContain('SELFIE_REQUIRED');
+      expect(res.statusCode, `${url} ${res.body}`).toBe(201);
+      const after = await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId } });
+      expect(after.trustLevel, url).toBe('L1');
+      expect(after.selfieCapturedAt, url).toBeNull();
     }
   });
 

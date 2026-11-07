@@ -17,7 +17,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { CountryConfigService } from '../modules/country/country-config.service';
-import { seedDocRegistry, registryChecklist, registryCode, REGISTRY_TIER, REGISTRY_EFFECTIVE_FROM, splitChecklistKey } from '../modules/verification/doc-registry';
+import { seedDocRegistry, registryChecklist, registryCode, REGISTRY_TIER, REGISTRY_EFFECTIVE_FROM, splitChecklistKey, RETIRED_REGISTRY_LIST_KEYS } from '../modules/verification/doc-registry';
 
 let app: FastifyInstance;
 let countries: Array<{ code: string; lists: Record<string, string[]> }> = [];
@@ -31,7 +31,12 @@ beforeAll(async () => {
   await app.ready();
   await system(() => seedDocRegistry(app.prisma));
   const rows = await app.prisma.countryConfig.findMany({ select: { code: true, documentChecklists: true } });
-  countries = rows.map((r) => ({ code: r.code, lists: (r.documentChecklists ?? {}) as Record<string, string[]> }));
+  // [ROLE-DOCS · CHECKLIST-LEGAL] a list the owner retired is never mirrored, whatever an older seed stored (the seed's own rule)
+  countries = rows.map((r) => {
+    const lists = { ...((r.documentChecklists ?? {}) as Record<string, string[]>) };
+    for (const key of RETIRED_REGISTRY_LIST_KEYS) delete lists[key];
+    return { code: r.code, lists };
+  });
 });
 
 afterAll(async () => {
@@ -51,7 +56,7 @@ describe('[DOC-1 §4.2] the registry', () => {
   it('every checklist of every country is mirrored exactly, in order, by an inactive provisional requirement set', async () => {
     for (const c of countries) {
       for (const [role, codes] of Object.entries(c.lists)) {
-        // [P3-2] a `<ROLE>_UNREGISTERED` list is the role's set at the UNREGISTERED tier — the registry's own tier column
+        // [ROLE-DOCS] a `<ROLE>_OWN_NAME` list is the role's set at the OWN_NAME tier — the registry's own tier column
         // [VERIFY-DOCS] a `<KEY>_OPTIONAL` list joins the same set as NON-blocking items (a type its required list names stays blocking)
         const key = splitChecklistKey(role);
         const set = await app.prisma.requirementSet.findUnique({

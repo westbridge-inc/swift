@@ -1,9 +1,10 @@
 import { Prisma, type VehicleType } from '@prisma/client';
+import { documentLapsesAt } from './document-validity';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
 import { needsHirePlate } from './hire-plate';
 import { AppError } from '../../utils/errors';
-import { approvedEvidenceFor, anyChecklistEvidenceFor, type EvidenceDb, type EvidenceRow } from './evidence';
+import { approvedEvidenceFor, anyChecklistEvidenceFor, countableVehicleSubjectIds, type EvidenceDb, type EvidenceRow } from './evidence';
 import { BUCKET_OF, VEHICLE_INSURANCE_DOC_TYPE } from './doc-registry';
 import { normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 
@@ -43,7 +44,8 @@ async function currentVehicle(db: EvidenceDb, userId: string, countryCode: strin
 }
 
 function expiry(row: EvidenceRow): number {
-  return Math.min(row.expiresAt?.getTime() ?? Infinity, row.retentionExpiresAt?.getTime() ?? Infinity);
+  // [FOLLOWUPS ruling] a calendar-day expiry counts through the end of that Guyana day (document-validity.ts)
+  return Math.min(row.expiresAt ? documentLapsesAt(row.expiresAt).getTime() : Infinity, row.retentionExpiresAt?.getTime() ?? Infinity);
 }
 
 /** Preview or locked read: the caller chooses the operating profile explicitly. */
@@ -54,7 +56,9 @@ export async function evaluateMoverDocuments(
 ): Promise<MoverDocumentVerdict> {
   const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
   if (!user) return denied('docs');
-  const required = await new CountryConfigService(db as never).getMoverChecklist(user.countryCode, opts.vehicleType, db);
+  // [CARS-PLATES · owner 6 Nov 2026] The list for the WORK: a car's delivery profile reads the delivery list (no hire
+  // licences); the taxi profile the taxi list, and the H plate below.
+  const required = await new CountryConfigService(db as never).getMoverChecklist(user.countryCode, opts.vehicleType, db, opts.kind);
   const hire = opts.kind === 'DRIVER' && isPassengerVehicle(opts.vehicleType);
   // [Owner ruling 11 Oct 2026 · Opus 12 Oct] A taxi (car or wagon car; buses keep their own path) works
   // only on an H-series plate, whatever papers were approved before: the gate says so too, as documents.
@@ -68,16 +72,14 @@ export async function evaluateMoverDocuments(
   if (target?.subjectId && await db.subjectLink.count({ where: { accountId: userId, subjectId: target.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null } }) > 0) return denied('docs');
   const now = new Date();
   const rows = await approvedEvidenceFor(db, userId, types, now);
-  const links = vehicleTypes.length ? await db.subjectLink.findMany({
-    where: { accountId: userId, validTo: null, approvedAt: { not: null }, validFrom: { lte: now } },
-    select: { subjectId: true },
-  }) : [];
+  // [SEC-TRUST F9] The same countable links as the evidence rule: a registrant's link only on a paper of its own a person approved.
+  const links = vehicleTypes.length ? await countableVehicleSubjectIds(db, userId, now) : [];
   const current: EvidenceRow[] = [];
   for (const row of rows) {
     if (!vehicleTypes.includes(row.docType)) {
       current.push(row);
     } else if (row.subjectId !== null) {
-      if (row.subjectId === target?.subjectId && links.some((link) => link.subjectId === row.subjectId)) current.push(row);
+      if (row.subjectId === target?.subjectId && links.includes(row.subjectId)) current.push(row);
     } else if (target?.subjectId == null) {
       current.push(row);
     } else {

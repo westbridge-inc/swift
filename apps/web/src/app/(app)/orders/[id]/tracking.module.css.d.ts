@@ -25,6 +25,7 @@ declare const styles: {
   readonly orderLines: string;
   readonly page: string;
   readonly paymentAction: string;
+  readonly pickupCheck: string;
   readonly pickupCode: string;
   readonly plate: string;
   readonly primaryButton: string;

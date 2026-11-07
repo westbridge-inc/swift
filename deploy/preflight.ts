@@ -110,7 +110,7 @@ function readEnvFile(file: string): Record<string, string> {
 const STUBS: Record<string, string> = {
   DEV_OTP_BYPASS: '0',
   LIFECYCLE_V2: '1',
-  ORDER_HOLD_MINUTES: '5',
+  ORDER_HOLD_MINUTES: '1',
   OTP_HASH_SECRET: 'x'.repeat(48),
   JWT_SECRET: 'x'.repeat(48),
   KYC_PROVIDER: 'manual',
@@ -141,6 +141,7 @@ const STUBS: Record<string, string> = {
   EMAIL_PROVIDER: 'smtp',
   SMTP_HOST: 'stub.invalid', SMTP_PORT: '465', SMTP_USER: 'STUB',
   SMTP_PASS: 'STUB-NOT-A-REAL-SECRET', EMAIL_FROM: 'stub@stub.invalid',
+  RESEND_API_KEY: 'STUB-NOT-A-REAL-SECRET',
   BILLING_TOPUP_HOLD: '1',
   AGENT_CASH_WEBHOOK_SECRET: '',
   // The hash salts come from the store (*_FILE); stubbing them lets the
@@ -241,6 +242,24 @@ for (const v of WATCHED) {
   const present = fileEnv[v] !== undefined && fileEnv[v] !== '';
   const source = fromStore.includes(v) ? 'STORE  ' : present ? 'PRESENT' : 'MISSING';
   console.log(`  ${source}  ${v}`);
+}
+console.log('');
+
+// ── UPLOAD MALWARE SCAN [Row 312 · COORD 21 Oct] ──────────────────────────
+// The emergency switch is loud: while MALWARE_SCAN_BYPASS=1, a mover's uploads are stored
+// WITHOUT a scan whenever the scanner is down (rescanned later). Not a boot refusal: it exists
+// for an outage. But nobody deploys with it on without reading this.
+console.log('UPLOAD MALWARE SCAN');
+console.log('─'.repeat(72));
+if (fileEnv['MALWARE_SCAN_BYPASS'] === '1') {
+  console.log('  ✗✗✗ MALWARE_SCAN_BYPASS=1 — THE EMERGENCY BYPASS IS ON ✗✗✗');
+  console.log('    While the scanner is down, liveness selfies, onboarding documents and vehicle photos');
+  console.log('    are stored WITHOUT a malware scan. Ops are paged every hour it stays on.');
+  console.log('    Remove the line once clamd answers again.');
+} else if (fileEnv['MALWARE_SCAN'] && fileEnv['MALWARE_SCAN'] !== 'clamd') {
+  console.log(`  ✗ MALWARE_SCAN=${fileEnv['MALWARE_SCAN']}: uploads are stored unscanned (production refuses this).`);
+} else {
+  console.log('  ✓ every upload is scanned by the private clamd service before it is stored');
 }
 console.log('');
 

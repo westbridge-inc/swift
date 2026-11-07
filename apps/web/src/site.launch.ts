@@ -22,8 +22,9 @@ export const launch = {
   // build-time value here: the web server reads it while it runs
   // (src/lib/launch-switch.ts, SWIFT_WEB_ORDERING), so opening or closing
   // ordering needs a restart with the new setting, never a rebuild.
-  iosApp: 'soon' as LaunchState,
-  androidApp: 'soon' as LaunchState,
+  // [G11] The same for the App Store and Google Play links: SWIFT_APP_STORES,
+  // read while the server runs (src/lib/launch-switch.ts), turned on at
+  // Release once both stores show the app live.
 
   verticals: {
     food: 'live' as LaunchState,

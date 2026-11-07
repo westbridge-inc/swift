@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { beforeEach, describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -15,6 +15,7 @@ import { escalateStoreSilentMmgClaim, expireUnpaidMmgAcceptance, expireUnpaidMmg
 import { MMG_ACCEPT_EXPIRY_REASON, MMG_STORE_SILENT_SUBJECT } from '../modules/order/mmg-accept-expiry';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { freshOrderPlaceBudget } from './helpers/order-place-budget';
 
 // ---------------------------------------------------------------------------
 // [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An MMG order the store ACCEPTED but
@@ -152,6 +153,8 @@ async function purgeFixtures() {
   });
 }
 
+beforeEach(() => freshOrderPlaceBudget(app.redis));
+
 beforeAll(async () => {
   vi.stubEnv('STORE_MMG_PAY_LINK', '');
   app = Fastify({ logger: false });
@@ -242,13 +245,16 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
     const toCustomer = await notices(customer.userId, orderId);
     expect(toCustomer.map((n) => n.title)).toContain('Order cancelled — MMG payment not confirmed');
     const customerPush = toCustomer.find((n) => n.title === 'Order cancelled — MMG payment not confirmed')!;
-    expect(customerPush.body).toContain('within 30 minutes of accepting');
+    expect(customerPush.body).toContain('within 30 minutes of Window Diner accepting');
     expect(customerPush.body).toContain('Window Diner refunds you directly');
+    // [BUG-HUNT-2 G14b] Most people here never paid: it blames nobody, and says where to go if the money did leave.
+    expect(customerPush.body).not.toContain("didn't mark");
+    expect(customerPush.body).toContain('contact Swift support');
     const toStore = await notices(owner.userId, orderId);
     expect(toStore.some((n) => n.body.includes('not marked "Paid by MMG" within 30 minutes'))).toBe(true);
     const closed = await customerView(orderId);
     expect(closed.mmgPayment).toBeNull(); // the number is never shown on a closed order
-    expect(closed.cancellationNotice).toBe("Window Diner didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Window Diner refunds you directly.");
+    expect(closed.cancellationNotice).toBe('No MMG payment was confirmed within 30 minutes of Window Diner accepting, so this order was cancelled automatically. If you did send the MMG payment, Window Diner refunds you directly. If it does not, contact Swift support.');
     const storeClosed = await storeView(orderId);
     expect(storeClosed['cancellationReason']).toBe(MMG_ACCEPT_EXPIRY_REASON);
     expect(storeClosed['mmgPayBy']).toBeNull();
@@ -330,6 +336,12 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
     await sweep(); await sweep();
     expect(await cases(orderId)).toHaveLength(1);
     expect((await notices(owner.userId, orderId)).filter((n) => n.title.startsWith('Check your MMG for order'))).toHaveLength(1);
+    // [BUG-HUNT-2 G14c] The customer who said they paid is told once, and their card says support is on it.
+    const toldCustomer = (await notices(customer.userId, orderId)).filter((n) => n.title === 'Swift support is checking your MMG payment');
+    expect(toldCustomer).toHaveLength(1);
+    expect(toldCustomer[0]!.body).toContain('Keep your MMG message');
+    expect(toldCustomer[0]!.data).toMatchObject({ kind: 'mmg_store_silent', audience: 'customer' });
+    expect((await customerView(orderId))['mmgClaim']).toMatchObject({ customerClaim: 'PAID', storeSilent: true });
     // Still locked until the store confirms; the store's tap (same reference) lets it go ahead.
     expect((await preparing(orderId)).statusCode).toBe(409);
     const tap = await paidWith(orderId, reference);
@@ -371,11 +383,16 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
   it('only accepted, unpaid MMG orders expire: a waiting (not yet accepted) MMG order and an accepted CASH order are left alone', async () => {
     const pending = await placeOrder('MOBILE_MONEY');
     await sys(() => app.prisma.order.update({ where: { id: pending }, data: { createdAt: new Date(Date.now() - 2 * 60 * MIN) } }));
+    // [RIDER-SAFE 2] Both cash orders are PLACED before either is accepted: an
+    // accepted, riderless delivery order is one waiting for a rider, and this
+    // store already has two (the "Paid by MMG" orders above), so a checkout
+    // after the first acceptance would meet the store's rider-backlog pause
+    // (cap 3) — the throttle working, not what this test is about.
     const cash = await placeOrder('CASH');
-    await acceptedAgo(cash, 2 * 60 * MIN);
     // [O-3] Accept now starts preparation, so a cash order the store accepts today is PREPARING. A cash order
     // accepted before the one-tap accept still sits at ACCEPTED: the sweep must leave that one alone too.
     const legacyCash = await placeOrder('CASH');
+    await acceptedAgo(cash, 2 * 60 * MIN);
     await sys(() => app.prisma.order.update({ where: { id: legacyCash }, data: { status: 'ACCEPTED', acceptedAt: new Date(Date.now() - 2 * 60 * MIN) } }));
     const swept = await sweep();
     expect(swept).not.toContain(pending);

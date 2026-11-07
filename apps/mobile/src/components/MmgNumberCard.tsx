@@ -5,6 +5,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, LabeledInput, PillButton, T } from '../kit';
 import { fmtWhen } from '../lib/stepUp';
+import { mmgHoldSentence } from '../lib/mmgHold';
 
 /**
  * [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's OWN MMG number — where a customer who chose MMG pays
@@ -22,6 +23,7 @@ export function MmgNumberCard({
   cancelling,
   error,
   readOnly,
+  holdHours,
   onSave,
   onCancelPending,
 }: {
@@ -35,6 +37,8 @@ export function MmgNumberCard({
   error?: string | null;
   /** A manager sees the number; only the owner may change where the money goes. */
   readOnly?: boolean;
+  /** [owner 30 Oct 2026] The server's hours a number saved now waits (1 for the store's first-ever, else the cool-off). */
+  holdHours?: number | null;
   onSave: (number: string | null) => void;
   onCancelPending?: () => void;
 }) {
@@ -107,7 +111,7 @@ export function MmgNumberCard({
           </View>
           {trimmed && dirty ? (
             <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
-              We’ll text you a code first. The new number goes live after a hold — your current number keeps working until then, and we’ll show you exactly when.
+              {mmgHoldSentence('number', holdHours, !!value)}
             </T>
           ) : null}
           <PillButton

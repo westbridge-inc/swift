@@ -8,6 +8,7 @@ import { censusSeesEveryRow, type CensusVisibilityRow } from '../../lib/census-v
 import { runAsSystem } from '../../plugins/tenant-context';
 import { writeDeletionReceipt } from '../verification/purge-receipt';
 import { UNCLAIMED_UPLOAD_DAYS, UPLOAD_DAY_MS } from '../verification/upload-window';
+import { closeSealedPhotoEnvelope, isSealedPhotoKey, SEALED_PHOTO_KEY_WHERE, shredSealedPhotoKey } from '../../providers/storage/sealed-photo';
 
 /**
  * [Row 331 · DSAR-ERASURE · GUARDRAILS §2 "honour deletion end to end"]
@@ -119,6 +120,71 @@ async function closedAccount(tx: Prisma.TransactionClient, userId: string) {
 }
 
 /**
+ * [ROLE-DOCS · owner 21 Oct 2026 · REVIEW-F #2001 S3-1] The selfie store build 9 still uploads beside a customer's ID.
+ * Nothing reads it (a customer never gives a photo), so it is a face Swift does not need: it is erased NOW, not left
+ * as an unclaimed upload until the account closes. [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] The same for the
+ * ID photo itself: Swift no longer takes customer IDs, but store builds 9-12 upload the picture BEFORE asking
+ * (POST /verification/upload, then POST /verification/identity, which now answers 410), so the refusal erases it at
+ * once. Same proof as the account-erasure pass, for this one key only: it must be the caller's own encrypted upload in
+ * their own verification folder, named by nothing else (no document, mover, recovery or other envelope), and the
+ * person must hold no legal hold. Crypto-shred first, then the bytes; an absence the provider does not confirm stays
+ * open for the account-erasure retry (and the open-account unclaimed sweep). Never throws: the caller's answer does
+ * not depend on it. Returns what happened, for the caller's log and tests.
+ */
+// The upload's kind, never a document type (DOC-INV-2: document type strings live in the registry).
+export type UnusedCustomerUpload = 'customer-selfie' | 'customer-id';
+const UNUSED_UPLOAD_RECEIPT: Readonly<Record<UnusedCustomerUpload, { docTypeCode: string; deletedBy: string; what: string; label: string }>> = {
+  'customer-selfie': { docTypeCode: 'unused_customer_selfie', deletedBy: 'customer-id-intake', what: 'unused customer selfie', label: 'customer-id:discard-unused-selfie' },
+  'customer-id': { docTypeCode: 'unused_customer_id', deletedBy: 'customer-id-not-needed', what: 'unused customer ID', label: 'customer-id:discard-unused-id' },
+};
+
+export async function discardUnusedCustomerSelfie(
+  db: PrismaClient, storage: StorageProvider, userId: string, fileKey: string, log?: Log,
+): Promise<'ERASED' | 'NOT_OWN' | 'CLAIMED' | 'HELD' | 'PENDING'> {
+  return discardUnusedCustomerUpload(db, storage, userId, fileKey, 'customer-selfie', log);
+}
+
+export async function discardUnusedCustomerUpload(
+  db: PrismaClient, storage: StorageProvider, userId: string, fileKey: string, kind: UnusedCustomerUpload, log?: Log,
+): Promise<'ERASED' | 'NOT_OWN' | 'CLAIMED' | 'HELD' | 'PENDING'> {
+  const receipt = UNUSED_UPLOAD_RECEIPT[kind];
+  return owed(log, userId, receipt.what, 'PENDING' as const, () => runAsSystem(receipt.label, () => db.$transaction(async (tx) => {
+    await lockSubject(tx, userId);
+    const name = canonicalSubjectKey(fileKey, userId, 'verification');
+    const own = name ? await tx.encryptedObject.findFirst({ where: { fileKey, createdBy: userId, shreddedAt: null } }) : null;
+    if (!name || !own) return 'NOT_OWN' as const;
+    if (!await censusVisible(tx, ['verification_documents', 'riders', 'drivers', 'account_recoveries', 'encrypted_objects'])) return 'PENDING' as const;
+    const refs = await tx.$queryRaw<Array<{ source: string; owner: string; key: string }>>`
+      SELECT * FROM (
+        SELECT 'document' AS source, "userId" AS owner, "fileUrl" AS key FROM verification_documents WHERE strpos("fileUrl", ${name}) > 0
+        UNION ALL SELECT 'mover', "userId", k FROM riders, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
+        UNION ALL SELECT 'mover', "userId", k FROM drivers, unnest(ARRAY["nationalIdUrl","driverLicenseUrl","vehicleInsuranceUrl","vehicleInspectionUrl","profilePhotoUrl","vehiclePhotoUrl"]) AS k WHERE strpos(k, ${name}) > 0
+        UNION ALL SELECT 'recovery', "userId", k FROM account_recoveries, unnest(ARRAY["idDocumentUrl","selfieUrl"]) AS k WHERE strpos(k, ${name}) > 0
+        UNION ALL SELECT 'envelope', "createdBy", "fileKey" FROM encrypted_objects WHERE strpos("fileKey", ${name}) > 0
+      ) AS refs WHERE key IS NOT NULL AND key <> ''
+      /* customer-selfie-discard-references */
+    `;
+    const same = refs.filter((r) => sameObject(r.key, fileKey));
+    if (same.some((r) => r.source !== 'envelope' || r.owner !== userId || r.key !== fileKey)) return 'CLAIMED' as const;
+    if (await underLegalHold(tx, userId)) return 'HELD' as const;
+    const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } });
+    await tx.encryptedObject.updateMany({ where: { fileKey, createdBy: userId, shreddedAt: null }, data: { wrappedDek: null } });
+    if (!await deleteStorageObjectAndConfirmAbsent(storage, fileKey)) return 'PENDING' as const;
+    await tx.encryptedObject.updateMany({ where: { fileKey, createdBy: userId, shreddedAt: null }, data: { shreddedAt: new Date(), sha256: ERASED_FINGERPRINT } });
+    await writeDeletionReceipt(tx, {
+      submissionId: `upload:${digest(fileKey)}`, subjectId: userId, tenantId: user.tenantId, docTypeCode: receipt.docTypeCode, deletedBy: receipt.deletedBy,
+      evidence: {
+        sha256: /^[a-f0-9]{64}$/i.test(own.sha256) ? Buffer.from(own.sha256, 'hex') : null,
+        bytesDeleted: BigInt(own.sizeBytes),
+        storeLocations: [`storage:${fileKey}`, `encrypted_object:${fileKey}`],
+        probe: 'CONFIRMED_ABSENT',
+      },
+    });
+    return 'ERASED' as const;
+  }, { timeout: 60_000 })));
+}
+
+/**
  * Every encrypted upload this person made that no document and no mover pointer
  * claims: the bytes are deleted, the key shredded, the fingerprint forgotten, and
  * a receipt written. Claimed objects belong to the document and mover passes.
@@ -152,7 +218,8 @@ export async function sweepStaleUnclaimedUploads(
   const people = new Set<string>();
   for (let after: string | undefined; ;) {
     const rows = await db.encryptedObject.findMany({
-      where: { shreddedAt: null, createdAt: { lt: olderThan }, ...(after ? { fileKey: { gt: after } } : {}) },
+      // [DOC-SECURITY G2] A sealed photo (the profile photo, a shift selfie) is not an upload: its own pass owns it.
+      where: { shreddedAt: null, createdAt: { lt: olderThan }, NOT: SEALED_PHOTO_KEY_WHERE, ...(after ? { fileKey: { gt: after } } : {}) },
       select: { fileKey: true, createdBy: true }, orderBy: { fileKey: 'asc' }, take: opts.page ?? 500,
     });
     if (!rows.length) break;
@@ -160,7 +227,7 @@ export async function sweepStaleUnclaimedUploads(
     const named = new Set((await db.verificationDocument.findMany({
       where: { fileUrl: { in: rows.map((r) => r.fileKey) } }, select: { fileUrl: true },
     })).map((d) => d.fileUrl));
-    for (const r of rows) if (!named.has(r.fileKey)) people.add(r.createdBy);
+    for (const r of rows) if (!named.has(r.fileKey) && !isSealedPhotoKey(r.fileKey)) people.add(r.createdBy);
   }
   const total = { people: people.size, erased: 0, held: 0, pending: 0 };
   for (const userId of [...people].sort()) {
@@ -185,7 +252,8 @@ async function eraseUnclaimed(db: PrismaClient, storage: StorageProvider, userId
     const named = new Set((await tx.verificationDocument.findMany({
       where: { fileUrl: { in: own.map((c) => c.fileKey) } }, select: { fileUrl: true },
     })).map((d) => d.fileUrl));
-    const candidates = own.filter((c) => !named.has(c.fileKey));
+    // [DOC-SECURITY G2] A sealed photo is the avatar's or the liveness pass's, never an unclaimed upload.
+    const candidates = own.filter((c) => !named.has(c.fileKey) && !isSealedPhotoKey(c.fileKey));
     if (!candidates.length) return { pending: 0, held: 0, erased: 0 };
     // Erasure: only a committed closure authorizes it. The open-account sweep: only the age of an unclaimed upload.
     const user = mode.scope === 'closure'
@@ -287,7 +355,10 @@ export async function eraseLivenessSelfies(db: PrismaClient, storage: StoragePro
           /* upload-erasure-liveness-references */
         `;
         if (refs.some((r) => sameObject(r.key, key) && (r.owner !== userId || r.key !== key))) { leavePending(key, 'Shared liveness object'); continue; }
+        // [DOC-SECURITY G2] A sealed photo: crypto-shred first (every copy is then unreadable), then the bytes.
+        await shredSealedPhotoKey(tx, key, userId);
         if (!await deleteStorageObjectAndConfirmAbsent(storage, key)) { leavePending(key, 'Liveness absence not confirmed'); continue; }
+        await closeSealedPhotoEnvelope(tx, key, userId);
         erased += 1;
       }
     }

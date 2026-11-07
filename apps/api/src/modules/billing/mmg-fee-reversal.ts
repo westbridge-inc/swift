@@ -11,6 +11,7 @@ import { verifiedCheckoutCredit } from './confirmation-finance';
 import type { BillingService } from './billing.service';
 import { postLedger, returnedNotBookedPostings } from './ledger';
 import { amountMinorOf, decideAfterLookup, returnedWhilePaymentNotFound, lookupProof, REVERSAL_SENDING_STALE_MS, type ReversalProof } from './mmg-reversal-proof';
+import { PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 export { lookupProof, REVERSAL_PROOF_WINDOW_MS, REVERSAL_SENDING_STALE_MS } from './mmg-reversal-proof';
 
 // ---------------------------------------------------------------------------
@@ -61,7 +62,7 @@ export const REVERSAL_LATE_WATCH_MS = 7 * 24 * 3_600_000;
 
 export type ReversalRefusal =
   | 'NOT_CONFIRMED' | 'NOT_PROVEN' | 'IDENTITY_CONFLICT' | 'AMOUNT_MISMATCH' | 'ALREADY_REVERSING'
-  | 'ALREADY_REVERSED' | 'MONEY_ALREADY_USED' | 'PAYMENT_CONFIRMING';
+  | 'ALREADY_REVERSED' | 'MONEY_ALREADY_USED' | 'PAYMENT_CONFIRMING' | 'CHAIN_CHECKOUT' | 'AD_CHECKOUT';
 
 const REFUSAL_COPY: Record<ReversalRefusal, string> = {
   NOT_CONFIRMED: 'Only a weekly-fee payment Swift confirmed with MMG can be returned this way.',
@@ -72,6 +73,10 @@ const REFUSAL_COPY: Record<ReversalRefusal, string> = {
   ALREADY_REVERSED: 'This payment has already been returned to the partner.',
   MONEY_ALREADY_USED: 'This payment has already paid, in whole or in part, for a week of the partner\'s fee. It is not returned here; follow the refund procedure.',
   PAYMENT_CONFIRMING: 'Another payment for this fee is being confirmed or reviewed. Try again once it is settled.',
+  // [ENTERPRISE E1] One MMG payment credited to several branches: MMG returns it in full only, and that would take
+  // money back from every branch's wallet at once. Not built here: follow the refund procedure.
+  AD_CHECKOUT: 'This payment paid for an ad. MMG has not said when an ad payment can be returned, so it cannot be returned here.',
+  CHAIN_CHECKOUT: 'This payment paid several branches ("pay all my branches"). It cannot be returned here; follow the refund procedure.',
 };
 
 export function reversalRefusal(code: ReversalRefusal): AppError {
@@ -89,6 +94,10 @@ export interface ReversalDeps {
 }
 
 
+/** MMG's lookup proved this payment went back: a return that booked, or one a person closed because the money had already
+ *  paid for a week. Both rest on MMG's own record, and in both the money is back with the partner. */
+export const RETURN_PROVEN = { OR: [{ state: 'REVERSED' }, { resolution: 'RETURNED_NOT_BOOKED' }] } satisfies Prisma.MmgFeeReversalWhereInput;
+
 /**
  * Can this payment be returned, right now? Read under the payer's billing lock
  * and the checkout's row lock. `expectAmount` is the whole amount the admin
@@ -97,6 +106,7 @@ export interface ReversalDeps {
 export async function reversalEligibilityInTx(
   tx: Tx, intent: MmgCheckoutIntent, expectAmount: number | null, now: Date,
 ): Promise<{ ok: true } | { ok: false; code: ReversalRefusal }> {
+  if (!intent.subscriptionId) return { ok: false, code: intent.adInvoiceId ? 'AD_CHECKOUT' : 'CHAIN_CHECKOUT' };
   if (intent.status !== 'CONFIRMED' || !intent.providerPaymentId || !intent.mmgTransactionId || !intent.confirmedAt) {
     return { ok: false, code: 'NOT_CONFIRMED' };
   }
@@ -393,13 +403,15 @@ export class MmgFeeReversalService {
     // [review S4-7] A server that cannot build MMG's client refuses before anything is written.
     const client = this.client();
     const claim = await this.deps.prisma.$transaction(async (tx) => {
-      const found = await tx.mmgCheckoutIntent.findFirst({ where: { id: input.checkoutId, tenantId: input.tenantId }, select: { subscriptionId: true } });
+      const found = await tx.mmgCheckoutIntent.findFirst({ where: { id: input.checkoutId, tenantId: input.tenantId }, select: { subscriptionId: true, adInvoiceId: true } });
       if (!found) throw new NotFoundError('MMG checkout', input.checkoutId);
+      if (!found.subscriptionId) throw reversalRefusal(found.adInvoiceId ? 'AD_CHECKOUT' : 'CHAIN_CHECKOUT');
       await lockBillingAuthority(tx, found.subscriptionId);
       await tx.$queryRaw`SELECT "id" FROM "mmg_checkout_intents" WHERE "id" = ${input.checkoutId} FOR UPDATE`;
       const intent = await tx.mmgCheckoutIntent.findUniqueOrThrow({ where: { id: input.checkoutId } });
       const eligible = await reversalEligibilityInTx(tx, intent, input.amountGyd, now);
       if (!eligible.ok) throw reversalRefusal(eligible.code);
+      if (!intent.subscriptionId) throw reversalRefusal('CHAIN_CHECKOUT');
       const row = await tx.mmgFeeReversal.create({ data: {
         tenantId: intent.tenantId, subscriptionId: intent.subscriptionId, checkoutId: intent.id,
         providerPaymentId: intent.providerPaymentId!, mmgTransactionId: intent.mmgTransactionId!,
@@ -881,13 +893,10 @@ export class MmgFeeReversalService {
         this.deps.prisma.mmgCheckoutIntent.findUnique({ where: { id: row.checkoutId }, select: { confirmedAt: true, createdAt: true } }),
         this.deps.prisma.subscription.findUnique({
           where: { id: row.subscriptionId },
-          select: {
-            rider: { select: { userId: true } }, driver: { select: { userId: true } },
-            vendor: { select: { id: true, owner: { select: { userId: true } } } },
-          },
+          select: PAYER_INCLUDE,
         }),
       ]);
-      const userId = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
+      const userId = payerUserIdOf(sub);
       if (!userId) return;
       const paidOn = (intent?.confirmedAt ?? intent?.createdAt ?? row.sentAt)
         .toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric' });
@@ -898,7 +907,7 @@ export class MmgFeeReversalService {
         title: 'Weekly-fee payment returned',
         // [review S4] MMG returns the money to the account that PAID, which may not be the partner's own.
         body: `Your payment of ${amount} on ${paidOn} was returned to the MMG account it was paid from.`,
-        audience: sub?.vendor ? 'business' : 'earner',
+        audience: payerAudienceOf(sub),
         data: { kind: 'billing_mmg_checkout', subscriptionId: row.subscriptionId, ref: row.checkoutId, status: 'REVERSED', ...(sub?.vendor ? { vendorId: sub.vendor.id } : {}) },
       });
     } catch (err) {

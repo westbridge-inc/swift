@@ -11,6 +11,9 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import courierRoutes from '../modules/courier/courier.routes';
 import { OrderService, holdWindowMs } from '../modules/order/order.service';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../modules/order/response-sla';
+import { checkoutQueueTiming } from '../modules/order/checkout-outbox';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
@@ -129,13 +132,35 @@ describe('flag plumbing', () => {
   it('flag off → no hold window; flag on → configured minutes', () => {
     expect(holdWindowMs()).toBeNull();
     process.env['LIFECYCLE_V2'] = '1';
-    // [F036-03b] The default IS the settled five minutes — an env that omits
-    // the variable must not quietly shorten the documented window.
-    expect(holdWindowMs()).toBe(5 * 60_000);
+    // [F036-03b] The default IS the settled hold — an env that omits the
+    // variable must not quietly change the documented window. [owner 30 Oct
+    // 2026] The settled hold is ONE minute now (was five).
+    expect(holdWindowMs()).toBe(1 * 60_000);
     process.env['ORDER_HOLD_MINUTES'] = '3';
     expect(holdWindowMs()).toBe(3 * 60_000);
     process.env['ORDER_HOLD_MINUTES'] = 'garbage';
     expect(holdWindowMs()).toBeNull(); // misconfiguration fails safe (no hold)
+  });
+
+  // [owner 30 Oct 2026] "the 5 minute wait time is still there, not 1 minute": ONE minute for every store order
+  // (delivery and pickup), set by one line (ORDER_HOLD_MINUTES). The no-answer auto-cancel the checkout arms is
+  // that same hold + the store's response time, from the same default.
+  it('the unset default is the owner\'s one minute in the checkout delays too (hold + response time)', async () => {
+    process.env['LIFECYCLE_V2'] = '1';
+    const slaMinutes = await vendorResponseSlaMinutes(app.prisma);
+    expect((await checkoutQueueTiming(app.prisma)).autoCancelDelayMs).toBe((1 + slaMinutes) * 60_000);
+    process.env['ORDER_HOLD_MINUTES'] = '5';
+    expect((await checkoutQueueTiming(app.prisma)).autoCancelDelayMs).toBe((5 + slaMinutes) * 60_000);
+    delete process.env['LIFECYCLE_V2'];
+    expect((await checkoutQueueTiming(app.prisma)).autoCancelDelayMs).toBe(slaMinutes * 60_000);
+  });
+
+  it('every env example and the preflight stub say the owner\'s one minute (the launch line: ORDER_HOLD_MINUTES=1)', () => {
+    const root = join(process.cwd(), '../..');
+    const declared = (text: string) => [...text.matchAll(/^\s*ORDER_HOLD_MINUTES[=:]\s*'?([^'\s,#]*)/gm)].map((m) => m[1]);
+    expect(declared(readFileSync(join(root, 'apps/api/.env.example'), 'utf8'))).toEqual(['1']);
+    expect(declared(readFileSync(join(root, 'deploy/.env.deploy.example'), 'utf8'))).toEqual(['1']);
+    expect(declared(readFileSync(join(root, 'deploy/preflight.ts'), 'utf8'))).toEqual(['1']);
   });
 });
 

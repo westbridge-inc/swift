@@ -45,6 +45,15 @@ function serve(profile: unknown, list: unknown, onWrite?: (_r: ApiRequest) => { 
   });
 }
 
+describe('[FLOW-QA2] a mover with no subscription yet', () => {
+  it('says it starts when Swift approves them (the server makes it on approval: verification afterApproval -> startTrialForRider/Driver)', async () => {
+    serve(rider, checklist('NEEDS_DOCUMENTS'));
+    renderWithQuery(<MoverDetail id="rider-1" kind="rider" />);
+    expect(await screen.findByText('No subscription yet. It starts when Swift approves them.')).toBeTruthy();
+    expect(screen.queryByText(/documents are verified/)).toBeNull();
+  });
+});
+
 describe('[MC-PR2] rider page', () => {
   it('waiting for documents: shows the checklist and the next step, and offers no Verify', async () => {
     serve(rider, checklist('NEEDS_DOCUMENTS'));
@@ -101,5 +110,23 @@ describe('[MC-PR2] driver page', () => {
     const [, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(JSON.parse(String(init?.body))).toMatchObject({ rideClass: 'COMFORT' });
     expect(screen.queryByText(/ECONOMY|COMFORT/)).toBeNull();
+  });
+});
+
+// [BUG-HUNT F06] The Review Center's approval never sets the old flag: a rider who is approved and online read
+// "Documents not verified" beside the checklist saying the opposite. The badge reads the verdict GO uses.
+describe('[BUG-HUNT F06] the document badge says what GO says', () => {
+  it('flag false, every document approved and current: complete, and nothing to verify', async () => {
+    serve(rider, checklist('VERIFIED', [item('national_id', 'APPROVED')]));
+    renderWithQuery(<MoverDetail id="rider-1" kind="rider" />);
+    expect(await screen.findByText('Documents complete')).toBeTruthy();
+    expect(screen.queryByText('Documents not verified')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Verify/ })).toBeNull();
+  });
+
+  it('flag true, a document missing: the badge does not call them complete', async () => {
+    serve({ ...rider, documentsVerified: true }, { ...checklist('NEEDS_DOCUMENTS'), live: { allowed: false, reason: 'docs' } });
+    renderWithQuery(<MoverDetail id="rider-1" kind="rider" />);
+    expect(await screen.findByText('Documents missing')).toBeTruthy();
   });
 });

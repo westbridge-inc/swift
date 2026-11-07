@@ -9,7 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { loginWithOtp } from './helpers/otp';
 import { BillingService, type BillingObserver } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -70,7 +70,7 @@ async function makeVendorSub(status: 'ACTIVE' | 'PAST_DUE' = 'ACTIVE') {
   vendorIds.push(vendor.id);
   const sub = await app.prisma.subscription.create({
     data: {
-      // [owner #62] The fee is GY$5,000, so each payment recorded in this file is one week: one week at a time.
+      // The fee is GY$5,000, so each payment recorded in this file is one week, well inside the four-week limit [owner 6 Nov].
       vendorId: vendor.id, type: 'RESTAURANT', status, weeklyRate: 5000, billingMethod: 'CASH',
       currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000),
     },
@@ -116,7 +116,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const admin = await loginWithOtp(app, '+5926001000'); // seeded SUPER_ADMIN
@@ -260,28 +260,28 @@ describe('[M-08 · operations] rollback is hold-only', () => {
 
 
 // ---------------------------------------------------------------------------
-// [OWNER #62 · 14 Oct (was four weeks, 8 Oct) + OWNER RULING 8 Oct (4)] Weekly
-// fees are paid one week at a time, and production credits no fee by hand. A
-// recorded payment that would go past one week ahead is refused with the most
+// [OWNER 6 Nov 2026 (up to four weeks ahead; was one week, owner #62) + OWNER
+// RULING 8 Oct (4)] Production credits no fee by hand. A recorded payment that
+// would go past four weeks ahead is refused with the most
 // that can still be recorded (the rest is refunded to the partner); nothing is
 // written.
 // ---------------------------------------------------------------------------
-describe('[owner #62] a recorded fee payment never takes an account past one week ahead', () => {
-  it('names the most that can be recorded, records nothing over it, and refuses anything once the coming week is held', async () => {
+describe('[owner 6 Nov] a recorded fee payment never takes an account past four weeks ahead', () => {
+  it('names the most that can be recorded, records nothing over it, and refuses anything once four weeks are held', async () => {
     const { sub } = await makeVendorSub();
-    const over = await topup(sub.id, { amount: 5001, reference: refFor('CAP1') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    const over = await topup(sub.id, { amount: 20_001, reference: refFor('CAP1') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
     expect(over.statusCode).toBe(409);
     expect(over.json().error).toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
-    expect(over.json().error.message).toContain('Record at most GY$5,000 now and refund the rest to the partner');
+    expect(over.json().error.message).toContain('This would pay more than four weeks ahead on this account. Record at most GY$20,000 now and refund the rest to the partner');
     expect(await facts(sub.id)).toEqual({ credits: 0, receipts: 0, postings: 0, audits: 0, commands: 0, balance: 0 });
 
-    const fits = await topup(sub.id, { amount: 5000, reference: refFor('CAP2') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
+    const fits = await topup(sub.id, { amount: 20_000, reference: refFor('CAP2') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
     expect(fits.statusCode).toBe(200);
-    expect((await facts(sub.id)).balance).toBe(5000);
+    expect((await facts(sub.id)).balance).toBe(20_000);
 
     const full = await topup(sub.id, { amount: 1, reference: refFor('CAP3') }, { 'idempotency-key': `attempt-${nanoid(12)}` });
     expect(full.statusCode).toBe(409);
-    expect(full.json().error.message).toContain('The next weekly fee on this account is already paid');
+    expect(full.json().error.message).toContain('This account is already paid as far as Swift takes it, up to four weeks ahead.');
     expect((await facts(sub.id)).credits).toBe(1);
   });
 

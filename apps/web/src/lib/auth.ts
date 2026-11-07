@@ -3,6 +3,7 @@
 import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 import { DEMO_ENDED_LOGIN, DEMO_ENDED_NOTICE, isClosedDemoAnswer, noteDemoEnded } from '@/lib/demo-ended';
+import { CALL_BRIDGE_HEADER, CALL_BRIDGE_VERSION } from '@/lib/call-bridge-header';
 
 // ── The session ──────────────────────────────────────────────────────────────
 // [W-01] THIS APP HOLDS NO CREDENTIAL. It used to keep both tokens in
@@ -100,14 +101,20 @@ function responseContextIsCurrent(snapshot: AuthSnapshot, storeId: string | null
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code?: string;
+  /** The server's `ref`, when it sent one as text. */
   readonly details?: { ref?: string };
+  /** The server's `error.details` exactly as sent (unchecked: a screen that acts on it checks its shape). */
+  readonly errorDetails?: unknown;
 
-  constructor(message: string, status: number, code?: string, details?: { ref?: string }) {
+  /** `code` and `errorDetails` may be the server's own (unchecked): a code is kept only when it is text. */
+  constructor(message: string, status: number, code?: unknown, errorDetails?: unknown) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
-    this.details = details;
-    if (code !== undefined) this.code = code;
+    const ref = (errorDetails as { ref?: unknown } | null | undefined)?.ref;
+    this.details = typeof ref === 'string' ? { ref } : undefined;
+    if (typeof code === 'string') this.code = code;
+    this.errorDetails = errorDetails;
   }
 }
 
@@ -134,7 +141,7 @@ export function captureSessionGuard(): () => void {
  * refreshes the locally tracked principal, which the mid-request account-change
  * guards below compare against.
  */
-export type SessionAnswer = { ok: boolean; unreachable?: true; user?: Record<string, unknown> };
+export type SessionAnswer = { ok: boolean; unreachable?: true; rateLimited?: true; user?: Record<string, unknown> };
 export async function sessionProbe(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   const forget = () => {
@@ -208,6 +215,8 @@ export async function restoreSession(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   const refresh = await tryRefresh();
   if (refresh === 'unreachable') return { ok: false, unreachable: true };
+  // [FLOW-QA F15] still not a sign-out, but the page can offer "Sign in again" instead of only "try again"
+  if (refresh === 'rate-limited') return { ok: false, unreachable: true, rateLimited: true };
   if (refresh === 'signed-out') return { ok: false };
   return sessionProbe();
 }
@@ -302,7 +311,7 @@ export function subscribeSelectedStore(listener: () => void): () => void {
 /** [REVIEW-F2 #1968 S4-4] What the refresh step learned. Only the server saying
  *  no is a sign-out: a 5xx, a timeout (408), a rate limit (429 — refreshes are
  *  limited per address) or a dropped connection says nothing about the session. */
-type RefreshOutcome = 'refreshed' | 'signed-out' | 'unreachable';
+type RefreshOutcome = 'refreshed' | 'signed-out' | 'unreachable' | 'rate-limited';
 let refreshFlight: Promise<RefreshOutcome> | null = null;
 
 /** One refresh at a time: concurrent 401s share the flight, so a rotated
@@ -315,7 +324,8 @@ async function tryRefresh(): Promise<RefreshOutcome> {
           method: 'POST', credentials: 'include', headers: { ...clientHeaders },
         });
         if (res.ok) return 'refreshed';
-        return res.status >= 500 || res.status === 408 || res.status === 429 ? 'unreachable' : 'signed-out';
+        if (res.status === 429) return 'rate-limited';
+        return res.status >= 500 || res.status === 408 ? 'unreachable' : 'signed-out';
       } catch {
         return 'unreachable';
       } finally {
@@ -350,6 +360,9 @@ export async function apiFetch(
         ...(options?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
         ...clientHeaders,
         ...(/^\/api\/v1\/(vendor|rider|driver)(?:\/|$)/.test(path) ? { 'x-client-platform': 'web' } : {}),
+        // [O-1] This website knows the Swift call bridge: with the bridge on, the API sends it no other
+        // person's personal number ("Call via Swift" instead); with it off, nothing changes (lib/call-bridge-header.ts).
+        [CALL_BRIDGE_HEADER]: CALL_BRIDGE_VERSION,
         ...(requestStore && { 'x-vendor-id': requestStore }),
         ...options?.headers,
         // [Row 225] The account this page is acting as: the API refuses a write
@@ -366,6 +379,9 @@ export async function apiFetch(
     // sign-out: the session is kept, the page stays, and the caller sees an error.
     if (refresh === 'unreachable') {
       throw new ApiRequestError('Swift can\u2019t be reached right now. Check your connection and try again.', 503, 'UNREACHABLE');
+    }
+    if (refresh === 'rate-limited') {
+      throw new ApiRequestError('Too many sign-in checks from your network right now. Wait a minute, or sign in again.', 429, 'RATE_LIMITED');
     }
     if (refresh === 'refreshed' && snapshotIsCurrent(requestSession)) res = await doFetch();
     if (res.status === 401) {
@@ -387,8 +403,10 @@ export async function apiFetch(
   if (!responseContextIsCurrent(requestSession, requestStore)) {
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
   }
+  // [W2] Read once: every page carries this module, so its size counts on the customer home page too.
+  const error = json?.error;
   // [Row 225] The server saw another account behind this tab's cookie: learn who, so the page re-renders as them.
-  if (res.status === 409 && json?.error?.code === 'SESSION_CHANGED') {
+  if (res.status === 409 && error?.code === 'SESSION_CHANGED') {
     void sessionProbe();
     // The page re-renders as that account by itself (the probe above): say what happened, ask for nothing.
     throw new ApiRequestError(SERVER_SESSION_CHANGED, 409, 'SESSION_CHANGED');
@@ -399,28 +417,30 @@ export async function apiFetch(
   }
   if (!res.ok || json?.success === false) {
     throw new ApiRequestError(
-      json?.error?.message || (res.status >= 500
+      error?.message || (res.status >= 500
         ? 'Something went wrong on our side. Please try again.'
         : 'We couldn’t complete that. Please try again.'),
       res.status,
-      typeof json?.error?.code === 'string' ? json.error.code : undefined,
-      typeof json?.error?.details?.ref === 'string' ? { ref: json.error.details.ref } : undefined,
+      error?.code,
+      error?.details,
     );
   }
   return json;
 }
 
-export async function sendOtp(phone: string) {
-  const res = await fetch(`${API_URL}/api/v1/auth/send-otp`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...clientHeaders },
-    body: JSON.stringify({ phone }),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'Could not send the code.');
+
+/** [BILL-PRO PR6] Does the signed-in person have a provider profile (a pro)? Read with the session cookie the
+ *  sign-in just set; any failure is "no". */
+export async function hasProviderProfile(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_URL}/api/v1/services/providers/me`, { credentials: 'include', headers: { ...clientHeaders } });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
-/** OTP login for partners: businesses land on /dashboard, earners on /portal. */
+/** OTP login for partners: businesses and their staff land on /dashboard, earners on /portal, pros on /portal/weekly-fee. */
 export async function verifyPartnerLogin(phone: string, code: string): Promise<{ user: unknown; home: string }> {
   const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
     method: 'POST',
@@ -429,7 +449,8 @@ export async function verifyPartnerLogin(phone: string, code: string): Promise<{
     body: JSON.stringify({ phone, code }),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
+  // [FLOW-QA F16] the status and the server's wait ride along, for the page's plain words (lib/otp-send-refusal)
+  if (!res.ok || !json.success) throw Object.assign(new Error(json?.error?.message || 'That code is not valid.'), { status: res.status, code: json?.error?.code, retryAfterSeconds: json?.error?.details?.retryAfterSeconds });
   const data = json.data;
   // [W-01] A browser client is answered with cookies and NO tokens, so the
   // signal that a session exists is the user the server names — not a
@@ -442,8 +463,20 @@ export async function verifyPartnerLogin(phone: string, code: string): Promise<{
   // vendorOwner relation on the login payload.
   const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!data.user?.vendorOwner;
   const isMover = roles.some((r) => ['MOVER', 'RIDER', 'DRIVER'].includes(r));
-  if (!isVendor && !isMover) {
+  // [BUG-HUNT F03] Branch staff hold no partner role: the server's `storeStaff` says they work at a store (lib/role-home).
+  if (!isVendor && !isMover && data.user?.storeStaff === true) {
+    adoptSession(data.user.id);
+    return { user: data.user, home: '/dashboard' };
+  }
+  // [BILL-PRO PR6 · owner A4] An independent service provider (a pro) holds no partner role but pays their own weekly
+  // fee here (Partner portal, Weekly fee): the server's own answer decides, never a role guess.
+  const isPro = !isVendor && !isMover && await hasProviderProfile();
+  if (!isVendor && !isMover && !isPro) {
     throw new Error('No business or earner profile on this account yet — sign up in the Swift app first.');
+  }
+  if (isPro) {
+    adoptSession(data.user.id);
+    return { user: data.user, home: '/portal/weekly-fee' };
   }
   adoptSession(data.user.id);
   // An account with both keeps the store dashboard as home; /portal stays a link away.

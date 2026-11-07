@@ -40,7 +40,7 @@ interface DriverRow {
 }
 
 const STATUS_OPTIONS: Array<[string, string]> = [
-  ['', 'Anyone'], ['online', 'Online now'], ['offline', 'Offline'], ['verified', 'Documents verified'], ['unverified', 'Documents not verified'],
+  ['', 'Anyone'], ['online', 'Online now'], ['offline', 'Offline'], ['verified', 'Documents complete'], ['unverified', 'Documents missing'],
 ];
 
 const nameOf = (d: DriverRow) => [d.user?.firstName, d.user?.lastName].filter(Boolean).join(' ') || 'Unnamed driver';
@@ -69,7 +69,6 @@ export default function DriversPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>Drivers</h1>
       <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-4" />
       <ListToolbar state={state} onChange={setState} searchLabel="Search by name or phone" filters={[{ key: 'status', label: 'Status', options: STATUS_OPTIONS }]} />
       {list.isLoading ? (

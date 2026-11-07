@@ -209,8 +209,10 @@ describe('appointment completion', () => {
 // 2. The customer keeps their pickup code after checkout
 // ---------------------------------------------------------------------------
 describe('takeaway pickup code visibility', () => {
-  it('order detail and list both carry pickupCode', async () => {
+  // [PICKUP · owner 30 Oct 2026] The customer is given the code when the store asks for it (requirePickupCode).
+  it('order detail and list both carry pickupCode when the store asks for the code', async () => {
     const vendor = await makeVendor();
+    await app.prisma.vendor.update({ where: { id: vendor.vendorId }, data: { requirePickupCode: true } });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const order = await makeOrder(customer.userId, vendor.vendorId, 'READY_FOR_PICKUP', {
       fulfillment: 'PICKUP',
@@ -225,6 +227,20 @@ describe('takeaway pickup code visibility', () => {
     const list = await inject('GET', '/api/v1/customer/orders', undefined, customer.token);
     const row = list.json().data.find((o: { id: string }) => o.id === order.id);
     expect(row?.pickupCode).toBe('424242');
+    const v1 = await inject('GET', `/api/v1/customer/orders/${order.id}?pickupHandover=v1`, undefined, customer.token);
+    expect(v1.json().data.pickupCode).toBe('424242');
+  });
+
+  it('with the store\'s code off (the default) neither the list nor a v1 order screen carries it; store build 12\'s screen still does', async () => {
+    const vendor = await makeVendor();
+    const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'READY_FOR_PICKUP', { fulfillment: 'PICKUP', pickupCode: '424243' });
+    const v1 = await inject('GET', `/api/v1/customer/orders/${order.id}?pickupHandover=v1`, undefined, customer.token);
+    expect(v1.json().data).toMatchObject({ pickupCode: null, pickupCodeRequired: false });
+    const legacy = await inject('GET', `/api/v1/customer/orders/${order.id}`, undefined, customer.token);
+    expect(legacy.json().data.pickupCode).toBe('424243');
+    const list = await inject('GET', '/api/v1/customer/orders', undefined, customer.token);
+    expect(list.json().data.find((o: { id: string }) => o.id === order.id)?.pickupCode).toBeNull();
   });
 });
 

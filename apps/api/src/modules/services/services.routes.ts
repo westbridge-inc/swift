@@ -1,9 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import { shownRatingTotals, shownRatingsFor, shownSurface } from '../rating/rating-groups';
-import type { Prisma } from '@prisma/client';
+import type { Prisma, ServiceJob } from '@prisma/client';
 import { z } from '../../lib/zod';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
+import { blockedAuthorIds } from '../moderation/user-block.service';
 import {
   canonicalServiceTrade,
   createServiceJobWithLiveAuthority,
@@ -14,6 +15,7 @@ import {
   qualificationTypeMatchesTrade,
   refreshProviderVerification,
   requireCanonicalServiceTrade,
+  requiredLicenceStatus,
   riskGuidance,
   serviceTradeLabel,
   tradeRiskTier,
@@ -26,7 +28,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
-import { runAsSystem } from '../../plugins/tenant-context';
+import { enterTenant, runAsSystem } from '../../plugins/tenant-context';
 import { assertProviderProfileWording, isServiceCategoryOperational } from './service-catalog';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { offersLegalServices } from '../compliance/prohibited-items';
@@ -35,6 +37,10 @@ import {
   transitionServiceJob,
 } from './service-job-transition';
 import { executeTenantBoundServiceJobTransaction } from './service-job-transaction';
+import { canonicalSlotStart } from '../booking/availability';
+import { isServiceJobExclusionViolation } from './provider-time';
+import { registerProviderBookableRoutes } from './provider-bookable.routes';
+import { proBookableFromListOf, registerProBookingRoutes, serviceAppointmentViewFor, serviceJobCustomerCancelFor } from './pro-booking.routes';
 import {
   commandGeneration,
   legacyQuoteSchema,
@@ -46,6 +52,7 @@ import {
   scheduledTransitionSchema,
   transitionGenerationSchema,
 } from './service-job-client-contract';
+import { assertProFeeAllowsNewWork, proFeeStanding } from './pro-fee';
 
 // ---------------------------------------------------------------------------
 // Module S: Services (spec §4.6) — hire verified professionals. A ServiceJob is
@@ -59,8 +66,13 @@ const providerProfileSchema = z.object({
   bio: z.string().trim().max(2000).optional(),
   portfolioPhotos: z.array(z.string().max(2048)).max(20).optional(),
 });
+// [ROLE-DOCS · owner 21 Oct 2026] No GEI_LICENCE here: an electrician's GEI licence is a REQUIRED
+// checklist document (gei_electrical_licence), reviewed by a person with its January re-check. Asking for it
+// again as an optional "qualification" collected the same licence twice. The enum value stays in the
+// database type for history; the API no longer accepts it (QUALIFICATION_RETIRED).
+const RETIRED_QUALIFICATION_TYPES = new Set(['GEI_LICENCE']);
 const qualificationSchema = z.object({
-  type: z.enum(['GEI_LICENCE', 'CVQ', 'GTEE', 'CITY_AND_GUILDS', 'OTHER']),
+  type: z.enum(['CVQ', 'GTEE', 'CITY_AND_GUILDS', 'OTHER']),
   referenceNumber: z.string().trim().max(120).optional(),
 });
 const browseSchema = z.object({
@@ -130,6 +142,13 @@ export async function servicesRoutes(app: FastifyInstance) {
       // outranks it (same doctrine as public.routes' resolver).
       const t = await app.prisma.tenant.findUnique({ where: { id: 'swift-default' }, select: { isActive: true } });
       if (!t?.isActive) throw new NotFoundError('ServiceCatalog');
+      // [TENANT-WALL] Resolving the guest's marketplace is not binding it: the
+      // browse reads providers (a model with no tenant of its own) through their
+      // accounts, and under the tenant wall an unbound read sees no account at
+      // all, so every guest got an empty list. Bind what was resolved, as the
+      // public storefronts and the market do; a signed-in caller keeps the
+      // tenant authentication bound.
+      enterTenant('swift-default');
     }
     return tenantId ?? 'swift-default';
   }
@@ -162,6 +181,11 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (!expectedScheduledFor) throw new AppError(400, 'BAD_STATE', 'There is no scheduled slot for this job');
     return { expectedUpdatedAt, expectedScheduledFor };
   }
+
+  // [BOOK-P1] A provider's bookable services, weekly hours and time off (behind INSTANT_BOOKING).
+  registerProviderBookableRoutes(app);
+  // [BOOK-P2] A customer books a time from a pro's menu, and either side moves it (behind INSTANT_BOOKING).
+  registerProBookingRoutes(app);
 
   // ─── Provider profile + qualifications ─────────────────────────────────
 
@@ -344,12 +368,20 @@ export async function servicesRoutes(app: FastifyInstance) {
     });
     if (!provider) throw new NotFoundError('ServiceProvider');
     const trade = canonicalServiceTrade(provider.trade);
-    const certified = trade !== null && provider.qualifications.some((q) => (
+    const matching = trade === null ? [] : provider.qualifications.filter((q) => (
       q.status === 'VERIFIED'
       && q.verifiedAt !== null
       && q.trade === trade
       && qualificationTypeMatchesTrade(q.type, trade)
     ));
+    // [ROLE-DOCS · PR 3] the licence the trade REQUIRES, approved by a person, counts too (and carries its date)
+    const licence = trade === null ? { required: false, checkedOn: null } : await requiredLicenceStatus(app.prisma, request.user.userId);
+    const licenceOn = licence.checkedOn;
+    const certified = matching.length > 0 || licenceOn !== null;
+    const standing = await proFeeStanding(app.prisma, request.user.userId);
+    const licenceCheckedOn = [licenceOn, ...matching.map((q) => q.verifiedAt)].reduce<Date | null>(
+      (latest, at) => (at && (!latest || at > latest) ? at : latest), null,
+    )?.toISOString() ?? null;
     return {
       success: true,
       data: {
@@ -358,8 +390,15 @@ export async function servicesRoutes(app: FastifyInstance) {
         ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)),
         tradeLabel: serviceTradeLabel(provider.trade),
         categoryUnavailable: trade === null || !isServiceCategoryOperational(trade),
-        selfSkilled: !certified,
+        // [REVIEW-F #2053 S4-2] a trade that requires a licence is never "self-skilled"
+        selfSkilled: !certified && !licence.required,
         certified,
+        // [R7 · ROLE-DOCS PR 3] "Licence on file, checked on [date]": the latest day a person checked one (null = none).
+        licenceCheckedOn,
+        // [BILL-PRO PR3] The pro's weekly-fee standing and whether customers can find them now (documents approved
+        // and, with PRO_WEEKLY_FEE on, the agreement accepted and the fee operable). Builds 9-12 ignore both.
+        fee: standing,
+        listed: provider.isVerified && standing.operable,
       },
     };
   });
@@ -376,6 +415,10 @@ export async function servicesRoutes(app: FastifyInstance) {
 
   /** POST /providers/qualifications — add a trade qualification (earns the badge). */
   app.post('/providers/qualifications', auth, async (request) => {
+    const asked = (request.body as { type?: unknown } | null | undefined)?.type;
+    if (typeof asked === 'string' && RETIRED_QUALIFICATION_TYPES.has(asked)) {
+      throw new AppError(400, 'QUALIFICATION_RETIRED', 'Your GEI electrical licence goes in your Documents checklist, where a person checks it. It is not added as a qualification.');
+    }
     const body = qualificationSchema.parse(request.body);
     const userId = request.user.userId;
     const qual = await app.prisma.$transaction(async (tx) => {
@@ -432,10 +475,14 @@ export async function servicesRoutes(app: FastifyInstance) {
     const trade = requireCanonicalServiceTrade(query.trade);
     const tenantId = await browseTenant(request.authSessionId !== null);
     const afterId = query.cursor ? decodeProviderCursor(query.cursor, { tenantId, trade }) : undefined;
+    // [SEC-TRUST F2] A signed-in customer never sees the providers they blocked.
+    const viewerId = request.authSessionId !== null ? request.user?.userId : undefined;
+    const blocked = viewerId ? await blockedAuthorIds(app.prisma, tenantId, viewerId) : [];
     const candidates = await app.prisma.serviceProvider.findMany({
       where: {
         trade,
         ...(afterId ? { id: { gt: afterId } } : {}),
+        ...(blocked.length ? { userId: { notIn: blocked } } : {}),
         // ServiceProvider is tenant-owned through its canonical User. Keep the
         // relational predicate here until the model itself carries tenantId.
         user: { tenantId, status: 'ACTIVE' },
@@ -450,10 +497,14 @@ export async function servicesRoutes(app: FastifyInstance) {
       },
     });
     const pageCandidates = candidates.slice(0, query.limit);
-    const live = await Promise.all(pageCandidates.map(async (provider) => ({
-      provider,
-      verified: await isProviderVerified(app.prisma, provider.userId),
-    })));
+    const live = await Promise.all(pageCandidates.map(async (provider) => {
+      // [BILL-PRO PR3 · owner A3/B2] Listed only while the pro may take new work: documents approved AND (PRO_WEEKLY_FEE
+      // on) the agreement accepted and the fee operable.
+      const verified = await isProviderVerified(app.prisma, provider.userId) && (await proFeeStanding(app.prisma, provider.userId)).operable;
+      // [ROLE-DOCS · PR 3] the licence the trade REQUIRES, approved by a person (read only for a listed provider)
+      const licence = verified ? await requiredLicenceStatus(app.prisma, provider.userId) : { required: false, checkedOn: null };
+      return { provider, verified, licenceOn: licence.checkedOn, licenceRequired: licence.required };
+    }));
     // [ALG-31 / L2] The star line comes from THE ONE MAPPER, never from the raw
     // lifetime mean. `rating-surface.ts` is the single definition of what a
     // rating LOOKS like: `displayRating` is null below RATING_MIN_DISPLAY (5),
@@ -464,9 +515,16 @@ export async function servicesRoutes(app: FastifyInstance) {
     // (`totalRatings > 0`) — a THIRD definition of the same rule, and one that
     // let a single 1-star rating brand a provider on the browse page.
     const visible = live.filter(({ verified }) => verified).map(({ provider }) => provider);
+    const licenceOnOf = new Map(live.map(({ provider, licenceOn }) => [provider.id, licenceOn]));
+    const licenceRequiredOf = new Map(live.map(({ provider, licenceRequired }) => [provider.id, licenceRequired]));
     // [COORD 18 Oct, option S] The star a customer (or the provider) sees is from whole groups of 5 only; the
     // ranking below still reads the true mean (display only).
     const shown = await shownRatingsFor(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.userId));
+    // [BOOK-P3] Which of these pros a customer can book from their list right now (the phone shows Book
+    // for them, a quote request for everyone): the switch on, a trade with a bookable menu, weekly hours,
+    // at least one active service, and the agreement with the advance-acceptance clause accepted. The
+    // booking routes re-check all of it (pro-booking.routes.ts); this only decides the button.
+    const bookableFromList = await proBookableFromListOf(app.prisma, visible, trade);
     const rankMean = new Map(visible.map((p) => [p.id, p.averageRating]));
 
     const ranked = visible
@@ -474,6 +532,8 @@ export async function servicesRoutes(app: FastifyInstance) {
         const qualifications = provider.qualifications.filter((qualification) => (
           qualificationTypeMatchesTrade(qualification.type, trade)
         ));
+        // [ROLE-DOCS · PR 3] a required trade licence a person approved is a licence on file too
+        const licenceOn = licenceOnOf.get(provider.id) ?? null;
         return {
           id: provider.id,
           trade: provider.trade,
@@ -486,12 +546,14 @@ export async function servicesRoutes(app: FastifyInstance) {
           ...shownSurface(shown.get(provider.userId)!),
           averageRating: shown.get(provider.userId)!.average,
           totalRatings: shown.get(provider.userId)!.ratingCount,
-          selfSkilled: qualifications.length === 0,
-          certified: qualifications.length > 0,
+          // [REVIEW-F #2053 S4-2] a trade that requires a licence is never "self-skilled"
+          selfSkilled: qualifications.length === 0 && licenceOn === null && !licenceRequiredOf.get(provider.id),
+          certified: qualifications.length > 0 || licenceOn !== null,
           badges: qualifications.map((qualification) => qualification.type),
+          bookableFromList: bookableFromList.has(provider.id),
           // [R7] "Licence on file, checked on [date]": the latest day a person checked one of these (null = none).
           licenceCheckedOn: qualifications.reduce<Date | null>(
-            (latest, q) => (q.verifiedAt && (!latest || q.verifiedAt > latest) ? q.verifiedAt : latest), null,
+            (latest, q) => (q.verifiedAt && (!latest || q.verifiedAt > latest) ? q.verifiedAt : latest), licenceOn,
           )?.toISOString() ?? null,
         };
       })
@@ -576,6 +638,13 @@ export async function servicesRoutes(app: FastifyInstance) {
     return { success: true, data: job };
   });
 
+  /** A job as its reader gets it. Each field is added only when it answers something (older apps ignore both). */
+  const withCustomerCancelViews = <J extends ServiceJob>(job: J, viewerId: string, now: Date) => {
+    const appointment = serviceAppointmentViewFor(job, viewerId, now);
+    const customerCancel = serviceJobCustomerCancelFor(job, viewerId, now);
+    return { ...job, ...(appointment ? { appointment } : {}), ...(customerCancel ? { customerCancel } : {}) };
+  };
+
   app.get('/jobs', auth, async (request) => {
     const userId = request.user.userId;
     const jobs = await app.prisma.serviceJob.findMany({
@@ -583,12 +652,19 @@ export async function servicesRoutes(app: FastifyInstance) {
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
-    return { success: true, data: jobs };
+    // [BOOK-P2] A job booked from a pro's menu carries the customer's appointment rules (cancel,
+    // move) while INSTANT_BOOKING is on; every other job is exactly as before (no field added).
+    const now = new Date();
+    return {
+      success: true,
+      data: jobs.map((job) => withCustomerCancelViews(job, userId, now)),
+    };
   });
 
   app.get('/jobs/:id', auth, async (request) => {
     const { id } = request.params as { id: string };
-    return { success: true, data: await jobForUser(id, request.user.userId) };
+    const job = await jobForUser(id, request.user.userId);
+    return { success: true, data: withCustomerCancelViews(job, request.user.userId, new Date()) };
   });
 
   app.post('/jobs/:id/quote', auth, async (request) => {
@@ -614,6 +690,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       if (!(await isProviderVerified(tx, request.user.userId))) {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your verification has lapsed — renew your documents before taking new work.');
       }
+      // [BILL-PRO PR3 · owner B2] No new quote while the pro's weekly fee is unpaid (PRO_WEEKLY_FEE on only).
+      await assertProFeeAllowsNewWork(tx, request.user.userId, 'provider');
       return transitionServiceJob(tx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -643,7 +721,9 @@ export async function servicesRoutes(app: FastifyInstance) {
   app.post('/jobs/:id/schedule', auth, async (request) => {
     const { id } = request.params as { id: string };
     const command = readServiceJobLifecycleCommand(request, scheduleSchema, legacyScheduleSchema);
-    const { scheduledFor } = command.body;
+    // [BOOK-P1] A slot is minute-grained, as an appointment's is (canonicalSlotStart):
+    // 09:00:00 and 09:00:01 are one time, checked, stored and held as 09:00.
+    const scheduledFor = canonicalSlotStart(command.body.scheduledFor);
     const job = await jobForUser(id, request.user.userId);
     const { expectedUpdatedAt, expectedQuoteAmount } = commandGeneration(command, job);
     if (job.customerId !== request.user.userId) throw new AppError(403, 'CUSTOMER_ONLY', 'Only the customer can schedule');
@@ -655,14 +735,17 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (scheduledFor.getTime() <= Date.now()) throw new AppError(400, 'SLOT_IN_PAST', 'Pick a time in the future');
     // [S0] A provider has ONE body: two customers cannot hold the same slot.
     // The judge is the partial unique index on ("providerId", "scheduledFor")
-    // for live jobs (service_job_slot_exclusivity migration) — a read-then-check
-    // would still lose a concurrent race, so the database decides and the loser
+    // for live jobs (service_job_slot_exclusivity migration), and [BOOK-P1] the
+    // exclusion over the time each live job holds (provider-time.ts) — a
+    // read-then-check would still lose a concurrent race, so the database decides and the loser
     // is turned into a real 409 instead of a stood-up customer. The write is a
     // state CAS like the quote (:quote) and confirm (:confirm) paths, so a job
     // that left QUOTED while we were reading fails cleanly rather than being
     // silently overwritten.
     // The provider still ACCEPTS the slot (§4.3) — providerConfirmedAt starts null.
     const transitioned = await executeTenantBoundServiceJobTransaction(app.prisma, async (boundTx) => {
+      // [BILL-PRO PR3 · owner B2] A pro whose weekly fee is unpaid takes no new booking (PRO_WEEKLY_FEE on only).
+      await assertProFeeAllowsNewWork(boundTx, job.provider.userId, 'customer');
       return transitionServiceJob(boundTx, {
         jobId: id,
         actorUserId: request.user.userId,
@@ -683,8 +766,10 @@ export async function servicesRoutes(app: FastifyInstance) {
       });
     }).catch((error: unknown) => {
       // The unique violation IS the double-booking answer — same translation
-      // BookingService makes for appointment slots.
-      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
+      // BookingService makes for appointment slots. [BOOK-P1] So is the
+      // one-pro-one-time exclusion: another live job of this provider holds
+      // that time (a booked service runs to its end, provider-time.ts).
+      if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002' || isServiceJobExclusionViolation(error)) {
         throw new AppError(409, 'SLOT_TAKEN', 'That time was just booked with this provider — pick another time');
       }
       throw error;
@@ -713,6 +798,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       if (!(await isProviderVerified(tx, request.user.userId))) {
         throw new AppError(409, 'PROVIDER_NOT_VERIFIED', 'Your verification has lapsed — renew your documents before confirming new work.');
       }
+      // [BILL-PRO PR3 · owner B2] No new confirm while the pro's weekly fee is unpaid (PRO_WEEKLY_FEE on only).
+      await assertProFeeAllowsNewWork(tx, request.user.userId, 'provider');
       const confirmedAt = new Date();
       return transitionServiceJob(tx, {
         jobId: id,
@@ -763,7 +850,8 @@ export async function servicesRoutes(app: FastifyInstance) {
           scheduledFor: expectedScheduledFor,
           providerConfirmedAt: null,
         },
-        data: { scheduledFor: null, providerConfirmedAt: null },
+        // [BOOK-P1] A job with no time holds none: its end goes with its start.
+        data: { scheduledFor: null, endsAt: null, providerConfirmedAt: null },
         action: 'SERVICE_JOB_SLOT_DECLINED',
         audit: { scheduledFor: expectedScheduledFor.toISOString() },
         notices: [{
@@ -906,9 +994,11 @@ export async function servicesRoutes(app: FastifyInstance) {
     // [owner #50 · coordinator rulings 14 Oct] The one cancellation rule decides
     // the customer's cancel, as the Terms (§7) say: free while the job is a
     // request, refused once it is booked or in progress (contact the provider).
+    // [BOOK-P2 · owner B1] A time booked from a pro's menu, while INSTANT_BOOKING
+    // is on: free until two hours before it starts (cancel-policy.ts).
     // The provider may still cancel a booked or started job. Never a fee.
     if (cancelledByCustomer) {
-      const verdict = serviceJobCancelVerdict(job);
+      const verdict = serviceJobCancelVerdict(job, new Date());
       if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
     }
     const when = job.scheduledFor ? slotLabel(job.scheduledFor) : null;

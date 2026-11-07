@@ -2,6 +2,7 @@ import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
+import { isSealedPhotoKey } from '../providers/storage/sealed-photo';
 import { REVIEW_PACK_IMAGE_DIR, reviewPackPicture } from '../modules/review/content-pack';
 import { REVIEW_PARTNER_PORTRAIT_DIR, reviewPartnerPortrait } from '../modules/review/partner-pack';
 
@@ -48,6 +49,8 @@ export function registerPublicUploads(app: FastifyInstance, uploadBase: string) 
         if (!png) return reply.code(404).send();
         return reply.header('Content-Type', 'image/png').header('Cache-Control', 'public, max-age=86400').send(png);
       }
+      // [DOC-SECURITY G2] A sealed photo is ciphertext: never served statically (its signed link decrypts it).
+      if (isSealedPhotoKey(`${folder}/${rel}`)) return reply.code(404).send();
       const abs = path.join(uploadBase, folder, rel);
       try {
         const s = await stat(abs);

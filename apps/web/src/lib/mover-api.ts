@@ -5,6 +5,7 @@
 // the phone by design (GPS + push belong in the field).
 import { ApiRequestError, apiFetch } from './auth';
 import { parseAmount } from './money';
+import { unlessNotHeld } from './partner-profiles';
 
 // [W-10] This used to be `soft()`: `.catch(() => null)` on every read, so a
 // 500, an offline phone or a schema change was indistinguishable from "you
@@ -25,17 +26,37 @@ const absentOrThrow = <T,>(p: Promise<{ data: T }>): Promise<T | null> =>
   });
 
 // ── Profiles: a mover may be a rider, a driver, or both ─────────────────────
-export const getRiderProfile = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/rider/profile'));
-export const getDriverProfile = () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/driver/profile'));
+// [PORTAL-404 · F29] Asked only when /auth/me did not say the person holds no such profile (lib/partner-profiles):
+// a rider's pages no longer ask for a driver profile and log the 404.
+export const getRiderProfile = () => unlessNotHeld('rider', () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/rider/profile')));
+export const getDriverProfile = () => unlessNotHeld('driver', () => absentOrThrow<Record<string, unknown>>(apiFetch('/api/v1/driver/profile')));
 
 // ── Earnings ────────────────────────────────────────────────────────────────
-export const getRiderSummary = () => absentOrThrow<{
+/** Today / this week / this month / all time, each { total, count } — the SAME shape on the rider and the driver
+ *  route (driver.routes SWIFT-080), the one the phone's Earnings screen reads. */
+export interface EarningsSummary {
   today: { total: number; count: number };
   thisWeek: { total: number; count: number };
   thisMonth: { total: number; count: number };
   allTime: { total: number; count: number };
   pendingPayout: number;
-}>(apiFetch('/api/v1/rider/earnings/summary'));
+  /** [Board 13a "CASH COLLECTED"] The cash kept from cash jobs per window (api dispatch/cash-in-hand.ts). Absent from
+   *  an older API, so optional and never defaulted to 0. */
+  cashInHand?: { today: unknown; thisWeek: unknown; thisMonth: unknown; allTime: unknown };
+}
+export const getRiderSummary = () => absentOrThrow<EarningsSummary>(apiFetch('/api/v1/rider/earnings/summary'));
+/** [P36 · board 13d / W3] A taxi driver's office shows the same four windows as the phone (it showed all-time only). */
+export const getDriverSummary = () => absentOrThrow<EarningsSummary>(apiFetch('/api/v1/driver/earnings/summary'));
+
+/** [P36 · board 13d "Download statement"] The phone's earnings statement: the server mints a short-lived signed
+ *  path (?link=1) that opens without the session, the same link the phone's in-app browser opens. */
+export const getEarningsStatementPath = (role: 'rider' | 'driver') =>
+  apiFetch(`/api/v1/${role}/earnings/statement?link=1`).then((r) => {
+    const path = (r.data as { path?: unknown } | null | undefined)?.path;
+    // [REVIEW-G #2113 S4-1] A path on Swift's API only: '//host' would be protocol-relative under an empty origin.
+    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) throw new Error('Statement link missing from the response.');
+    return path;
+  });
 
 export const getRiderEarnings = (page = 1) =>
   apiFetch(`/api/v1/rider/earnings?page=${page}&limit=25`).then((r) => ({
@@ -85,6 +106,10 @@ export interface DocStatus {
   missing: string[];
   vehicleType?: string | null;
   roleVerified: boolean;
+  /** [VERIFY-DOCS] What the person MAY add (a taxi driver's police clearance only). */
+  optional?: string[];
+  /** [POLICE-CLEARANCE CONSENT] The clearance's own consent words (read by policeClearanceWordsFrom). */
+  policeClearanceConsent?: unknown;
 }
 export const getVerificationStatus = (vehicleType?: string) =>
   apiFetch(`/api/v1/verification/status?role=MOVER${vehicleType ? `&vehicleType=${vehicleType}` : ''}`).then(
@@ -97,10 +122,14 @@ export const uploadVerificationFile = (file: File) => {
     (r) => r.data as { url: string },
   );
 };
-export const submitVerificationDocument = (docType: string, fileUrl: string) =>
-  apiFetch('/api/v1/verification/documents', {
+export const submitVerificationDocument = async (docType: string, fileUrl: string) => {
+  // [POLICE-CLEARANCE CONSENT] Never a police clearance under the privacy-notice tick: it has its own consent
+  // (store-documents-api submitPoliceClearance). Refused before anything leaves the browser.
+  if (docType === 'police_clearance') throw new Error('A police clearance is sent only with its own consent.');
+  return apiFetch('/api/v1/verification/documents', {
     method: 'POST',
     // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5); [R17] the API records that
     // tick in the consent ledger, anchored to the box's exact words (document_v1)
     body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }),
   });
+};

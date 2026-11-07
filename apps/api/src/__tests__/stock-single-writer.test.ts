@@ -131,6 +131,23 @@ describe('the stock counter has exactly one writer', () => {
     ).toEqual([]);
   });
 
+  it('no file outside modules/inventory/stock.ts writes Item.stockQuantity in raw SQL either [POS-SYNC]', () => {
+    // The batch writer (applyStockMovements / recordOpeningBalances) moves the
+    // counter with one UPDATE … FROM (VALUES …). That is only safe where the
+    // ledger rows are written beside it — so raw SQL that SETs the counter is
+    // held to the same one-file rule as the Prisma writes above.
+    const offenders: string[] = [];
+    for (const file of sourceFiles(API_SRC)) {
+      const rel = file.slice(API_SRC.length + 1);
+      if (rel === SINGLE_WRITER) continue;
+      if (/SET\s+"stockQuantity"|,\s*"stockQuantity"\s*=/.test(readFileSync(file, 'utf8'))) offenders.push(rel);
+    }
+    expect(offenders).toEqual([]);
+    const writer = readFileSync(join(API_SRC, SINGLE_WRITER), 'utf8');
+    expect(writer).toContain('export async function applyStockMovements');
+    expect(writer).toContain('stockMovement.createMany');
+  });
+
   it('the single writer is where we think it is, and still writes the ledger', () => {
     // Guards against the gate passing because the writer was moved or gutted.
     const src = readFileSync(join(API_SRC, SINGLE_WRITER), 'utf8');

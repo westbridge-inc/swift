@@ -9,6 +9,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { authRoutes } from '../modules/auth/auth.routes';
+import rateLimit from '@fastify/rate-limit';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
@@ -27,6 +28,8 @@ import { serviceCatalogRoutes } from '../modules/services/service-catalog.routes
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
+import { callsRoutes } from '../modules/calls/calls.routes';
+import { providerFeeRoutes } from '../modules/services/provider-fee.routes';
 import { loginWithOtp } from './helpers/otp';
 
 // ---------------------------------------------------------------------------
@@ -60,6 +63,9 @@ async function buildTestApp() {
   await server.register(redisPlugin);
   await server.register(authPlugin);
   await server.register(socketPlugin);
+  // [FLOW-QA F15] the auth routes count sign-in tries through the limiter (as app.ts registers it); here every request
+  // is let through, as before. Mounted here by name, so the composition-root drift guard below still sees authRoutes.
+  await server.register(rateLimit, { global: false, allowList: () => true });
   await server.register(authRoutes, { prefix: '/api/v1/auth' });
   await server.register(customerRoutes, { prefix: '/api/v1/customer' });
   await server.register(vendorRoutes, { prefix: '/api/v1/vendor' });
@@ -82,6 +88,8 @@ async function buildTestApp() {
   await server.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
   await server.register(partnerRoutes, { prefix: '/api/v1/partner' });
   await server.register(statementRoutes, { prefix: '/api/v1/statements' });
+  await server.register(callsRoutes, { prefix: '/api/v1/calls' });
+  await server.register(providerFeeRoutes, { prefix: '/api/v1/provider' });
   await server.ready();
   return server;
 }
@@ -161,6 +169,8 @@ const MATRIX: PrefixSpec[] = [
   // unauthenticated sweep still applies to every route.
   { prefix: '/api/v1/search/', wrongRoles: [] },
   { prefix: '/api/v1/chat/', wrongRoles: [] },
+  // [O-1] The call bridge: any party to an order (customer, mover, store) may ask Swift to connect a call.
+  { prefix: '/api/v1/calls/', wrongRoles: [] },
   { prefix: '/api/v1/verification/', wrongRoles: [] },
   { prefix: '/api/v1/rides/', wrongRoles: [] },
   // SOS is raiseable by any authenticated actor (passenger/driver/rider), so
@@ -172,6 +182,11 @@ const MATRIX: PrefixSpec[] = [
   { prefix: '/api/v1/services/', wrongRoles: [] },
   { prefix: '/api/v1/partner/', wrongRoles: [] },
   { prefix: '/api/v1/statements/', wrongRoles: [] },
+  // [BILL-PRO PR4] A pro's own weekly fee. Being a pro is a profile, not a role (a customer, a store owner or a mover
+  // may also be a service provider), so no role token is wrong here by role; the gate is the person's OWN provider
+  // profile (no profile: refused, see the '[BILL-PRO] /api/v1/provider' describe below, and with well-formed bodies
+  // provider-fee-routes.test.ts '[REVIEW-G #2230 S4]'). The unauthenticated sweep applies to every route.
+  { prefix: '/api/v1/provider/', wrongRoles: [] },
 ];
 
 /** Routes that are UNAUTHENTICATED on purpose: a server-minted HMAC signature
@@ -206,6 +221,10 @@ const PUBLIC_BY_DESIGN = new Set([
   // account — the 128-bit CSPRNG token IS the credential; it grants only the
   // narrow public payload and dies at trip end + grace (or revocation).
   'GET /api/v1/safety/public/trip/:token',
+  // [WEB-TAXI] Trip Guardian's texted answer link: a passenger no push reached
+  // answers the waiting check-in without signing in — the one-time secret of
+  // ONE ask IS the credential; it answers only that check, misses are one 404.
+  'POST /api/v1/safety/public/checkin',
   // [T1] Guest browse (customer.routes.ts PUBLIC_BROWSE, the same four URLs):
   // optional auth by design, the public catalogue a guest may look around.
   'GET /api/v1/customer/home',
@@ -305,6 +324,29 @@ describe('[T1] ops-only routes inside multi-role prefixes refuse every non-ops r
   }
 });
 
+// [BILL-PRO PR4] /api/v1/provider reads and pays only the caller's OWN pro fee. The seeded customer, store owner and
+// mover have no provider profile, so every route here must refuse them: never a 2xx (no fee read, started or
+// paid), never a 5xx. GET /subscription says so with a 404 (no provider profile), as provider-fee-routes.test.ts pins.
+describe('[BILL-PRO] /api/v1/provider: a person with no provider profile never reads or pays a pro fee', () => {
+  for (const role of ['customer', 'vendor', 'mover']) {
+    it(`a ${role} token (no provider profile) is refused on every /api/v1/provider route`, async () => {
+      const routes = routeTable.filter((r) => r.url.startsWith('/api/v1/provider/'));
+      expect(routes.map((r) => `${r.method} ${r.url}`)).toEqual(expect.arrayContaining([
+        'GET /api/v1/provider/subscription', 'POST /api/v1/provider/weekly-fee-ack', 'PUT /api/v1/provider/subscription/billing-method',
+        'POST /api/v1/provider/subscription/mmg-checkout',
+      ]));
+      const offenders: string[] = [];
+      for (const r of routes) {
+        const res = await fire(r.method, r.url, tokens[role]);
+        if (res.statusCode < 400 || res.statusCode >= 500) offenders.push(`${r.method} ${r.url} -> ${res.statusCode}`);
+      }
+      expect(offenders, offenders.join('\n')).toEqual([]);
+      const own = await fire('GET', '/api/v1/provider/subscription', tokens[role]);
+      expect([own.statusCode, own.json().error?.code]).toEqual([404, 'NOT_FOUND']);
+    });
+  }
+});
+
 describe('Suspended accounts are cut off immediately', () => {
   it('a suspended user cannot use a live access token and cannot refresh', async () => {
     // Self-contained: create a fresh ACTIVE customer + a live session directly.
@@ -392,11 +434,15 @@ describe('composition root ↔ matrix drift guard, by plugin [SWIFT-092 · T1]',
   // smsInboundRoutes (/api/v1/sms) is the SMS provider calling with a texted reply [R22]:
   // machine-to-machine, HMAC-signed by the provider and refused (403) unsigned, 503 dark
   // until configured; it only ever withdraws marketing consent — proven in marketing-stop.test.ts.
+  // callVoiceRoutes (/api/v1/calls/voice) is the voice provider calling back during a Swift-bridged
+  // call [O-1]: machine-to-machine, signed by the provider over the exact URL and refused (403)
+  // unsigned, 503 until configured; a call back to Swift's number only hears 'call from the app' —
+  // proven in call-bridge.test.ts.
   // testControlRoutes exists only in isolated load builds; production never registers it.
   const EXEMPT_PLUGINS = new Set([
     'agentCashRoutes', 'attributionRoutes', 'discoveryRoutes', 'marketRoutes', 'mmgCheckoutPublicRoutes',
     'cardRailPublicRoutes', 'publicRoutes', 'qrPublicRoutes', 'qrResolverRoutes', 'legalRoutes', 'testControlRoutes',
-    'smsInboundRoutes',
+    'smsInboundRoutes', 'callVoiceRoutes',
   ]);
 
   it('flags a route plugin the matrix never mounts, even under a prefix it already sweeps (red-first)', () => {

@@ -9,18 +9,37 @@ import { site, launch } from '@/site.config';
  *    money — so Swift cannot refund order money itself;
  *  - cancelling follows the ONE cancel-policy predicate in the API
  *    (modules/order/cancel-policy.ts) and its charge path (order.service.ts);
- *  - the weekly partner fee is paid in advance, one week at a time, and
- *    stopping a plan ends future charges (modules/billing/billing.service.ts);
- *  - it is paid one week at a time: while a week runs the coming week may be
- *    paid, and no further (modules/billing/pay-ahead.ts, owner #62), and
- *    closing an account waits until a fee paid for a week that has not
- *    started is refunded (modules/user/partner-wind-down.ts, FEE_CREDIT).
+ *  - the weekly partner fee is paid in advance, and stopping a plan ends
+ *    future charges (modules/billing/billing.service.ts); money paid for weeks
+ *    that have not started stays for the weekly fee (prepaidBalance) and is
+ *    never charged while the plan is stopped;
+ *  - it may be paid up to four weeks ahead: while a week runs the four weeks
+ *    after it may be paid, and no further (modules/billing/pay-ahead.ts
+ *    PAY_AHEAD_MAX_WEEKS, owner 6 Nov 2026), and closing an account waits
+ *    until every fee paid for a week that has not started is refunded
+ *    (modules/user/partner-wind-down.ts, FEE_CREDIT counts the whole credit).
+ *  - [BOOK-S7 · owner B1/B2 28 Oct 2026] while instant appointment booking
+ *    (INSTANT_BOOKING) is switched on, a confirmed appointment cancels free
+ *    until 2 hours before it starts, never less than 1 minute after it was
+ *    confirmed (cancel-policy.ts), and the customer's own move stops 2 hours
+ *    before it starts (reschedule-policy.ts); with it off, the 1-minute
+ *    booking rule above stands. Terms §7 says the same (pinned in the API's
+ *    legal-appointment-rules.test.ts).
+ *  - [TERMS · owner 29 Oct 2026] the same rule for a time booked from a
+ *    provider's list of services (book-a-pro: cancel-policy.ts
+ *    serviceJobCancelVerdict), plus the provider's move and the free cancel
+ *    once the provider is 30 minutes late and has not started; with the switch
+ *    off such a job keeps the service job rule below.
+ *  - [BOOK-P3 · COORD 29 Oct 2026 (b)] while the switch is on, an appointment
+ *    the business or provider moves cancels free for 60 minutes after the
+ *    customer is told (APPOINTMENT_MOVED_FREE_CANCEL_MIN), or until it starts
+ *    if sooner, even inside the 2-hour cut-off.
  * Approved by the owner, 1 Oct 2026: the business commitments marked below.
  * Owner ruling, 8 Oct 2026: the refund at closing. Owner #62, 14 Oct 2026: one
- * week at a time, no paying ahead (was a four-week limit).
+ * week at a time. Owner, 6 Nov 2026: up to four weeks ahead (replaces #62).
  */
 
-const UPDATED = '17 October 2026';
+const UPDATED = '6 November 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -68,8 +87,21 @@ export default function RefundsPage() {
           You can still cancel free if no driver or rider was found, or if they are running very late, as the app shows.
         </li>
         <li>
-          <b>A service job</b> (a local pro you hired through the app) can be cancelled free in the app while it is a
-          request, until the job is booked. Once it is booked, contact the provider to change or cancel it.
+          <b>Appointments</b> (a time you book from a business&apos;s listing or from a provider&apos;s list of
+          services): while {site.tradeName}&apos;s instant appointment booking is switched on, an appointment the
+          business or provider has confirmed can be cancelled free in the app until 2 hours before it starts, and always
+          for at least 1 minute after it was confirmed. Where the app offers it, you can also move it to another free
+          time of the same service until 2 hours before it starts. After that, contact the business or provider to change
+          or cancel it. The business can also move your appointment, and you are told in the app when it does. While
+          instant appointment booking is switched on, a provider can also move an appointment booked from their list of
+          services, and you are told in the app when they do; if the provider has not started it 30 minutes after its
+          start time, you can still cancel it free in the app. While instant appointment booking is switched on, if the
+          business or provider moves your appointment, you can also cancel it free in the app for 60 minutes after you
+          are told, or until it starts if that is sooner, even within 2 hours of its start.
+        </li>
+        <li>
+          <b>Any other service job</b> (a local pro you hired through the app) can be cancelled free in the app while it
+          is a request, until the job is booked. Once it is booked, contact the provider to change or cancel it.
         </li>
         <li>
           <b>Once the order is on its way</b> (the rider has collected it, or you are in the taxi), it can no longer be
@@ -118,8 +150,10 @@ export default function RefundsPage() {
       </p>
       <ul>
         <li>
-          <b>Paid in advance.</b> Each payment covers the week that starts on its due date. Today the fee is paid by
-          MMG.{' '}
+          <b>Paid in advance.</b> Each weekly fee covers the week that starts on its due date. Today the fee is paid by
+          MMG, or directly to {site.legalEntityName}, in person by cash or cheque, or by bank transfer; a cheque counts once it clears,
+          and a payment counts once {site.tradeName} records it.
+          You get a receipt for every payment. Never pay the fee through an agent or anyone else.{' '}
           {cardsLive ? 'It can also be paid by Visa or Mastercard, through our bank’s card payment page.' : null}
         </li>
         <li>
@@ -128,17 +162,19 @@ export default function RefundsPage() {
           {site.supportReplyBusinessDays} business days.
         </li>
         <li>
-          <b>One week at a time.</b> You pay the fee one week at a time: while a week runs you can pay for the coming
-          week, and no further. Money received beyond that is returned to you. A fee paid before its week starts is only
-          ever used for that weekly fee.
+          <b>Up to four weeks ahead.</b> You can pay the fee for one week, or up to four weeks ahead: while a week runs
+          you can pay for the four weeks after it, and no further. Money received beyond that is returned to you. A fee
+          paid before its week starts is only ever used for your weekly fees.
         </li>
         <li>
           <b>Stopping your plan.</b> When you stop your weekly plan, {site.tradeName} stops charging for the weeks
-          after it. A week that has already started is not refunded, and a fee already owed stays owed.
+          after it. A week that has already started is not refunded, and a fee already owed stays owed. Weeks you paid
+          for that have not started are not used while your plan is stopped: they pay your fee if you start again, or
+          are refunded when you close your account.
         </li>
         <li>
           <b>Closing your account.</b> {site.tradeName} refunds any weekly fee you paid for a week that has not started,
-          within 14 days, to the account you paid from, records the refund, and then deletes your account. A week that has already started is not refunded.
+          within 14 days, to the account you paid from or, if you paid in person, by a way you and {site.tradeName} agree, records the refund, and then deletes your account. A week that has already started is not refunded.
         </li>
       </ul>
 

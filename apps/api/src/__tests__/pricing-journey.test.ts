@@ -40,7 +40,8 @@ import { currentMoverDocuments } from './helpers/current-mover-documents';
 //             zone (CJIA, Ogle) pays 295/km after 3 km. Class multipliers
 //             apply. No fixed fares; the server ignores any mover-sent fare.
 //   Delivery  500 covers 3 km, then 100/km, surge 1.0 (rounded up to a whole
-//             dollar); express ×1.5; pickup orders pay no delivery fee.
+//             dollar); express adds a flat 1,000 at any distance (owner 1 Nov
+//             2026); pickup orders pay no delivery fee.
 //   Courier   800 + 120/km + the size surcharge, × the speed; nearest dollar.
 //
 // Route distances are fixed per destination by a stand-in routing engine, so
@@ -125,7 +126,9 @@ function receiptOf(order: Order, items: Array<{ name: string; quantity: number; 
   return renderReceiptHtml({ ...order, status: 'DELIVERED', vendor: null, customer: null, items } as never);
 }
 const receiptTotal = (html: string) => /<tr class="grand"><td>Total<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1];
-const receiptDeliveryPay = (html: string) => /Delivery pay for your rider<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1] ?? null;
+const receiptDeliveryPay = (html: string) => /Delivery pay for your rider(?: \(express\))?<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1] ?? null;
+/** [BUG-HUNT-2 G16] A parcel's own word on its receipt: the fee is the whole price, there is no store order above it. */
+const receiptParcelFee = (html: string) => /Delivery fee(?: \(express\))?<\/td><td class="num">([^<]+)<\/td>/.exec(html)?.[1] ?? null;
 
 async function purge() {
   await sys(async () => {
@@ -371,7 +374,7 @@ describe('delivery — cart quote = order = rider offer = receipt', () => {
     ['5 km', 5, false, 'DELIVERY', 700],
     ['10 km', 10, false, 'DELIVERY', 1200],
     ['4.37 km (637, a whole dollar)', 4.37, false, 'DELIVERY', 637],
-    ['5 km express (×1.5)', 5, true, 'DELIVERY', 1050],
+    ['5 km express (700 + the flat 1,000)', 5, true, 'DELIVERY', 1700],
     ['pickup: no delivery fee, however far', 10, false, 'PICKUP', 0],
   ] as const)('%s → fee %s', async (_label, km, express, fulfillment, fee) => {
     const drop = at({ lat: 6.8095 + Math.round(km * 100) * 0.00001 + (express ? 0.0005 : 0) + (fulfillment === 'PICKUP' ? 0.001 : 0), lng: -58.159 }, km);
@@ -411,11 +414,25 @@ describe('courier — estimate = job = rider offer = receipt', () => {
     ['8 km extra large (+2,000), rush ×2', 8, 'EXTRA_LARGE', 'RUSH', 7520],
     ['2.37 km small (1,084.40 → 1,084)', 2.37, 'SMALL', 'STANDARD', 1084],
   ] as const)('%s → %s', async (_label, km, packageSize, speed, fee) => {
-    // [Owner ruling 15 Oct 2026] TRANSFORMED: an extra-large parcel is carried only by a car or the heavy fleet, so
-    // its row runs with CAR_DELIVERIES=1 (the re-enable path); with the switch off it is refused: PARCEL_TOO_BIG.
-    if (packageSize === 'EXTRA_LARGE') { vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); }); }
+    // [Owner ruling 15 Oct 2026] TRANSFORMED: an extra-large parcel is carried only by a car or the heavy fleet.
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] TRANSFORMED AGAIN: cars take food and shop orders only, never parcels, and
+    // the heavy fleet is not taken on yet, so even with cars delivering (CAR_DELIVERIES=1) its quote and its request are
+    // refused before anything is written (PARCEL_TOO_BIG). Its price stays the formula above (courier-rates suites).
     const dropoff = at({ lat: 6.775 - Math.round(km * 100) * 0.00001, lng: -58.05 - (speed === 'STANDARD' ? 0 : 0.001) }, km);
     const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    if (packageSize === 'EXTRA_LARGE') {
+      vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
+      const refusedQuote = await call('POST', '/api/v1/courier/estimate', sender.token, { pickup: STABROEK, dropoff, packageSize, speed });
+      expect(refusedQuote.statusCode, refusedQuote.body).toBe(409);
+      expect(refusedQuote.json().error.code).toBe('PARCEL_TOO_BIG');
+      const refusedJob = await call('POST', '/api/v1/courier/order', sender.token, {
+        pickup: STABROEK, dropoff, pickupAddress: 'Stabroek Market', dropoffAddress: 'Journey parcel stop', packageSize, speed,
+        recipientName: 'Aunty Pat', recipientPhone: '+5926001234', expectedFee: fee,
+      });
+      expect(refusedJob.statusCode, refusedJob.body).toBe(409);
+      expect(refusedJob.json().error.code).toBe('PARCEL_TOO_BIG');
+      return;
+    }
     const est = await call('POST', '/api/v1/courier/estimate', sender.token, { pickup: STABROEK, dropoff, packageSize, speed });
     expect(est.statusCode, est.body).toBe(200);
     expect(est.json().data.totalFee).toBe(fee);
@@ -429,7 +446,7 @@ describe('courier — estimate = job = rider offer = receipt', () => {
     expect([Number(stored.deliveryFee), Number(stored.totalAmount), Number(stored.subtotalBase), Number(stored.billableKm)]).toEqual([fee, fee, 0, km]);
     expect(cashMathForOffer(stored)).toEqual({ collectFromCustomer: fee, payToVendor: 0, youKeep: fee });
     const receipt = receiptOf(stored);
-    expect(receiptDeliveryPay(receipt)).toBe(money(fee));
+    expect(receiptParcelFee(receipt)).toBe(money(fee));
     expect(receiptTotal(receipt)).toBe(money(fee));
   });
 });

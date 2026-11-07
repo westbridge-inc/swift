@@ -73,7 +73,14 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'reaper-lag': { policy: 'SAFE_REPLAY', why: 'Reads the reaper heartbeat, sets a gauge and pages through opsPageOnce, which dedupes. It writes no business rows.' },
   'audit-chain-verify': { policy: 'SAFE_REPLAY', why: 'Walks the audit chain and recomputes every link; writes only a gauge and, on a break, an admin notification. A second run repeats the same verdict.' },
   'audit-chain-anchor': { policy: 'SAFE_REPLAY', why: 'Appends one anchor row with the current head and tells the admins. A replay appends a second anchor of the same head — harmless, and the table is append-only by design.' },
+  'erasure-ledger-watch': { policy: 'SAFE_REPLAY', why: 'Reads ledger counts and ages and pages through pageOps, which dedupes on an open page. It writes no business rows.' },
   'malware-scanner-watch': { policy: 'SAFE_REPLAY', why: 'Asks the scanner PING, counts consecutive failures in one Redis key and pages through pageOps, which keeps one open page per title. It writes no business rows; a replay is one more ask.' },
+  'mmg-refund-deadlines': { policy: 'SAFE_REPLAY', why: 'Each miss is the law\'s compare-and-set under the order lock, set once. The notices carry per-row dedupe keys and the page goes through pageOps. It moves no money and closes nothing; a replay finds nothing left to mark.' },
+  'ride-overdue-watch': { policy: 'SAFE_REPLAY', why: 'Reads the rides in progress and pages through pageOps, which keeps one open page per title. It writes no business rows and closes no ride; a replay is one more read.' },
+  'pickup-not-collected-watch': { policy: 'SAFE_REPLAY', why: 'Reads the ready pickups past 24 hours. Each store notice carries a per-order dedupe key and the support page goes through pageOps, which keeps one open page per title. It closes no order; a replay is one more read.' },
+  'fee-refund-case-sweep': { policy: 'SAFE_REPLAY', why: 'Closes a case by a compare-and-set on OPEN, only on a return of its payment that MMG proved, and pages through pageOps, which keeps one open page per title. It moves no money; a replay finds the closed cases gone from the open set.' },
+  'error-rate-watch': { policy: 'SAFE_REPLAY', why: 'Reads the hourly error tally and pages through pageOps, which keeps one open page per title and one delivered page per key window; a closed page stays closed. It writes no business rows; a replay is one more read.' },
+  'upload-rescan': { policy: 'SAFE_REPLAY', why: 'Each row closes by a compare-and-set on rescannedAt IS NULL; a replay finds closed rows gone from the open set. A positive moved to quarantine is no longer open, and its page goes through pageOps (one open page per title).' },
   'backup-freshness': { policy: 'SAFE_REPLAY', why: 'Reads backup state and pages through opsPageOnce, which is explicitly deduped. It writes no business rows.' },
   'batching-shadow-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-fx-notices': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -92,10 +99,9 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'evidence-retention': { policy: 'SAFE_REPLAY', why: 'Repairs holds, drains the legal-hold VAULT OUTBOX (idempotent by construction) and deletes only unsealed, case-less bundles past their window; the database triggers refuse anything else.' },
   'expiry-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'verification-decision-outbox': { policy: 'SAFE_REPLAY', why: 'Lease-claimed outbox drain: a row is claimed under a 60 s lease and marked processed once; the approval tail it runs (afterApproval) returns an existing subscription instead of starting a second, and an approval that no longer stands closes its row without starting anything.' },
-  'image-policy-sweep': { policy: 'SAFE_REPLAY', why: 'Purges the images of committed, extracted PERSONAL documents of active types through purgeImageAfterReview, which refuses an already-purged, held or uncommitted submission; a replay finds nothing left to purge. Receipts append.' },
+  'image-policy-sweep': { policy: 'SAFE_REPLAY', why: 'Purges the images of PERSONAL partner documents after their window (committed, or no longer current: replaced, revoked, expired) and of committed, extracted PERSONAL documents of active types, through purgeImageAfterReview, which refuses an already-purged, held, waiting or rejected submission; a replay finds nothing left to purge. Receipts append.' },
   'handover-claims-reconcile': { policy: 'SAFE_REPLAY', why: 'Reads settlements older than the claim window and reports the unmatched pairs: one audit row per run and at most one admin notice per day. It settles nothing and fails nothing; a replay reports the same pairs.' },
   'rlp-sweep': { policy: 'SAFE_REPLAY', why: 'Flags approved-but-unpaid claims past the pay-out SLA (a flag pushed at most once, guarded by the WHERE), lists the countries whose reserve is below its floor, writes one audit row per run and at most one admin notice per day per finding; it pays nothing and changes no status.' },
-  'rlp-reserve-provision': { policy: 'SAFE_REPLAY', why: 'Provisions the PREVIOUS month once per country: the PROVISION row is unique on (country, kind, periodKey), so a replay inserts nothing and the balance cannot be provisioned twice.' },
   'flag-ratings': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'guardian-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'incident-pattern-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -140,7 +146,14 @@ export type JobName =
   | 'auto-cancel'
   | 'auto-complete'
   | 'backup-freshness'
+  | 'erasure-ledger-watch'
   | 'malware-scanner-watch'
+  | 'mmg-refund-deadlines'
+  | 'ride-overdue-watch'
+  | 'pickup-not-collected-watch'
+  | 'fee-refund-case-sweep'
+  | 'error-rate-watch'
+  | 'upload-rescan'
   | 'reaper-lag'
   | 'audit-chain-verify'
   | 'audit-chain-anchor'
@@ -164,7 +177,6 @@ export type JobName =
   | 'image-policy-sweep'
   | 'handover-claims-reconcile'
   | 'rlp-sweep'
-  | 'rlp-reserve-provision'
   | 'flag-ratings'
   | 'guardian-sweep'
   | 'incident-pattern-scan'

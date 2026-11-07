@@ -1,33 +1,74 @@
-import { act, screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { WeeklyFee } from './weekly-fee';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 import { apiFetch, setSelectedStore } from '@/lib/auth';
 
+describe('[owner 6 Nov 2026] up to four weeks ahead on the website', () => {
+  const FOUR = [{ weeks: 1, amountGyd: 2100 }, { weeks: 2, amountGyd: 4200 }, { weeks: 3, amountGyd: 6300 }, { weeks: 4, amountGyd: 8400 }];
+  it('offers the weeks the server says fit, labels Pay with the chosen amount, and sends the chosen weeks', async () => {
+    const bodies: string[] = [];
+    mockApi(({ method, init }) => {
+      if (method === 'POST') {
+        bodies.push(String(init?.body));
+        return { status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT', message: 'Swift takes the weekly fee up to four weeks ahead. GY$2,100 is already paid toward weeks that have not started, so you can pay at most GY$6,300 now.' } } };
+      }
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: FOUR }] } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="rider" />);
+    const group = await screen.findByRole('group', { name: 'How many weeks?' });
+    expect(screen.getByRole('button', { name: 'Pay GY$2,100 with MMG' })).toBeTruthy();
+    expect(within(group).getAllByRole('radio')).toHaveLength(4);
+    expect(group.textContent).toContain('You can pay up to four weeks ahead.');
+    await view.user.click(within(group).getByLabelText(/4 weeks/));
+    await view.user.click(screen.getByRole('button', { name: 'Pay GY$8,400 with MMG' }));
+    // The server's own words: what is paid, and the most that can be paid now.
+    await screen.findByText('Swift takes the weekly fee up to four weeks ahead. GY$2,100 is already paid toward weeks that have not started, so you can pay at most GY$6,300 now.');
+    expect(bodies).toEqual(['{"weeks":4}']);
+    view.unmount();
+  });
+
+  it('an older API (no weekOptions) shows no choice and sends {} as before', async () => {
+    const bodies: string[] = [];
+    mockApi(({ method, init }) => {
+      if (method === 'POST') { bodies.push(String(init?.body)); return { status: 503, body: { success: false, error: { code: 'MMG_CHECKOUT_UNAVAILABLE' } } }; }
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' }] } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await view.user.click(await screen.findByRole('button', { name: 'Pay GY$2,100 with MMG' }));
+    expect(screen.queryByRole('group', { name: 'How many weeks?' })).toBeNull();
+    await waitFor(() => expect(bodies).toEqual(['{}']));
+    view.unmount();
+  });
+});
+
 describe('rendered weekly fee', () => {
   it('opens new and handed-back OPEN checkouts in the same tab with a fresh key per tap', async () => {
     const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
     const keys: string[] = [];
+    const posts: string[] = [];
     mockApi(({ method, url, init }) => {
       if (method === 'POST') {
-        keys.push(new Headers(init?.headers).get('Idempotency-Key')!);
+        keys.push(new Headers(init?.headers).get('Idempotency-Key')!); posts.push(url.pathname);
         return { status: keys.length === 1 ? 201 : 200, body: { success: true, data: { ref: 'open-ref', status: 'OPEN', checkoutUrl: 'https://checkout.test/opaque', amountGyd: 1200, currencyCode: 'GYD' } } };
       }
       if (url.pathname.endsWith('/open-ref')) return { body: { success: true, data: { ref: 'open-ref', status: 'OPEN', amountGyd: 1200, subscriptionStatus: 'ACTIVE' } } };
-      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] } } };
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }], latestMmgCheckout: keys.length ? { ref: 'open-ref', status: 'OPEN', expiresAt: '2099-01-01T12:00:00Z' } : null, reopenableMmgCheckout: keys.length ? { ref: 'open-ref', expiresAt: '2099-01-01T12:00:00Z' } : null } } };
     });
     const view = renderWithQuery(<WeeklyFee family="vendor" />);
     await view.user.click(await screen.findByRole('button', { name: 'Pay GY$1,200 with MMG' }));
     await screen.findByText('Waiting for MMG…');
-    await view.user.click(await screen.findByRole('button', { name: 'Pay GY$1,200 with MMG' }));
+    await act(async () => { await view.queryClient.invalidateQueries({ queryKey: ['weekly-fee'] }); });
+    await view.user.click(await screen.findByRole('button', { name: "Back to MMG's page" }));
     await waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
     expect(assign).toHaveBeenCalledWith('https://checkout.test/opaque');
     expect(keys).toHaveLength(2); expect(keys[0]).not.toBe(keys[1]);
+    expect(posts).toEqual(['/api/v1/vendor/subscription/mmg-checkout', '/api/v1/vendor/subscription/mmg-checkout/open-ref/reopen']);
     expect(document.body.textContent).not.toContain('Paid:'); view.unmount();
   });
   it.each(['live', 'off', 'absent'])('MMG %s controls the actual button; deprecated fields cannot render', async (state) => {
     mockApi(() => ({ body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', payActions: state === 'absent' ? undefined : [{ id: 'MMG_CHECKOUT', state, amountGyd: 1200, currencyCode: 'GYD' }, { id: 'CARD', state: 'off' }], sanFormatted: 'private-number', payCashSteps: ['Go to MMG agent'], activationCopy: 'instant restoration' } } }));
-    const view = renderWithQuery(<WeeklyFee family="vendor" />); await screen.findByText('Nothing due right now: your next bill is 6 Oct 2026');
+    const view = renderWithQuery(<WeeklyFee family="vendor" />); await screen.findByText('Nothing to pay for the week from 6 Oct 2026'); // [FEE-STATUS] was 'Nothing due right now: your next bill is 6 Oct 2026', a passed date
     const button = screen.queryByRole('button', { name: 'Pay GY$1,200 with MMG' });
     if (state === 'live') expect(button).toBeTruthy(); else expect(button).toBeNull();
     expect(document.body.textContent).not.toMatch(/coming soon|private-number|MMG agent|instant restoration|card/i); view.unmount();
@@ -89,7 +130,7 @@ describe('rendered weekly fee', () => {
       if (order !== 'focus before storage') storage();
       if (order !== 'storage only') window.dispatchEvent(new Event('focus'));
     });
-    await screen.findByText('GY$3,400 due now');
+    await screen.findByText('Payment due now'); await screen.findByText('GY$3,400 to pay.');
     if (order === 'focus before storage') act(storage);
     expect(calls.some(([url, store]) => url.endsWith('/ref-A') && store === 'store-B')).toBe(false);
     expect(document.body.textContent).not.toContain('Paid:');
@@ -149,4 +190,147 @@ describe('rendered weekly fee', () => {
     expect(calls).toHaveBeenCalledTimes(2); // one read + refresh; no retry
   });
 
+});
+
+
+describe('[owner 5 Nov 2026] paying in person', () => {
+  const fee = (inPerson: unknown, status = 'ACTIVE') => ({ status, amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }, { id: 'CARD', state: 'off' }], recentCheckouts: [], ...(inPerson === undefined ? {} : { inPerson }) });
+
+  it.each(['vendor', 'rider'] as const)('%s: where the door accepts it says so, and the link is a door that exists', async (family) => {
+    mockApi(() => ({ body: { success: true, data: fee({ open: true, waitingGyd: null }) } }));
+    const view = renderWithQuery(<WeeklyFee family={family} />);
+    const line = await screen.findByTestId('pay-in-person');
+    expect(line.textContent).toContain('pay Swift directly, in person, by cash, cheque or bank transfer');
+    expect(line.textContent).toContain('A cheque counts once it clears');
+    expect(line.textContent).toContain('A payment counts once Swift records it, and your status here changes then');
+    expect(line.textContent).toContain('Never give it to anyone else');
+    expect(within(line).getByRole('link', { name: 'Ask Swift to arrange it' }).getAttribute('href')).toBe(family === 'vendor' ? '/dashboard/help' : '/portal/help');
+    expect(line.textContent).not.toContain('Get help');
+    view.unmount();
+  });
+
+  it.each([
+    ['the door is closed', { open: false, waitingGyd: null }],
+    ['an older API says nothing', undefined],
+  ])('%s: no offer', async (_name, inPerson) => {
+    mockApi(() => ({ body: { success: true, data: fee(inPerson) } }));
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await screen.findByText('Nothing to pay for the week from 6 Oct 2026');
+    expect(screen.queryByTestId('pay-in-person')).toBeNull();
+    expect(screen.queryByTestId('in-person-waiting')).toBeNull();
+    view.unmount();
+  });
+
+  it('while a record waits it says so plainly, with the amount, under where the fee stands', async () => {
+    mockApi(() => ({ body: { success: true, data: fee({ open: false, waitingGyd: 5000 }) } }));
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    const words = (await screen.findByTestId('in-person-waiting')).textContent!;
+    expect(words).toContain('Swift has your in-person payment of GY$5,000 and is recording it');
+    expect(words).toContain('Do not pay again');
+    expect(screen.queryByTestId('pay-in-person')).toBeNull();
+    view.unmount();
+  });
+});
+
+describe('own checkout reopen affordance', () => {
+  it('reload with MMG off shows Back and Guyana deadline; same page and fresh keys on two taps', async () => {
+    const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
+    const expiresAt = '2099-10-08T23:30:00Z';
+    const c = { ref: 'own-open', status: 'OPEN', expiresAt, amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' };
+    const keys: string[] = [];
+    const posts: string[] = [];
+    mockApi(({ method, url, init }) => {
+      if (method === 'POST') { keys.push(new Headers(init?.headers).get('Idempotency-Key')!); posts.push(url.pathname); return { status: 200, body: { success: true, data: { ...c, checkoutUrl: 'https://checkout.test/same-page' } } }; }
+      return { body: { success: true, data: url.pathname.endsWith('/own-open') ? c : { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt } } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    const back = await screen.findByRole('button', { name: "Back to MMG's page" });
+    expect(document.body.textContent).toContain('Swift keeps this checkout open until 19:30 (Guyana time).');
+    expect(document.body.textContent).toContain("Already paid on MMG's page? Don't pay again — we'll confirm it with MMG.");
+    expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull();
+    await view.user.click(back); await waitFor(() => expect(assign).toHaveBeenCalledTimes(1));
+    await view.user.click(await screen.findByRole('button', { name: "Back to MMG's page" }));
+    await waitFor(() => expect(assign).toHaveBeenCalledTimes(2));
+    expect(keys).toHaveLength(2); expect(keys[0]).not.toBe(keys[1]);
+    expect(posts).toEqual(['/api/v1/vendor/subscription/mmg-checkout/own-open/reopen', '/api/v1/vendor/subscription/mmg-checkout/own-open/reopen']);
+    expect(assign).toHaveBeenCalledWith('https://checkout.test/same-page'); view.unmount();
+  });
+
+  it("at Swift's deadline Back goes away on this browser's clock and the fee is read again, even while the server still grants it", async () => {
+    const expiresAt = new Date(Date.now() + 2_000).toISOString();
+    const c = { ref: 'own-open', status: 'OPEN', expiresAt, amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' };
+    let feeReads = 0;
+    mockApi(({ url }) => {
+      if (url.pathname.endsWith('/own-open')) return { body: { success: true, data: c } };
+      feeReads += 1;
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt } } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await screen.findByRole('button', { name: "Back to MMG's page" });
+    const before = feeReads;
+    await waitFor(() => expect(screen.queryByRole('button', { name: "Back to MMG's page" })).toBeNull(), { timeout: 4_000 });
+    await waitFor(() => expect(feeReads).toBeGreaterThan(before), { timeout: 3_000 });
+    expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull(); view.unmount();
+  }, 10_000);
+  it('a grant naming another checkout than the one on screen shows no Back: the Back card checks the grant itself', async () => {
+    // [size budget] The rule (reopenableMmg) now runs inside the on-demand Back card, so this pins it there.
+    let latest = 'own-open';
+    const c = (ref: string) => ({ ref, status: 'OPEN', expiresAt: '2099-10-08T23:30:00Z', amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' });
+    mockApi(({ url }) => {
+      const read = url.pathname.match(/mmg-checkout\/([^/]+)$/);
+      if (read) return { body: { success: true, data: c(read[1] ?? '') } };
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c(latest), reopenableMmgCheckout: { ref: 'own-open', expiresAt: '2099-10-08T23:30:00Z' } } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    await screen.findByRole('button', { name: "Back to MMG's page" });
+    latest = 'newer-open';
+    await act(async () => { await view.queryClient.invalidateQueries({ queryKey: ['weekly-fee'] }); });
+    await waitFor(() => expect(screen.queryByRole('button', { name: "Back to MMG's page" })).toBeNull());
+    expect(screen.queryByRole('button', { name: /Pay GY/ })).toBeNull(); view.unmount();
+  });
+  it.each(['OPEN', 'EXPIRED', 'CONFIRMING', 'HELD'])('%s without a reopen grant has no Pay or Back, even with a stale live action', async (status) => {
+    const c = { ref: 'blocked-ref', status, expiresAt: '2099-01-01T12:00:00Z', amountGyd: 1200, subscriptionStatus: 'ACTIVE' };
+    mockApi(({ url }) => ({ body: { success: true, data: url.pathname.endsWith('/blocked-ref') ? c : { status: 'ACTIVE', latestMmgCheckout: c, reopenableMmgCheckout: null, payActions: [{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1200, currencyCode: 'GYD' }] } } }));
+    const view = renderWithQuery(<WeeklyFee family="rider" />); await screen.findByRole('status');
+    expect(screen.queryByRole('button', { name: /Pay GY|Back to MMG|Retry/ })).toBeNull();
+    if (status === 'EXPIRED') expect(document.body.textContent).toContain('Swift support will check this payment.'); view.unmount();
+  });
+});
+
+
+describe('[review F1] a stale Back tap on the web', () => {
+  it.each([
+    ['the server refuses it (paid on another device)', { status: 409, body: { success: false, error: { code: 'CHECKOUT_NOT_REOPENABLE', message: 'no', details: { ref: 'own-open', status: 'CONFIRMED' } } } }],
+    ['the server answers with another checkout', { status: 200, body: { success: true, data: { ref: 'other-ref', status: 'OPEN', checkoutUrl: 'https://checkout.test/other-page', amountGyd: 1200, currencyCode: 'GYD' } } }],
+  ] as const)('opens no MMG page when %s, and refreshes the fee', async (_case, answer) => {
+    const assign = vi.spyOn(window.location, 'assign').mockImplementation(() => {});
+    const c = { ref: 'own-open', status: 'OPEN', expiresAt: '2099-10-08T23:30:00Z', amountGyd: 1200, currencyCode: 'GYD', subscriptionStatus: 'ACTIVE' };
+    let feeReads = 0; const reads: string[] = [];
+    mockApi(({ method, url }) => {
+      if (method === 'POST') return answer;
+      if (url.pathname.includes('/mmg-checkout/')) { reads.push(url.pathname); return { body: { success: true, data: c } }; }
+      feeReads += 1;
+      return { body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 1200, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }], latestMmgCheckout: c, reopenableMmgCheckout: { ref: c.ref, expiresAt: c.expiresAt } } } };
+    });
+    const view = renderWithQuery(<WeeklyFee family="vendor" />);
+    const back = await screen.findByRole('button', { name: "Back to MMG's page" });
+    const before = feeReads;
+    await view.user.click(back);
+    await waitFor(() => expect(feeReads).toBeGreaterThan(before));
+    await screen.findByText("We couldn't reopen that MMG page. Its latest status is shown here.");
+    expect(assign).not.toHaveBeenCalled();
+    expect(reads.every((path) => path.endsWith('/own-open'))).toBe(true); view.unmount();
+  });
+});
+
+// [Row 156] A partner who paid twice or by mistake is told what to do, in the words the refunds page already promises:
+// no new promise, and no time for MMG's part.
+describe('[Row 156] charged twice, or by mistake', () => {
+  it.each(['vendor', 'rider'] as const)('%s: says what the refunds page says, and links to it', async (family) => {
+    mockApi(() => ({ body: { success: true, data: { status: 'ACTIVE', amountDueGyd: 0, nextBillingDate: '2026-10-06T12:00:00Z', payActions: [] } } }));
+    renderWithQuery(<WeeklyFee family={family} />);
+    const words = await screen.findByText(/^Charged twice, or by mistake\?/);
+    expect(words.textContent).toContain('refunds the extra or mistaken charge in full, within 14 days, to the method you paid with');
+    expect(within(words).getByRole('link', { name: 'How refunds work' }).getAttribute('href')).toBe('/legal/refunds');
+  });
 });

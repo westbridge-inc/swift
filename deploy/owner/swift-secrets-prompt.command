@@ -14,7 +14,7 @@
 # name, address or key is stored in this file: it lives in a public repository.
 #
 # Secret names are UPPER_CASE, for example JWT_SECRET, TWILIO_API_KEY_SECRET,
-# SMTP_PASS, MMG_API_KEY, MMG_PASSWORD, MMG_MKEY, MMG_MSECRET,
+# SMTP_PASS, RESEND_API_KEY, MMG_API_KEY, MMG_PASSWORD, MMG_MKEY, MMG_MSECRET,
 # PAYMENT_GATEWAY_KEY, PAYMENT_GATEWAY_SECRET, AWS_ACCESS_KEY_ID,
 # AWS_SECRET_ACCESS_KEY. The full list is apps/api/src/utils/secret-files.ts.
 set -euo pipefail

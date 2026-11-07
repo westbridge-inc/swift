@@ -174,7 +174,6 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
     ['a taxi watchdog release', { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer', status: 'PENDING' }, 'Taxi'],
     ['a taxi watchdog custody warning', { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer', status: 'RIDE_IN_PROGRESS' }, 'Taxi'],
     // [PUSH-ROUTING] Rows that used to open nothing.
-    ['an ID-on-file notice', { kind: 'verification_l2', audience: 'customer' }, 'IdentityVerification'],
     ['a store reply to their review', { kind: 'review_response', ratingId: 'r1', vendorId: 'v1' }, 'VendorReviews'],
     ['a support ticket update', { kind: 'support_update', ticketId: 't1' }, 'GetHelp'],
     ['a drivers-are-back notice', { kind: 'supply_returned', audience: 'customer', pool: 'DRIVER' }, 'Taxi'],
@@ -201,6 +200,15 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
     pressTheRow(renderRow(row(data)));
     expect(mocks.safeNavigate).toHaveBeenCalledExactlyOnceWith('OrdersHistory', undefined);
     expect(mocks.safeNavigate).not.toHaveBeenCalledWith('Schedule', expect.anything());
+  });
+
+  it('[BOOK-FU2] the customer copy of a moved appointment, as the API sends it now, opens the booking\'s own order', () => {
+    // appointment_moved replaced booking_rescheduled (above: the rows sent before it).
+    const data = { kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1', audience: 'customer' };
+    const button = pressTheRow(renderRow(row(data)));
+    expect(button.props['accessibilityRole']).toBe('button');
+    expect(mocks.safeNavigate).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'o1' });
+    expect(mocks.safeNavigate).not.toHaveBeenCalledWith('ServiceJobs', expect.anything());
   });
 });
 

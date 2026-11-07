@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { DataUnavailable } from '@/components/dashboard/DataUnavailable';
@@ -8,12 +9,16 @@ import { Modal } from '@/components/Modal';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { ReviewerAccess } from '@/components/verification/ReviewerAccess';
 import { CatalogueApproverAccess } from '@/components/verification/CatalogueApproverAccess';
-import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/CustomerIdOnFile';
-import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
+import { CustomerIdRetired } from '@/components/verification/CustomerIdRetired';
+import { approveDoc, rejectDoc, errorCode, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { HELD_FOR_ORDERING_DAY, heldForOrderingDayLine, REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
 import { label } from '@/lib/labels';
+import { gyDate, gyDateTime, gyTodayYmd } from '@/lib/dates';
+
+/** [STORE-VAT] The server's code-level document type for a store's GRA VAT certificate. */
+const VAT_CERTIFICATE_DOC_TYPE = 'vat_registration_certificate';
 
 const EXPIRING_DOC_TYPES = [
   'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -23,10 +28,8 @@ const EXPIRING_DOC_TYPES = [
   'drivers_licence',
   // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate. [owner 16 Oct]
   // The restaurant licence, sanitary certificate and trade licence ask for their YEAR (reviewerTypes).
-  'liquor_licence', 'sanitary_certificate', 'trade_licence',
-  // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
-  // validity like a licence, so the console must ask for its date too.
-  'self_declaration_unregistered',
+  // [ROLE-DOCS · owner 21 Oct 2026] no liquor licence: alcohol is banned outright and no gate names it.
+  'sanitary_certificate', 'trade_licence',
   // [TRADES · 13 Oct 2026; R15] the service-trade licences and certificates. The ones checked again
   // every January ask for the certificate's YEAR instead of a date (reviewerTypes 'certificateYear').
   'pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration',
@@ -54,6 +57,7 @@ export default function VerificationPage() {
   const [role, setRole] = useState('');
   const [type, setType] = useState('');
   const [age, setAge] = useState('');
+  const [heldOnly, setHeldOnly] = useState(false);
   const [now, setNow] = useState(Date.now);
   const [applicant, setApplicant] = useState<Applicant | null>(null);
   const [selected, setSelected] = useState<ReviewDocument | null>(null);
@@ -63,6 +67,7 @@ export default function VerificationPage() {
   const [issuedOn, setIssuedOn] = useState('');
   const [certificateYear, setCertificateYear] = useState('');
   const [registrationKind, setRegistrationKind] = useState<'' | 'BUSINESS_NAME' | 'COMPANY'>('');
+  const [ownNameConfirmed, setOwnNameConfirmed] = useState(false);
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
   const [decision, setDecision] = useState<'approve' | 'reject' | null>(null);
   const [reason, setReason] = useState('');
@@ -107,12 +112,21 @@ export default function VerificationPage() {
     const q = search.trim().toLowerCase();
     return (!q || `${a.name} ${a.phone}`.toLowerCase().includes(q)) &&
       (!age || (a.oldest > 0 && now - a.oldest >= Number(age) * 3_600_000)) &&
-      a.documents.some((d) => (!role || d.role === role) && (!type || d.docType === type));
+      a.documents.some((d) => (!role || d.role === role) && (!type || d.docType === type)) &&
+      (!heldOnly || a.documents.some((d) => d.approvalHeldAt));
   });
+  // [ADMIN-AUDIT S2-2] The server's answer to each decision made on this page, by document id. Until the
+  // re-reads land, the queue still lists a decided document as waiting: its chip shows the answer instead,
+  // and it is never offered as the next document again (a second-review answer stays PENDING on the server).
+  const answers = useRef(new Map<string, string>());
   const documents = applicant ? [...new Map([
     ...applicant.documents, ...(history.data ?? []).filter((d) => applicantId(d) === applicant.id),
     ...(queue.data ?? []).filter((d) => applicantId(d) === applicant.id),
-  ].map((d) => [d.id, d])).values()] : [];
+  ].map((d) => [d.id, d])).values()].map((d) => {
+    const answer = answers.current.get(d.id);
+    const answered: ReviewDocument['status'] | null = answer === 'APPROVED' ? 'APPROVED' : answer === 'REJECTED' ? 'REJECTED' : null;
+    return d.status === 'PENDING' && answered ? { ...d, status: answered } : d;
+  }) : [];
   useEffect(() => {
     const list = documentList.current;
     if (!list) return;
@@ -129,12 +143,17 @@ export default function VerificationPage() {
     documentList.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
   };
   const selectDocument = (doc: ReviewDocument) => {
-    setSelected(doc); setViewed(false); setExpiresAt(''); setDocumentNumber(''); setIssuedOn(''); setCertificateYear(''); setRegistrationKind(''); setInsurance(EMPTY_INSURANCE);
+    setSelected(doc); setViewed(false); setExpiresAt(''); setDocumentNumber(''); setIssuedOn(''); setCertificateYear(''); setRegistrationKind(''); setOwnNameConfirmed(false); setInsurance(EMPTY_INSURANCE);
     setMutationError(null); setDecision(null); setReason(''); setReasonCode('');
   };
   const openApplicant = (next: Applicant | null) => {
     setApplicant(next);
-    if (next) selectDocument(next.documents[0]!); else setSelected(null);
+    // [ADMIN-AUDIT S2-2 · REVIEW-F #2152 S4-3] Under a role or type filter the applicant opens on their first
+    // MATCHING document, and never on a VAT certificate when another can be decided here (Store VAT decides it).
+    const matches = (d: ReviewDocument) => (!role || d.role === role) && (!type || d.docType === type);
+    const first = next && (next.documents.find((d) => matches(d) && d.docType !== VAT_CERTIFICATE_DOC_TYPE)
+      ?? next.documents.find(matches) ?? next.documents[0]);
+    if (first) selectDocument(first); else setSelected(null);
   };
   // [MC-PR1] /verification?applicant=<userId>: "Open in Review Center" on a
   // refusal (a store whose documents are not all approved) lands on THAT
@@ -170,6 +189,8 @@ export default function VerificationPage() {
   const needsIssuedOn = selected?.reviewerTypes?.includes('issuedOn') ?? false;
   // [R16] A business registration: the reviewer says what it is; only a yearly business NAME needs its year.
   const needsRegistrationKind = selected?.reviewerTypes?.includes('registrationKind') ?? false;
+  // [ROLE-DOCS · owner 21 Oct 2026] an own-name declaration: the reviewer's own check of the name against the owner's ID
+  const needsOwnName = selected?.reviewerTypes?.includes('ownNameConfirmed') ?? false;
   // [R15] A licence or food certificate checked every January: the year printed on it, never a date.
   const needsCertificateYear = (selected?.reviewerTypes?.includes('certificateYear') ?? false)
     && (!needsRegistrationKind || registrationKind === 'BUSINESS_NAME');
@@ -178,7 +199,8 @@ export default function VerificationPage() {
   const typedReady = (!needsNumber || documentNumber.replace(/[^a-z0-9]/gi, '').length >= 4)
     && (!needsIssuedOn || (!!issuedOn && Number.isFinite(Date.parse(issuedOn)) && Date.parse(issuedOn) <= now))
     && (!needsCertificateYear || certificateYearOk)
-    && (!needsRegistrationKind || registrationKind !== '');
+    && (!needsRegistrationKind || registrationKind !== '')
+    && (!needsOwnName || ownNameConfirmed);
   const approveBlocked = !viewed || !expiryOk || !typedReady || (isInsurance && !insuranceReady);
   const currentIndex = filtered.findIndex((a) => a.id === applicant?.id);
   const move = (offset: number) => {
@@ -195,9 +217,14 @@ export default function VerificationPage() {
         ...(needsIssuedOn ? { issuedOn: new Date(issuedOn).toISOString() } : {}),
         ...(needsRegistrationKind && registrationKind ? { registrationKind } : {}),
         ...(needsCertificateYear ? { certificateYear: Number(certificateYear) } : {}),
+        ...(needsOwnName ? { ownNameConfirmed } : {}),
       }, note) : rejectDoc(doc.id, note, code as RejectionReasonCode);
     },
-    onError: (error) => setMutationError(error),
+    onError: (error) => {
+      setMutationError(error);
+      // [BUG-HUNT F23] A held paper now carries its marker: the queue shows it without a reload.
+      if (errorCode(error) === 'PARTNER_APPROVAL_HELD') void client.invalidateQueries({ queryKey: ['verification'] });
+    },
     onSuccess: (result, variables) => {
       const outcome = result?.data?.status;
       setNotice(outcome === 'PENDING'
@@ -206,11 +233,20 @@ export default function VerificationPage() {
         : outcome === 'REJECTED' ? `Rejected ${docLabel(variables.doc.docType)} for ${applicant?.name}.`
         : 'Decision received. Refreshing the server record; no final status was returned.');
       const nextApplicant = filtered[currentIndex + 1] ?? null;
+      answers.current.set(variables.doc.id, typeof outcome === 'string' ? outcome : '');
+      // [ADMIN-AUDIT S2-2] Stay with this applicant while they have documents waiting (a rider sends
+      // three, a taxi driver seven): their next waiting document opens, in the order the list shows.
+      // A VAT certificate is decided in Store VAT, never here: it is not a next document to stop on.
+      // A role or document-type filter is a sweep of that kind across applicants: only matching documents are next.
+      const stillWaiting = documents.filter((d) => d.status === 'PENDING' && !answers.current.has(d.id) && d.docType !== VAT_CERTIFICATE_DOC_TYPE
+        && (!role || d.role === role) && (!type || d.docType === type));
+      const from = documents.findIndex((d) => d.id === variables.doc.id);
+      const nextDocument = stillWaiting.find((d) => documents.indexOf(d) > from) ?? stillWaiting[0] ?? null;
       setDecision(null);
       // No optimistic decision or removal: the decision shows only from the server's answer (above).
-      // [PERF row 562 · COORD 00:41Z] The next applicant opens AT that answer; the reads that follow
-      // run on their own. They used to hold the whole workspace for four more round trips.
-      openApplicant(nextApplicant);
+      // [PERF row 562 · COORD 00:41Z] The next document or applicant opens AT that answer; the reads
+      // that follow run on their own. They used to hold the whole workspace for four more round trips.
+      if (nextDocument) selectDocument(nextDocument); else openApplicant(nextApplicant);
       void Promise.all([
         client.invalidateQueries({ queryKey: ['verification'] }),
         client.invalidateQueries({ queryKey: ['verification-history'] }),
@@ -221,8 +257,11 @@ export default function VerificationPage() {
     onSettled: () => { inFlight.current = false; },
   });
   const busy = mutation.isPending;
+  // [STORE-VAT · owner O-5] A store's GRA VAT certificate is decided in Store VAT, where the reviewer types the VAT number,
+  // the registered name and the date it shows; the server refuses it at this door (DECIDE_IN_STORE_VAT).
+  const vatCertificate = selected?.docType === VAT_CERTIFICATE_DOC_TYPE;
   const openDecision = (action: 'approve' | 'reject') => {
-    if (!selected || selected.status !== 'PENDING' || busy || (action === 'approve' && approveBlocked)) return;
+    if (!selected || selected.status !== 'PENDING' || busy || vatCertificate || (action === 'approve' && approveBlocked)) return;
     setReason(''); setReasonCode(''); setMutationError(null); setDecision(action);
   };
   useEffect(() => {
@@ -244,31 +283,36 @@ export default function VerificationPage() {
   const vehicle = profile.data?.data?.driver ?? selected?.user?.driver;
   const rider = profile.data?.data?.rider;
   const businesses: { id?: string; name: string }[] = profile.data?.data?.vendorOwner?.vendors ?? [];
-  const clearFilters = () => { setSearch(''); setRole(''); setType(''); setAge(''); };
-  return <div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
+  const clearFilters = () => { setSearch(''); setRole(''); setType(''); setAge(''); setHeldOnly(false); };
+  return <div className="mc-page"><div className={`review-center${applicant ? ' rc-is-review' : ''}`}>
     <div inert={decision ? true : undefined}>
-      <header className="rc-page-heading"><div><h1>Review Center</h1><p>Review the evidence. Record the decision. Keep applicants moving.</p></div><span className="rc-muted">Oldest submissions first</span></header>
+      <header className="rc-page-heading"><p>Review the evidence and record the decision. Oldest submissions first.</p></header>
       {!applicant && <ReviewerAccess />}
       {!applicant && <CatalogueApproverAccess />}
       {notice && <p role="status" className="rc-notice">{notice}</p>}
       <div className="rc-queue-controls">
-        <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{s}</button>)}</div>
+        <div className="rc-tabs" aria-label="Document status">{REVIEW_STATUSES.map((s) => <button key={s} disabled={busy} aria-pressed={s === status} onClick={() => { setStatus(s); openApplicant(null); }}>{label('VerificationDocumentStatus', s)}</button>)}</div>
         <div className="rc-tabs" aria-label="Review lane">{LANES.map((l) => <button key={l.value} disabled={busy} aria-pressed={l.value === lane} onClick={() => { setLane(l.value); openApplicant(null); clearFilters(); }}>
           {l.label}<span aria-hidden="true"> {laneCounts ? (l.value === 'all' ? laneCounts.operator + laneCounts.customer : laneCounts[l.value]) : '—'}</span>
         </button>)}</div>
         {counts.isError && <p className="rc-muted">Lane counts unavailable. <button onClick={() => void counts.refetch()}>Retry counts</button></p>}
-        {lane !== 'operator' && <p className="rc-muted">Customer IDs are shown deliberately in this lane. Every document view is audit-logged.</p>}
+        {/* [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] Swift keeps no customer IDs (a held one stays until its hold ends): this lane holds service providers' documents. */}
+        {lane !== 'operator' && <p className="rc-muted">This lane holds service providers&apos; documents, filed with their customer account. Swift keeps no customer IDs, except one a legal or safety hold keeps until the hold ends. Every document view is audit-logged.</p>}
       </div>
       {!applicant ? <>
         <button className="rc-filter-toggle" aria-expanded={filtersOpen} aria-controls="review-filters" onClick={() => setFiltersOpen(!filtersOpen)}>Filters{search || role || type || age ? " · active" : ""}</button>
         <div id="review-filters" className={`rc-filters${filtersOpen ? " rc-filters-open" : ""}`}>
-          <label>Search applicants<input aria-label="Search applicants" type="search" placeholder="Name or phone" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
+          <label>Search applicants<input aria-label="Search applicants" type="search" placeholder="Name or last 4 digits of the phone" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
           <label>Applicant role<select aria-label="Applicant role" value={role} onChange={(e) => setRole(e.target.value)}><option value="">All roles</option>{[...new Set(['CUSTOMER', ...(queue.data ?? []).map((d) => d.role)])].sort().map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}</select></label>
           <label>Document type<select aria-label="Document type" value={type} onChange={(e) => setType(e.target.value)}><option value="">All documents</option>{[...new Set((queue.data ?? []).map((d) => d.docType))].sort().map((t) => <option key={t} value={t}>{docLabel(t)}</option>)}</select></label>
           <label>Waiting time<select aria-label="Waiting time" value={age} onChange={(e) => setAge(e.target.value)}><option value="">Any age</option><option value="24">Over 24 hours</option><option value="72">Over 3 days</option><option value="168">Over 7 days</option></select></label>
+          <label><input type="checkbox" checked={heldOnly} onChange={(e) => setHeldOnly(e.target.checked)} /> {HELD_FOR_ORDERING_DAY}</label>
           <button onClick={clearFilters}>Clear filters</button>
         </div>
-        {queue.isLoading ? <div className="rc-skeleton" aria-label="Loading verification queue">Loading the complete queue…</div> : queue.isError ? <DataUnavailable what="the verification queue" notAnAllClear="This is not an empty queue — we could not read it." onRetry={() => void queue.refetch()} /> : <section className="rc-queue" aria-label="Applicants">
+        {/* [DOC-SECURITY G3] The queue is a document reviewer's read: a refusal says so, it is not a failed load. */}
+        {queue.isLoading ? <div className="rc-skeleton" aria-label="Loading verification queue">Loading the complete queue…</div> : queue.isError ? (errorCode(queue.error) === 'DOCUMENT_REVIEWER_REQUIRED'
+          ? <p role="status" aria-label="Document-reviewer permission needed" className="rc-notice">You need the document-reviewer permission to see the documents waiting for review. A super-admin grants it under Document reviewers at the top of the Review Center.</p>
+          : <DataUnavailable what="the verification queue" notAnAllClear="This is not an empty queue — we could not read it." onRetry={() => void queue.refetch()} />) : <section className="rc-queue" aria-label="Applicants">
           {newDocuments > 0 && <p className="rc-new-banner" role="status">{newDocuments} new {newDocuments === 1 ? 'document' : 'documents'} since this list loaded. <button onClick={() => void queue.refetch()} disabled={queue.isFetching}>Show {newDocuments === 1 ? 'it' : 'them'}</button></p>}
           <div className="rc-queue-summary"><strong>{filtered.length} applicants</strong><span>{queue.data?.length ?? 0} documents in this lane</span><button onClick={() => void queue.refetch()} disabled={queue.isFetching}>Refresh queue</button></div>
           {!filtered.length ? <p className="rc-empty"><span>{groups.length ? 'No applicants match these filters.' : 'No documents'}</span> {groups.length ? 'Clear a filter to see more applicants.' : 'This lane has no documents with the selected status.'}</p> :
@@ -276,6 +320,7 @@ export default function VerificationPage() {
               <td><strong>{a.name}</strong><small>{maskedPhone(a.phone)}</small></td>
               <td><span>{[...new Set(a.documents.map((d) => roleLabel(d.role)))].join(', ')}</span><small>{a.documents.length} {a.documents.length === 1 ? 'document' : 'documents'} · {a.documents.map((d) => docLabel(d.docType)).join(', ')}</small>
                 {/* [MC-AD1] a re-submission or a renewal is marked; a first upload is not */}
+                {a.documents.some((d) => d.approvalHeldAt) && <span className="rc-chip rc-chip-renewal">{HELD_FOR_ORDERING_DAY}</span>}
                 {a.documents.filter((d) => d.previousDecision).map((d) => <span key={d.id} className={`rc-chip rc-chip-${d.previousDecision?.kind === 'RENEWAL' ? 'renewal' : 'resubmitted'}`}>{resubmissionLabel(d)}{d.previousDecision?.kind === 'RESUBMITTED_AFTER_REJECTION' && `: ${d.previousDecision.reviewNote || 'No reason recorded'}`}</span>)}</td>
               <td><time dateTime={a.oldest ? new Date(a.oldest).toISOString() : undefined}>{waitingSince(a.oldest, now)}</time></td>
               <td><button className="rc-primary" onClick={() => openApplicant(a)}>Review</button></td>
@@ -299,6 +344,7 @@ export default function VerificationPage() {
           </nav>
           <div className="rc-review-body">
             <div className="rc-document-heading"><h3>{docLabel(selected.docType)}</h3><Chip status={selected.status} /></div>
+            {heldForOrderingDayLine(selected) && <aside role="note" aria-label={HELD_FOR_ORDERING_DAY} className="rc-previous"><strong>{HELD_FOR_ORDERING_DAY}</strong><span>{heldForOrderingDayLine(selected)}</span></aside>}
             {selected.previousDecision && <aside role="note" aria-label="Earlier decision" className="rc-previous">
               <strong>{resubmissionLabel(selected)}</strong>
               <span>{previousDecisionLine(selected.previousDecision)}</span>
@@ -307,22 +353,14 @@ export default function VerificationPage() {
             {reviewerHint(selected.docType) ? <p className="rc-reviewer-hint">{reviewerHint(selected.docType)}</p> : null}
             {reviewNote(selected.docType, selected.role) && <p className="rc-muted rc-review-note">{reviewNote(selected.docType, selected.role)}</p>}
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
-            <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
-            <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc, accountTrustLevel) => {
-              setNotice(withdrawNotice(applicant.name, accountTrustLevel));
-              await Promise.all([
-                client.invalidateQueries({ queryKey: ['verification'] }),
-                client.invalidateQueries({ queryKey: ['verification-history'] }),
-                client.invalidateQueries({ queryKey: ['verification-counts'] }),
-                client.invalidateQueries({ queryKey: ['document-custody', doc.id] }),
-              ]);
-              openApplicant(null);
-            }} />
-            {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn || needsCertificateYear || needsRegistrationKind) && <div className="rc-fields">
+            <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {gyDate(selected.expiresAt)}</span>}</div>
+            <CustomerIdRetired key={`cid-${selected.id}`} doc={selected} />
+            {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn || needsCertificateYear || needsRegistrationKind || needsOwnName) && <div className="rc-fields">
               {needsRegistrationKind && <label>What this certificate is<select aria-label="What this certificate is" value={registrationKind} onChange={(e) => setRegistrationKind(e.target.value as '' | 'BUSINESS_NAME' | 'COMPANY')} disabled={busy}><option value="">Choose…</option><option value="BUSINESS_NAME">Business name (sole trader or partnership): renewed every year</option><option value="COMPANY">Company: certificate of incorporation, never expires</option></select><small>{registrationKind === 'BUSINESS_NAME' ? 'Type the year it is registered for. The store goes offline on 16 January if it is not renewed.' : 'A company’s incorporation certificate never expires.'}</small></label>}
+              {needsOwnName && <label className="rc-check"><input type="checkbox" aria-label="Own name checked against the ID" checked={ownNameConfirmed} onChange={(e) => setOwnNameConfirmed(e.target.checked)} disabled={busy} />The store name in the declaration is the owner’s true surname, with nothing added except their first names or initials, as printed on their ID. If not, reject it: the store must register its business name.</label>}
               {needsCertificateYear && <label>Year printed on the certificate<input inputMode="numeric" aria-label="Year printed on the certificate" autoComplete="off" maxLength={4} placeholder={String(yearNow)} value={certificateYear} onChange={(e) => setCertificateYear(e.target.value)} disabled={busy} /><small>{certificateYear && !certificateYearOk ? `Only this year’s certificate (or, until 16 January, last year’s) can be approved.` : 'It is checked again every January. The server sets the date.'}</small></label>}
               {needsNumber && <label>Document number<input aria-label="Document number" autoComplete="off" maxLength={40} value={documentNumber} onChange={(e) => setDocumentNumber(e.target.value)} disabled={busy} /><small>Read the number from this document.</small></label>}
-              {needsIssuedOn && <label>Issue date printed on the document<input type="date" aria-label="Issue date printed on the document" max={new Date(now).toISOString().slice(0, 10)} value={issuedOn} onChange={(e) => setIssuedOn(e.target.value)} disabled={busy} /><small>Read its issue date. The server determines when it must be checked again.</small></label>}
+              {needsIssuedOn && <label>Issue date printed on the document<input type="date" aria-label="Issue date printed on the document" max={gyTodayYmd(new Date(now))} value={issuedOn} onChange={(e) => setIssuedOn(e.target.value)} disabled={busy} /><small>Read its issue date. The server determines when it must be checked again.</small></label>}
               {needsExpiry && <label>Expiry printed on the document (required)<input type="date" aria-label="Expiry printed on the document" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} disabled={busy} />{!expiryOk && <small>{expiresAt ? 'That date has already passed; an expired document cannot be approved.' : 'This document type expires — key the date from the document.'}</small>}</label>}
               {isInsurance && <fieldset disabled={busy}><legend>Insurance 5-point check</legend>
                 <label>Insurer<input placeholder="Insurer" value={insurance.insurerName} onChange={(e) => setInsurance({ ...insurance, insurerName: e.target.value })} /></label>
@@ -335,11 +373,12 @@ export default function VerificationPage() {
             </div>}
             <section className="rc-history"><h3>History and audit timeline</h3>
               {custody.isLoading ? <p>Loading history…</p> : custody.isError ? <p className="rc-error">History unavailable. <button onClick={() => void custody.refetch()}>Retry history</button></p> : timeline.length ?
-                <ol>{timeline.map((event, i) => <li key={`${event.at}-${i}`}><time dateTime={event.at}>{new Date(event.at).toLocaleString()}</time><span>{event.label}</span><TimelineActor actor={event.actor} applicant={applicant} /></li>)}</ol> : <p className="rc-muted">No history returned for this document.</p>}
+                <ol>{timeline.map((event, i) => <li key={`${event.at}-${i}`}><time dateTime={event.at}>{gyDateTime(event.at)}</time><span>{event.label}</span><TimelineActor actor={event.actor} applicant={applicant} /></li>)}</ol> : <p className="rc-muted">No history returned for this document.</p>}
             </section>
           </div>
         </div>
-        {selected.status === 'PENDING' && <footer ref={actions} className="rc-actions"><p>{viewed ? 'Evidence opened. Record your decision.' : 'Open the evidence to unlock approval.'}<small>Desktop: A approve · R reject · J/K navigate</small></p><button disabled={busy} onClick={() => openDecision('reject')}>Reject</button><button className="rc-primary" disabled={busy || !!approveBlocked} onClick={() => openDecision('approve')}>Approve</button></footer>}
+        {selected.status === 'PENDING' && vatCertificate && <footer className="rc-actions"><p>A VAT certificate is decided in Store VAT, where you type the VAT number, the registered name and the date it shows.</p><Link href="/store-vat" className="rc-primary">Open Store VAT</Link></footer>}
+        {selected.status === 'PENDING' && !vatCertificate && <footer ref={actions} className="rc-actions"><p>{viewed ? 'Evidence opened. Record your decision.' : 'Open the evidence to unlock approval.'}<small>Desktop: A approve · R reject · J/K navigate</small></p><button disabled={busy} onClick={() => openDecision('reject')}>Reject</button><button className="rc-primary" disabled={busy || !!approveBlocked} onClick={() => openDecision('approve')}>Approve</button></footer>}
       </section>}
     </div>
     {decision && selected && applicant && <Modal title={decision === 'approve' ? 'Approve document' : 'Reject document'} busy={busy} onClose={() => setDecision(null)}>
@@ -358,5 +397,5 @@ export default function VerificationPage() {
         <div className="rc-dialog-actions"><button type="button" disabled={busy} onClick={() => setDecision(null)}>Cancel</button><button className="rc-primary" type="submit" disabled={busy || reasonTooShort(reason) || (decision === 'reject' && !reasonCode) || (decision === 'approve' && !!approveBlocked)}>{busy ? 'Saving decision…' : decision === 'approve' ? 'Confirm approval' : 'Confirm rejection'}</button></div>
       </form>
     </Modal>}
-  </div>;
+  </div></div>;
 }

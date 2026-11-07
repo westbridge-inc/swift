@@ -206,7 +206,8 @@ export async function revokeUserDevice(tx: TxRaw, userId: string, token: string)
   return row?.n ?? 0;
 }
 
-/** Delete every registration of `userId` (the account erasure). Returns how many. */
+/** Delete every registration of `userId` (the account erasure). Returns how many. [row 622] The action refuses
+ *  (throws) unless the account carries the erasure tombstone, which the closure writes first. */
 export async function eraseUserDevices(tx: TxRaw, userId: string): Promise<number> {
   const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_erase_devices(${userId}) AS n`;
   return row?.n ?? 0;

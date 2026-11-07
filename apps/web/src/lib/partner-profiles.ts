@@ -1,0 +1,85 @@
+'use client';
+
+import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import { ApiRequestError, apiFetch, BROWSER_CLIENT, hasProviderProfile } from './auth';
+
+// [PORTAL-404 · FLOW-QA F29] The earner office asked GET /rider/profile, /driver/profile and /provider/subscription
+// for every account, and the server answers 404 for a profile the person does not hold. The browser logs each 404
+// itself, so a new rider saw /driver/profile errors on Earnings, History and Account, and everyone saw one for the
+// provider fee on Weekly fee. GET /auth/me now says which profiles exist; the profile reads ask only for those.
+//
+// Absence is still the server's word, never a guess: a profile is skipped only when /auth/me answered and said "no".
+// When it could not answer (a failure, or an API from before it said) the profile route is asked as before, so a
+// failure still reaches the page as an error and never as "you have no profile".
+
+/** Which of the signed-in person's own partner profiles exist, as GET /auth/me says (`data.profiles`). Null when the
+ *  answer does not carry all three as yes/no (an API from before it said so): the caller then asks the profile route
+ *  itself, as it always did. */
+export type PartnerProfiles = { rider: boolean; driver: boolean; provider: boolean };
+export function readPartnerProfiles(value: unknown): PartnerProfiles | null {
+  const v = value as Partial<Record<keyof PartnerProfiles, unknown>> | null | undefined;
+  if (!v || typeof v.rider !== 'boolean' || typeof v.driver !== 'boolean' || typeof v.provider !== 'boolean') return null;
+  return { rider: v.rider, driver: v.driver, provider: v.provider };
+}
+
+/** Whether /auth/me says this person is a pro, or null when it could not say. A plain read with the session cookie, as
+ *  lib/auth hasProviderProfile is: no refresh, no redirect. */
+export async function providerFromMe(): Promise<boolean | null> {
+  try {
+    const me = await fetch(`${BROWSER_API_ORIGIN}/api/v1/auth/me`, { credentials: 'include', headers: { 'X-Swift-Client': BROWSER_CLIENT } });
+    if (!me.ok) return null;
+    return readPartnerProfiles((await me.json().catch(() => null))?.data?.profiles)?.provider ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether /auth/me names MOVER among this account's roles. False when it could not say, so a page keeps its ordinary
+ *  words rather than guess. A plain read, as providerFromMe is. */
+export async function holdsMoverRole(): Promise<boolean> {
+  try {
+    const me = await fetch(`${BROWSER_API_ORIGIN}/api/v1/auth/me`, { credentials: 'include', headers: { 'X-Swift-Client': BROWSER_CLIENT } });
+    if (!me.ok) return false;
+    const roles: unknown = (await me.json().catch(() => null))?.data?.user?.roles;
+    return Array.isArray(roles) && roles.includes('MOVER');
+  } catch {
+    return false;
+  }
+}
+
+/** Is this person a pro? /auth/me's answer (a 200, never a 404 the browser logs for someone who is not a pro); only
+ *  when it could not say is the provider route asked (lib/auth hasProviderProfile, as before). Used by the pages that
+ *  load it on demand (the header's account link, the signed-in card, the store's weekly-fee link, the page MMG returns
+ *  to). lib/auth itself is
+ *  left as it was: every page carries it, and the home page sits at its size ceiling. */
+export async function isProvider(): Promise<boolean> {
+  return (await providerFromMe()) ?? hasProviderProfile();
+}
+
+const SESSION_ANSWERS = new Set([401, 409, 410, 429]);
+let inFlight: Promise<PartnerProfiles | null> | null = null;
+
+/** The person's partner profiles from /auth/me, or null when it did not say. Reads at the same moment share one
+ *  request (a page asks for the rider and the driver profile together); nothing is kept after it answers, so a
+ *  profile added a minute ago is never hidden by an old answer. */
+export function partnerProfiles(): Promise<PartnerProfiles | null> {
+  inFlight ??= apiFetch('/api/v1/auth/me')
+    .then((body) => readPartnerProfiles((body as { data?: { profiles?: unknown } } | null)?.data?.profiles))
+    // [REVIEW-G4 #2315 S4-1] An answer about the session itself (signed out, another account, a closed demo, too many
+    // checks) is the page's answer too: passed on, so the profile route is not asked again (a second refresh and a
+    // second redirect). Only "could not say" (a network failure, a server error, an older API) asks the route.
+    .catch((error: unknown) => {
+      if (error instanceof ApiRequestError && SESSION_ANSWERS.has(error.status)) throw error;
+      return null;
+    })
+    .finally(() => { inFlight = null; });
+  return inFlight;
+}
+
+/** `read()` unless /auth/me said this person holds no such profile: then null, the same "no profile" the route's
+ *  404 or 403 meant, without asking. */
+export async function unlessNotHeld<T>(kind: keyof PartnerProfiles, read: () => Promise<T | null>): Promise<T | null> {
+  const known = await partnerProfiles();
+  if (known && !known[kind]) return null;
+  return read();
+}

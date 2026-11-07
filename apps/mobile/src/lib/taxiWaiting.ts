@@ -3,8 +3,8 @@ import { money } from './money';
 // ---------------------------------------------------------------------------
 // [TAXI waiting charge · owner ruling 1 Oct 2026] The phone's half of the
 // waiting charge (CONTRACT.md Rev 2 §8): a charge per FULL block of waiting,
-// counted by the SERVER from the driver's arrival — at the pickup and at each
-// stop — and paid in cash on top of the route fare.
+// counted by the SERVER from the car's arrival — at the pickup and at each stop
+// — up to the server's cap, and paid in cash on top of the route fare.
 //
 // The rule for this module is the contract's: show what the server sends and
 // never make up a value. With no `waiting` object there is nothing to show (the
@@ -54,12 +54,25 @@ function termsOf(raw: unknown): WaitingTerms | null {
  * The line shown beside the fare before booking (§8.2): the server's own
  * sentence, from the estimate (or the capability read) it rode on. A server
  * that sends terms without the sentence gets the same sentence built from its
- * numbers; no terms — or broken ones — show nothing.
+ * numbers, less the cap, which is the server's to name; no terms — or broken
+ * ones — show nothing.
  */
 export function waitingDisclosure(source: unknown): string | null {
   const terms = termsOf((source as { waiting?: unknown } | null | undefined)?.waiting);
   if (!terms) return null;
   return terms.text ?? `Waiting: ${money(terms.chargePerBlock)} per ${terms.blockMinutes} minutes after your driver arrives`;
+}
+
+/**
+ * [TAXI waiting charge · quote proof] The terms to echo with the booking: the
+ * numbers behind the line shown beside the fare (waitingDisclosure), so the
+ * server freezes the terms the passenger saw (409 WAITING_TERMS_CHANGED when
+ * they moved). Null whenever no line is shown: terms never seen are never echoed.
+ */
+export function waitingEcho(source: unknown): { chargePerBlock: number; blockMinutes: number } | null {
+  const terms = termsOf((source as { waiting?: unknown } | null | undefined)?.waiting);
+  if (!terms || !Number.isInteger(terms.chargePerBlock) || !Number.isInteger(terms.blockMinutes)) return null;
+  return { chargePerBlock: terms.chargePerBlock, blockMinutes: terms.blockMinutes };
 }
 
 /** The live wait on a ride (§8.3), present from the driver's arrival on. */

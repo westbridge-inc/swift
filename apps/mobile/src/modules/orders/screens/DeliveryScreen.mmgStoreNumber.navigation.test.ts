@@ -184,7 +184,7 @@ describe('[PAYMENT-SIMPLIFY] the accepted MMG order shows the store number', () 
   });
 
   it('an order that cancelled because it was not marked paid in time says why', async () => {
-    const notice = "Number Diner didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Number Diner refunds you directly.";
+    const notice = 'No MMG payment was confirmed within 30 minutes of Number Diner accepting, so this order was cancelled automatically. If you did send the MMG payment, Number Diner refunds you directly. If it does not, contact Swift support.';
     await show({ ...ORDER, status: 'CANCELLED', canCancel: false, mmgPayment: null, cancellationNotice: notice });
     expect(host.textContent).toContain(notice);
   });

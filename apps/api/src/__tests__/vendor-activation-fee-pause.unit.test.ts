@@ -12,7 +12,7 @@ import { subscriptionOperability } from '../modules/subscription/operate-gate';
 
 const NOW = new Date('2026-10-14T12:00:00Z');
 const LAPSED = new Date('2026-10-10T12:00:00Z');
-const goLive = { checklist: { complete: true }, disclosure: { engaged: false, complete: true, missing: [] }, publishedPhone: true } as unknown as Parameters<typeof vendorActivationNext>[1];
+const goLive = { checklist: { complete: true }, disclosure: { engaged: false, complete: true, missing: [] }, publishedPhone: true, foodHandlers: { required: false, attested: false } } as unknown as Parameters<typeof vendorActivationNext>[1];
 
 function pastDueLapsed(id = 'sub-held') {
   return {

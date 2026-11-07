@@ -102,7 +102,8 @@ const read = (kind: 'driver' | 'rider', userId: string) => kind === 'driver'
 describe.each(['driver', 'rider'] as const)('%s vehicle identity changes require review', (kind) => {
   it.each([
     ['vehicleMake', 'Honda'], ['vehicleModel', 'Civic'], ['vehicleYear', 2020],
-    ['vehicleColor', 'Blue'], ['licensePlate', 'HC000001'],
+    // [CARS-PLATES · REVIEW-G22 S2-1] a delivery car never takes a new H (hire) plate of its own: its new plate is private.
+    ['vehicleColor', 'Blue'], ['licensePlate', kind === 'rider' ? 'PC000001' : 'HC000001'],
   ])('%s: requires step-up, retires supply and closes the old approval link', async (field, value) => {
     const mover = await fixture(kind);
     const body = { [field as string]: value };
@@ -261,6 +262,8 @@ describe('a vehicle paper under a second review survives a vehicle edit', () => 
   // recusal check, after A took its locks and read the paper), and A goes on once the edit has finished or is
   // waiting on a row lock. With the locks in place the edit waits for A, then sees SECOND_REVIEW and keeps the paper.
   const raceEscalationWithEdit = async (door: keyof typeof edits, mover: { token: string }, paper: string, a: string) => {
+    // [SEC-PII] The escalation now takes the person's lock first (it places the investigation hold, like every
+    // purge and vehicle edit, person first): the edit waits there, so a wait on the person's row counts too.
     let edit: ReturnType<typeof edits[typeof door]> | null = null;
     const original = recusal.assertNotRecused;
     const spy = vi.spyOn(recusal, 'assertNotRecused').mockImplementation(async (db, reviewerId, subjectUserId) => {
@@ -272,7 +275,7 @@ describe('a vehicle paper under a second review survives a vehicle edit', () => 
           const [row] = await app.prisma.$queryRaw<Array<{ waiting: number }>>`
             SELECT count(*)::int AS waiting FROM pg_stat_activity
             WHERE wait_event_type = 'Lock' AND query LIKE '%FOR UPDATE%'
-              AND (query LIKE '%review_case%' OR query LIKE '%verification_documents%')`;
+              AND (query LIKE '%review_case%' OR query LIKE '%verification_documents%' OR query LIKE '%"users"%')`;
           if (row!.waiting > 0) break;
           await new Promise((resolve) => setTimeout(resolve, 25));
         }

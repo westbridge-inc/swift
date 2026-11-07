@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type HTTPMethods, type InjectOptions } f
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { publicRoutes } from '../modules/public/public.routes';
+import { registerErrorHandler } from '../middleware/error-handler';
 
 let app: FastifyInstance;
 let routes: Array<{ method: HTTPMethods; url: string }>;
@@ -15,6 +16,9 @@ beforeEach(async () => {
   app.decorate('authenticate', authenticate);
   app.decorate('authenticateOptional', authenticate);
   app.decorate('prisma', { adPlacement: { findMany } } as unknown as FastifyInstance['prisma']);
+  // The switch refuses by THROWING (so nothing after its hook can run); the
+  // app's error handler writes the refusal, as it does in buildApp.
+  registerErrorHandler(app);
   app.addHook('onRoute', (route) => {
     if (route.url.startsWith('/api/v1/ads')) {
       for (const method of [route.method].flat()) {

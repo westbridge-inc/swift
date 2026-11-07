@@ -1,4 +1,5 @@
 /** @jsxImportSource react */
+import type { StoreFeeScope } from '../../../components/onboarding/StoreWeeklyFeeCard';
 import { guardVendorOperation, useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useState, useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
@@ -22,15 +23,20 @@ import {
   TonePill,
 } from '../../../kit';
 import { BrandSwitch } from '../../../kit/controls';
-import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../shared';
+import { DAY_LABELS, GUTTER, InlineInput, prettyVendorType } from '../shared';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
 import { MmgNumberCard } from '../../../components/MmgNumberCard';
 import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { RefundRuleCard } from '../../../components/RefundRuleCard';
+import { BookingCapacityCard, storedBookingCapacity } from '../../../components/BookingCapacityCard';
+import { KitchenCapacityCard } from '../../../components/KitchenCapacityCard';
+import { storedKitchenCapacity } from '../../../lib/kitchenCapacity';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
+import { StoreVatSection } from '../StoreVatSection';
+import { VatDocumentRow } from '../VatDocumentRow';
 import { StorePhotosCard } from '../../../components/StorePhotosCard';
 import { storePhotoUrl } from '../../../lib/images';
 import type { StorePin } from '../../../lib/storePin';
@@ -58,6 +64,8 @@ import { useStepUp } from '../../../hooks/useStepUp';
 import { isStepUpDismissed, serverMessage } from '../../../lib/stepUp';
 import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
+import { feeStatusOf } from '../../../lib/weeklyFee';
+import { feeStatusPill } from '../../../lib/feeStatusPill';
 import { mediaUrl } from '../../../lib/images';
 import { safeVendorRole, TabHeader, VendorBillingNotice } from '../shared';
 import { useAuthStore } from '../../../stores/authStore';
@@ -162,6 +170,34 @@ export function VendorAccountScreen() {
     ),
   });
 
+  // [BOOK-S5a · owner C1] A Services business's "how many bookings at once"; the server's refusal in its words.
+  const [capacityError, setCapacityError] = useState<string | null>(null);
+  const saveCapacity = useVendorMutation({
+    mutationFn: (bookingCapacity: number) => vendorApi.updateProfile({ bookingCapacity }),
+    onMutate: () => setCapacityError(null),
+    onSuccess: () => {
+      setCapacityError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setCapacityError(
+      e?.response?.data?.error?.message ?? 'That could not be saved. Check your connection and try again.',
+    ),
+  });
+  const bookingCapacity = store?.vendorType === 'SERVICE' ? storedBookingCapacity(store) : null;
+  // [RIDER-SAFE 4] How many orders the kitchen holds at once (stores that cook or pack; no limit by default).
+  const [kitchenError, setKitchenError] = useState<string | null>(null);
+  const saveKitchen = useVendorMutation({
+    mutationFn: (maxConcurrentOrders: number | null) => vendorApi.updateProfile({ maxConcurrentOrders }),
+    onMutate: () => setKitchenError(null),
+    onSuccess: () => {
+      setKitchenError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setKitchenError(
+      e?.response?.data?.error?.message ?? 'That could not be saved. Check your connection and try again.',
+    ),
+  });
+
   const [days, setDays] = useState<DayHours[]>([]);
   useEffect(() => {
     // [WR-007] Seed the editor ONLY from a successful read. A failed fetch
@@ -214,7 +250,12 @@ export function VendorAccountScreen() {
         {isManager && store && !samplePreview ? <StorePhotosCard store={store} /> : null}
 
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
-          <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
+          {/* [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] No "Seller status" row: the self-declared tier and its limits
+              are removed, so there is no tier to show (the screen stays only for notices sent before). */}
+          {/* [CHAINS PR2] Every branch at a glance, several at once, and (owner) adding one. */}
+          {isManager ? (
+            <SettingsRow icon="git-branch" label="Branches" sub={isOwner ? 'All your branches, and add a branch' : 'Your branches at a glance'} onPress={() => navigation.navigate('VendorBranches')} />
+          ) : null}
           <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData' , { closureRequest: true })} />
           <JobAlertSettingsRow />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
@@ -239,6 +280,7 @@ export function VendorAccountScreen() {
           <MmgNumberCard
             value={store?.mmgNumber}
             pending={store?.mmgNumberPending ? { number: store.mmgNumberPending, applyAt: store.mmgNumberApplyAt ?? null } : null}
+            holdHours={store?.mmgNumberHoldHours ?? null}
             saving={saveMmgNumber.isPending}
             cancelling={cancelPendingMmgNumber.isPending}
             error={mmgNumberError}
@@ -254,6 +296,7 @@ export function VendorAccountScreen() {
             who="store"
             value={store?.mmgPayUrl}
             pending={store?.mmgPayUrlPending ? { url: store.mmgPayUrlPending, applyAt: store.mmgPayUrlApplyAt ?? null } : null}
+            holdHours={store?.mmgPayUrlHoldHours ?? null}
             saving={saveMmgLink.isPending}
             cancelling={cancelPendingMmgLink.isPending}
             error={mmgError}
@@ -281,10 +324,32 @@ export function VendorAccountScreen() {
           />
         ) : null}
 
-        {/* A guest's sample store has no pin to move: the save needs a real account. */}
-        {isManager && !guestSample && store ? <StoreLocationCard store={store} /> : null}
+        {/* [BOOK-S5a] Services only, and only when the server sends the setting (an older server does not). */}
+        {isManager && bookingCapacity != null ? (
+          <BookingCapacityCard
+            value={bookingCapacity}
+            saving={saveCapacity.isPending}
+            error={capacityError}
+            onSave={(n) => saveCapacity.mutate(n)}
+          />
+        ) : null}
 
-        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} /> : null}
+        {isManager && store && !samplePreview && store.vendorType !== 'SERVICE' ? (
+          <KitchenCapacityCard
+            value={storedKitchenCapacity(store)}
+            saving={saveKitchen.isPending}
+            error={kitchenError}
+            onSave={(n) => saveKitchen.mutate(n)}
+          />
+        ) : null}
+
+        {/* A guest's sample store has no pin to move: the save needs a real account. */}
+        {isOwner && !guestSample && store ? <StoreLocationCard store={store} /> : null}
+
+        {isOwner && store?.vendorType ? <VendorDocumentsSection vendorType={store.vendorType} storeName={store?.name} storeFee={store?.id ? { vendorId: store.id, isOwner } : null} /> : null}
+
+        {/* [STORE-VAT · owner O-5] The business's VAT registration is the owner's to give; a sample store has none. */}
+        {isOwner && !samplePreview && store ? <StoreVatSection style={{ marginBottom: space.lg }} /> : null}
 
         {isManager ? <StoreQrCard /> : null}
 
@@ -377,8 +442,8 @@ export function VendorAccountScreen() {
  * [Q8] Where the store is on the map: the pin riders and customers are sent to.
  * There was no way to change it after sign-up, when it had been the phone's
  * position. The same picker as List-your-business moves it, saved through
- * PUT /vendor/profile: manager and up, like the rest of the store's details,
- * and the server holds a moved pin to the same market rule as a new store.
+ * PUT /vendor/profile: owner only, and the server holds a moved pin to the
+ * same market rule as a new store.
  */
 function StoreLocationCard({ store }: { store: any }) {
   const qc = useQueryClient();
@@ -433,33 +498,30 @@ function StoreLocationCard({ store }: { store: any }) {
  * expiry — an approved document re-opens for upload inside its 30-day renewal
  * window, and an expired one explains exactly why commerce stopped.
  */
-function VendorDocumentsSection({ vendorType }: { vendorType: string }) {
+function VendorDocumentsSection({ vendorType, storeName, storeFee }: { vendorType: string; storeName?: string | null; storeFee?: StoreFeeScope | null }) {
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(vendorType);
   return (
     <View style={{ marginBottom: space.lg }}>
-      <DocumentChecklist role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
+      <DocumentChecklist
+        role={vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={storeName}
+        // [VAT-DOCS · owner 30 Oct 2026] the owner's optional "VAT certificate (only if VAT-registered)" row (this section is owner-only)
+        optionalExtra={(withHeading) => <VatDocumentRow withHeading={withHeading} inline={false} />}
+        storeFee={storeFee}
+      />
     </View>
   );
 }
 
 function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string; setBilling: any }) {
   const navigation = useNavigation<any>();
-  const pill = !sub
-    ? { label: 'Inactive', tone: 'brand' as const }
-    : sub.isTrialActive
-      ? { label: 'Free trial', tone: 'brand' as const }
-      : sub.isInGracePeriod
-        ? { label: 'Grace period', tone: 'warning' as const }
-        : sub.status === 'ACTIVE'
-          ? { label: 'Active', tone: 'success' as const }
-          : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
-  const subLine = !sub
+  // [FEE-STATUS · owner 25 Oct] Where the fee stands, in the API's words (feeStatusOf): this row read
+  // "next bill 13 Oct" + "Active" on 25 October. Never the code, never a passed date as a next bill.
+  const feeStatus = sub ? feeStatusOf(sub) : null;
+  const pill = feeStatus ? feeStatusPill(feeStatus.state) : { label: 'Inactive', tone: 'brand' as const };
+  const rate = `${money(sub?.weeklyFeeGyd ?? sub?.customRate ?? sub?.weeklyRate)}/week`;
+  const subLine = !feeStatus
     ? 'Not active yet'
-    : sub.isTrialActive && sub.trialEndDate
-      ? `Trial ends ${fmtDate(sub.trialEndDate)} · then ${money(sub.weeklyRate)}/week`
-      : sub.isInGracePeriod && sub.gracePeriodEnd
-        ? `Weekly fee due by ${fmtDate(sub.gracePeriodEnd)}`
-        : `${money(sub.customRate ?? sub.weeklyRate)}/week${sub.nextBillingDate ? ` · next bill ${fmtDate(sub.nextBillingDate)}` : ''}`;
+    : feeStatus.state === 'TRIAL' ? `${feeStatus.headline} · then ${rate}` : `${rate} · ${feeStatus.headline}`;
   return (
     <>
       <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
@@ -727,6 +789,12 @@ function StaffSection() {
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<'MANAGER' | 'STAFF'>('STAFF');
   const [removing, setRemoving] = useState<any | null>(null);
+  // [CHAINS PR2] One person, several branches in one step (the owner's approved branches; one daily add).
+  // [REVIEW-F #2220 S4-3] Only branches that are open on Swift (ACTIVE): the server refuses the whole add for a
+  // waiting, suspended or closed one.
+  const { store: here, stores: allStores } = useVendorProfile();
+  const otherBranches: any[] = (allStores ?? []).filter((s: any) => s.id !== here?.id && s.status === 'ACTIVE');
+  const [alsoAt, setAlsoAt] = useState<string[]>([]);
 
   const members: any[] = staffQ.data ?? [];
   const errMsg = isStepUpDismissed(addStaff.error)
@@ -736,7 +804,9 @@ function StaffSection() {
   const submit = () => {
     const p = phone.trim();
     if (p.length < 10) return;
-    addStaff.mutate({ phone: p, role }, { onSuccess: () => setPhone('') });
+    const also = alsoAt.filter((id) => otherBranches.some((s) => s.id === id));
+    const vendorIds = here?.id && also.length > 0 ? [here.id, ...also] : undefined;
+    addStaff.mutate({ phone: p, role, ...(vendorIds ? { vendorIds } : {}) }, { onSuccess: () => { setPhone(''); setAlsoAt([]); } });
   };
 
   return (
@@ -795,6 +865,19 @@ function StaffSection() {
           <Chip label="Staff · queue + availability" selected={role === 'STAFF'} onPress={() => setRole('STAFF')} />
           <Chip label="Manager" selected={role === 'MANAGER'} onPress={() => setRole('MANAGER')} />
         </View>
+        {otherBranches.length > 0 ? (
+          <>
+            <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
+              Also add them to these branches:
+            </T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.sm }}>
+              {otherBranches.map((s) => (
+                <Chip key={s.id} label={s.name} selected={alsoAt.includes(s.id)}
+                  onPress={() => setAlsoAt((a) => (a.includes(s.id) ? a.filter((x) => x !== s.id) : [...a, s.id]))} />
+              ))}
+            </View>
+          </>
+        ) : null}
         {errMsg ? (
           <T variant="label" tone="error" style={{ marginTop: space.md }}>
             {errMsg}
@@ -827,7 +910,9 @@ function StaffSection() {
         <PillButton
           label="Remove"
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={removeStaff.isPending}
           onPress={() => {
+            if (removeStaff.isPending) return;
             const id = removing!.id;
             setRemoving(null);
             removeStaff.mutate(id);

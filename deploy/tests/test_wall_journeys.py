@@ -527,8 +527,9 @@ class JourneysOnCopy(unittest.TestCase):
         stores = sql[sql.index('UPDATE vendors'):]
         self.assertIn("AND \"suspensionSource\" = 'BILLING'", stores)
         self.assertIn('"acceptingOrders" = ("acceptingOrders" OR "isVerified")', stores)
-        # A new partner's trial: TRIAL, 14 days (SubscriptionService activation, TRIAL_DAYS).
-        days = re.search(r'export const TRIAL_DAYS = (\d+);', (REPO / 'apps/api/src/modules/subscription/subscription.service.ts').read_text())
+        # A new partner's trial: TRIAL, 14 days (SubscriptionService activation, TRIAL_DAYS; one definition in
+        # subscription/trial-length.ts since DEPT-PRICE). The roster's stores are small, never department-size.
+        days = re.search(r'export const TRIAL_DAYS = (\d+);', (REPO / 'apps/api/src/modules/subscription/trial-length.ts').read_text())
         self.assertEqual(sql.count(f"now() + interval '{days.group(1)} days'"), 3)
         self.assertIn("status = 'TRIAL'", sql)
         # Counts only.
@@ -677,10 +678,14 @@ class JourneysLayerRendered(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr[:600])
             model = json.loads(result.stdout)
         self.assertEqual(model['name'], 'swift-rehearsal')
-        self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True}})
+        # [Row 312] Plus the copy's own internal scanner network: the instance (the API) scans its uploads
+        # with the copy's clamd there; the runner never joins it. Both are internal: no route out.
+        self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True},
+                                             'scanner': {'name': 'swift-rehearsal_scanner', 'ipam': {}, 'internal': True}})
         instance, runner = model['services']['api-journeys'], model['services']['journeys-copy']
+        self.assertEqual(sorted(instance['networks']), ['private', 'scanner'])
+        self.assertEqual(list(runner['networks']), ['private'])
         for service in (instance, runner):
-            self.assertEqual(list(service['networks']), ['private'])
             self.assertFalse(service.get('ports'))
         # Uploads go to a store that dies with the container, never a volume or the live bucket.
         self.assertEqual(instance['tmpfs'], ['/srv/swift/uploads:uid=1000,gid=1000,mode=0700'])

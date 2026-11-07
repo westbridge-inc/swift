@@ -7,6 +7,7 @@ import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, StatTile as KitStatTile, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money, moneyExact } from '../../../lib/money';
+import { useCheckingLatest } from '../../../lib/checkingLatest';
 import { cashSettlementAmount } from '../../../lib/riderFeesOwed';
 import { dateLabel } from '../shared';
 import { useMutation } from '@tanstack/react-query';
@@ -14,13 +15,17 @@ import { API_URL, driverApi, riderApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
 import { weeksCovered } from '../../../lib/billing';
-import { subscriptionWords } from '../../../lib/weeklyFee';
+import { feeStatusOf, type FeeSubscription } from '../../../lib/weeklyFee';
+import { feeStatusPill } from '../../../lib/feeStatusPill';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
   requireAuthSessionSnapshot,
 } from '../../../stores/authStore';
 import {
+  cashInHandThisWeek,
+  otherProfileKind,
+  otherProfileWeek,
   earningLabel,
   earningRows,
   earningsWindowTotal,
@@ -236,23 +241,12 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
   const status = serverText(source['status'])?.toUpperCase();
   const isTrial = source['isTrialActive'] === true;
   const isGrace = source['isInGracePeriod'] === true;
-  const pill = isTrial
-    ? { label: 'Free trial', tone: 'info' as const }
-    : isGrace
-      ? { label: 'Grace period', tone: 'warning' as const }
-      : status === 'ACTIVE'
-        ? { label: 'Active', tone: 'success' as const }
-        : status === 'PAST_DUE'
-          ? { label: 'Past due', tone: 'warning' as const }
-          : status === 'SUSPENDED' || status === 'CHURNED'
-            ? { label: status === 'SUSPENDED' ? 'Suspended' : 'Churned', tone: 'error' as const }
-        : status
-          ? { label: subscriptionWords(status), tone: 'neutral' as const } // [UI-SWEEP U73] the Billing words, never the code
-          : undefined;
+  // [FEE-STATUS · owner 25 Oct] The pill and the line come from where the fee stands (the API's
+  // feeStatus): a card read "Active · next bill 13 Oct" on 25 October. Never the code, never "Active"
+  // or a next bill on a date that has passed. [UI-SWEEP U73] the words, never the code.
+  const feeStatus = status ? feeStatusOf(source as unknown as FeeSubscription) : null;
+  const pill = feeStatus ? feeStatusPill(feeStatus.state) : undefined;
   const rate = serverNumber(source['weeklyFeeGyd'] ?? source['customRate'] ?? source['weeklyRate']);
-  const trialEnd = serverDate(source['trialEndDate']);
-  const graceEnd = serverDate(source['gracePeriodEnd']);
-  const nextBill = serverDate(source['nextBillingDate']);
   const needsAttention = isGrace || status === 'PAST_DUE' || status === 'SUSPENDED' || status === 'CHURNED';
 
   return (
@@ -261,29 +255,14 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
         <T variant="heading">Your weekly fee</T>
         {pill ? <TonePill label={pill.label} tone={pill.tone} /> : null}
       </View>
-      {isTrial && trialEnd ? (
-        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-          Trial ends {dateLabel(trialEnd)}
-        </T>
-      ) : null}
-      {isGrace && graceEnd ? (
-        <T variant="label" tone="muted" style={{ marginTop: space.sm }}>
-          Pay by {dateLabel(graceEnd)} to keep going online
-        </T>
-      ) : null}
-      {rate != null || nextBill ? (
+      {rate != null ? (
         <View style={{ flexDirection: 'row', alignItems: 'baseline', flexWrap: 'wrap', gap: space.xs, marginTop: space.sm }}>
-          {rate != null ? <T variant="numM">{money(rate)}</T> : null}
-          {rate != null ? (
-            <T variant="caption" tone="muted">{isTrial ? '/week after trial' : '/week'}</T>
-          ) : null}
-          {nextBill ? (
-            <T variant="caption" tone="muted">
-              {rate != null ? '· next bill ' : 'Next bill '}{dateLabel(nextBill)}
-            </T>
-          ) : null}
+          <T variant="numM">{money(rate)}</T>
+          <T variant="caption" tone="muted">{isTrial ? '/week after trial' : '/week'}</T>
         </View>
       ) : null}
+      {feeStatus ? <T variant="label" tone="muted" style={{ marginTop: space.sm }} testID="earnings-fee-status">{feeStatus.headline}</T> : null}
+      {feeStatus?.detail ? <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{feeStatus.detail}</T> : null}
       <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
         The flat fee is Swift&apos;s only charge — every fare stays yours.
       </T>
@@ -306,10 +285,10 @@ function EarningsTools({
   statementError: boolean;
 }) {
   const source = serverRecord(sub);
-  // [OWNER RULING 8 Oct, NO "WALLET" · owner #62, NO PAYING AHEAD] Money paid
-  // before its week starts is shown as the next weekly fee being paid, never
-  // "paid ahead" or a count of weeks; the action is "Pay weekly fee". Swift
-  // holds no money for anyone: this is Swift's own fee, paid early.
+  // [OWNER RULING 8 Oct, NO "WALLET" · owner 6 Nov 2026, up to four weeks ahead]
+  // Money paid before its week starts is shown as the next weekly fees being
+  // paid, never "paid ahead"; the action is "Pay weekly fee". Swift holds no
+  // money for anyone: this is Swift's own fee, paid early.
   const paidAhead = serverNumber(source?.['walletBalanceGyd']);
   const showPaidAhead = paidAhead != null && paidAhead > 0;
   const weeks = weeksCovered(paidAhead, serverNumber(source?.['weeklyFeeGyd'] ?? source?.['customRate'] ?? source?.['weeklyRate']));
@@ -322,7 +301,7 @@ function EarningsTools({
             <T variant="numM">{money(paidAhead)}</T>
           </View>
           {weeks >= 1 ? (
-            <T variant="caption" tone="muted">Your next weekly fee is already paid</T>
+            <T variant="caption" tone="muted">{weeks >= 2 ? `Your next ${weeks} weekly fees are already paid` : 'Your next weekly fee is already paid'}</T>
           ) : null}
         </View>
       ) : null}
@@ -400,8 +379,14 @@ export function EarningsScreen({ navigation }: any) {
   const { kind } = mover;
   const summaryQ = useEarningsSummary<unknown>(kind);
   const historyQ = useEarnings<unknown>(kind);
+  // [SPEED 30 Oct] Figures from memory (opened again, or read ahead from Home) say so until Swift answers.
+  const checkingLatest = useCheckingLatest(summaryQ);
+  // [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] An account with a taxi AND a car delivery profile also sees the other
+  // profile's week, read from that profile's own summary (asked for only for such an account). [REVIEW-F delta S3-1]
+  const otherKind = otherProfileKind({ kind, dual: mover.dual, carDeliveryProfile: mover.carDeliveryProfile });
+  const otherSummaryQ = useEarningsSummary<unknown>(otherKind);
   // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
-  const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch()]));
+  const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch(), ...(otherKind ? [otherSummaryQ.refetch()] : [])]));
   const stats = useMoverStats(kind);
   const subQ = useMoverSubscription(kind);
   const ledgerQ = useCashSettlements(kind);
@@ -451,6 +436,9 @@ export function EarningsScreen({ navigation }: any) {
   const allTimeDetail = isDriver
     ? countDetail(allTimeJobs, 'trip', 'trips')
     : countDetail(allTimeJobs, 'job', 'jobs');
+  // [Board 13a "CASH COLLECTED"] The server's figure; undefined (older API) leaves the tile out.
+  const cashThisWeek = cashInHandThisWeek(summaryQ.data);
+  const other = otherKind ? otherProfileWeek(otherKind, otherSummaryQ.data) : undefined;
 
   return (
     <Screen>
@@ -483,6 +471,7 @@ export function EarningsScreen({ navigation }: any) {
             total={earningsWindowTotal(summaryQ.data, 'thisWeek', 'week')}
             facts={weekFacts}
           />
+          {checkingLatest ? <T variant="caption" tone="muted" testID="earnings-checking" style={{ marginTop: space.sm }}>Checking for the latest…</T> : null}
 
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
             <StatTile
@@ -501,7 +490,26 @@ export function EarningsScreen({ navigation }: any) {
               total={earningsWindowTotal(summaryQ.data, 'allTime')}
               sub={allTimeDetail}
             />
+            {cashThisWeek != null ? (
+              <StatTile label="CASH COLLECTED" total={cashThisWeek} sub="This week" />
+            ) : null}
           </View>
+          {/* [REVIEW-F #2117 S3-1] The tile's sub is one line, so what the figure means sits under the row, whole. */}
+          {cashThisWeek != null ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+              {isDriver
+                ? 'Cash collected this week: the fares passengers paid you in cash.'
+                : 'Cash collected this week, after paying stores for the goods.'}
+            </T>
+          ) : null}
+          {other ? (
+            <Card style={{ marginTop: space.md }}>
+              <T variant="micro" tone="muted">{other.title}</T>
+              <T variant="numM" style={{ marginTop: space.xs }}>{money(other.total)}</T>
+              {other.cash ? <T variant="caption" tone="muted">{other.cash}</T> : null}
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{other.note}</T>
+            </Card>
+          ) : null}
 
           {breakdown ? (
             <Card style={{ marginTop: space.md }}>

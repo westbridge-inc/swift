@@ -373,13 +373,20 @@ describe('[item 20] support tickets: the census', () => {
     expect(sites).toEqual({
       // The person's own: filing, listing, the closure request (in its own transaction).
       'modules/support/support.service.ts create': 1,
+      // [BUG-HUNT-2 G20] The store's own case on a paid pickup: wall-off branch of the check beside the sweep's, under the order lock.
+      'modules/order/pickup-not-collected.ts findFirst': 1,
       'modules/support/support.service.ts findMany': 2, // listForUser (own) + listForAdmin (the queue: capability when on)
       // The admin queue (SupportService.queue: tenantPrisma off, the capability on): count, the resolve read (off/on), update.
       'modules/support/support.service.ts count': 1,
+      // [ADMIN-AUDIT S2-1] Today's counts (waitingForAdmin: by tab and SAFETY apart), through the same queue().
+      'modules/support/support.service.ts groupBy': 1,
       'modules/support/support.service.ts findUnique': 1,
       'modules/support/support.service.ts findFirst': 1,
       'modules/support/support.service.ts update': 1,
-      'modules/user/account.service.ts findFirst': 1,
+      // [WEB-DELETE] + the deletion check's read of the person's own open closure request, and the owner cancelling
+      // their own request (read + close, keyed by userId, under the person lock).
+      'modules/user/account.service.ts findFirst': 3,
+      'modules/user/account.service.ts updateMany': 1,
       'modules/user/account.service.ts create': 1,
       // The admin closure completion: tenantPrisma off, the capability on (read and close).
       'modules/admin/admin.routes.ts findFirst': 1,
@@ -395,8 +402,8 @@ describe('[item 20] support tickets: the census', () => {
       'jobs/queue.ts findFirst': 1,
       'modules/order/mmg-accept-expiry.ts updateMany': 1,
     });
-    expect(helperCalls).toEqual({ 'jobs/queue.ts': 1 });
-    expect(actionCalls).toEqual({ 'jobs/queue.ts orderCaseExists': 1, 'modules/order/mmg-accept-expiry.ts closeOrderCase': 1 });
+    expect(helperCalls).toEqual({ 'modules/order/mmg-refund-rail.ts': 1, 'modules/order/pickup-not-collected.ts': 1, 'jobs/queue.ts': 1 });
+    expect(actionCalls).toEqual({ 'jobs/queue.ts orderCaseExists': 1, 'modules/order/mmg-accept-expiry.ts closeOrderCase': 1, 'modules/order/pickup-not-collected.ts orderCaseExists': 1 });
     expect(named).toEqual([]);
     // The sweep's order filter (a system job) and closeStoreSilentMmgCase's type.
     // (and the inactive-account sweep's user filter, a system job).
@@ -431,5 +438,24 @@ describe('[item 20 · S4-1] support tickets: the person binding is transaction-l
       expect(await count(one)).toBe(0);
       expect(await tenant.runWithTenant(PRODUCTION, () => count(one))).toBe(0);
     } finally { await one.$disconnect(); }
+  });
+});
+
+// [WEB-DELETE · REVIEW-G #2304 S3, adopted from REVIEW-GMF's probe] With the wall ON the completion's claim on the
+// closure request is written through the support-closure capability, outside the erasure's transaction: a completion
+// the erasure then refuses must give the claim back, or the owner could never cancel (a pause stuck on).
+describe('[WEB-DELETE] wall ON: a refused completion gives the closure claim back', () => {
+  it('a live order refuses completion; the ticket is OPEN again; the owner can still cancel', async () => {
+    const { AccountService } = await import('../modules/user/account.service');
+    const closer = await mkUser(['CUSTOMER'], 'CUSTOMER');
+    const own = await asPerson(closer, () => new AccountService(app).requestClosure(closer));
+    await mkOrder(closer, { status: 'PENDING' });
+    const url = `/api/v1/admin/support/${own.ticketId}/complete-account-closure`;
+    const res = await call('POST', url, tokens.admin, withAdminReason('POST', url, {}) as Record<string, unknown>);
+    expect(res.statusCode).toBe(409);
+    const t = await owner.supportTicket.findUniqueOrThrow({ where: { id: own.ticketId } });
+    expect(t.status).toBe('OPEN');
+    const cancelled = await asPerson(closer, () => new AccountService(app).cancelClosure(closer)).then(() => 'ok', (e: { code?: string }) => e.code);
+    expect(cancelled).toBe('ok');
   });
 });

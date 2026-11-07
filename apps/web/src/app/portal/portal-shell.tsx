@@ -1,6 +1,6 @@
 'use client';
 
-import { LayoutDashboard, History, FileCheck2, Receipt, UserRound } from 'lucide-react';
+import { Bell, LayoutDashboard, History, FileCheck2, Receipt, UserRound } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleUnreachable, useConsoleSession } from '@/components/console-session';
 import { ConsoleShell } from '@/components/console-shell';
@@ -11,13 +11,15 @@ export const NAV = [
   { href: '/portal/documents', label: 'Documents', icon: FileCheck2, exact: false },
   { href: '/portal/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
   { href: '/portal/account', label: 'Account', icon: UserRound, exact: false },
+  // [BUG-HUNT F04] A door to a person. Its icon is one the shell already loads, so no page grows past its ceiling.
+  { href: '/portal/help', label: 'Help', icon: Bell, exact: false, dock: false },
 ];
 
 export function PortalShell({ children }: { children: React.ReactNode }) {
   // [W-01 · UI-SWEEP U23] Only the server saying "no session" goes to /login;
   // a check that could not reach Swift says so instead (components/console-session).
   const gate = useConsoleSession();
-  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} />;
+  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} rateLimited={gate.rateLimited} />;
   if (gate.phase !== 'ready') return <div className="sw-page sw-empty" role="status">Opening your office…</div>;
   const person = gate.person;
   return (

@@ -3,13 +3,18 @@
 import { Fragment, useState, useRef } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, setAsideSubscriptionCredit, recordSubscriptionRefundPaid, releaseSubscriptionRefund, fetchBillingEvents } from '@/lib/api';
+import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, setAsideSubscriptionCredit, fetchInPersonDoor, recordInPersonFeePayment, recordSubscriptionRefundPaid, releaseSubscriptionRefund, fetchBillingEvents, type InPersonDoor, type InPersonPaymentBody, type RefundPaidMethod } from '@/lib/api';
 import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
+import { outcomeOf } from '@/lib/outcome';
 import { StatusPill, gyd } from '@/components/detail';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import type { ReasonAnswer, ReasonField } from '@/components/mc/ReasonDialog';
+import { billDateLabel } from '@/lib/bill-date';
+import { chargedWeeklyFee } from '@/lib/weekly-fee';
+import { gyDate, gyDateTime } from '@/lib/dates';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -26,14 +31,14 @@ function holder(s: any): { name: string; kind: string; href?: string } {
 function BillingEvents({ id }: { id: string }) {
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
   const events: any[] = data?.data ?? [];
-  if (isLoading) return <p className="text-xs text-[var(--muted)] p-3">Loading billing trail…</p>;
+  if (isLoading) return <p className="text-xs mc-muted p-3">Loading billing trail…</p>;
   if (isError) return <QueryFailed error={error} what="the billing trail" onRetry={() => void refetch()} retrying={isFetching} className="m-3" />;
-  if (events.length === 0) return <p className="text-xs text-[var(--muted)] p-3">No billing events.</p>;
+  if (events.length === 0) return <p className="text-xs mc-muted p-3">No billing events.</p>;
   return (
     <div className="p-3 space-y-1.5">
       {events.map((e: any) => (
         <div key={e.id} className="flex items-center gap-3 text-xs">
-          <span className="text-[var(--muted)] w-36 shrink-0">{new Date(e.createdAt).toLocaleString()}</span>
+          <span className="mc-muted w-36 shrink-0">{gyDateTime(e.createdAt)}</span>
           <span>{e.type ? label('BillingEventType', e.type) : String(e.kind ?? '').replaceAll('_', ' ').toLowerCase()}</span>
           {e.amount != null && <span className="ml-auto font-medium">{gyd(e.amount)}</span>}
         </div>
@@ -41,6 +46,37 @@ function BillingEvents({ id }: { id: string }) {
     </div>
   );
 }
+
+/**
+ * [OWNER 5 Nov 2026] What each way of paying in person asks for. The screen's promises are part of the request the
+ * second admin signs: a cheque counts only once cleared, a transfer once seen in the bank, cash with a receipt in hand.
+ */
+const SAME_RULES = 'Paid directly to the company, never through an agent or a Swift Number. An MMG payment is never recorded here.';
+const NOT_PERSONAL = 'Not a card, account or phone number, and no names: this is kept for good.';
+const AFTER_SENDING = 'Nothing is recorded yet, so keep the money safe. In Approvals a second admin approves it. While you are the only admin, press Start there: it waits 12 hours by default, then takes a sign-in code, then Execute. The receipt is issued on Execute, and the partner\'s status changes then. If nobody starts it within 24 hours it lapses: ask again or hand the money back.';
+const IN_PERSON: Record<InPersonPaymentBody['method'], { words: string; body: string; field: ReasonField; reference: ReasonField; request: (_amount: number, _reference: string, _values: ReasonAnswer['values']) => InPersonPaymentBody }> = {
+  CASH: {
+    words: 'Cash',
+    body: 'Take the cash and give a numbered slip from your receipt book, then record it here with that number. Swift\'s own receipt is issued on Execute.',
+    reference: { kind: 'reference', name: 'reference', label: 'Slip number', hint: `One slip credits once. A short number takes a prefix, such as RCPT-42. ${NOT_PERSONAL}` },
+    field: { kind: 'choice', name: 'receipt', label: 'How the partner gets Swift\'s receipt after Execute', options: [{ value: 'PRINTED', label: 'I will print it from Finance and hand it over' }, { value: 'SENT', label: 'On their fee page, sent with the payment notice' }] },
+    request: (amount, reference, values) => ({ method: 'CASH', amount, reference, receipt: values['receipt'] === 'SENT' ? 'SENT' : 'PRINTED' }),
+  },
+  CHEQUE: {
+    words: 'Cheque',
+    body: 'A cheque counts only once it has cleared. Do not record it until the money is in the company bank account.',
+    reference: { kind: 'reference', name: 'reference', label: 'Cheque number', hint: `One cheque credits once. Add the bank if numbers could repeat, such as GBTI-004512. ${NOT_PERSONAL}` },
+    field: { kind: 'choice', name: 'cleared', label: 'Has this cheque cleared?', options: [{ value: 'yes', label: 'Yes, it has cleared and the money is in the bank' }], hint: 'If it has not cleared, cancel and record it once it has.' },
+    request: (amount, reference) => ({ method: 'CHEQUE', amount, reference, cleared: true }),
+  },
+  BANK_TRANSFER: {
+    words: 'Bank transfer',
+    body: 'Record a transfer only once you can see it in the company bank account.',
+    reference: { kind: 'reference', name: 'reference', label: 'Bank reference', hint: `One transfer credits once. ${NOT_PERSONAL}` },
+    field: { kind: 'choice', name: 'seen', label: 'Have you seen it in the bank?', options: [{ value: 'yes', label: 'Yes, it is in the company bank account' }], hint: 'If you have not, cancel and record it once you have.' },
+    request: (amount, reference) => ({ method: 'BANK_TRANSFER', amount, reference, seenInBank: true }),
+  },
+};
 
 const DONE_COPY = {
   'set-aside': 'Set aside. Pay it now outside Swift, then record the payout here.',
@@ -56,9 +92,9 @@ const QUEUED_COPY = {
 /** What happened to the last refund step on this row: done, queued for a
  *  second admin (with the approval id), or refused with the server's words. */
 function RefundOutcome({ outcome }: { outcome: MoneyActionOutcome }) {
-  if (outcome.kind === 'error') return <p role="alert" className="text-xs text-red-500 mt-2">{outcome.message}</p>;
+  if (outcome.kind === 'error') return <p role="alert" className="text-xs mc-text-bad mt-2">{outcome.message}</p>;
   return (
-    <p role="status" className={`text-xs mt-2 ${outcome.kind === 'queued' ? 'text-amber-500' : 'text-[var(--muted)]'}`}>
+    <p role="status" className={`text-xs mt-2 ${outcome.kind === 'queued' ? 'mc-text-warn' : 'mc-muted'}`}>
       {outcome.message}
       {outcome.approvalId && (
         <>
@@ -151,7 +187,7 @@ export default function SubscriptionsPage() {
     ...refundStep('set-aside'),
   });
   const recordPaid = useMutation({
-    mutationFn: ({ id, amount, method, reference, setAsideId, reason }: { id: string; amount: number; method: 'MMG' | 'BANK_TRANSFER'; reference: string; setAsideId: string; reason: string }) =>
+    mutationFn: ({ id, amount, method, reference, setAsideId, reason }: { id: string; amount: number; method: RefundPaidMethod; reference: string; setAsideId: string; reason: string }) =>
       recordSubscriptionRefundPaid(id, amount, method, reference, setAsideId, reason),
     ...refundStep('paid'),
   });
@@ -162,94 +198,127 @@ export default function SubscriptionsPage() {
   const refundBusy = setAside.isPending || recordPaid.isPending || release.isPending;
 
   const rows: any[] = data?.data ?? [];
-  // [OWNER 8 Oct (4)] Partners pay the weekly fee only through the MMG checkout
-  // page; production holds recording a payment by hand (BILLING_TOPUP_HOLD),
-  // so the button is not offered while the server says the hold is on.
+  // [OWNER 8 Oct (4)] Production holds the top-up (BILLING_TOPUP_HOLD), so its
+  // button is not offered while the server says the hold is on.
   const recordingHeld = (data as any)?.manualFeeRecording === 'held';
+  // [OWNER 5 Nov 2026] Money paid directly to Westbridge Inc. has its own button, for the role the route allows.
+  const inPersonOffered = (data as any)?.inPersonRecording === true;
+  const recordInPerson = async (s: any, name: string) => {
+    // Read first: nobody takes money the door would refuse.
+    let door: InPersonDoor;
+    try {
+      door = (await fetchInPersonDoor(s.id)).data;
+    } catch (error) {
+      actions.show(outcomeOf(error, { kind: 'read' }));
+      return;
+    }
+    if (!door.open) {
+      await dialog.askWith({ title: `Do not take money from ${name} now`, body: <p>{door.refused}</p>, confirmLabel: 'Close', reason: false });
+      return;
+    }
+    const limits = `At most GY$${door.mostGyd.toLocaleString()} can be recorded now${door.leastGyd > 0 ? `, and at least GY$${door.leastGyd.toLocaleString()} is due` : ''}.`;
+    const how = await dialog.askWith({
+      title: `How is ${name} paying?`,
+      body: <p>{limits} {SAME_RULES}</p>,
+      confirmLabel: 'Continue',
+      reason: false,
+      fields: [{ kind: 'choice', name: 'method', label: 'Paid by', options: (Object.keys(IN_PERSON) as InPersonPaymentBody['method'][]).map((value) => ({ value, label: IN_PERSON[value].words })) }],
+    });
+    if (!how) return;
+    const way = IN_PERSON[how.values['method'] as InPersonPaymentBody['method']];
+    const outcome = await actions.run({
+      title: `Record ${way.words.toLowerCase()} from ${name}?`,
+      body: <p>{way.body} {limits} {SAME_RULES}</p>,
+      confirmLabel: 'Record in-person payment',
+      reason: { label: 'Why this is being recorded', hint: 'Where and how it was paid. No names, and no card, account or phone numbers.' },
+      fields: [{ kind: 'amount', name: 'amount', label: 'Amount received (GYD)' }, way.reference, way.field],
+      submit: ({ reason, values }) => recordInPersonFeePayment(s.id, way.request(Number(values['amount']), String(values['reference']), values), reason),
+      success: () => `Recorded for ${name}.`,
+    });
+    lockIfQueued(`${s.id}:in-person`)(outcome);
+    if (outcome?.tone === 'queued') actions.show({ ...outcome, next: AFTER_SENDING });
+  };
 
   return (
-    <div>
+    <div className="mc-page">
       <div className="flex items-center justify-between mb-1">
-        <h1 className="text-2xl font-bold">Subscriptions</h1>
-        <div className="flex gap-1">
+        <div className="flex gap-1" role="group" aria-label="Show subscribers">
           {FILTERS.map((f) => (
             <button
               key={f}
               type="button"
               onClick={() => setFilter(f)}
               aria-pressed={filter === f}
-              className={`px-2.5 py-1 rounded-lg text-xs ${
-                filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
-              }`}
+              className="mc-tab"
             >
-              {f === 'ALL' ? 'All' : f.replaceAll('_', ' ').toLowerCase()}
+              {f === 'ALL' ? 'All' : label('SubscriptionStatus', f)}
             </button>
           ))}
         </div>
       </div>
-      <p className="text-[var(--muted)] text-sm mb-6">
+      <p className="mc-muted text-sm mb-6">
         The weekly flat fee is Swift&apos;s only revenue — this queue is the business.
       </p>
       {recordingHeld ? (
-        <p className="text-[var(--muted)] text-xs -mt-4 mb-6">
-          Recording fee payments by hand is on hold: partners pay through the MMG checkout page. A payment that arrived another way is refunded.
+        <p className="mc-muted text-xs -mt-4 mb-6">
+          The agent route and the old Record fee payment button are on hold. Money paid directly to the company in person has its own button. A payment that came through an agent or a Swift Number is refunded.
         </p>
       ) : null}
       {actions.banner}
 
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="mc-table-wrap">
+        <table className="mc-table mc-table-auto">
           <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Holder</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Weekly</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Next bill / trial end</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Actions</th>
+            <tr >
+              <th className="mc-label text-left">Holder</th>
+              <th className="mc-label text-left">Status</th>
+              <th className="mc-label text-right">Weekly</th>
+              <th className="mc-label text-left">Next bill / trial end</th>
+              <th className="mc-label text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+              <tr><td colSpan={5} className="mc-table-empty">Loading…</td></tr>
             ) : isError ? (
               <tr><td colSpan={5} className="p-4">
                 <QueryFailed error={error} what="the subscriptions" onRetry={() => void refetch()} retrying={isFetching} />
               </td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">No subscriptions match.</td></tr>
+              <tr><td colSpan={5} className="mc-table-empty">No subscriptions match.</td></tr>
             ) : (
               rows.map((s: any) => {
                 const h = holder(s);
-                const when = s.isTrialActive && s.trialEndDate ? `trial → ${new Date(s.trialEndDate).toLocaleDateString()}` : s.nextBillingDate ? new Date(s.nextBillingDate).toLocaleDateString() : '—';
+                const when = s.isTrialActive && s.trialEndDate ? `Free trial until ${gyDate(s.trialEndDate)}` : s.nextBillingDate ? (billDateLabel(s.nextBillingDate) === 'Due since' ? `Due since ${gyDate(s.nextBillingDate)}` : gyDate(s.nextBillingDate)) : '—';
                 const payoutReported = (s.refundSetAsideId ? reportedRefunds[s.refundSetAsideId] === true : false) || s.refundPayoutReported === true;
                 // [Review S2-1] Every payout record for this set-aside was refused, expired or failed:
                 // record it again; the release stays refused (a payout may have been sent, Q-1527).
                 const payoutNotCompleted = !payoutReported && s.refundPayoutAsk === 'NOT_COMPLETED';
                 return (
                   <Fragment key={s.id}>
-                    <tr className="border-b border-[var(--border)] hover:bg-white/5">
+                    <tr >
                       <td className="p-4">
                         {h.href ? (
-                          <Link href={h.href} className="font-medium hover:text-[var(--accent)] transition-colors">
+                          <Link href={h.href} className="font-medium text-[var(--mc-accent)] font-semibold">
                             {h.name}
                           </Link>
                         ) : (
                           <span className="font-medium">{h.name}</span>
                         )}
-                        <span className="text-xs text-[var(--muted)] ml-2">{h.kind}</span>
+                        <span className="text-xs mc-muted ml-2">{h.kind}</span>
                       </td>
                       <td className="p-4">
                         <StatusPill value={s.status} />
-                        {s.feeWaived ? <span className="ml-2 text-xs text-sky-400">fee waived</span> : null}
+                        {s.feeWaived ? <span className="ml-2 text-xs mc-text-info">fee waived</span> : null}
                       </td>
-                      <td className="p-4 text-right">{gyd(s.customRate ?? s.weeklyRate)}</td>
-                      <td className="p-4 text-[var(--muted)]">{when}</td>
+                      <td className="p-4 text-right">{gyd(chargedWeeklyFee(s))}</td>
+                      <td className="p-4 mc-muted">{when}</td>
                       <td className="p-4 text-right">
                         <div className="flex gap-2 justify-end">
                           <button
                             type="button"
                             onClick={() => setOpenTrail(openTrail === s.id ? null : s.id)}
-                            className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10"
+                            className="px-3 py-1 rounded-lg text-xs border border-[var(--mc-line)] hover:bg-[var(--mc-surface)]"
                           >
                             {openTrail === s.id ? 'Hide trail' : 'Billing trail'}
                           </button>
@@ -269,9 +338,17 @@ export default function SubscriptionsPage() {
                               success: () => `Payment recorded for ${h.name}.`,
                             }).then(lockIfQueued(`${s.id}:fee-payment`))}
                             disabled={topup.isPending || queuedAsks[`${s.id}:fee-payment`] === true}
-                            className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                            className="mc-btn"
                           >
                             {queuedAsks[`${s.id}:fee-payment`] ? 'Payment waiting for approval' : 'Record fee payment'}
+                          </button>}
+                          {inPersonOffered && <button
+                            type="button"
+                            onClick={() => void recordInPerson(s, h.name)}
+                            disabled={queuedAsks[`${s.id}:in-person`] === true}
+                            className="mc-btn"
+                          >
+                            {queuedAsks[`${s.id}:in-person`] ? 'Payment waiting for approval' : 'Record in-person payment'}
                           </button>}
                           {Number(s.refundSetAside ?? 0) > 0 ? (
                             <>
@@ -281,19 +358,19 @@ export default function SubscriptionsPage() {
                                   const owed = Number(s.refundSetAside);
                                   const answer = await dialog.askWith({
                                     title: `Record that GY$${owed.toLocaleString()} was paid back to ${h.name}?`,
-                                    body: <p>Only once the refund has really been paid outside Swift. The reference is the proof the money went back. A second admin approves the record.</p>,
+                                    body: <p>Only once the refund has really been paid outside Swift. The reference, cheque number or signed receipt number is the proof the money went back. A second admin approves the record.</p>,
                                     confirmLabel: 'Record payout',
                                     fields: [
-                                      { kind: 'choice', name: 'method', label: 'Paid back by', options: [{ value: 'MMG', label: 'MMG' }, { value: 'BANK_TRANSFER', label: 'Bank transfer' }] },
-                                      { kind: 'reference', name: 'reference', label: 'Reference of the refund you paid' },
+                                      { kind: 'choice', name: 'method', label: 'Paid back by', options: [{ value: 'MMG', label: 'MMG' }, { value: 'BANK_TRANSFER', label: 'Bank transfer' }, { value: 'CHEQUE', label: 'Cheque' }, { value: 'CASH', label: 'Cash' }] },
+                                      { kind: 'reference', name: 'reference', label: 'Reference of the refund you paid', hint: 'Never the reference the money came in on.' },
                                     ],
                                   });
                                   if (!answer) return;
-                                  const method = answer.values['method'] === 'BANK_TRANSFER' ? 'BANK_TRANSFER' : 'MMG';
+                                  const method = answer.values['method'] as RefundPaidMethod;
                                   recordPaid.mutate({ id: s.id, amount: owed, method, reference: String(answer.values['reference']), setAsideId: String(s.refundSetAsideId ?? ''), reason: answer.reason });
                                 }}
                                 disabled={refundBusy || payoutReported}
-                                className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                                className="mc-btn"
                               >
                                 Record payout
                               </button>
@@ -309,7 +386,7 @@ export default function SubscriptionsPage() {
                                   if (answer) release.mutate({ id: s.id, amount: owed, setAsideId: String(s.refundSetAsideId ?? ''), reason: answer.reason });
                                 }}
                                 disabled={refundBusy || payoutReported || payoutNotCompleted}
-                                className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                                className="mc-btn"
                               >
                                 Release
                               </button>
@@ -327,7 +404,7 @@ export default function SubscriptionsPage() {
                                 if (answer) setAside.mutate({ id: s.id, amount: credit, reason: answer.reason });
                               }}
                               disabled={refundBusy}
-                              className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                              className="mc-btn"
                             >
                               Refund credit
                             </button>
@@ -344,14 +421,14 @@ export default function SubscriptionsPage() {
                                 success: () => `Fee waived for ${h.name} for this period.`,
                               }).then(lockIfQueued(`${s.id}:waive`))}
                               disabled={waive.isPending || queuedAsks[`${s.id}:waive`] === true}
-                              className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                              className="mc-btn"
                             >
                               {queuedAsks[`${s.id}:waive`] ? 'Waiver waiting for approval' : 'Waive fee'}
                             </button>
                           )}
                         </div>
                         {Number(s.refundSetAside ?? 0) > 0 && (
-                          <p className="text-xs text-amber-500 mt-2">{payoutReported
+                          <p className="text-xs mc-text-warn mt-2">{payoutReported
                             ? 'Payment reported; recording awaits approval. Do not pay again or release this refund.'
                             : payoutNotCompleted
                               ? 'The last payout record was not completed (refused, expired or failed). Do not pay again: record it again with the correct reference. This refund cannot be released.'
@@ -361,7 +438,7 @@ export default function SubscriptionsPage() {
                       </td>
                     </tr>
                     {openTrail === s.id && (
-                      <tr className="border-b border-[var(--border)] bg-black/20">
+                      <tr className="border-b border-[var(--mc-line)] bg-[var(--mc-surface)]">
                         <td colSpan={5}>
                           <BillingEvents id={s.id} />
                         </td>

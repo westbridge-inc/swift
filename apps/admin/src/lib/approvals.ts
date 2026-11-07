@@ -11,6 +11,8 @@
 // action it knows will fail is teaching the operator to click through errors.
 // ---------------------------------------------------------------------------
 
+import { gyDateTime } from './dates';
+
 export interface ApprovalRow {
   id: string;
   /** "<METHOD> <route template>" — the classified action, never a raw URL. */
@@ -22,6 +24,10 @@ export interface ApprovalRow {
   fingerprint: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED' | 'CANCELLED';
   requestedBy: string;
+  /** [ADMIN-AUDIT S3-7] The asker's and the approver's names, read by the server inside this market (null: not an
+   *  account found here; absent: an older server). */
+  requestedByName?: string | null;
+  approvedByName?: string | null;
   /** The requester's stated reason — the thing the approver is here to read. */
   reason: string;
   /** [DS110-13] The canonical `{ params, body, query }` of the reviewed
@@ -53,10 +59,10 @@ export type SoloState =
   | { state: 'available'; coolOffHours: number }
   | { state: 'unavailable'; why: string; message: string };
 
-/** "Solo approval: available after 14 Oct, 07:30" — the wait, in plain words. */
+/** "Solo approval: available after 14 Oct 2026, 07:30" — the wait, in plain words, in Guyana time (lib/dates). */
 export function soloWaitCopy(availableAt: string, now = new Date()): string {
   const at = new Date(availableAt);
-  const when = at.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const when = gyDateTime(at);
   return at.getTime() > now.getTime() ? `Solo approval: available after ${when}` : `Solo approval: available now (since ${when})`;
 }
 
@@ -110,6 +116,24 @@ export function urgencyOf(row: ApprovalRow, now = new Date()): Urgency {
   return m <= 30 ? 'soon' : 'ok';
 }
 
+// [ADMIN-AUDIT S3-7] The card's words: the class, the status and the time left, never the codes alone.
+export const CLASS_WORD: Record<string, string> = { C4: 'Money', C5: 'Platform' };
+export const APPROVAL_STATUS_WORDS: Record<ApprovalRow['status'], string> = {
+  PENDING: 'Waiting for a second admin', APPROVED: 'Approved, not executed yet', REJECTED: 'Rejected',
+  APPLIED: 'Executed', EXPIRED: 'Expired', CANCELLED: 'Cancelled',
+};
+/** The decided line: "Approved by …" (an executed request was approved first), "Rejected by …". */
+export const DECIDED_WORDS: Partial<Record<ApprovalRow['status'], string>> = {
+  APPROVED: 'Approved', APPLIED: 'Approved', REJECTED: 'Rejected', CANCELLED: 'Cancelled', EXPIRED: 'Expired',
+};
+/** "23 h 53 min left", "45 min left", "expired". */
+export function timeLeftWords(minutes: number): string {
+  if (!(minutes > 0)) return 'expired';
+  const h = Math.floor(minutes / 60);
+  const m = Math.floor(minutes % 60);
+  return h > 0 ? `${h} h ${m} min left` : `${m} min left`;
+}
+
 export const CLASS_MEANING: Record<string, string> = {
   C4: 'Money — moves, forgives, or claims settlement of value',
   C5: 'Platform — pricing, config, algorithms, or broadcasts',
@@ -123,6 +147,8 @@ export const CLASS_MEANING: Record<string, string> = {
  * know whether they are about to forgive a fee or publish a price.
  */
 export function describeAction(action: string): string {
+  // [OWNER 5 Nov 2026] Money arriving, not a thing being created: the approver reads what they are signing.
+  if (action === 'POST /subscriptions/:id/in-person-payment') return 'Record a weekly fee paid in person';
   const [method, route = ''] = action.split(' ');
   const parts = route.split('/').filter((p) => p && !p.startsWith(':'));
   const subject = parts.map(humanise).join(' → ') || 'an admin action';
@@ -237,4 +263,20 @@ export function canApply(row: ApprovalRow, now = new Date()): boolean {
 /** Approved and replayable, but it is the requester's to execute, not this admin's. */
 export function awaitsRequester(row: ApprovalRow, now = new Date()): boolean {
   return !row.isOwnRequest && replayable(row, now);
+}
+
+/** [ADMIN-AUDIT S3-7] A person on an approval, by name: the id only when an older server sent no name. */
+export function personWords(name: string | null | undefined, id: string | null | undefined): string {
+  if (name) return name;
+  if (name === null) return 'an account not found here';
+  return id ?? 'an unknown account';
+}
+
+/** [REVIEW-G #2156 S3-1] Who decided a request, in words; null when the record names nobody. A withdrawn request
+ *  (CANCELLED) is only ever withdrawn by its asker (the server never records an approver on it), so it names the
+ *  asker; any other decision names the approver. */
+export function decidedBy(row: ApprovalRow): string | null {
+  if (row.status === 'CANCELLED') return personWords(row.requestedByName, row.requestedBy);
+  if (!row.approvedBy && !row.approvedByName) return null;
+  return personWords(row.approvedByName, row.approvedBy);
 }

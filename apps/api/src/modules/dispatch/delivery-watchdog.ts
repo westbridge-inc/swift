@@ -198,7 +198,7 @@ export async function recoverStrandedDeliveries(
             // Scoped to the order [NOC-A F45].
             tenantId: order.tenantId ?? null,
             title: 'Delivery rider lost signal with the goods',
-            body: `Order ${order.orderNumber}: the rider's GPS went dark AFTER pickup — they hold the goods${order.paymentMethod === 'CASH' ? ' and fronted the vendor cash' : ''}. A custody recovery case is open: claim it and decide hold, return or relay — do NOT auto-cancel.`,
+            body: `Order ${order.orderNumber}: the rider's GPS went dark AFTER pickup — they hold the goods${order.paymentMethod === 'CASH' && order.orderType !== 'COURIER' ? ' and fronted the vendor cash' : ''}. A custody recovery case is open: claim it and decide hold, return or relay — do NOT auto-cancel.`,
             data: { kind: 'ops_delivery_rider_dropped', orderId, caseId: decision.caseId },
           });
         } catch {

@@ -9,6 +9,7 @@ import { smsDestinationAllowed } from '../../utils/sms-budget';
 import { withTimeout } from '../../utils/async-lifecycle';
 import { notificationFailuresCounter } from '../../plugins/observability';
 import { NotificationService } from '../notification/notification.service';
+import { assertNameNotLocked } from './legal-name';
 
 type ProfileUpdate = { firstName?: string; lastName?: string; email?: string };
 const INACTIVE: readonly UserStatus[] = ['DEACTIVATED', 'BANNED', 'SUSPENDED'];
@@ -38,6 +39,7 @@ const PROFILE_SELECT = {
  * The app re-sends the same address on every name edit; that is not a change.
  */
 export async function updateCustomerProfile(app: FastifyInstance, userId: string, sessionId: string | null, body: ProfileUpdate) {
+  await assertNameNotLocked(app.prisma, userId, body);
   if (body.email) {
     const existing = await app.prisma.user.findFirst({ where: { email: body.email, id: { not: userId } }, select: { id: true } });
     if (existing) throw emailTaken();
@@ -51,7 +53,9 @@ export async function updateCustomerProfile(app: FastifyInstance, userId: string
   const changedAt = new Date();
   if (previous && emailChanged) {
     // Cheap refusals first (above); then the code, then (admins) the old address.
-    await requireStepUp(app, { user: { userId }, authSessionId: sessionId }, { consume: true });
+    await requireStepUp(app, { user: { userId }, authSessionId: sessionId }, { consume: true }).catch((error: unknown) => {
+      throw isStepUpRequired(error) ? emailStepUpRequired(error) : error;
+    });
     if (admin && previous.email) await sendAdminEmailChangeNotice(previous.email, body.email!, changedAt);
   }
 
@@ -122,6 +126,20 @@ async function tellOfEmailChange(app: FastifyInstance, userId: string, noticeId:
       notificationFailuresCounter.inc({ channel, stage: 'email_change' });
     }
   }));
+}
+
+const isStepUpRequired = (error: unknown): error is AppError => error instanceof AppError && error.code === 'STEP_UP_REQUIRED';
+
+/**
+ * The same 403 STEP_UP_REQUIRED (code and details unchanged: an app with the
+ * code sheet opens it and retries), worded for the store binary whose
+ * Personal Data screen has no sheet yet and shows this message under the
+ * email field: nothing is changed, and it says how to get the screen that can.
+ */
+function emailStepUpRequired(error: AppError): AppError {
+  return new AppError(error.statusCode, error.code,
+    'To change your email, confirm it’s you with a code texted to the phone on this account. If no code box opens, Swift needs its latest update: close it fully, open it again and try again. Nothing was changed.',
+    error.details);
 }
 
 function emailTaken(): AppError {

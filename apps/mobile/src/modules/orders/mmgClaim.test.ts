@@ -18,10 +18,22 @@ const base: MmgClaimView = {
 };
 const view = (over: Partial<MmgClaimView>): MmgClaimView => ({ ...base, ...over });
 
+describe('[G14c] the store has gone silent on a payment the customer reported', () => {
+  it('reads the server\'s word, and an older server\'s silence is false', () => {
+    expect(parseMmgClaimView({ ...base, customerClaim: 'PAID', storeSilent: true })!.storeSilent).toBe(true);
+    expect(parseMmgClaimView({ ...base, customerClaim: 'PAID' })!.storeSilent).toBe(false);
+  });
+  it('the card says support is checking, not "waiting for the store"', () => {
+    const silent = mmgClaimPresentation(view({ customerClaim: 'PAID', storeSilent: true }));
+    expect(silent).toMatchObject({ tone: 'warning', title: 'Swift support is checking' });
+    expect(mmgClaimPresentation(view({ customerClaim: 'PAID', storeSilent: false })).title).toBe('Waiting for the store');
+  });
+});
+
 describe('parseMmgClaimView — the server projection, strictly', () => {
   it('accepts the exact server shape', () => {
     const raw = { ...base, customerClaim: 'NOT_PAID', customerClaimAt: '2026-09-22T10:00:00.000Z', storeClaimed: true, disputed: true, disputedAt: '2026-09-22T10:01:00.000Z', revision: 2 };
-    expect(parseMmgClaimView(raw)).toEqual(raw);
+    expect(parseMmgClaimView(raw)).toEqual({ ...raw, storeSilent: false });
   });
 
   it.each([

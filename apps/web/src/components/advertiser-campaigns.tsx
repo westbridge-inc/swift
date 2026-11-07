@@ -6,6 +6,7 @@ import { getAdvertisers, getCampaigns, type Campaign } from '@/lib/partner-api';
 import { formatAmount, formatMoney } from '@/lib/money';
 import { ApiRequestError } from '@/lib/auth';
 import { DataUnavailable } from './data-unavailable';
+import { PayInvoice } from './advertiser-pay';
 
 /** [BUG-GUARDS C5] Status words, the phone's (AdvertiserHomeScreen CAMPAIGN_STATUS,
  *  CampaignDetail creatives, team roles) — never the server's code ("pending
@@ -46,10 +47,11 @@ function CampaignList({ advertiserId }: { advertiserId: string }) {
     {q.data?.length === 100 && <p className="sw-caption mt-4">Showing the latest 100 campaigns.</p>}
   </>;
 }
-export function AdvertiserCampaigns({ account = false }: { account?: boolean }) {
+export function AdvertiserCampaigns({ account = false, children }: { account?: boolean; children?: React.ReactNode }) {
   const q = useQuery({ queryKey: ['ads-memberships'], queryFn: getAdvertisers });
   return <section className="space-y-6">
     <header className="sw-bleed bg-[var(--swift-red)] py-5 text-white"><h1 className="sw-title text-white">{account ? 'Advertising account' : 'Your campaigns'}</h1><p className="mt-1 text-[13px]">Home-screen advertising · flat weekly rates</p></header>
+    {children}
     {q.isLoading && <div role="status" className="sw-empty"><span className="sw-skeleton h-28 w-full" />Loading your advertising accounts…</div>}
     {q.isError && (adsOff(q.error) ? <AdsNotOpen /> : <DataUnavailable what="your advertising accounts" error={q.error} onRetry={() => void q.refetch()} />)}
     {q.data?.length === 0 && <div className="sw-empty"><h2 className="sw-heading">Your business can advertise here</h2><p className="sw-caption">Register an advertising account in the Swift app to get started.</p></div>}
@@ -70,7 +72,7 @@ export function CampaignRead({ advertiserId, campaignId }: { advertiserId: strin
       <div className="max-w-3xl space-y-6">
       {c.statusReason && <p className="sw-note">{c.statusReason}</p>}
       <dl className="sw-card grid gap-5 p-5 wide:grid-cols-2"><div><dt className="sw-caption">Placement</dt><dd className="sw-label">{c.placement.name}</dd></div><div><dt className="sw-caption">Schedule</dt><dd>{weekDate(c.startWeek)} – {weekDate(c.endWeek)}</dd></div><div><dt className="sw-caption">Cities</dt><dd>{c.cities.join(', ')}</dd></div><div><dt className="sw-caption">Campaign total</dt><dd className="sw-title"><Amount value={c.totalAmount} currency={c.currency} /></dd></div></dl>
-      <section><h2 className="sw-heading">Payment records</h2>{c.invoices.length ? c.invoices.map(i => <div key={i.id} className="sw-row flex-wrap"><span className="flex-1 sw-label">{i.number}</span><span>{formatAmount(i.amount, `${c.currency} `)}</span><span className="sw-status">{say(INVOICE_WORDS, i.status)}</span></div>) : <p className="sw-board-empty mt-3">No invoices yet.</p>}</section>
+      <section><h2 className="sw-heading">Payment records</h2>{c.invoices.length ? c.invoices.map(i => <div key={i.id} className="sw-row flex-wrap"><span className="flex-1 sw-label">{i.number}</span><span>{formatAmount(i.amount, `${c.currency} `)}</span><span className="sw-status">{say(INVOICE_WORDS, i.status)}</span>{i.payable === true && <PayInvoice invoiceId={i.id} />}{i.paymentConfirming === true && <p className="sw-caption w-full">An earlier payment is being confirmed. Do not pay again.</p>}</div>) : <p className="sw-board-empty mt-3">No invoices yet.</p>}</section>
       <section><h2 className="sw-heading">Creative review</h2>{c.creatives.length ? c.creatives.map((a, index) => <div key={a.id} className="sw-row"><span className="flex-1">Creative {index + 1}</span><span className="sw-status">{say(CREATIVE_WORDS, a.status)}</span></div>) : <p className="sw-board-empty mt-3">No creative uploaded yet.</p>}</section>
       <section><h2 className="sw-heading">Booked weeks</h2>{c.bookings.length ? c.bookings.map((b, index) => <div key={`${b.city}:${b.weekStart}:${index}`} className="sw-row flex-wrap"><span className="flex-1">{b.city} · {weekDate(b.weekStart)}</span><span className="sw-status">{say(WEEK_WORDS, b.status)}</span></div>) : <p className="sw-board-empty mt-3">No weeks reserved yet.</p>}</section>
       </div>

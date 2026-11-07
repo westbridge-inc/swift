@@ -419,16 +419,28 @@ describe('GOLD-3 · TAXI-01 — ride request + queue', () => {
     expect(await sys(() => app.prisma.order.count({ where: { customerId: customer.userId } }))).toBe(1);
   });
 
-  it('an L1 customer is refused on request and on queue join, and nothing is written', async () => {
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE] This case used to prove an L1 customer was
+  // refused (403 ID_VERIFICATION_REQUIRED) on both paths with nothing written. A taxi ride no longer needs the
+  // customer's ID on file, so the same account now books, and another L1 account waits in the queue.
+  it('an L1 customer (no ID on file) books on request and joins the queue, never asked for an ID', async () => {
     const l1 = await makeUser('Leo', ['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L1' });
     const req = await call('POST', '/api/v1/rides/request', l1.token, TRIP);
-    expect(req.statusCode).toBe(403);
-    expect(req.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-    const join = await call('POST', '/api/v1/rides/queue/join', l1.token, TRIP);
-    expect(join.statusCode).toBe(403);
-    expect(join.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
-    expect(await sys(() => app.prisma.order.count({ where: { customerId: l1.userId } }))).toBe(0);
-    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1.userId } }))).toBe(0);
+    expect(req.body).not.toContain('ID_VERIFICATION_REQUIRED');
+    expect(req.statusCode, req.body).toBe(201);
+    const ride = req.json().data.ride as { id: string };
+    expect(await sys(() => app.prisma.order.count({ where: { customerId: l1.userId, orderType: 'TAXI', status: 'PENDING' } }))).toBe(1);
+    // Nobody is on the map: the passenger withdraws the request, so no later case meets this ride.
+    const cancel = await call('POST', `/api/v1/rides/${ride.id}/cancel`, l1.token, {});
+    expect(cancel.statusCode, cancel.body).toBe(200);
+
+    const l1q = await makeUser('Lea', ['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L1' });
+    const join = await call('POST', '/api/v1/rides/queue/join', l1q.token, TRIP);
+    expect(join.body).not.toContain('ID_VERIFICATION_REQUIRED');
+    expect(join.statusCode, join.body).toBe(201);
+    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1q.userId, status: 'WAITING' } }))).toBe(1);
+    const leave = await call('POST', '/api/v1/rides/queue/leave', l1q.token, {});
+    expect(leave.statusCode, leave.body).toBe(200);
+    expect(await sys(() => app.prisma.rideQueueEntry.count({ where: { customerId: l1q.userId, status: 'WAITING' } }))).toBe(0);
   });
 });
 
@@ -837,6 +849,16 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
     expect(fund.res.statusCode, fund.res.body).toBe(200);
 
     const reference = `GOLD3PAY${nanoid(10).replace(/[^A-Za-z0-9]/g, '0').toUpperCase()}`;
+    // Undecided, it cannot even be asked: the refusal comes before anything is written.
+    const undecided = await adminInject({ method: 'PUT', url: `/api/v1/admin/cash-rules/claims/${claimId}/paid`, token: admin.token, payload: { reference, amount: String(SEEDED_ZONE_FARE) } });
+    expect(undecided.statusCode, undecided.body).toBe(400);
+    expect(undecided.json().error.code).toBe('INVALID_CLAIM_STATE');
+    const approved = await withApproval(admin, approver, {
+      method: 'PUT',
+      url: `/api/v1/admin/cash-rules/claims/${claimId}/approve`,
+      payload: { reason: 'GOLD-3 fixture: a person read the case' },
+    });
+    expect(approved.res.statusCode, approved.res.body).toBe(200);
     const pay = await withApproval(admin, approver, {
       method: 'PUT',
       url: `/api/v1/admin/cash-rules/claims/${claimId}/paid`,
@@ -848,10 +870,10 @@ describe('GOLD-3 · TAXI-04 — [G3-F1] an admin settles the driver\'s no-show c
     const [paid, draw, told] = await Promise.all([
       sys(() => app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } })),
       sys(() => app.prisma.rlpReserveEntry.findMany({ where: { claimId } })),
-      sys(() => app.prisma.notification.findMany({ where: { userId: driverUserId, title: 'Guarantee paid' } })),
+      sys(() => app.prisma.notification.findMany({ where: { userId: driverUserId, title: 'Swift paid you' } })),
     ]);
     expect({ status: paid.status, paidAmount: Number(paid.paidAmount), paidBy: paid.paidById, ref: paid.paymentRef })
-      .toEqual({ status: 'PENDING_REVIEW', paidAmount: 0, paidBy: null, ref: null });
+      .toEqual({ status: 'APPROVED', paidAmount: 0, paidBy: null, ref: null });
     expect(draw).toEqual([]);
     expect(told).toHaveLength(0);
     // The spent approval cannot be spent again.

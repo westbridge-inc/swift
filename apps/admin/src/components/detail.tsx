@@ -31,30 +31,24 @@ export function Row({ label, value, href }: { label: string; value?: React.React
   );
 }
 
-const PILL: Record<string, string> = {
-  ACTIVE: 'bg-emerald-500/15 text-emerald-400',
-  DELIVERED: 'bg-emerald-500/15 text-emerald-400',
-  COMPLETED: 'bg-emerald-500/15 text-emerald-400',
-  PAID: 'bg-emerald-500/15 text-emerald-400',
-  PENDING: 'bg-amber-500/15 text-amber-400',
-  PENDING_APPROVAL: 'bg-amber-500/15 text-amber-400',
-  PAST_DUE: 'bg-amber-500/15 text-amber-400',
-  TRIAL: 'bg-sky-500/15 text-sky-400',
-  SUSPENDED: 'bg-red-500/15 text-red-400',
-  BANNED: 'bg-red-500/15 text-red-400',
-  CANCELLED: 'bg-red-500/15 text-red-400',
-  FAILED: 'bg-red-500/15 text-red-400',
-  EXPIRED: 'bg-red-500/15 text-red-400',
+// [ADMIN-UI] A status word in the Mission Control pill, coloured by what it means.
+const PILL_TONE: Record<string, 'good' | 'warn' | 'bad' | 'info'> = {
+  ACTIVE: 'good', DELIVERED: 'good', COMPLETED: 'good', PAID: 'good',
+  PENDING: 'warn', PENDING_APPROVAL: 'warn', PAST_DUE: 'warn',
+  TRIAL: 'info',
+  SUSPENDED: 'bad', BANNED: 'bad', CANCELLED: 'bad', FAILED: 'bad', EXPIRED: 'bad',
 };
 
 export function StatusPill({ value }: { value?: string | null }) {
   if (!value) return null;
+  const tone = PILL_TONE[value];
   return (
-    <span className={`px-2.5 py-1 rounded-full text-xs ${PILL[value] ?? 'bg-white/10 text-[var(--muted)]'}`}>
+    <span className={`mc-badge${tone ? ` mc-tone-${tone}` : ''}`}>
       {value.replaceAll('_', ' ')}
     </span>
   );
 }
+
 
 export function BackLink({ href, label }: { href: string; label: string }) {
   return (

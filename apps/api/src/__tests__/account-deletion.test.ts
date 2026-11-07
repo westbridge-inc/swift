@@ -162,7 +162,8 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(enc?.wrappedDek).toBeNull();
     expect(enc?.shreddedAt).not.toBeNull();
     expect((await app.prisma.verificationDocument.findUnique({ where: { id: doc.id } }))?.purgedAt).not.toBeNull();
-    expect(PRIVACY).toContain("A customer's own ID is not on that schedule: it is kept while the account is open and deleted when the account is deleted.");
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b) — a DELIBERATE change] the policy no longer keeps one while the account is open
+    expect(PRIVACY).toContain("Swift no longer keeps customers' IDs: any a customer added before 1 November 2026 is withdrawn and deleted, unless a legal or safety hold keeps it until the hold ends.");
   });
 
   it('[NR-3 gap 6] ephemeral high-risk rows go with the account', async () => {
@@ -359,7 +360,7 @@ describe('D9-05 — account deletion (erasure)', () => {
       data: {
         companyName: `Del Ads ${nanoid(5)}`, industry: 'Retail', contactName: 'Del', contactEmail: 'del@example.com',
         contactPhone: '+5926000123', status: 'APPROVED', createdByUserId: u.userId,
-        members: { create: { userId: u.userId, role: 'OWNER' } },
+        members: { create: { userId: u.userId, role: 'OWNER', acceptedAt: new Date() } },
       },
     });
     advertiserIds.push(adv.id);
@@ -395,7 +396,7 @@ describe('D9-05 — account deletion (erasure)', () => {
       data: {
         companyName: `Co Ads ${nanoid(5)}`, industry: 'Retail', contactName: 'Co', contactEmail: 'co@example.com',
         contactPhone: '+5926000124', status: 'APPROVED', createdByUserId: owner.userId,
-        members: { create: [{ userId: owner.userId, role: 'OWNER' }, { userId: coOwner.userId, role: 'OWNER' }] },
+        members: { create: [{ userId: owner.userId, role: 'OWNER', acceptedAt: new Date() }, { userId: coOwner.userId, role: 'OWNER', acceptedAt: new Date() }] },
       },
     });
     advertiserIds.push(adv.id);

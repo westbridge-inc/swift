@@ -11,11 +11,16 @@ import { CANCEL_ORDER_FAQ_ANSWER } from '../../../lib/cancelPolicyCopy';
 const FAQS: { q: string; a: string }[] = [
   {
     q: 'How do I pay?',
-    a: 'Cash on delivery. You pay the rider (or the store on pickup) when your order arrives — Swift never charges your card.',
+    a: 'Cash when your order arrives: you pay the rider, or the store on pickup. Where a store offers MMG, you can pay the store by MMG instead. Swift never charges your card.',
   },
   {
     q: 'Does Swift add fees or markups?',
     a: 'No. Menu prices are the store’s own prices. You only pay the delivery fee shown at checkout — stores and riders pay a flat weekly subscription instead.',
+  },
+  {
+    // [OWNER 5 Nov 2026] MMG checkout stays; in person is recorded by a person, directly to the company.
+    q: 'How do stores, riders and drivers pay the weekly fee?',
+    a: 'In the Swift app or on swiftgy.com, on MMG’s checkout page. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: use Contact us to arrange it. A cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else.',
   },
   {
     q: 'Where does Swift deliver?',
@@ -26,9 +31,10 @@ const FAQS: { q: string; a: string }[] = [
     a: 'Open the order from Home or My Orders. You’ll see the live map, the rider’s position, and every stage from the kitchen to your gate.',
   },
   {
-    q: 'Why does Swift ask for my ID?',
+    q: 'Does Swift need my ID?',
     // [Owner ruling 8 Oct 2026 — CUSTOMER ID] on file at once, no selfie. [16 Oct] Customers take no photos, taxi included.
-    a: 'Bigger orders and taxi rides need your ID on file — a quick photo of your government ID, no selfie. It goes on file right away (sometimes a person checks it first).',
+    // [Owner ruling 24 Oct 2026] No ID for taxi rides or bigger orders. [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] No ID at all.
+    a: 'No. Swift never asks a customer for an ID or a photo, for orders, taxi rides or promo codes.',
   },
   {
     q: 'Can I cancel an order?',
@@ -37,7 +43,7 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: 'How do refunds work with cash?',
-    a: 'If something goes wrong, report it from the order. Claims are reviewed with GPS and photo evidence and settled under Swift’s guarantee policy.',
+    a: 'Paying cash, you pay only when the order is handed over, so a cancelled order has nothing to refund. If something is wrong with an order you received, report it from the order. Any refund is made by the business: order money never passes through Swift, so Swift cannot send it, but we help you get an answer.',
   },
   // [Owner ruling 11 Oct 2026] the two licences, said plainly
   TAXI_DOCUMENTS_FAQ,

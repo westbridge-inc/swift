@@ -31,7 +31,7 @@ interface RiderRow {
 }
 
 const STATUS_OPTIONS: Array<[string, string]> = [
-  ['', 'Anyone'], ['online', 'Online now'], ['offline', 'Offline'], ['verified', 'Documents verified'], ['unverified', 'Documents not verified'],
+  ['', 'Anyone'], ['online', 'Online now'], ['offline', 'Offline'], ['verified', 'Documents complete'], ['unverified', 'Documents missing'],
 ];
 
 export default function RidersPage() {
@@ -41,7 +41,6 @@ export default function RidersPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>Riders</h1>
       <ListToolbar
         state={state}
         onChange={setState}

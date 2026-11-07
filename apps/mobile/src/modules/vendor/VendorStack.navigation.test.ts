@@ -105,6 +105,8 @@ vi.mock('../../components/MmgPayLinkCard', () => ({ MmgPayLinkCard: () => null }
 vi.mock('../../components/MmgNumberCard', () => ({ MmgNumberCard: () => null }));
 vi.mock('../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: () => null }));
 vi.mock('../../components/RefundRuleCard', () => ({ RefundRuleCard: () => null }));
+vi.mock('./StoreVatSection', () => ({ StoreVatSection: () => null })); // [STORE-VAT] a child section, stubbed like its siblings
+vi.mock('./VatDocumentRow', () => ({ VatDocumentRow: () => null })); // [VAT-DOCS] the Documents list's optional VAT row, stubbed the same way
 vi.mock('../../components/StoreLocationPicker', () => ({ StoreLocationPicker: () => null }));
 vi.mock('../../components/StorePhotosCard', () => ({ StorePhotosCard: () => null }));
 vi.mock('../../components/billing/BillingSurfaces', () => ({ BillingStopControl: () => null }));
@@ -188,6 +190,10 @@ vi.mock('./screens/VendorOrderDetailScreen', () => ({ VendorOrderDetailScreen: (
 vi.mock('./screens/VendorOrderHistoryScreen', () => ({ VendorOrderHistoryScreen: () => null }));
 vi.mock('./screens/VendorScheduleScreen', () => ({ VendorScheduleScreen: () => null }));
 vi.mock('./screens/VendorTierScreen', () => ({ VendorTierScreen: () => null }));
+// [CHAINS PR2] Branch screens are unrelated to tap routing; the add-branch
+// screen reaches the persisted location store (native MMKV storage).
+vi.mock('./screens/VendorBranchesScreen', () => ({ VendorBranchesScreen: () => null }));
+vi.mock('./screens/VendorAddBranchScreen', () => ({ VendorAddBranchScreen: () => null }));
 
 vi.mock('expo-notifications', () => ({
   addNotificationResponseReceivedListener: (listener: typeof fx.listener) => { fx.listener = listener; return { remove: vi.fn() }; },
@@ -347,6 +353,42 @@ describe('DS390 real cold notification router and delayed profile', () => {
       expect(fx.order).toHaveBeenCalledWith('order-B', expect.objectContaining({ userId: 'owner' }), expect.any(String));
     } finally { uninstall(); }
   });
+  // [S4] The store's copy of a store appointment's 24h reminder, exactly as the API sends it: the
+  // booking's order on the order desk of the store that owns it (never the marketplace jobs list).
+  it('a store appointment reminder opens the booking\'s order on the store that owns it', async () => {
+    fx.realProfile = true;
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    fx.order.mockResolvedValue({ data: { data: { id: 'order-B', vendorId: 'store-B' } } });
+    fx.cold = response({ kind: 'appointment_reminder', bookingId: 'booking-B', orderId: 'order-B', audience: 'business' });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await mount(); flushPendingNavigation(); await settleRouter();
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('VendorOrderDetail');
+      expect(navigation.getCurrentRoute()?.params).toEqual({ orderId: 'order-B' });
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-B');
+    } finally { uninstall(); }
+  });
+  // [BOOK-FU2] The store's copy of a moved appointment (the customer moved it), exactly as the API sends it:
+  // the booking's order on the order desk of the store that owns it (never the marketplace jobs list).
+  it('a moved appointment opens the booking\'s order on the store that owns it', async () => {
+    fx.realProfile = true;
+    useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    fx.order.mockResolvedValue({ data: { data: { id: 'order-B', vendorId: 'store-B' } } });
+    fx.cold = response({ kind: 'appointment_moved', bookingId: 'booking-B2', orderId: 'order-B', audience: 'business' });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await act(async () => { await Promise.resolve(); });
+      await mount(); flushPendingNavigation(); await settleRouter();
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('VendorOrderDetail');
+      expect(navigation.getCurrentRoute()?.params).toEqual({ orderId: 'order-B' });
+      expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-B');
+    } finally { uninstall(); }
+  });
 });
 
 
@@ -392,6 +434,10 @@ describe('DS390 vendor routing authority boundaries', () => {
     [{ kind: 'mmg_link_change_applied', actor: 'VENDOR' }, 'Account', 'store-A'],
     [{ kind: 'mmg_link_change_cancelled', actor: 'VENDOR' }, 'Account', 'store-A'],
     [{ kind: 'booking_rescheduled', audience: 'business', bookingId: 'booking-A' }, 'Schedule', 'store-A'],
+    // [S4] A store appointment's reminder for a booking with no order on file: the Schedule agenda.
+    [{ kind: 'appointment_reminder', audience: 'business', bookingId: 'booking-A' }, 'Schedule', 'store-A'],
+    // [BOOK-FU2] A moved appointment for a booking with no order on file: the Schedule agenda.
+    [{ kind: 'appointment_moved', audience: 'business', bookingId: 'booking-A2' }, 'Schedule', 'store-A'],
   ] as const)('delivers cold %j after delayed initial selection', async (data, screen, store) => {
     fx.realProfile = true;
     useStoreSwitcher.setState({ selectedStoreId: null, storeGeneration: 0, initialSelectionGeneration: null });

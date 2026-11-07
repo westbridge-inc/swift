@@ -1,9 +1,68 @@
 import type { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from 'fastify';
+import type {} from '@fastify/rate-limit';
 import { AppError } from '../utils/errors';
 import { ZodError } from '../lib/zod';
 import { isDevelopment } from '../utils/runtime-mode';
 import { requestLogContext } from '../utils/logger-config';
 import { captureError } from '../plugins/observability';
+import { tallyServerError, type ServerErrorTallyWriter } from '../lib/server-error-tally';
+
+/**
+ * [VIEWER-FIX] What a 5xx log line may say about its error: its class, its
+ * code, and the model and operation a database refusal names. Only plain
+ * identifiers travel, never a message, URL, key or value (the logger's `err`
+ * serializer redacts the error itself, so without these a 500 said nothing).
+ */
+const LOG_IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+export function serverErrorLogFields(error: unknown): Record<string, string> {
+  const e = (error ?? {}) as { constructor?: { name?: unknown }; code?: unknown; model?: unknown; operation?: unknown };
+  const fields: Record<string, string> = {};
+  const keep = (key: string, value: unknown) => { if (typeof value === 'string' && LOG_IDENTIFIER.test(value)) fields[key] = value; };
+  keep('errorClass', e.constructor?.name);
+  keep('errorCode', e.code);
+  keep('model', e.model);
+  keep('operation', e.operation);
+  return fields;
+}
+
+type ServerErrorRedis = ServerErrorTallyWriter & { set(k: string, v: string, ...a: unknown[]): Promise<unknown>; del(k: string): Promise<unknown> };
+
+/**
+ * SWIFT-AUD-D7-02: an error-rate SPIKE pages (dedup'd via the exact-count
+ * trigger + a redis NX guard). Per-minute window counter.
+ * [FIXES-4 · REVIEW-G10 S3-1] It sees what the hourly tally sees: an AppError
+ * 500 and an error carrying its own 5xx used to answer before it ran, so a
+ * tenant-wall failure at any rate had no fast pager. Push and inbox only: the
+ * sustained watch (modules/ops/error-rate-watch.ts) owns the on-call text.
+ */
+async function pageServerErrorSpike(app: FastifyInstance, redis: ServerErrorRedis): Promise<void> {
+  const windowKey = `err5xx:${Math.floor(Date.now() / 60_000)}`;
+  const count = await redis.incr(windowKey);
+  if (count === 1) await redis.expire(windowKey, 180);
+  const threshold = Number(process.env['ERROR_RATE_ALERT_PER_MIN'] ?? '30');
+  if (count !== threshold) return; // fire exactly once per window crossing
+  const claimed = await redis.set('ops_page:error-spike', '1', 'EX', 900, 'NX');
+  if (claimed !== 'OK') return;
+  const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+  try {
+    const paged = await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
+      // A 5xx SPIKE is an aggregate infra signal, single-flighted across
+      // the whole API — not one tenant's event [NOC-A F45].
+      tenantId: null,
+      title: 'Server error spike',
+      body: `${threshold}+ server errors in the last minute. Check Sentry / the API logs now.`,
+      data: { kind: 'ops_error_spike', perMinute: threshold },
+    });
+    // [F-028-10] Zero recipients is not a delivered page. Holding the
+    // 15-minute dedup claim after reaching NOBODY kept the outage dark
+    // for the full window; release it so the next spike retries.
+    if (paged === 0) await redis.del('ops_page:error-spike').catch(() => {});
+  } catch {
+    // Release the dedup claim so the next spike re-pages rather than staying
+    // dark for the window on a transient notify failure.
+    await redis.del('ops_page:error-spike').catch(() => {});
+  }
+}
 
 export function registerErrorHandler(app: FastifyInstance) {
   const respond = (error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
@@ -33,6 +92,11 @@ export function registerErrorHandler(app: FastifyInstance) {
       if (error.statusCode === 429 && typeof retryAfter === 'number' && Number.isFinite(retryAfter) && retryAfter > 0) {
         reply.header('Retry-After', String(Math.ceil(retryAfter)));
       }
+      // [FIXES-4] A 500 is always logged [VIEWER-FIX], the AppError kind too: a broken
+      // invariant is our fault. A deliberate refusal (502, 503) stays off the error log.
+      if (error.statusCode === 500) {
+        request.log.error({ ...serverErrorLogFields(error), statusCode: error.statusCode, ...requestLogContext(request) }, 'Unhandled error');
+      }
       return reply.status(error.statusCode).send({
         success: false,
         error: {
@@ -45,6 +109,12 @@ export function registerErrorHandler(app: FastifyInstance) {
 
     // Fastify built-in errors (rate limit, etc.)
     if ('statusCode' in error && typeof error.statusCode === 'number') {
+      // [VIEWER-FIX] An error carrying its own 5xx status (the tenant wall's
+      // TENANT_CONTEXT_REQUIRED, a transaction refusal) is our fault as much as
+      // an unknown one: it is logged too, by class, code and route template.
+      if (error.statusCode >= 500) {
+        request.log.error({ ...serverErrorLogFields(error), statusCode: error.statusCode, ...requestLogContext(request) }, 'Unhandled error');
+      }
       return reply.status(error.statusCode).send({
         success: false,
         error: {
@@ -75,41 +145,7 @@ export function registerErrorHandler(app: FastifyInstance) {
     }
 
     // Unknown errors
-    request.log.error({ err: error, ...requestLogContext(request) }, 'Unhandled error');
-    // SWIFT-AUD-D7-02: an error-rate SPIKE pages (dedup'd via the exact-count
-    // trigger + a redis NX guard). Per-minute window counter; fire-and-caught
-    // — accounting must never slow the error response, and minimal test
-    // harnesses without redis just skip it.
-    void (async () => {
-      const redis = (app as { redis?: { incr(k: string): Promise<number>; expire(k: string, s: number): Promise<unknown>; set(k: string, v: string, ...a: unknown[]): Promise<unknown>; del(k: string): Promise<unknown> } }).redis;
-      if (!redis) return;
-      const windowKey = `err5xx:${Math.floor(Date.now() / 60_000)}`;
-      const count = await redis.incr(windowKey);
-      if (count === 1) await redis.expire(windowKey, 180);
-      const threshold = Number(process.env['ERROR_RATE_ALERT_PER_MIN'] ?? '30');
-      if (count !== threshold) return; // fire exactly once per window crossing
-      const claimed = await redis.set('ops_page:error-spike', '1', 'EX', 900, 'NX');
-      if (claimed !== 'OK') return;
-      const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
-      try {
-        const paged = await notifyAdmins(app.prisma, new NotificationService(app.prisma, app.io), {
-          // A 5xx SPIKE is an aggregate infra signal, single-flighted across
-          // the whole API — not one tenant's event [NOC-A F45].
-          tenantId: null,
-          title: 'Server error spike',
-          body: `${threshold}+ unhandled 500s in the last minute. Check Sentry / the API logs now.`,
-          data: { kind: 'ops_error_spike', perMinute: threshold },
-        });
-        // [F-028-10] Zero recipients is not a delivered page. Holding the
-        // 15-minute dedup claim after reaching NOBODY kept the outage dark
-        // for the full window; release it so the next spike retries.
-        if (paged === 0) await redis.del('ops_page:error-spike').catch(() => {});
-      } catch {
-        // Release the dedup claim so the next spike re-pages rather than staying
-        // dark for the window on a transient notify failure.
-        await redis.del('ops_page:error-spike').catch(() => {});
-      }
-    })().catch(() => {});
+    request.log.error({ err: error, ...serverErrorLogFields(error), ...requestLogContext(request) }, 'Unhandled error');
     return reply.status(500).send({
       success: false,
       error: {
@@ -132,13 +168,26 @@ export function registerErrorHandler(app: FastifyInstance) {
       } catch {
         // The tracker must never break the error response already on its way.
       }
+      // [FIXES-4] Every 500 and every unhandled 5xx counts here, once: the hourly
+      // tally the worker's error-rate watch reads and the per-minute spike. A
+      // deliberate AppError refusal (a 502 or 503 that says "try later") is an
+      // answer, not a fault. Fire-and-caught: accounting must never slow the
+      // error response, and a minimal test harness without redis just skips it.
+      const redis = (app as { redis?: ServerErrorRedis }).redis;
+      if (redis && (reply.statusCode === 500 || !(error instanceof AppError))) {
+        void tallyServerError(redis).catch(() => {});
+        void pageServerErrorSpike(app, redis).catch(() => {});
+      }
     }
     return sent;
   });
 
   // 404 handler. Echo only the path — never the query string (reflected
   // attacker input has no business in responses) — and cap the length.
-  app.setNotFoundHandler((request, reply) => {
+  // A path no route matched is behind the same rate limiter as every route:
+  // the limiter's per-route hook never runs for it, so without this a caller
+  // could send unmatched requests without any ceiling.
+  app.setNotFoundHandler({ preHandler: notFoundRateLimit(app) }, (request, reply) => {
     const path = request.url.split('?')[0]!.slice(0, 200);
     reply.status(404).send({
       success: false,
@@ -148,4 +197,22 @@ export function registerErrorHandler(app: FastifyInstance) {
       },
     });
   });
+}
+
+/**
+ * The limiter's own pre-handler for the not-found handler, resolved on the
+ * first unmatched request: app.ts registers the error handler BEFORE the
+ * rate-limit plugin, so `app.rateLimit` does not exist yet when the not-found
+ * handler is set. An app with no limiter registered (a bare test app) answers
+ * the plain 404.
+ */
+function notFoundRateLimit(app: FastifyInstance) {
+  let limiter: ReturnType<FastifyInstance['rateLimit']> | null = null;
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    if (!limiter) {
+      if (!app.hasDecorator('rateLimit')) return;
+      limiter = app.rateLimit();
+    }
+    await limiter.call(app, request, reply);
+  };
 }

@@ -168,8 +168,8 @@ async function payable(amount = 2000) {
   const { claim } = await cash.handover(order.id, rider.userId, {
     outcome: 'refused', gps: order.door, photoUrl: await issuedPhoto(order.id, rider.userId), sessionId: rider.sessionId,
   });
-  expect(claim, 'a payable fixture is a complete, auto-approved filing').toMatchObject({ status: 'AUTO_APPROVED', evidenceComplete: true, flags: [] });
-  return claim!;
+  expect(claim, 'a payable fixture is a complete, clean filing that waits for a person').toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true, flags: [] });
+  return cash.approveClaim(claim!.id, 'admin-review', 'a person read the bundle');
 }
 
 /** The review queue is oldest-first and pages at 50: on a database that keeps history, find a claim by paging. */
@@ -346,8 +346,8 @@ describe('Golden rule handover', () => {
   });
 });
 
-describe('The guarantee — honest claim pays, guardrails catch patterns', () => {
-  it('an honest rider with a clean record: claim auto-approved, customer struck', async () => {
+describe('Case by case — an honest case goes to a person, guardrails catch patterns', () => {
+  it('an honest rider with a clean record: the case waits for a person, customer struck', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider();
     const order = await makeAtDoorOrder(customer.userId, rider.riderId, 3500);
@@ -360,7 +360,7 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     }, rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('FAILED');
-    expect(res.json().data.claim.status).toBe('AUTO_APPROVED');
+    expect(res.json().data.claim.status).toBe('PENDING_REVIEW');
     expect(res.json().data.claim.flags).toEqual([]);
 
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
@@ -413,7 +413,7 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
   });
 
   it('claim payout is single-winner: two concurrent markClaimPaid → one pays, one 400s (no double-payout)', async () => {
-    const claim = await payable(); // AUTO_APPROVED on a real, complete filing
+    const claim = await payable(); // APPROVED by a person on a real, complete filing
 
     // Two admins (or a double-click / retry) mark the SAME claim paid at once.
     const results = await Promise.allSettled([
@@ -434,14 +434,14 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
   });
 
   it('[WR-004] a claim payout without a payment reference is refused — PAID needs evidence', async () => {
-    const claim = await payable(); // AUTO_APPROVED on a real, complete filing
+    const claim = await payable(); // APPROVED by a person on a real, complete filing
 
     await expect(cash.markClaimPaid(claim.id, 'admin-a', '', 2000)).rejects.toThrow(/reference/i);
     await expect(cash.markClaimPaid(claim.id, 'admin-a', '   ', 2000)).rejects.toThrow(/reference/i);
 
     // The refusal changed nothing: the claim is still payable with evidence.
     const still = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } });
-    expect(still.status).toBe('AUTO_APPROVED');
+    expect(still.status).toBe('APPROVED');
     const paid = await cash.markClaimPaid(claim.id, 'admin-a', ref('BANK-REF-1'), 2000);
     expect(paid.status).toBe('PAID');
     expect(paid.paymentRef).toBe(ref('BANK-REF-1').toUpperCase());
@@ -458,7 +458,7 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     expect(await app.prisma.rlpReserveEntry.count({ where: { claimId: planted.id } })).toBe(0);
   });
 
-  it('orders at/over the USD gate are not auto-covered; the unpaid outcome is filed, and a declaration alone strikes nobody', async () => {
+  it('orders at/over the USD gate are cases too: a person decides, flagged over the gate; the unpaid outcome is filed, and a declaration alone strikes nobody', async () => {
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER', { trustLevel: 'L2' });
     const rider = await makeRider();
     const order = await makeAtDoorOrder(customer.userId, rider.riderId, 20000);
@@ -469,7 +469,8 @@ describe('The guarantee — honest claim pays, guardrails catch patterns', () =>
     }, rider.token);
     expect(res.statusCode).toBe(200);
     expect(res.json().data.status).toBe('FAILED');
-    expect(res.json().data.claim).toBeNull();
+    expect(res.json().data.claim).toMatchObject({ status: 'PENDING_REVIEW' });
+    expect(res.json().data.claim.flags).toEqual(expect.arrayContaining(['over_gate', 'evidence_incomplete']));
 
     // [SAFE-B] No issued photo: nothing the server holds supports punishment, so no strike; the filing is kept for support.
     expect(await app.prisma.strike.count({ where: { orderId: order.id } })).toBe(0);
@@ -558,14 +559,17 @@ describe('Strike consequences — the prankster customer gets restricted', () =>
     }
   }
 
-  it('2 strikes: L1 restricted, L2 still flows; 4 strikes: banned outright', async () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1 — a DELIBERATE change to this pin] A customer ID no longer lifts
+  // the restriction (Swift keeps none; L2 is retired): it holds at every level until the strikes age out or a person at
+  // Swift lifts it (customer-id-removed.test.ts).
+  it('2 strikes: restricted at every level, L2 included; 4 strikes: banned outright', async () => {
     const prankster = await makeUser(['CUSTOMER'], 'CUSTOMER');
     await strikeTimes(prankster.userId, 2);
 
     expect(await orderingRestriction(app.prisma, prankster.userId)).toBe('restricted');
 
     await app.prisma.user.update({ where: { id: prankster.userId }, data: { trustLevel: 'L2' } });
-    expect(await orderingRestriction(app.prisma, prankster.userId)).toBeNull();
+    expect(await orderingRestriction(app.prisma, prankster.userId)).toBe('restricted');
 
     await strikeTimes(prankster.userId, 2);
     expect(await orderingRestriction(app.prisma, prankster.userId)).toBe('banned');
@@ -583,8 +587,9 @@ describe('Strike consequences — the prankster customer gets restricted', () =>
     }, prankster.token);
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe('STRIKE_RESTRICTED');
-    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] a restricted account's ID waits for a person (STRIKES hold).
-    expect(res.json().error.message).toMatch(/ID on file[\s\S]*a person will look at it/);
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] the words name the way out, never an ID
+    expect(res.json().error.message).toMatch(/90 days old[\s\S]*a person at Swift reviews it/);
+    expect(res.json().error.message).not.toMatch(/\bID\b/);
   });
 
   it('a banned customer cannot check out at all', async () => {
@@ -683,6 +688,9 @@ describe('Admin review + founder metrics', () => {
     const data = res.json().data;
     expect(data.failedPaymentPct).toBeGreaterThanOrEqual(0);
     expect(data.guaranteePayoutsThisWeek.total).toBeGreaterThan(0);
+    // Only money that left: a row nobody paid is not a payment.
+    const paid = await app.prisma.reimbursementClaim.aggregate({ where: { status: 'PAID', paidAt: { gte: new Date(Date.now() - 7 * 86_400_000) } }, _sum: { amount: true }, _count: true });
+    expect(data.guaranteePayoutsThisWeek).toEqual({ total: Number(paid._sum.amount ?? 0), count: paid._count });
     expect(Array.isArray(data.claimsByRider)).toBe(true);
     expect(data.claimsByRider.length).toBeGreaterThan(0);
   });
@@ -705,7 +713,7 @@ describe('Admin review + founder metrics', () => {
 // ---------------------------------------------------------------------------
 
 describe('[A-11] a claim payout carries evidence that holds up', () => {
-  // [SAFE-B] `payable()` (above) files a real, complete refusal: AUTO_APPROVED, amount 2000.
+  // [SAFE-B] `payable()` (above) files a real, complete refusal, approved by a person: APPROVED, amount 2000.
 
   it('one transfer settles ONE claim — a reused reference is refused', async () => {
     const first = await payable();
@@ -713,11 +721,11 @@ describe('[A-11] a claim payout carries evidence that holds up', () => {
     await cash.markClaimPaid(first.id, 'admin-a', ref('BANK-REUSE-9'), 2000);
 
     await expect(cash.markClaimPaid(second.id, 'admin-a', ref('BANK-REUSE-9'), 2000))
-      .rejects.toThrow(/already recorded against another claim/i);
+      .rejects.toThrow(/already recorded against another payment/i);
 
     // the refusal changed nothing: the second claim is still payable
     const still = await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: second.id } });
-    expect(still.status).toBe('AUTO_APPROVED');
+    expect(still.status).toBe('APPROVED');
     expect(still.paymentRef).toBeNull();
   });
 
@@ -750,7 +758,7 @@ describe('[A-11] a claim payout carries evidence that holds up', () => {
     for (const malformed of ['x', 'ab', '!!!!', '-lead', 'trail-', 'A'.repeat(65)]) {
       expect(await code(malformed), malformed).toBe('PAYMENT_REF_INVALID');
     }
-    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('AUTO_APPROVED');
+    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('APPROVED');
   });
 
   it('the payer must state the amount, and it must be the claim’s own figure', async () => {
@@ -761,7 +769,7 @@ describe('[A-11] a claim payout carries evidence that holds up', () => {
       await expect(cash.markClaimPaid(claim.id, 'admin-a', 'BANK-AMT-2', wrong), String(wrong))
         .rejects.toThrow(/not GY\$|amount/i);
     }
-    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('AUTO_APPROVED');
+    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('APPROVED');
   });
 
   it('a non-numeric amount is refused rather than coerced', async () => {
@@ -770,7 +778,7 @@ describe('[A-11] a claim payout carries evidence that holds up', () => {
     for (const bad of ['', '  ', 'two thousand', 'GY$2000', '2e3']) {
       await expect(cash.markClaimPaid(claim.id, 'admin-a', 'BANK-COERCE-1', bad), String(bad)).rejects.toThrow();
     }
-    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('AUTO_APPROVED');
+    expect((await app.prisma.reimbursementClaim.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe('APPROVED');
   });
 
   it('records the exact figure and WHO paid it, alongside who approved it', async () => {

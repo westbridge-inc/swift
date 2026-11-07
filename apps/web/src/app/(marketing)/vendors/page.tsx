@@ -2,7 +2,8 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { CheckCircle2, Store, ClipboardList, Boxes, QrCode, LineChart, Users } from 'lucide-react';
 import { Section } from '@/components/site';
-import { launch } from '@/site.config';
+import { partnerSignupHref } from '@/lib/signup-roles';
+import { PrelaunchPartnerNote, ReviewTime } from '@/components/prelaunch-partner-note';
 
 // NOTE [G-FEE]: this page may state subscription pricing. It must never be
 // deep-linked from the iOS binary — Apple treats in-app links to external
@@ -25,7 +26,7 @@ const DASHBOARD = [
   {
     icon: Boxes,
     title: 'Inventory that keeps up',
-    body: 'Add items one at a time, import a spreadsheet, or photograph a paper menu and let Swift read it. Sold-out hides instantly and comes back when you restock — and a live order holding that item asks the customer to swap rather than silently dropping it.',
+    body: 'Add items one at a time or import a spreadsheet. In the Swift app you can also upload a typed PDF menu (not a photo or a scan). Sold-out hides instantly and comes back when you restock — and a live order holding that item asks the customer to swap rather than silently dropping it.',
   },
   {
     icon: LineChart,
@@ -69,8 +70,8 @@ export default function VendorsPage() {
             <span className="text-[var(--swift-red)]">every dollar stays yours</span>
           </h1>
           <p className="mt-5 max-w-xl text-lg leading-relaxed text-[var(--swift-muted)]">
-            Swift is the only delivery platform in {launch.markets[0]} that takes no cut of what you
-            sell. One flat weekly fee, and the commission line on your P&amp;L simply is not there.
+            Swift takes no cut. You keep 100% of every sale, for one flat weekly fee. The commission
+            line on your P&amp;L simply is not there.
           </p>
 
           <div className="mt-9 grid gap-3 sm:grid-cols-2">
@@ -117,12 +118,19 @@ export default function VendorsPage() {
               {
                 n: '2',
                 t: 'Send your documents',
-                b: 'Owner ID, business registration, TIN and a photo of your storefront. Photograph them with your phone — the camera guides the frame.',
+                // [FLOW-QA2 NEW-5] What the store checklists ask (platform-config): never a TIN (dropped 6 Oct 2026).
+                b: 'Owner ID, business registration (or a signed declaration if you trade under your own surname) and a photo of your storefront; a restaurant adds its GRA licence, and a service business sends only the owner’s ID. Photograph them with your phone — the camera guides the frame.',
               },
               {
                 n: '3',
                 t: 'We review them',
-                b: 'A person checks every document. Most businesses clear review within a day, and you can browse the whole dashboard while you wait.',
+                // [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day.
+                b: (
+                  <>
+                    A person checks every document.{' '}
+                    <ReviewTime live="We review documents Monday to Saturday, 8:00–16:00 Guyana time, and you can browse the whole dashboard while you wait." after="You can browse the whole dashboard while you wait." />
+                  </>
+                ),
               },
               {
                 n: '4',
@@ -143,8 +151,9 @@ export default function VendorsPage() {
           </ol>
 
           <div className="mt-10 flex flex-wrap gap-3">
+            {/* [OPEN-EARLY] Opens sign-up on the business door. */}
             <Link
-              href="/signup"
+              href={partnerSignupHref('business')}
               className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
             >
               Start a business account
@@ -156,6 +165,7 @@ export default function VendorsPage() {
               See what it costs
             </Link>
           </div>
+          <PrelaunchPartnerNote className="mt-6" />
         </div>
       </Section>
     </>

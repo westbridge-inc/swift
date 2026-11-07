@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { BarChart3, Calendar, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
+import { BarChart3, Bell, Calendar, Check, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleUnreachable, useConsoleSession } from '@/components/console-session';
 import type { ShellPerson } from '@/components/customer-shell';
@@ -15,6 +15,7 @@ import { catalogueName, type CatalogueName } from '@/lib/catalogue-name';
 import { useStoreRole } from '@/lib/store-role';
 import type { VendorMemberRole } from '@/lib/vendor-hub';
 import { StoreLiveFeed } from '@/components/store-live-feed';
+import { branchLabel } from '@/lib/branch-label';
 
 /**
  * The business console's places: the app's four sections
@@ -23,7 +24,9 @@ import { StoreLiveFeed } from '@/components/store-live-feed';
  * it as "Availability" and have no Insights, exactly as in the app. A Services
  * store's owners and managers also get Schedule after Orders (the app's R1 tab:
  * a Services store runs its day from a booking agenda). Weekly fee, bulk import
- * and hours are reached from the Orders home and Account.
+ * and hours are reached from the Orders home and Account. [OPEN-EARLY PR-2] The store's owner also has Documents
+ * (the phone's Account → Documents, owner only), in the rail and the menu but not the phone dock. Its icon is one
+ * every console page already loads (Check), so no page grows past its first-load ceiling (scripts/perf-budget.json).
  */
 export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | undefined, vendorType?: string) => {
   const manager = role === 'OWNER' || role === 'MANAGER';
@@ -32,8 +35,11 @@ export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | 
     ...(manager && vendorType === 'SERVICE' ? [{ href: '/dashboard/schedule', label: 'Schedule', icon: Calendar, exact: false }] : []),
     { href: '/dashboard/inventory', label: manager ? catalogue : 'Availability', icon: Boxes, exact: false },
     ...(manager ? [{ href: '/dashboard/insights', label: 'Insights', icon: BarChart3, exact: false }] : []),
+    ...(role === 'OWNER' ? [{ href: '/dashboard/documents', label: 'Documents', icon: Check, exact: false, dock: false }] : []),
     // Account is the store's settings page until the app's Account screen lands (PR D).
     { href: '/dashboard/settings', label: 'Account', icon: UserRound, exact: false },
+    // [BUG-HUNT F04] A door to a person, for everyone on the team. The icon is one the shell already loads.
+    { href: '/dashboard/help', label: 'Help', icon: Bell, exact: false, dock: false },
   ];
 };
 
@@ -75,7 +81,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
       >
         <StoreIcon className="h-4 w-4 shrink-0 text-[var(--swift-red)]" />
         <span className={`min-w-0 flex-1 truncate text-sm font-semibold ${selected ? '' : 'text-[var(--swift-red)]'}`}>
-          {selected ? selected.name : 'Choose a store'}
+          {selected ? branchLabel(selected) : 'Choose a store'}
         </span>
         {(list.length > 1 || !selected) && <ChevronDown className="h-4 w-4 shrink-0 text-[var(--swift-muted)]" />}
       </button>
@@ -90,7 +96,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
               }}
               className={`block w-full truncate px-3 py-2 text-left text-sm hover:bg-[var(--swift-subtle)] ${s.id === selected?.id ? 'font-bold text-[var(--swift-red)]' : ''}`}
             >
-              {s.name}
+              {branchLabel(s)}
               <span className="ml-2 text-xs text-[var(--swift-muted)]">{s.city ?? ''}</span>
             </button>
           ))}
@@ -98,6 +104,25 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
       )}
     </div>
   );
+}
+
+/**
+ * [SPEED 30 Oct · owner] A first tap on a tab shows its content: once the board's own reads have
+ * landed, the reads the other tabs of this login make on their first draw are made once. All of it
+ * lives in lib/dashboard-tab-reads, its own chunk (no page's first load carries it). Staff prefetch
+ * only what they can see; a store switch or a role change starts again for the new store or role.
+ */
+function useTabPrefetch(storeId: string | null, role: VendorMemberRole | undefined, vendorType: string | undefined, roleKnown: boolean) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!storeId || !roleKnown) return;
+    let stop: (() => void) | undefined;
+    let live = true;
+    void import('@/lib/dashboard-tab-reads')
+      .then((reads) => { if (live) stop = reads.prefetchWhenIdle(queryClient, reads.dashboardTabReads(storeId, role, vendorType)); })
+      .catch(() => undefined);
+    return () => { live = false; stop?.(); };
+  }, [queryClient, storeId, role, vendorType, roleKnown]);
 }
 
 function StoreShell({ children, person }: { children: React.ReactNode; person: ShellPerson | null }) {
@@ -110,11 +135,14 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
     queryKey: ['stores'],
     queryFn: getStores,
     // "No store yet" (404) is an answer, not a hiccup: never retried.
-    retry: (failures, error) => !(error instanceof ApiRequestError && error.status === 404) && failures < 1,
+    retry: (failures, error) => !(error instanceof ApiRequestError && (error.status === 404 || error.status === 403)) && failures < 1,
   });
   // A business account whose store was never created: the server answers 404.
   // That is a step still to do, not a failure.
   const noStoreYet = stores.error instanceof ApiRequestError && stores.error.status === 404;
+  // [FLOW-QA F10] An account with no business at all (a rider, a driver, a customer) is refused the store list (403):
+  // that is "no business on this account", never a board that "may have orders waiting".
+  const noBusiness = stores.error instanceof ApiRequestError && stores.error.status === 403;
   const list: Store[] = useMemo(() => stores.data?.stores ?? [], [stores.data?.stores]);
 
   const onSwitch = useCallback(
@@ -147,18 +175,28 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
   }, [storeId, list, stores.data?.selectedId, onSwitch]);
 
   const selected = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
-  const { role } = useStoreRole();
+  const { role, known: roleKnown } = useStoreRole();
   const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType), role, selected?.vendorType), [selected?.vendorType, role]);
 
   // [PERF row 8] The store's live feed, for a store the server listed for this account.
   const feedStore = storeId && list.some((s) => s.id === storeId) ? storeId : null;
+  // [SPEED 30 Oct] The other tabs' first reads, made once the board is idle (role- and store-type-scoped).
+  useTabPrefetch(feedStore, role, selected?.vendorType, roleKnown);
   return (<>
     {feedStore && <StoreLiveFeed key={feedStore} storeId={feedStore} />}
     <ConsoleShell person={person} home="/dashboard" title="Business" navigation={navigation}
-      switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet} />}
+      switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet && !noBusiness} />}
       signOutBody="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
       contentKey={storeId ?? 'no-store'}>
-      {noStoreYet ? (
+      {noBusiness ? (
+        <div className="sw-card p-6" data-no-business>
+          <p className="text-sm font-semibold">No business on this account.</p>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">Add a business to this Swift account to take orders here.</p>
+          <Link href="/signup?resume=business" className="sw-btn sw-btn-md mt-4">
+            Add a business
+          </Link>
+        </div>
+      ) : noStoreYet ? (
         <div className="sw-card p-6">
           <p className="text-sm font-semibold">Your business isn&apos;t set up yet.</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">Add your store&apos;s details and location to start taking orders.</p>
@@ -175,14 +213,17 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
   </>);
 }
 
+/** [SPEED 30 Oct] A tab's last answers stay for half an hour after it closes (react-query's default is 5 minutes). */
+const KEEP_TABS_FOR = 30 * 60_000;
+
 export function DashboardShell({ children }: { children: React.ReactNode }) {
   // [W-01 · UI-SWEEP U23] Only the server saying "no session" goes to /login;
   // a check that could not reach Swift says so instead (components/console-session).
   const gate = useConsoleSession();
-  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} />;
+  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} rateLimited={gate.rateLimited} />;
   if (gate.phase !== 'ready') return <div className="sw-page sw-empty" role="status">Opening your business…</div>;
   return (
-    <Providers offline="fail">
+    <Providers offline="fail" keepFor={KEEP_TABS_FOR}>
       <StoreShell person={gate.person}>{children}</StoreShell>
     </Providers>
   );

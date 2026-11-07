@@ -1,26 +1,38 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutSeller, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutWords, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
+import { lazyRetry } from '@/lib/chunk-retry';
+import { CheckingLatest, useCheckingLatest } from '@/components/checking-latest';
+// [F8] A partner not approved yet has no fee: what it will be loads on demand (weekly-fee-not-started.tsx).
+const WeeklyFeeNotStarted = lazyRetry(() => import('./weekly-fee-not-started'));
 
-/** The dot beside the status word: colour is the second signal, the word is the first. */
-const STATUS_DOT: Record<string, string> = {
-  TRIAL: 'bg-[var(--swift-success)]', ACTIVE: 'bg-[var(--swift-success)]', PAST_DUE: 'bg-[var(--swift-warning)]',
-  SUSPENDED: 'bg-[var(--swift-error)]', CHURNED: 'bg-[var(--swift-error)]',
-};
+// [MMG reopen] Loaded only when the server grants a reopen (switch off by default): not in the first load,
+// and neither is its rule or its words (lib/weekly-fee-reopen).
+const WeeklyFeeReopen = lazyRetry(() => import('./weekly-fee-reopen'));
 
-export function WeeklyFee({ family }: { family: FeeFamily }) {
+// [owner 6 Nov 2026] The choice of weeks: loaded only when there is more than one (perf budget).
+const WeeklyFeeWeeks = lazyRetry(() => import('./weekly-fee-weeks'));
+
+// [PERF · 6 Nov 2026] Recent checkouts and receipts, below the fold: their own chunk (perf budget).
+const WeeklyFeeHistory = lazyRetry(() => import('./weekly-fee-history'));
+
+// [OWNER 5 Nov 2026] Paying in person: loaded only when the server offers it or a record waits (perf budget).
+const WeeklyFeeInPerson = lazyRetry(() => import('./weekly-fee-in-person'));
+
+/** `aside`: drawn under where the fee stands (the store owner's "Pay all my branches" door, ENTERPRISE E1b). */
+export function WeeklyFee({ family, aside }: { family: FeeFamily; aside?: ReactNode }) {
   const storeId = useStoreId();
   // A store change unmounts the whole checkout lifetime, including its view.
-  return <WeeklyFeeContext key={`${family}:${storeId ?? 'no-store'}`} family={family} storeId={storeId} />;
+  return <WeeklyFeeContext key={`${family}:${storeId ?? 'no-store'}`} family={family} storeId={storeId} aside={aside} />;
 }
 
-function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: string | null }) {
+function WeeklyFeeContext({ family, storeId, aside }: { family: FeeFamily; storeId: string | null; aside?: ReactNode }) {
   const client = useQueryClient();
   const queryKey = useMemo(() => ['weekly-fee', family, family === 'vendor' ? storeId : null], [family, storeId]);
   const base = `/api/v1/${family}/subscription`;
@@ -28,9 +40,22 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
   // A card Pay now that may still take money hides the MMG button too: one payment at a time.
   const [cardPending, setCardPending] = useState(false);
+  // [FEE-STATUS · owner 25 Oct] Refresh status says it is checking, then when it last checked. A failed
+  // re-read shows the page's own error (the query's), never "Checked at".
+  const [checked, setChecked] = useState<{ busy: boolean; at: number | null }>({ busy: false, at: null });
+  // [SPEED 30 Oct] Opened again: the last known status at once, said to be checking until Swift answers (no paying on it meanwhile).
+  const checkingLatest = useCheckingLatest(q);
+  const refreshStatus = async () => {
+    if (checked.busy) return;
+    setChecked((c) => ({ ...c, busy: true }));
+    session.focus();
+    const r = await q.refetch().catch(() => ({ isError: true }));
+    setChecked((c) => ({ busy: false, at: r.isError ? c.at : Date.now() }));
+  };
   const refreshFee = useCallback(() => { void client.invalidateQueries({ queryKey }); }, [client, queryKey]);
   const session = useMemo(() => new FeeCheckoutSession({
-    start: (key) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
+    start: (key, weeks) => apiFetch(`${base}/mmg-checkout`, { method: 'POST', body: JSON.stringify({ weeks }), headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
+    reopen: (ref, key) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}/reopen`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key } }, { storeId }).then((r) => r.data),
     read: (ref) => apiFetch(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, undefined, { storeId }).then((r) => r.data),
     open: async (url) => { window.location.assign(url); },
     refresh: () => { void client.invalidateQueries({ queryKey }); },
@@ -44,27 +69,41 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
     return () => window.removeEventListener('focus', focus);
   }, [client, queryKey, session]);
   if (q.isLoading) return <p>Loading your weekly fee…</p>;
+  // [WEB-ONBOARDING · FLOW-QA F8] No subscription yet (data: null) is a partner Swift has not approved: not a failure.
+  if (!q.isError && q.data === null) return <Suspense fallback={<p>Loading your weekly fee…</p>}><WeeklyFeeNotStarted family={family} storeId={storeId} /></Suspense>;
   if (q.isError || !q.data) return <div role="alert"><p>Could not load your weekly fee.</p><button onClick={() => void q.refetch()}>Try again</button></div>;
   const sub = q.data;
   const action = liveMmg(sub);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
-  const mmgPending = view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const mmgPending = view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  // [MMG reopen] Only a server grant loads the Back card, which decides (reopenableMmg) whether it shows.
+  const canReopen = !!sub.reopenableMmgCheckout && !view.blocked && !cardPending;
   const blocked = mmgPending || cardPending;
   // The card choice exists only when the server says CARD is live.
   const card = liveCard(sub.payActions);
+  const status = feeStatusOf(sub);
   return <section className="max-w-3xl space-y-6">
     <h1 className="text-2xl font-extrabold">Weekly fee</h1>
     <div className="space-y-3 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
-      <p className="text-xs font-semibold uppercase tracking-wide text-[var(--swift-muted)]">Amount due</p>
-      <p className="text-2xl font-extrabold sm:text-3xl">{dueLine(sub)}</p>
-      <p className="flex items-center gap-2 text-sm font-semibold"><span aria-hidden="true" className={`h-2 w-2 rounded-full ${STATUS_DOT[checkout?.subscriptionStatus ?? sub.status] ?? 'bg-[var(--swift-muted)]'}`} />{subscriptionWords(checkout?.subscriptionStatus ?? sub.status)}</p>
+      {/* [FEE-STATUS · owner 25 Oct] Where the fee stands, in the API's words: it read "Nothing due right now:
+          your next bill is 13 Oct 2026" + "Active" on 25 October. Never a passed date as a next bill. */}
+      <p className="text-xs font-semibold uppercase tracking-wide text-[var(--swift-muted)]">Your weekly fee</p>
+      <p className="text-2xl font-extrabold sm:text-3xl" data-testid="weekly-fee-status">{status.headline}</p>
+      {status.detail && <p className="text-sm">{status.detail}</p>}
+      <CheckingLatest show={checkingLatest && !checked.busy} />
       {checkout && <p role="status">{checkoutWords(checkout, view.returned)}</p>}
       {view.returned && !checkout && <p role="status">Waiting for MMG…</p>}
       {view.error && <p role="alert">{view.error}</p>}
-      <div><button className="min-h-11 text-sm font-semibold underline underline-offset-4" onClick={() => { void q.refetch(); session.focus(); }}>Refresh status</button></div>
+      <div className="flex flex-wrap items-center gap-3">
+        <button className="min-h-11 text-sm font-semibold underline underline-offset-4 disabled:opacity-50" disabled={checked.busy} aria-busy={checked.busy} onClick={() => void refreshStatus()}>{checked.busy ? 'Checking…' : 'Refresh status'}</button>
+        {checked.at ? <span role="status" className="text-sm text-[var(--swift-muted)]">{`Checked at ${new Date(checked.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Guyana' })}`}</span> : null}
+      </div>
+      {sub.inPerson && sub.inPerson.waitingGyd !== null ? <Suspense fallback={null}><WeeklyFeeInPerson waitingGyd={sub.inPerson.waitingGyd} /></Suspense> : null}
     </div>
+    {aside}
     {action && !blocked && card && <h2 className="text-lg font-bold">Choose how to pay</h2>}
     <div className={`grid gap-4 ${action && !blocked && card ? 'md:grid-cols-2' : ''}`}>
+      {canReopen && <Suspense fallback={null}><WeeklyFeeReopen sub={sub} checkout={checkout} busy={view.busy} onBack={(ref) => void session.reopen(ref)} onExpired={q.refetch} /></Suspense>}
       {action && !blocked && <section aria-labelledby="mmg-pay-title" className="flex flex-col gap-4 rounded-2xl border border-black/5 bg-white p-6 shadow-sm">
         <div className="flex items-start gap-3">
           <span aria-hidden="true" className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[var(--swift-red-50)] text-xs font-extrabold text-[var(--swift-red-600)]">MMG</span>
@@ -73,29 +112,18 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
             <p className="text-sm text-[var(--swift-muted)]">Opens MMG&apos;s page, then brings you back to Swift.</p>
           </div>
         </div>
-        <button disabled={view.busy} onClick={() => void session.pay()} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
-          {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
-        </button>
+        {/* [owner 6 Nov 2026] A choice of weeks (1-4, each only when it fits): its card, its words and its own Pay button
+            load only when the server offers more than one week (perf budget). Otherwise one week, as before. */}
+        {action.weekOptions?.[1] ? <Suspense fallback={null}><WeeklyFeeWeeks choices={action.weekOptions} disabled={view.busy || checkingLatest} session={session} /></Suspense>
+          : <button disabled={view.busy || checkingLatest} onClick={() => void session.pay()} className="mt-auto inline-flex min-h-12 w-full items-center justify-center rounded-full bg-[var(--swift-red)] px-6 py-3 font-bold text-white disabled:opacity-50">
+            {view.busy ? 'Opening MMG…' : `Pay ${feeMoney(action.amountGyd)} with MMG`}
+          </button>}
       </section>}
-      <CardPay family={family} storeId={storeId} card={card} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
+      <CardPay family={family} storeId={storeId} card={card} latestSession={sub.latestCardSession} otherPaymentPending={mmgPending} refresh={refreshFee} onPaymentPending={setCardPending} />
     </div>
     <p className="text-sm text-[var(--swift-muted)]">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</p>
-    <h2 className="text-lg font-bold">Recent checkouts</h2>
-    {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {
-      const shown = c.ref === view.checkout?.ref ? view.checkout : c;
-      return <div key={c.ref} className="space-y-2 rounded-2xl border border-black/5 bg-white p-5">
-        <p className="text-sm text-[var(--swift-muted)]">{feeDate(c.createdAt)} · {feeMoney(c.amountGyd)}</p>
-        <p>{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</p>
-        {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
-        {checkoutReferences(shown).map((r) => <p key={r.label} className="text-sm text-[var(--swift-muted)]">{r.label}: <span className="font-mono">{r.value}</span></p>)}
-        {/* [Owner 15 Oct 2026 · ruling #63] who sold the weekly fee, as the API states it */}
-        {checkoutSeller(shown) ? <p className="text-sm text-[var(--swift-muted)]" data-testid="fee-seller">{checkoutSeller(shown)}</p> : null}
-      </div>;
-    }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
-    <h2 className="text-lg font-bold">Receipts</h2>
-    {/* [owner legal plan R12] Printed by the API, line by line: the same receipt support and the accountant see. */}
-    {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <div key={r.receiptNumber} aria-label={`Receipt ${r.receiptNumber}`} className="space-y-1 rounded-2xl border border-black/5 bg-white p-5 text-sm">
-      {r.lines.map((line, i) => <p key={i} className={i === 0 ? 'font-semibold' : undefined}>{line}</p>)}
-    </div>) : <p className="text-sm text-[var(--swift-muted)]">No receipts yet.</p>}
+    {sub.inPerson?.open ? <Suspense fallback={null}><WeeklyFeeInPerson family={family} /></Suspense> : null}
+    {/* [PERF · 6 Nov 2026] Below the fold: recent checkouts, the refunds promise and the receipts (weekly-fee-history.tsx). */}
+    <Suspense fallback={null}><WeeklyFeeHistory sub={sub} view={view} /></Suspense>
   </section>;
 }

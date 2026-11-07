@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
+import { PAY_AHEAD_MAX_WEEKS_WORD } from '../modules/billing/pay-ahead';
 
 // ---------------------------------------------------------------------------
 // [REPORT-035 F-035-08 · S1] Every served legal text is BOUND to its version.
@@ -220,26 +221,200 @@ const PUBLISHED: Record<
     driver_agreement: '77ba8953b63491aa88492edc5ec4fb815466a19c27ac6b5eea69a942102ed69b',
     vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
   },
+  // [ROLE-DOCS · owner 21 Oct 2026 · COORD rulings (A) + 23 Oct 00:59Z, NON-material] On top of 2026-10-22: police
+  // clearance optional for TAXI drivers only (Privacy "With your explicit consent" line; Mover Agreement documents
+  // paragraph). Same day, so the human date is unchanged: Terms and the Business Agreement keep their 2026-10-22 hashes.
+  '2026-10-22.1': {
+    terms: '91d885a2cdf2e907d7017ee23f56fb0d14a1321b1128578e3be64efbde60bf7e',
+    privacy: '9d0eb3b0e6b218d18edbb10630c4fcefeea090043cf5671c2b9ad7658f993ebb',
+    driver_agreement: 'bfbfc55fb330b4d6e095ec3754c76570a8c128d460a7a59b3c4c0c586161b785',
+    vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
+  },
+  // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · NON-material] Terms s.3: a customer needs no ID to place
+  // an Order or take a taxi ride (the app asks for one only after repeated failed deliveries or payments, or for a
+  // high-value promotion); Privacy s.1 "(partners and, where they add one, customers)" and s.3 the ID a customer adds;
+  // Child Safety s.4 drops "higher-trust actions (taxi rides and larger orders) need a government ID on file".
+  // Nothing else changed: putting those words and 22 October back reproduces all four 2026-10-22.1 pins exactly (and
+  // Child Safety's served text). The date re-pins the two agreements.
+  '2026-10-25': {
+    terms: 'cace13357488b6dbc64dbfed520cbc0dbc13cd11472c073f817568d0695294ba',
+    privacy: '7a2b01b3dbb2ffc0fd4bfbc384867d584ebeac56bc6c7b9e19a761e13dd8a9dc',
+    driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
+    vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
+  },
+  // [O-1 · COORD 25 Oct 15:20Z — MATERIAL] Privacy only: section 5 Sharing says how Swift-bridged calling works while
+  // Swift's call service is switched on (no number shown between the people on an order in the current app and
+  // website; Swift rings each side; press 1; never recorded; a call record with no phone number) and names Twilio as
+  // the processor that connects the calls; section 6 says how long a call record is kept. Same day as 2026-10-25, so
+  // LAST_UPDATED is unchanged and the Terms and both agreements keep their 2026-10-25 hashes. Taking those three
+  // additions back out reproduces the 2026-10-25 Privacy pin exactly.
+  '2026-10-25.1': {
+    terms: 'cace13357488b6dbc64dbfed520cbc0dbc13cd11472c073f817568d0695294ba',
+    privacy: 'ec292043689e125609c24ae26868ec0aa1d8e1d1e903c3ba87f60d0c678f2c63',
+    driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
+    vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
+  },
+  // [POLICE-CLEARANCE CONSENT · COORD 25 Oct 22:17Z — NON-material] Privacy only: section 6 says what Swift keeps of a
+  // police clearance (whether it was clear and its issue date), that its image is deleted soon after the check (the app
+  // shows the days), and that it can be withdrawn at any time in the app. Same day as 2026-10-25.1, so LAST_UPDATED is
+  // unchanged and the Terms and both agreements keep their hashes. Taking that one sentence back out reproduces the
+  // 2026-10-25.1 Privacy pin exactly.
+  '2026-10-25.2': {
+    terms: 'cace13357488b6dbc64dbfed520cbc0dbc13cd11472c073f817568d0695294ba',
+    privacy: '40512a8d6df0f0952f5189e84b83bfdabec232fc1c782c5979b1406aa2ba45d9',
+    driver_agreement: '4420cc613d36378213cb2fe6d62a3b27b5e32a98cd90e693d5d25125761b25ac',
+    vendor_agreement: '43a48df497c99c20e5178262c37678de91076f5d1a331a2559374f2a85757ce1',
+  },
+  // [EMAIL-HTTPS · COORD 27 Oct — MATERIAL] Privacy only: section 5's processor list names Resend as the deliverer of
+  // Swift's emails (the email address and the email itself; sent from Brazil, records kept in the United States) and
+  // GoDaddy as the host of Swift's own mailbox. A new day, so LAST_UPDATED moves and every document re-pins. Putting
+  // the GoDaddy wording and 25 October back reproduces all four 2026-10-25.2 pins exactly.
+  '2026-10-27': {
+    terms: 'ab18c3a2c4d6fac9d8f852f33ebc4862eed91d5908dfc258498b330abd7702b9',
+    privacy: '2903780caa177241c7c6541def8caae34d6275f7ff65aef15003cefa3f8018f8',
+    driver_agreement: '58dad790f05ad3b097dcd9b7adc07307b2c2438accb819f9275ca475bdaa7115',
+    vendor_agreement: '9f3f9ddadd2753ef60760bfe16b56904858d09d2ce91966d5988b4de8a105f93',
+  },
+  // [BOOK-S7 · owner rulings 28 Oct 2026 · NON-material pre-launch, pending the owner] Appointments: Terms s.5 (a booking
+  // the app shows as confirmed when it is made was accepted in advance by the business's setting), s.7 (while instant
+  // appointment booking is switched on: free cancel until 2 hours before, never less than one minute after
+  // confirmation; the customer's move until 2 hours before; then contact the business); Business Agreement s.5 (keep
+  // availability current, honour bookings or cancel with a reason). Privacy: only the date (the no-show wording waits
+  // for the feature that creates the record, COORD 19:06Z). Nothing else changed: removing those three additions and
+  // putting 27 October back reproduces all four 2026-10-27 pins exactly.
+  '2026-10-28': {
+    terms: '94e238d9fd18fa7a0ccd81808179d022064479d275eb383692044661815a6a2e',
+    privacy: 'a2f555e75c10cb2b6ef40c230fe9737a5822ed89efc2e84f17c557e8ea49c810',
+    driver_agreement: '88858e16c7cbee85bb9e52e64c34383668cf8e079f0b456a30845f31e0d74bfc',
+    vendor_agreement: 'b594c5fc7bc2b83bdba4a07228b7c0b8421b4a267793299b5a575b6fd01b59d8',
+  },
+  // [BOOK-FU2 · owner B3 · MATERIAL] "Customer didn't come": Terms s.6 (no fee, no strike; a person reviews repeated
+  // missed appointments) and Privacy s.6 (the record: which booking, when and who at the business recorded it, kept
+  // with its order's record). Same day as 2026-10-28, so LAST_UPDATED is unchanged and both agreements keep their
+  // hashes. Taking those two sentences back out reproduces all four 2026-10-28 pins exactly.
+  '2026-10-28.1': {
+    terms: '5a3912091a9cceff70d91b5a56df70dc54736413e8eedc8866d65fccbfb11c6f',
+    privacy: '3a7f4a78881e18fdc07d86e234f93b08ce81d7f5f7d3437d28abb1402a9da434',
+    driver_agreement: '88858e16c7cbee85bb9e52e64c34383668cf8e079f0b456a30845f31e0d74bfc',
+    vendor_agreement: 'b594c5fc7bc2b83bdba4a07228b7c0b8421b4a267793299b5a575b6fd01b59d8',
+  },
+  // [TERMS · owner 29 Oct 2026 15:50Z · NON-material like 2026-10-28 · DRAFT until counsel] Terms s.7: an appointment
+  // includes a time booked from an individual service provider's list of services (book-a-pro, behind
+  // INSTANT_BOOKING): the switched-on cancel and move rule names "the Business or provider"; while the switch is on the
+  // provider can also move it (the customer is told in the app) and, if the provider has not started it 30 minutes
+  // after its start, it cancels free; "Any other service job request" keeps the request rule. Terms s.5 (COORD 29 Oct
+  // 16:13Z): the provider gives the same advance acceptance by publishing a list of services with bookable times (one
+  // added sentence after the Business's setting). A new day, so every text carries 29 October. Nothing else changed:
+  // taking out the s.5 sentence, putting the old s.7 paragraph and 28 October back reproduces all four 2026-10-28.1
+  // pins exactly. (2026-10-29 was never served anywhere, so its pin was replaced in place before merge.)
+  '2026-10-29': {
+    terms: '2d8e7e471a4527a928346ff77f76b1f3b8b07ccd464b6553ca1ec978c89d6d00',
+    privacy: 'cecd2b439bd410d76e79abc48f1f15fb62316ab2e0e2b2ebbf34011edfee473a',
+    driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
+    vendor_agreement: '7a89f3321e109bd9f0082f77ea97b5457fb398b246c270b491038f3f84971ed8',
+  },
+  // [BOOK-P3 · COORD ruling 29 Oct 2026 (b) · NON-material, customer-favourable · DRAFT until counsel] Terms s.7 adds
+  // one switched-on sentence: an appointment the Business or provider moves can be cancelled free in the app for 60
+  // minutes after the customer is told (APPOINTMENT_MOVED_FREE_CANCEL_MIN), or until it starts if sooner, even
+  // inside the 2-hour cut-off. The same day: LAST_UPDATED stays, so Privacy and both agreements keep their 2026-10-29
+  // hashes; taking that one sentence out of the Terms reproduces the 2026-10-29 Terms pin exactly.
+  '2026-10-29.1': {
+    terms: 'd70a9288cc77e6b7ecf880ceb434e3a60f1f9065020a2360c9f43745b77455b9',
+    privacy: 'cecd2b439bd410d76e79abc48f1f15fb62316ab2e0e2b2ebbf34011edfee473a',
+    driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
+    vendor_agreement: '7a89f3321e109bd9f0082f77ea97b5457fb398b246c270b491038f3f84971ed8',
+  },
+  // [BILL-PRO · owner 28 Oct 2026 Rounds A+B · COORD 29 Oct 16:13Z · MATERIAL for Providers only · DRAFT until counsel]
+  // The Business Agreement covers independent service providers: the opening names the Provider and how they accept
+  // (when the app asks, after the profile is created; REVIEW-F #2225 S3-1), and a new section 12 (documents a person checks, the weekly services fee on
+  // MMG's checkout page in the app or on the website, never before both ticks, the trial from the last of switch-on,
+  // documents, agreement and fee tick (owner 30 Oct 00:14Z; F S3-2), one fee with a Services
+  // store, the 48-hour block, and a published list of services with bookable times as the Provider's advance
+  // acceptance). Same day as 2026-10-29: the Terms keep their 2026-10-29.1 hash (BOOK-P3's s.7 sentence), the Privacy
+  // Policy and the Mover Agreement their 2026-10-29 hashes; undoing section 12 and the opening changes reproduces the
+  // 2026-10-29 Business Agreement pin.
+  '2026-10-29.2': {
+    terms: 'd70a9288cc77e6b7ecf880ceb434e3a60f1f9065020a2360c9f43745b77455b9',
+    privacy: 'cecd2b439bd410d76e79abc48f1f15fb62316ab2e0e2b2ebbf34011edfee473a',
+    driver_agreement: 'eabc6c129a2168fccb610a4014b246eb31c55d9ebb48d341848bd22715c343b7',
+    vendor_agreement: '3df0fa20578a9639996dd8c77f653d0e9e5a7f2d595ea03273ae87ec1176576d',
+  },
+  // [EXPRESS-FEE · owner ruling 1 Nov 2026 · NON-material, pre-launch] The bump for the express wording on the website's
+  // Delivery policy (express = the delivery fee + a flat GYD 1,000, any distance). No served text mentions express, so
+  // every document changes only by its "Last updated" date: putting "29 October 2026" back in place of "1 November 2026"
+  // reproduces each 2026-10-29.2 pin above exactly (checked mechanically before pinning).
+  '2026-11-01': {
+    terms: '0f03a5c2c29d481f7bbd916f9ee5191056f9a213639c5f3f9845d80eb3ddd853',
+    privacy: '935cf822433948c619c70cdde2149b53918ff2ab10f2d4ba22e24496e4c42461',
+    driver_agreement: '65168219ab4b9e6781eaf545510294db837f80bcb2a98cd0067cd43c428aa1f0',
+    vendor_agreement: '62c6c9d31e881482d6e8303c10a012abb75a75b25a5305959cb6aacb2625e115',
+  },
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) · COORD: minor, NON-material · DRAFT until counsel] Swift no longer
+  // takes or keeps a customer's ID. Terms s.3: a customer never needs an ID or a photo (the sentence on when the app
+  // asked for one is gone). Privacy s.1 (verification documents are partners' only; Swift asks no customer for an ID and
+  // keeps none), s.3 (the customer-ID basis is gone), s.5 (the automatic customer-ID check is gone), s.6 (IDs added
+  // before 1 November 2026 are withdrawn and deleted, a hold excepted). Same day as 2026-11-01 (EXPRESS-FEE), so the
+  // agreements keep their 2026-11-01 hashes; putting those six passages back reproduces the 2026-11-01 Terms and
+  // Privacy pins exactly.
+  '2026-11-01.1': {
+    terms: '27829c43404ec23ba2c302b440e800dff03622e61ec32d478de8580e44bc45dc',
+    privacy: '391aaeb3180cf5a049202cddc2c0bbce9cc3e0ed1f39908ada0d1a2a05a2fbdd',
+    driver_agreement: '65168219ab4b9e6781eaf545510294db837f80bcb2a98cd0067cd43c428aa1f0',
+    vendor_agreement: '62c6c9d31e881482d6e8303c10a012abb75a75b25a5305959cb6aacb2625e115',
+  },
+  // [owner ruling 4 Nov 2026, non-material, no fresh tick] Terms section 4: the taxi waiting charge is capped at
+  // GY$1,800 for a ride, starts only when the app has placed the car at the pickup, and stops at the ride code. A new
+  // day, so LAST_UPDATED moves and every document re-pins; the Privacy Policy and both agreements change only by their date.
+  '2026-11-04': {
+    terms: '8211f8fdae8b7086aa6b3c09f6494850591c48b316a0081d2deeebc580d699be',
+    privacy: 'e2506ea826f08f22fd1edfd856607c28ba70ffb4e00892ba7eeb29c409bc21ba',
+    driver_agreement: 'a4bc5e874eb2b2ae9d3992ba910bb22b38071d31f741cf3d627d915d515a4c4f',
+    vendor_agreement: '942975fc7e4fc9a4dc54890daf2c80479b62d3009bfc9c416361afe38121f38d',
+  },
+  // [2026-11-05 batch · wording delegated by the owner 5 Nov 2026 · MATERIAL · DRAFT until a Guyana attorney reads it] The
+  // words listed at LEGAL_VERSION in legal.routes.ts. Repinned while unpublished. Undoing exactly those edits
+  // the date and the page's .brand colour (the rider of 30 Oct) reproduces all four 2026-11-04 pins above (checked
+  // mechanically before pinning).
+  '2026-11-05': {
+    terms: '2365859aa57a5777914aa76208eae63f69f66ae915731ecb677c67ae3a4cb625',
+    privacy: '387335ef2d9a1d7d84f332e0ec46360a804841bc1712d9387d652b4785d46023',
+    driver_agreement: '25d51d7e642d7986ef409ebd9c84baf7c37990e7304d32a7677918b5435db9b0',
+    vendor_agreement: '34271e4cde4a38af83c44cea9aeb5ac6e2bad50d29ac40329881363c826c776a',
+  },
+  // [2026-11-06 · PAYAHEAD-4W · owner ruling 6 Nov 2026 "one month at a time", replaces owner #62 · MATERIAL for partners
+  // · DRAFT until a Guyana attorney reads it] Mover and Business Agreements section 2: up to four weeks ahead; a rise
+  // keeps the old fee for a week paid before the notice and takes no payment past its date; a cut reaches weeks paid
+  // ahead. Proven the only change: putting the three old sentences and the 5 Nov date back reproduces all four
+  // 2026-11-05 pins above exactly (checked mechanically before pinning). Terms and Privacy change by their date only.
+  '2026-11-06': {
+    terms: '6b98de410a681e5ae1c6066e9e44c299889c8fcd18880035985720d1a6cd13f7',
+    privacy: 'acd0a5ef15b1edddb1e645798b1a36b27dfa6fe477aef909ef8fbfc99b629687',
+    driver_agreement: 'bc4d65166549aaa4205cdfa1084618abe36737617490bcedd99c7eaa944da516',
+    vendor_agreement: '22c1763a78a89c22a6831e7e2f55abd234e4fd4fcb8b037db0f09bc0eff443de',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
   it.each([
     ['Mover Agreement', DRIVER_AGREEMENT],
     ['Business Agreement', VENDOR_AGREEMENT],
-  ])('%s directs weekly-fee payment to checkout in the Swift app', (_name, agreement) => {
+  ])('%s directs weekly-fee payment to checkout in the Swift app or on swiftgy.com', (_name, agreement) => {
     expect(agreement).not.toMatch(/MMG\s+agent|Swift\s+Number|account\s+number/i);
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
-    expect(feeParagraph).toContain("payable in the Swift app through MMG's checkout, or by card where the app offers it.");
+    expect(feeParagraph).toContain("payable in the Swift app or on swiftgy.com through MMG's checkout, by card where the app offers it, or directly to Westbridge Inc., in person by cash or cheque, or by bank transfer.");
   });
 
   it.each([
     ['Mover Agreement', DRIVER_AGREEMENT],
     ['Business Agreement', VENDOR_AGREEMENT],
-  ])('%s states one week at a time (no paying ahead) and the refund of an unstarted week at closing [owner #62, 14 Oct]', (_name, agreement) => {
+  ])('%s states up to four weeks ahead and the refund of every unstarted week at closing [owner 6 Nov 2026, replaces #62]', (_name, agreement) => {
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
-    expect(feeParagraph).toContain('You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you.');
-    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from, records the refund, and then deletes the account; a week that has started is not refunded.');
-    expect(feeParagraph, 'the four-week limit is gone [owner #62]').not.toMatch(/four weeks|paid ahead|pay ahead/i);
+    expect(feeParagraph).toContain(`You may pay the weekly fee up to ${PAY_AHEAD_MAX_WEEKS_WORD} weeks ahead: while a week runs you may pay for the ${PAY_AHEAD_MAX_WEEKS_WORD} weeks after it, and no further. Money received beyond that is returned to you.`);
+    expect(feeParagraph).toContain('it is used only for your weekly fees and cannot be withdrawn or sent to anyone.');
+    expect(feeParagraph).toContain('you will not pay the new fee. A week you paid for before we told you keeps the old fee, and once we have told you, Swift takes payment only for weeks that start before the change until the new fee applies.');
+    expect(feeParagraph).toContain('If it goes down, the lower fee applies from your next weekly fee not yet charged, even one you have already paid for, with a notice in the app; what you paid above the lower fee counts toward your later weekly fees.');
+    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from or, if you paid in person, by a way you and Swift agree, records the refund, and then deletes the account; a week that has started is not refunded.');
+    expect(feeParagraph, 'one week at a time is gone [owner 6 Nov]').not.toMatch(/one week at a time|the coming week, and no further|paid ahead/i);
   });
 
   it('the Terms name no cancellation fee — Swift never charges one [owner #46/#50/#52]', () => {
@@ -250,8 +425,11 @@ describe('legal version binding [F-035-08]', () => {
   it('the Terms never promise an in-app cancel the app refuses [Opus review 14 Oct S3-1/S3-3]', () => {
     // An MMG Order whose payment the Business confirmed (CAPTURED/CLAIMED) is refused at every stage, even before acceptance.
     expect(TERMS).toContain('If you paid by MMG and the Business has already confirmed your payment, the app cannot cancel the Order at any stage, even before the Business accepts it: contact the Business to cancel it.');
-    // The app offers a customer Cancel on a service job only while it is a request (REQUESTED/QUOTED), not once booked.
-    expect(TERMS).toContain('A service job request can be cancelled free in the app until the job is booked; once it is booked, contact the provider to change or cancel it.');
+    // The app offers a customer Cancel on a service job while it is a request, and until the provider has confirmed the
+    // time (nobody has accepted it yet), not once booked, unless the provider is running very late.
+    // [TERMS 2026-10-29] A time booked from a provider's list of services is an appointment (its own switched-on rule,
+    // legal-appointment-rules.test.ts); every other service job keeps this one.
+    expect(TERMS).toContain('Any other service job request can be cancelled free in the app until the job is booked; once it is booked, contact the provider to change or cancel it.');
     expect(TERMS).not.toMatch(/service job can be cancelled free until the provider starts/i);
   });
 
@@ -280,10 +458,13 @@ describe('legal version binding [F-035-08]', () => {
   });
 
   it('the version is a date stamp, and LAST_UPDATED must move with it (shape check)', () => {
-    expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // [ROLE-DOCS · COORD ruling 21 Oct 2026 — a DELIBERATE extension] A second stamp on the same day carries a
+    // same-day suffix (2026-10-22.1): versions compare as strings, so it sorts after 2026-10-22 and before the next
+    // day. The date part still has to match LAST_UPDATED.
+    expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     // The human form is rendered into both documents — same date, or the
     // page contradicts its own version.
-    const [y, m, d] = LEGAL_VERSION.split('-').map(Number);
+    const [y, m, d] = LEGAL_VERSION.split('.')[0]!.split('-').map(Number);
     const human = new Date(Date.UTC(y!, m! - 1, d!)).toLocaleDateString('en-GB', {
       day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
     });

@@ -281,10 +281,11 @@ export function useSearchTrending<T = any>(enabled = true) {
   });
 }
 
-export function useVendor<T = any>(id: string) {
+export function useVendor<T = any>(id: string, point?: { lat: number; lng: number } | null) {
+  // [CHAINS PR3] The place rides the fetch, not the key: the favourite toggle writes this exact key.
   return useQuery<T>({
     queryKey: customerKeys.vendor(id),
-    queryFn: () => unwrap<T>(customerApi.getVendor(id)),
+    queryFn: () => unwrap<T>(customerApi.getVendor(id, point)),
     enabled: !!id,
   });
 }
@@ -386,16 +387,26 @@ export function useFavorites<T = any>() {
   return useQuery<T>({ queryKey: ['customer', 'favorites'], queryFn: () => unwrap<T>(customerApi.getFavorites()) });
 }
 
+/** [TAP-AUDIT 27 Oct] The store page's heart fills (or empties) at the tap: the store's own read takes the new state at
+ *  once and goes back if the server refuses. The store page is NOT downloaded again for a heart (it carries the whole
+ *  menu); the lists that show hearts (favourites, Home, store lists) are re-read as before. */
+const withFavorite = (vendor: unknown, isFavorite: boolean) => (vendor && typeof vendor === 'object' ? { ...(vendor as object), isFavorite } : vendor);
 export function useToggleFavorite() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ vendorId, isFavorite }: { vendorId: string; isFavorite: boolean }) =>
       unwrap(isFavorite ? customerApi.removeFavorite(vendorId) : customerApi.addFavorite(vendorId)),
+    onMutate: async ({ vendorId, isFavorite }) => {
+      await qc.cancelQueries({ queryKey: customerKeys.vendor(vendorId), exact: true });
+      qc.setQueryData(customerKeys.vendor(vendorId), (v: unknown) => withFavorite(v, !isFavorite));
+    },
+    onError: (_e, { vendorId, isFavorite }) => {
+      qc.setQueryData(customerKeys.vendor(vendorId), (v: unknown) => withFavorite(v, isFavorite));
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['customer', 'favorites'] });
       qc.invalidateQueries({ queryKey: ['customer', 'home'] });
       qc.invalidateQueries({ queryKey: ['customer', 'vendors'] });
-      qc.invalidateQueries({ queryKey: ['customer', 'vendor'] });
     },
   });
 }
@@ -972,6 +983,18 @@ export function useDecideSubstitution() {
     // any other key left it showing the old proposal after a decision. The
     // order is the decision's own (#1707), never the render's.
     onSuccess: (_data: unknown, { orderId }: SubstitutionDecision) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
+  });
+}
+
+/** [BOOK-S6a · owner B2] Move an appointment to another free time of the same service. The order
+ *  is part of the request (never the render's closure), and it is read again whatever the outcome:
+ *  a timeout can mean the move landed, and a refusal (taken time, cut-off) shows the booking as it is. */
+export function useRescheduleBooking() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ bookingId, newSlotStart }: { orderId: string; bookingId: string; newSlotStart: string }) =>
+      unwrap(customerApi.rescheduleBooking(bookingId, newSlotStart)),
+    onSettled: (_data, _error, { orderId }) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
   });
 }
 

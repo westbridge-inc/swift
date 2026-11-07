@@ -6,21 +6,24 @@ import { fetchPromos, createPromo, type CreatePromoInput, type Promo } from '@/l
 import { Modal } from '@/components/Modal';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { gyCalendarDay, gyDate, gyTodayYmd } from '@/lib/dates';
 
-const EMPTY: CreatePromoInput = {
+/** A blank promo, running from today in Guyana for 30 days (the server reads a bare day as a Guyana day). */
+const emptyPromo = (now = new Date()): CreatePromoInput => ({
   code: '',
   description: '',
   discountType: 'PERCENTAGE',
   discountValue: 10,
-  validFrom: new Date().toISOString().slice(0, 10),
-  validUntil: new Date(Date.now() + 30 * 864e5).toISOString().slice(0, 10),
-};
+  validFrom: gyTodayYmd(now),
+  validUntil: gyTodayYmd(now, 30),
+});
 
 export default function PromosPage() {
   const qc = useQueryClient();
   const { data, isLoading, isError, error: readError, refetch, isFetching } = useQuery({ queryKey: ['promos'], queryFn: fetchPromos });
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState<CreatePromoInput>(EMPTY);
+  const [blank, setBlank] = useState<CreatePromoInput>(() => emptyPromo());
+  const [form, setForm] = useState<CreatePromoInput>(blank);
 
   // [U62] The form is the shared dialog (focus kept inside, Escape and a click
   // outside close it) and, once anything is typed, only Cancel closes it, so a
@@ -29,9 +32,11 @@ export default function PromosPage() {
   // the request once, and comes back if the operator cancels or is refused.
   const actions = useActionRunner(() => {
     void qc.invalidateQueries({ queryKey: ['promos'] });
-    setForm(EMPTY);
+    const next = emptyPromo();
+    setBlank(next);
+    setForm(next);
   });
-  const dirty = JSON.stringify(form) !== JSON.stringify(EMPTY);
+  const dirty = JSON.stringify(form) !== JSON.stringify(blank);
   const submit = async () => {
     const body: CreatePromoInput = {
       ...form,
@@ -45,8 +50,8 @@ export default function PromosPage() {
       title: `Create the promo code ${body.code}?`,
       body: (
         <p>
-          {body.discountType === 'PERCENTAGE' ? `${body.discountValue}% off` : body.discountType === 'FIXED_AMOUNT' ? `GY$${body.discountValue.toLocaleString()} off` : 'Free delivery'}
-          , valid {body.validFrom} to {body.validUntil}{body.maxUses ? `, at most ${body.maxUses} uses` : ''}.
+          {body.discountType === 'PERCENTAGE' ? `${body.discountValue}% off` : body.discountType === 'FIXED_AMOUNT' ? `GY$${body.discountValue.toLocaleString()} off` : 'Free delivery (the normal delivery fee; an express order still pays its GY$1,000)'}
+          , valid {gyCalendarDay(body.validFrom)} to {gyCalendarDay(body.validUntil)}{body.maxUses ? `, at most ${body.maxUses} uses` : ''}.
         </p>
       ),
       confirmLabel: 'Create promo code',
@@ -59,43 +64,42 @@ export default function PromosPage() {
   const set = (patch: Partial<CreatePromoInput>) => setForm((f) => ({ ...f, ...patch }));
 
   return (
-    <div>
+    <div className="mc-page">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Promo Codes</h1>
         <button
           type="button"
           onClick={() => { actions.clear(); setOpen(true); }}
-          className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80"
+          className="mc-btn mc-btn-primary"
         >
           Create Promo
         </button>
       </div>
 
       {actions.banner}
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="mc-table-wrap">
+        <table className="mc-table mc-table-auto">
           <thead>
-            <tr className="border-b border-[var(--border)]">
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Code</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Type</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Discount</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Status</th>
-              <th className="text-left p-4 text-[var(--muted)] font-medium">Uses</th>
-              <th className="text-right p-4 text-[var(--muted)] font-medium">Expires</th>
+            <tr >
+              <th className="mc-label text-left">Code</th>
+              <th className="mc-label text-left">Type</th>
+              <th className="mc-label text-left">Discount</th>
+              <th className="mc-label text-left">Status</th>
+              <th className="mc-label text-left">Uses</th>
+              <th className="mc-label text-right">Expires</th>
             </tr>
           </thead>
           <tbody>
             {isLoading ? (
-              <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
+              <tr><td colSpan={6} className="mc-table-empty">Loading...</td></tr>
             ) : isError ? (
               <tr><td colSpan={6} className="p-4">
                 <QueryFailed error={readError} what="the promo codes" onRetry={() => void refetch()} retrying={isFetching} />
               </td></tr>
             ) : data?.data?.length === 0 ? (
-              <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">No promo codes yet</td></tr>
+              <tr><td colSpan={6} className="mc-table-empty">No promo codes yet</td></tr>
             ) : (
               data?.data?.map((promo: Promo) => (
-                <tr key={promo.id} className="border-b border-[var(--border)] hover:bg-white/5">
+                <tr key={promo.id} >
                   <td className="p-4 font-mono font-medium">{promo.code}</td>
                   <td className="p-4">{promo.discountType}</td>
                   <td className="p-4">
@@ -107,12 +111,12 @@ export default function PromosPage() {
                   </td>
                   <td className="p-4">
                     <span className={`px-2 py-1 rounded-full text-xs ${
-                      promo.isActive ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
+                      promo.isActive ? 'bg-[var(--mc-good-soft)] mc-text-good' : 'bg-gray-500/20 text-gray-400'
                     }`}>{promo.isActive ? 'Active' : 'Inactive'}</span>
                   </td>
                   <td className="p-4">{promo.currentUses} / {promo.maxUses || '∞'}</td>
-                  <td className="p-4 text-right text-[var(--muted)]">
-                    {promo.validUntil ? new Date(promo.validUntil).toLocaleDateString() : 'Never'}
+                  <td className="p-4 text-right mc-muted">
+                    {promo.validUntil ? gyDate(promo.validUntil) : 'Never'}
                   </td>
                 </tr>
               ))
@@ -123,7 +127,7 @@ export default function PromosPage() {
 
       {open && (
         <Modal title="New promo code" onClose={() => setOpen(false)} busy={dirty} overlayTestId="promo-form-overlay">
-          <div className="w-full max-w-md bg-[var(--panel)] rounded-2xl border border-[var(--border)] p-6">
+          <div className="w-full max-w-md bg-[var(--mc-card)] rounded-2xl border border-[var(--mc-line)] p-6">
             <h2 className="text-lg font-semibold mb-4">New promo code</h2>
             <div className="space-y-3">
               <Field label="Code">
@@ -165,9 +169,9 @@ export default function PromosPage() {
               </div>
             </div>
             <div className="flex justify-end gap-3 mt-5">
-              <button type="button" onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
+              <button type="button" onClick={() => setOpen(false)} className="mc-btn mc-btn-quiet">Cancel</button>
               <button type="button" onClick={() => void submit()} disabled={form.code.trim().length < 2 || !form.description.trim()}
-                className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
+                className="mc-btn mc-btn-primary">
                 Create
               </button>
             </div>
@@ -179,7 +183,7 @@ export default function PromosPage() {
 }
 
 const inputCls =
-  'mt-1 w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none';
+  'mc-input mt-1';
 
 // [A-22] The label was rendered but never ASSOCIATED: no `htmlFor`, no `id`, so
 // a screen reader announced every one of these as an unnamed edit box and
@@ -189,7 +193,7 @@ function Field({ label, children }: { label: string; children: React.ReactElemen
   const id = useId();
   return (
     <div>
-      <label htmlFor={id} className="text-xs text-[var(--muted)]">{label}</label>
+      <label htmlFor={id} className="mc-muted text-xs">{label}</label>
       {cloneElement(children, { id })}
     </div>
   );

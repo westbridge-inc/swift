@@ -2,14 +2,16 @@ import { assertPlacesConfig } from '../providers/places/places-config';
 import { runtimeMode } from './runtime-mode';
 import { malformedAllowlistPositions } from '../providers/notifications/sms-recipient-allowlist';
 import { firstInvalidTwilioConfig } from './twilio-identity';
-import { PUBLIC_API_HOST, assertDisabledCardRailConfig } from './card-rail';
+import { PUBLIC_API_HOSTS, assertDisabledCardRailConfig } from './card-rail';
 import { powerTranzConfigFromEnv } from '../providers/card/powertranz-provider';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
+import { assertCallRelayConfig } from '../modules/calls/call-relay-switch';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
 import { identitySalt } from '../modules/integrity/normalize';
 import { smtpConfigFromEnv } from '../providers/notifications/smtp-email';
+import { resendConfigFromEnv } from '../providers/notifications/resend-email';
 import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
 /**
@@ -66,8 +68,9 @@ export function assertCardSimulatorNotPublic(env: Record<string, string | undefi
     let host = '';
     // [#1511 review S4] A trailing dot names the same host.
     try { host = new URL(env['API_PUBLIC_URL'] ?? '').hostname.toLowerCase().replace(/\.+$/, ''); } catch { host = ''; }
-    if (host === PUBLIC_API_HOST) {
-      throw new Error(`FATAL: a TEST card system (the simulator, CARD_RAIL_SIMULATOR_LIVE, or the provider's sandbox) on the public API host ${PUBLIC_API_HOST} — it books weeks without real money. Refusing to start.`);
+    // [GUARD-FIX] Either public name of the production API, never just one.
+    if (PUBLIC_API_HOSTS.includes(host)) {
+      throw new Error(`FATAL: a TEST card system (the simulator, CARD_RAIL_SIMULATOR_LIVE, or the provider's sandbox) on the public API host ${host} — it books weeks without real money. Refusing to start.`);
     }
     if ((env['CARD_RAIL_SIMULATOR_LIVE'] ?? '0') !== '0' && !host) {
       throw new Error('FATAL: CARD_RAIL_SIMULATOR_LIVE needs API_PUBLIC_URL set to this TEST server\'s own address (never the public host). Refusing to start.');
@@ -177,11 +180,13 @@ export function assertWallLoginConfig(env: Record<string, string | undefined>): 
   }
 }
 
-/** [DS214 D1 · B1/S4 · CANCEL-WINDOW 22 Oct 2026] The shortest LIFECYCLE_V2 order hold production boots with:
- *  the settled five-minute hold (Total Audit build order; ORDER_HOLD_MINUTES default 5). Its own number since the
- *  owner cut the free-cancel window AFTER acceptance to one minute (FREE_CANCEL_WINDOW_MIN): the hold BEFORE
- *  acceptance did not change, so neither does this boot floor. */
-export const ORDER_HOLD_FLOOR_MIN = 5;
+/** [DS214 D1 · B1/S4 · CANCEL-WINDOW 22 Oct 2026] The shortest LIFECYCLE_V2 order hold production boots with.
+ *  Its own number since the owner cut the free-cancel window AFTER acceptance to one minute (FREE_CANCEL_WINDOW_MIN).
+ *  [owner 30 Oct 2026, testing a pickup on staging: "the 5 minute wait time is still there, not 1 minute"] The
+ *  hold BEFORE acceptance is now one minute too (order/hold-minutes.ts ORDER_HOLD_DEFAULT_MIN, was five), so the
+ *  floor is ONE minute: the owner's own value. Not relaxed silently — moved by the owner's ruling, and the guard
+ *  still refuses a missing number, zero, a negative, and any hold shorter than one minute. */
+export const ORDER_HOLD_FLOOR_MIN = 1;
 
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
@@ -191,6 +196,14 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // driver needs its whole configuration — keys parsed, the request proven to
   // fit the key. Production also refuses the sandbox and a UAT page.
   assertMmgCheckoutConfig(env);
+  // [ADS-ON] Read as off, which takes no money, but a misspelling must not look like a switch that was turned on.
+  const adMmgCheckout = env['ADS_MMG_CHECKOUT'];
+  if (adMmgCheckout !== undefined && adMmgCheckout !== '' && adMmgCheckout !== '0' && adMmgCheckout !== '1') {
+    throw new Error('FATAL: ADS_MMG_CHECKOUT must be exactly 0 or 1 — a misspelled switch is not guessed at. Refusing to start.');
+  }
+  // [O-1] The Swift call bridge, in EVERY mode: CALL_RELAY=1 needs Swift's caller ID, the
+  // public webhook address and the Twilio account, key and webhook token, or nothing starts.
+  assertCallRelayConfig(env);
   // Validate the documented retention setting in every mode. Production
   // salts are checked below after the existing configuration guards.
   scanRawRetentionDays(env);
@@ -227,7 +240,7 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   }
 
   // [ledger E08] The settled posture is hold ON: every order is born held for
-  // ORDER_HOLD_MINUTES (default 5) — the customer's free-cancel window, hidden
+  // ORDER_HOLD_MINUTES (default 1, owner 30 Oct 2026) — the customer's free-cancel window, hidden
   // from the vendor. But holdWindowMs() and checkoutQueueTiming() read an
   // UNSET LIFECYCLE_V2 as hold OFF, so a deploy that merely omits the variable
   // pushes new orders to the vendor instantly while the app still promises a
@@ -240,14 +253,15 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // When the hold is on, a set-but-unparseable window makes holdWindowMs()
   // return null — the same silent hold-off — so that too refuses, never
   // silently defaults. [DS214 D1] And the hold may never be SHORTER than the
-  // settled five-minute hold (ORDER_HOLD_FLOOR_MIN): a shorter hold puts an
-  // order on the vendor board early, which is exactly the REPORT-036 defect
-  // (order.service.ts holdWindowMs).
+  // settled hold (ORDER_HOLD_FLOOR_MIN, one minute since the owner's 30 Oct
+  // 2026 ruling): a shorter hold puts an order on the vendor board early,
+  // which is exactly the REPORT-036 defect (order.service.ts holdWindowMs).
   // [CANCEL-WINDOW · owner 22 Oct 2026] This floor used to read
   // FREE_CANCEL_WINDOW_MIN, which was also five. The free-cancel window after
   // acceptance is now ONE minute; the hold before acceptance is a different
-  // timer the owner did not change, so the floor keeps its own number and
-  // this guard refuses exactly what it refused before (never relaxed silently).
+  // timer, so the floor keeps its own number. [owner 30 Oct 2026] The owner
+  // then cut the hold itself to one minute: the floor follows the owner's
+  // ruling (not relaxed silently) and still refuses below one minute.
   if (lifecycleV2 === '1' && env['ORDER_HOLD_MINUTES'] !== undefined) {
     const holdMinutes = Number(env['ORDER_HOLD_MINUTES']);
     if (!Number.isFinite(holdMinutes) || holdMinutes < ORDER_HOLD_FLOOR_MIN) {
@@ -325,6 +339,14 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     } catch (err) {
       throw new Error(`FATAL: ${which} in production, but the card provider is not fully set up for live cards: ${(err as Error).message}. Refusing to start.`);
     }
+  }
+  // [GUARD-FIX] The provider's TEST system (its sandbox) never runs in
+  // production, whatever the API's public name and even with v2 off: the
+  // public-name check above (assertCardSimulatorNotPublic) is keyed on names,
+  // this one on the production identity. The simulator and its test switch
+  // are already refused above.
+  if (env['CARD_RAIL_PROVIDER'] === 'powertranz' && env['CARD_RAIL_ENVIRONMENT'] !== 'live') {
+    throw new Error('FATAL: a TEST card system (the provider\'s sandbox: CARD_RAIL_PROVIDER=powertranz without CARD_RAIL_ENVIRONMENT=live) in production — it books weeks without real money. Refusing to start.');
   }
   if (paymentProvider === 'stripe' && !env['STRIPE_SECRET_KEY']?.startsWith('sk_live_')) {
     throw new Error('FATAL: PAYMENT_PROVIDER=stripe requires a live STRIPE_SECRET_KEY in production. Refusing to start.');
@@ -444,14 +466,17 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // [PROD-PATH] Email: receipts, expiry warnings, data-export links. The dev
   // sender refuses only at the FIRST send in production (channels.ts), so a
   // missing sender stayed invisible until a customer was owed an email. The
-  // launch sender is SMTP; its whole configuration is checked here, by the
-  // same reader the sender uses (it names missing settings, never values).
+  // launch sender is a real one, SMTP or (EMAIL-HTTPS 27 Oct: the droplets
+  // cannot reach SMTP) Resend over HTTPS; its whole configuration is checked
+  // here, by the same reader the sender uses (it names missing settings, never
+  // values). Unset, dev and anything else stay refused.
   const emailProvider = env['EMAIL_PROVIDER'];
-  if (emailProvider !== 'smtp') {
-    throw new Error('FATAL: EMAIL_PROVIDER must be smtp in production — unset or dev sends no receipt, notice or export link. Set EMAIL_PROVIDER=smtp with SMTP_HOST, SMTP_PORT, SMTP_USER, EMAIL_FROM and the SMTP_PASS secret. Refusing to start.');
+  if (emailProvider !== 'smtp' && emailProvider !== 'resend') {
+    throw new Error('FATAL: EMAIL_PROVIDER must be smtp or resend in production — unset or dev sends no receipt, notice or export link. Set EMAIL_PROVIDER=smtp with SMTP_HOST, SMTP_PORT, SMTP_USER, EMAIL_FROM and the SMTP_PASS secret, or EMAIL_PROVIDER=resend with EMAIL_FROM and the RESEND_API_KEY secret. Refusing to start.');
   }
   try {
-    smtpConfigFromEnv(env);
+    if (emailProvider === 'smtp') smtpConfigFromEnv(env);
+    else resendConfigFromEnv(env);
   } catch (error) {
     throw new Error(`FATAL: ${error instanceof Error ? error.message : String(error)}. Refusing to start.`);
   }

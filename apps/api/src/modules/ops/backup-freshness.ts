@@ -128,3 +128,77 @@ export async function pageBackupFreshness(
   });
   return { result, page };
 }
+
+// ---------------------------------------------------------------------------
+// [SEC-BACKUP] Is the backup protected from whoever holds the API's key?
+//
+// `deploy/backup.sh` also records which storage key the run used
+// (`last_backup_storage_key`: 'dedicated' = the backup bucket's own key from
+// the host's backup store, 'shared' = the API's key, the fallback until the
+// owner stores a backup-only one) and whether the dump was signed
+// (`last_backup_signed`). A shared key means anyone who obtains the API's
+// storage key can read, overwrite or delete every off-site backup; an unsigned
+// dump is refused by every restore. Both keep backups RUNNING, so this is a
+// separate, slower page from the freshness alarm: weekly, until it is fixed.
+// A heartbeat that records neither (a backup.sh from before this check) is
+// not judged here.
+// ---------------------------------------------------------------------------
+
+export const LAST_BACKUP_SIGNED_KEY = 'last_backup_signed';
+export const LAST_BACKUP_STORAGE_KEY_KEY = 'last_backup_storage_key';
+export const BACKUP_POSTURE_PAGE_TITLE = 'Backups are not protected from the API key';
+
+export interface BackupPosture {
+  /** True when a page should be raised. */
+  weak: boolean;
+  /** The last backup used the API's own storage key. */
+  sharedKey: boolean;
+  /** The last backup was not signed. */
+  unsigned: boolean;
+  /** Human-readable, safe to put straight into an alert body. */
+  reason: string;
+}
+
+export async function checkBackupPosture(prisma: PrismaClient): Promise<BackupPosture> {
+  const rows = await prisma.platformConfig.findMany({
+    where: { key: { in: [LAST_BACKUP_SIGNED_KEY, LAST_BACKUP_STORAGE_KEY_KEY] } },
+  });
+  const sharedKey = rows.find((r) => r.key === LAST_BACKUP_STORAGE_KEY_KEY)?.value === 'shared';
+  const unsigned = rows.find((r) => r.key === LAST_BACKUP_SIGNED_KEY)?.value === false;
+  const reasons: string[] = [];
+  if (sharedKey) {
+    reasons.push(
+      "Backups still use the API's storage key: whoever obtains it can read, overwrite or delete every off-site backup. Create a key limited to the backup bucket and store it on the host (owner sheet BACKUP-KEY-SETUP).",
+    );
+  }
+  if (unsigned) {
+    reasons.push(
+      'The last backup was not signed: restores refuse it. Install the backup store and the current backup unit on the host (sudo swift-secrets backup init).',
+    );
+  }
+  return {
+    weak: sharedKey || unsigned,
+    sharedKey,
+    unsigned,
+    reason: reasons.length ? reasons.join(' ') : 'Backups use their own key and are signed.',
+  };
+}
+
+/** A platform page on the same durable path (and alert kind) as the freshness alarm; a week between deliveries. */
+export async function pageBackupPosture(
+  deps: { prisma: PrismaClient; redis: Redis; notifications: NotificationService },
+): Promise<{ result: BackupPosture; page: PageOutcome | null }> {
+  const result = await checkBackupPosture(deps.prisma);
+  if (!result.weak) {
+    await resolveOpsPage(deps.prisma, BACKUP_POSTURE_PAGE_TITLE, 'backup-protected');
+    return { result, page: null };
+  }
+  const page = await pageOps(deps, {
+    key: 'ops_page:backup-posture',
+    windowSeconds: 7 * 24 * 3600,
+    title: BACKUP_POSTURE_PAGE_TITLE,
+    body: result.reason,
+    data: { kind: 'ops_backup_stale', backupPosture: true, sharedKey: result.sharedKey, unsigned: result.unsigned },
+  });
+  return { result, page };
+}

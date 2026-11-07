@@ -116,6 +116,7 @@ export const STORE_RATING_TYPES: readonly string[] = [...TYPES_FOR_ROLE.VENDOR];
 
 /** The person's own account row. */
 export const ACCOUNT_FIELDS = [
+  'moverPlanMoveUntil',
   'id', 'phone', 'email', 'emailChangedAt', 'firstName', 'lastName', 'selfieCapturedAt', 'roles', 'activeRole', 'lastMoverRole',
   'status', 'isPhoneVerified', 'isEmailVerified', 'acceptedTermsAt', 'tosVersion', 'trustLevel', 'lossProtectionSuspendedAt',
   'countryCode', 'notificationPrefs', 'lastKnownLat', 'lastKnownLng',
@@ -132,8 +133,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'userId', 'label', 'addressLine1', 'addressLine2', 'city', 'region', 'country', 'latitude', 'longitude', 'instructions', 'isDefault', 'createdAt', 'updatedAt'],
   },
   {
-    category: 'orders', model: 'Order', by: ['customerId'], key: 'id', omit: { mmgPayUrlSnapshot: 'OTHER_PERSON', mmgRecipientNameSnapshot: 'OTHER_PERSON', mmgNumberSnapshot: 'OTHER_PERSON' },
-    fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinVerifiedAt', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'createdAt', 'updatedAt'],
+    category: 'orders', model: 'Order', by: ['customerId'], key: 'id', omit: { mmgPayUrlSnapshot: 'OTHER_PERSON', mmgRecipientNameSnapshot: 'OTHER_PERSON', mmgNumberSnapshot: 'OTHER_PERSON', vatSellerNumber: 'OTHER_PERSON', vatSellerName: 'OTHER_PERSON' },
+    fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'vatAmount', 'vatRateBps', 'vatStandardGoods', 'vatZeroRatedGoods', 'vatExemptGoods', 'vatBase', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinVerifiedAt', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'appointmentMovedAt', 'createdAt', 'updatedAt'],
   },
   {
     // [REVIEW-M S3-1 · multi-stop] The places a passenger's taxi ride stopped at, each with its ride (orderId = the
@@ -169,11 +170,21 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'serviceJobs', model: 'ServiceJob', by: ['customerId'], key: 'id',
-    fields: ['id', 'customerId', 'description', 'status', 'quoteAmount', 'scheduledFor', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt', 'updatedAt'],
+    // [BOOK-P1] The service booked (its id) and when the booked time ends.
+    fields: ['id', 'customerId', 'description', 'status', 'quoteAmount', 'scheduledFor', 'endsAt', 'offeringId', 'providerConfirmedAt', 'providerMovedAt', 'completedAt', 'cancelledAt', 'createdAt', 'updatedAt'],
   },
   {
-    category: 'bookings', model: 'Booking', by: ['customerId'], key: 'id',
+    // [BOOK-S1] Whether the business took one booking at a time when it was made is bookkeeping for the database's overlap rule.
+    category: 'bookings', model: 'Booking', by: ['customerId'], key: 'id', omit: { exclusive: 'SYSTEM' },
     fields: ['id', 'itemId', 'customerId', 'orderId', 'slotStart', 'slotEnd', 'status', 'createdAt'],
+  },
+  {
+    // [BOOK-FU2 · owner B3] "Customer didn't come": a business recorded that you did not come to an appointment of
+    // yours (Privacy Policy section 6). The whole record is yours to see, through your order: which booking and
+    // when it was recorded. Who at the business recorded it is a person at that business (OTHER_PERSON).
+    category: 'missedAppointments', model: 'AppointmentNoShow', through: 'order', by: ['customerId'], key: 'id', sortBy: ['recordedAt', 'orderId'],
+    omit: { id: 'SYSTEM' },
+    fields: ['orderId', 'bookingId', 'recordedAt'],
   },
   {
     category: 'cart', model: 'Cart', by: ['customerId'], key: 'id',
@@ -222,7 +233,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'userId', 'platform', 'isActive', 'createdAt', 'alertsVersion'],
   },
   {
-    category: 'verificationDocuments', model: 'VerificationDocument', by: ['userId'], key: 'id',
+    category: 'verificationDocuments', model: 'VerificationDocument', by: ['userId'], key: 'id', omit: { approvalHeldAt: 'SYSTEM' },
     fields: ['id', 'userId', 'role', 'docType', 'status', 'state', 'expiresAt', 'reviewNote', 'reviewedAt', 'insurerName', 'policyNumber', 'coverageClass', 'hireClassConfirmed', 'plateCrossChecked', 'consentAt', 'privacyNoticeVersion', 'retentionExpiresAt', 'purgedAt', 'createdAt', 'updatedAt', 'subjectId', 'imagePurgedAt'],
   },
   {
@@ -287,7 +298,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'mmgCheckouts', model: 'MmgCheckoutIntent', by: ['createdByUserId'], key: 'id', omit: { candidates: 'SYSTEM' },
-    fields: ['id', 'subscriptionId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
+    fields: ['id', 'subscriptionId', 'chainOwnerId', 'adInvoiceId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
   },
   {
     category: 'feeNotices', model: 'BillingFeeNotice', by: ['userId'], key: 'id', omit: { payload: 'SYSTEM' },
@@ -296,6 +307,12 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   {
     category: 'emergencyContacts', model: 'EmergencyContact', by: ['userId'], key: 'id',
     fields: ['id', 'userId', 'name', 'phoneE164', 'relationship', 'priority', 'verifiedAt', 'createdAt', 'updatedAt'],
+  },
+  {
+    // [O-1] The Swift-bridged calls the person asked for on their orders: which party (a role, never a
+    // person), when, and how far it got. Swift stores no phone number for a call; the provider's own id is bookkeeping.
+    category: 'swiftCalls', model: 'CallSession', by: ['callerUserId'], key: 'id', omit: { provider: 'SYSTEM', providerCallId: 'SYSTEM' },
+    fields: ['id', 'orderId', 'callerUserId', 'callerRole', 'calleeRole', 'status', 'callerConfirmedAt', 'connectedAt', 'endedAt', 'durationSeconds', 'createdAt', 'updatedAt'],
   },
   {
     category: 'tripShares', model: 'TripShareToken', by: ['createdByUserId'], key: 'id',
@@ -315,19 +332,57 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'riderProfile', model: 'Rider', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalDeliveries', 'totalCourierJobs', 'completionRate', 'acceptanceRate', 'floatLimit', 'committedFloat', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'returnsToTaxi', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalDeliveries', 'totalCourierJobs', 'completionRate', 'acceptanceRate', 'floatLimit', 'committedFloat', 'createdAt', 'updatedAt'],
   },
   {
     category: 'driverProfile', model: 'Driver', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'takesDeliveries', 'deliveryCardsCapable', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
   },
   {
     category: 'serviceProviderProfile', model: 'ServiceProvider', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'trade', 'bio', 'selfSkilled', 'isVerified', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'trade', 'bio', 'selfSkilled', 'isVerified', 'weeklyHours', 'createdAt', 'updatedAt'],
   },
   {
     category: 'storeOwnership', model: 'VendorOwner', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'createdAt'],
+    // [CHAINS] The chain deal is the owner's own commercial term: its weekly fee, currency and when it was set. Who at
+    // Swift set it and the staff's reason are Swift's internal record.
+    // [CHAINS PR3] The brand name customers see for all the owner's branches is the owner's own business name.
+    fields: ['id', 'userId', 'createdAt', 'dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt', 'brandName', 'dealChangeKind', 'dealChangeFrom', 'dealChangeTo', 'dealChangeNotBefore', 'dealChangeSetAt', 'dealChangeSwitchedAt'],
+    omit: { dealReason: 'INTERNAL_NOTE', dealSetBy: 'OTHER_PERSON', dealChangeReason: 'INTERNAL_NOTE', dealChangeSetBy: 'OTHER_PERSON' },
+  },
+  {
+    // [REVIEW-M S3 on #2027 · follow-up] The record of each store the person OWNS, read through the ownership
+    // (VendorOwner.userId = the person; never a store they only work at): for a sole trader its phone, email,
+    // address and map pin can be the owner's own contact and home place, and its MMG details their own wallet.
+    // What the owner sets for the store is in. Images are stored files; staff notes, a checkout hold and who
+    // placed it, the ratings totals, being featured and system bookkeeping are not.
+    category: 'storesOwned', model: 'Vendor', through: 'owner', by: ['userId'], key: 'id',
+    omit: {
+      logoUrl: 'STORED_FILE', coverImageUrl: 'STORED_FILE', tierNote: 'INTERNAL_NOTE', mmgCheckoutHeldReason: 'INTERNAL_NOTE',
+      mmgCheckoutHeldAt: 'FRAUD_SAFETY', suspensionSource: 'SYSTEM', isFeatured: 'SYSTEM', mmgMissesClearedAt: 'SYSTEM', nameReviewApprovedHash: 'SYSTEM',
+      // [STORE-VAT · owner O-5] The staff member who decided the store's VAT.
+      vatReviewedBy: 'OTHER_PERSON',
+      // [CHAINS] Whether a new branch still waits for a person at Swift to approve it: Swift's own bookkeeping.
+      personApprovalRequired: 'SYSTEM',
+      // [CHAINS PR3] Whether Swift lists this branch on its own card: Swift's listing bookkeeping.
+      brandListedAlone: 'SYSTEM',
+      // [WEB-DELETE] When the owner's closure request paused new orders: Swift's bookkeeping of that request (the
+      // request itself is exported with the person's support tickets).
+      closurePausedAt: 'SYSTEM',
+    },
+    fields: [
+      'id', 'name', 'slug', 'description', 'vendorType', 'tradesUnderOwnName', 'phone', 'publicPhone', 'email', 'addressLine1', 'addressLine2', 'city', 'region',
+      'latitude', 'longitude', 'isCurrentlyOpen', 'acceptingOrders', 'selfDeliveryEnabled', 'requirePickupCode', 'maxConcurrentOrders', 'bookingCapacity',
+      'deliveryRadius', 'minOrderAmount', 'estimatedPrepTime', 'cuisineTypes', 'tags', 'refundRule', 'vatRegistrationNumber', 'qrSlug',
+      // [STORE-VAT · owner O-5] The store's own VAT record, as its owner sees it on the VAT screen (GET /vendor/vat): its
+      // answer and pricing choice, the certificate it sent, what a person approved (number, registered name, effective
+      // date), when, and the reason the store was given for a refusal or withdrawal (written for the store to read).
+      'vatStatus', 'vatMode', 'vatModeRequested', 'vatCertificateDocId', 'vatApprovedNumber', 'vatApprovedName', 'vatEffectiveFrom', 'vatReviewedAt', 'vatReviewNote',
+      'mmgNumber', 'mmgNumberPending', 'mmgNumberPendingAt', 'mmgNumberApplyAt', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt',
+      'isVerified', 'activationValidUntil', 'tier', 'tierChangedAt', 'status', 'totalOrders', 'nameReviewApprovedAt', 'createdAt', 'updatedAt',
+      // [RETIER PR-A] when the store first went live (it decides whether a new fee is priced on its catalogue)
+      'firstLiveAt',
+    ],
   },
   {
     category: 'storeStaffRoles', model: 'VendorStaff', by: ['userId'], key: 'id',
@@ -335,7 +390,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'advertiserMemberships', model: 'AdvertiserMember', by: ['userId'], key: 'advertiserId',
-    fields: ['advertiserId', 'userId', 'role', 'createdAt'],
+    fields: ['advertiserId', 'userId', 'role', 'createdAt', 'acceptedAt'],
   },
   {
     category: 'advertisersCreated', model: 'Advertiser', by: ['createdByUserId'], key: 'id',
@@ -358,12 +413,14 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'riderId', 'driverId', 'orderId', 'type', 'amount', 'status', 'createdAt'],
   },
   {
-    category: 'moverSubscriptions', model: 'Subscription', by: ['riderId', 'driverId'], via: 'mover', key: 'id',
+    // [BILL-PRO] A mover's subscription never has a pro owner (the database allows one owner per subscription).
+    // [WEB-DELETE] closureHold*: a store owner's closure request holding a store fee (Swift's bookkeeping; never a mover fee).
+    category: 'moverSubscriptions', model: 'Subscription', by: ['riderId', 'driverId'], via: 'mover', key: 'id', omit: { serviceProviderId: 'OTHER_PERSON', closureHoldAt: 'SYSTEM', closureHoldTicketId: 'SYSTEM' },
     fields: ['id', 'riderId', 'driverId', 'type', 'status', 'weeklyRate', 'currentPeriodStart', 'currentPeriodEnd', 'nextBillingDate', 'isInGracePeriod', 'gracePeriodEnd', 'isTrialActive', 'trialEndDate', 'autoRenew', 'lastPaymentDate', 'lastPaymentId', 'failedAttempts', 'feeWaived', 'feeWaivedReason', 'customRate', 'currencyCode', 'autoSuspendEnabled', 'billingMethod', 'mmgPayerMsisdn', 'suspendedAt', 'billingConfirmationPausedAt', 'billingEnforcementDueAt', 'san', 'sanAssignedAt', 'createdAt', 'updatedAt'],
   },
   {
     category: 'cashSettlements', model: 'DeliveryCashSettlement', by: ['riderId'], via: 'rider', key: 'id',
-    fields: ['id', 'orderId', 'riderId', 'amount', 'status', 'riderConfirmedAt', 'storeConfirmedAt', 'riderAttestedAmount', 'storeAttestedAmount', 'createdAt'],
+    fields: ['id', 'orderId', 'riderId', 'amount', 'status', 'riderConfirmedAt', 'storeConfirmedAt', 'riderAttestedAmount', 'storeAttestedAmount', 'closedAt', 'createdAt'],
   },
   {
     category: 'deliveryRuns', model: 'DeliveryRun', by: ['riderId'], via: 'rider', key: 'id',
@@ -383,7 +440,22 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'serviceJobsAsProvider', model: 'ServiceJob', by: ['providerId'], via: 'provider', key: 'id', rest: 'OTHER_PERSON',
-    fields: ['providerId', 'status', 'quoteAmount', 'scheduledFor', 'providerConfirmedAt', 'completedAt', 'cancelledAt', 'createdAt'],
+    fields: ['providerId', 'status', 'quoteAmount', 'scheduledFor', 'endsAt', 'offeringId', 'providerConfirmedAt', 'providerMovedAt', 'completedAt', 'cancelledAt', 'createdAt'],
+  },
+  {
+    // [BOOK-P1] The services the person offers as a provider: name, length, price.
+    category: 'serviceOfferings', model: 'ServiceOffering', by: ['providerId'], via: 'provider', key: 'id',
+    fields: ['id', 'providerId', 'name', 'durationMinutes', 'price', 'active', 'createdAt', 'updatedAt'],
+  },
+  {
+    // [BOOK-P1] The days and hours the person set as away, as a provider.
+    category: 'serviceTimeOff', model: 'ServiceProviderTimeOff', by: ['providerId'], via: 'provider', key: 'id',
+    fields: ['id', 'providerId', 'date', 'start', 'end', 'createdAt'],
+  },
+  {
+    // [BILL-PRO] An independent pro's weekly-fee subscription (none exist until the fee is switched on for pros).
+    category: 'proSubscriptions', model: 'Subscription', by: ['serviceProviderId'], via: 'provider', key: 'id', omit: { closureHoldAt: 'SYSTEM', closureHoldTicketId: 'SYSTEM' },
+    fields: ['id', 'serviceProviderId', 'type', 'status', 'weeklyRate', 'currentPeriodStart', 'currentPeriodEnd', 'nextBillingDate', 'isInGracePeriod', 'gracePeriodEnd', 'isTrialActive', 'trialEndDate', 'autoRenew', 'lastPaymentDate', 'lastPaymentId', 'failedAttempts', 'feeWaived', 'feeWaivedReason', 'customRate', 'currencyCode', 'autoSuspendEnabled', 'billingMethod', 'mmgPayerMsisdn', 'suspendedAt', 'billingConfirmationPausedAt', 'billingEnforcementDueAt', 'san', 'sanAssignedAt', 'createdAt', 'updatedAt'],
   },
   {
     category: 'serviceQualifications', model: 'ServiceQualification', by: ['providerId'], via: 'provider', key: 'id',
@@ -412,11 +484,15 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'TripSafetySession.driverUserId': { reason: 'FRAUD_SAFETY', note: 'trip safety monitoring and its risk score' },
   'SosAlert.counterpartyUserId': { reason: 'FRAUD_SAFETY', note: 'emergency alerts other people raised on a trip with you' },
   'SosRetrigger.counterpartyUserId': { reason: 'FRAUD_SAFETY', note: 'emergency alerts other people raised on a trip with you' },
-  'ReimbursementClaim.customerId': { reason: 'OTHER_PEOPLE', note: 'a claim a mover made about an order of yours' },
+  'ReimbursementClaim.customerId': { reason: 'OTHER_PEOPLE', note: 'a payment request a mover made about an order of yours' },
   'HandoverPhotoProof.customerId': { reason: 'OTHER_PEOPLE', note: 'the handover proof a mover filed for an order of yours' },
   'CashHandoverEvidence.customerId': { reason: 'OTHER_PEOPLE', note: 'the cash handover record a mover filed for an order of yours' },
   'Admin.userId': { reason: 'STAFF_WORK', note: 'your Swift staff permissions' },
   'AdCreative.reviewedByUserId': { reason: 'STAFF_WORK', note: 'ad reviews done as staff' },
+  'FeeRefundCase.openedByUserId': { reason: 'STAFF_WORK', note: 'weekly-fee refund cases recorded as staff' },
+  'AdCampaign.destinationApprovedByUserId': { reason: 'STAFF_WORK', note: 'ad links approved as staff' },
+  'HouseAd.destinationApprovedByUserId': { reason: 'STAFF_WORK', note: 'house ad links approved as staff' },
+  'AdLinkDomain.reviewedByUserId': { reason: 'STAFF_WORK', note: 'ad websites decided as staff' },
   'AdRefundIntent.requestedByUserId': { reason: 'STAFF_WORK', note: 'ad refunds asked for on behalf of a business' },
   'AdsAuditLog.actorUserId': { reason: 'STAFF_WORK', note: 'changes made to the ads of a business' },
   'AuditChainEntry.actorId': { reason: 'STAFF_WORK', note: 'the tamper-evident log of document decisions made as staff' },
@@ -430,7 +506,10 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'SensitiveReadLog.subjectId': { reason: 'STAFF_WORK', note: 'the security log of staff who opened your sensitive records' },
   'StockAdjustment.createdBy': { reason: 'STAFF_WORK', note: 'stock changes made for a store' },
   'StockMovement.actorId': { reason: 'STAFF_WORK', note: 'stock changes made for a store' },
+  'PosImport.actorId': { reason: 'STAFF_WORK', note: 'till files you applied for a store' },
   'SupportTicket.resolvedById': { reason: 'STAFF_WORK', note: 'support tickets resolved as staff' },
+  // [BOOK-FU2 · owner B3] The business's own record that its customer did not come (the customer's copy is missedAppointments).
+  'AppointmentNoShow.recordedByUserId': { reason: 'STAFF_WORK', note: 'missed appointments you recorded for a business' },
   'DocLegalHold.subjectUserId': { reason: 'LEGAL_HOLD', note: 'a legal hold on your documents' },
   'AlertDelivery.recipientId': { reason: 'SYSTEM', note: 'delivery of job offers (the jobs you did are in deliveriesAsRider and tripsAsDriver)' },
   'AlgoDecision.subjectId': { reason: 'SYSTEM', note: 'logs of automated dispatch and pricing steps' },
@@ -462,7 +541,7 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
  * them is red in account-export-register.test until it is exported through its parent or named here.
  */
 export const PLACES_NOT_EXPORTED: Readonly<Record<string, string>> = {
-  Vendor: 'a store’s own record (its name, contact and map pin, shown to its customers and riders); the owner sees and edits it in the store dashboard; not yet exported through storeOwnership (follow-up owed)',
+  // [REVIEW-M S3 on #2027] Vendor is exported through the ownership now (storesOwned).
 };
 
 /** Person links whose rows are already in a category through another column of the same row. */

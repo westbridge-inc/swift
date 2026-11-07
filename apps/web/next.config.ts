@@ -22,7 +22,8 @@ const FONT_CACHE_CONTROL = 'public, max-age=2592000, stale-while-revalidate=6048
 // [SWX-DEV-WEB-076 · integrated] The browser API origin and the CSP that
 // permits exactly it come from ONE authority (src/lib/browser-api-origin.ts).
 // `next dev` runs in development mode; every other phase — build, start,
-// export — is production and REQUIRES the canonical release origin.
+// export — is production and REQUIRES one of the channel's exact origins
+// (production: the release origin or the pre-launch origin; staging: staging).
 export default function createNextConfig(phase: string): NextConfig {
   // `next lint` loads this config with the production-build phase but produces
   // no artifact; the release law binds artifacts, so linting runs as
@@ -37,7 +38,9 @@ export default function createNextConfig(phase: string): NextConfig {
   // API's own card page). OFF unless the build sets SWIFT_WEB_CARD_FRAME=1: off, the CSP and
   // the client bundle are exactly what they were, and the card page opens in the same tab.
   const cardFrame = process.env['SWIFT_WEB_CARD_FRAME'] === '1';
-  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel, { cardFrame });
+  // [OPEN-EARLY] The policy names the origin the build resolved (the release origin or the
+  // pre-launch one), so the browser may connect to exactly the API this build calls.
+  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel, { cardFrame, apiOrigin: browserApiOrigin });
   // [WEB-TILES] The MapTiler browser key (lib/map-tiles.ts): a malformed value
   // refuses the build; a production build without one says, in its log, that
   // the site it builds draws no map tiles. Next inlines the key into the bundle.
@@ -77,23 +80,58 @@ export default function createNextConfig(phase: string): NextConfig {
     // icons, skeletons and routes) were copied into each page's own chunk as well as the
     // layout's: 2.5 to 4.5 kB loaded twice on every customer page. This group puts the app's own
     // code (and lucide's icons) that at least 12 of the customer pages use into one chunk they all
-    // load. Customer pages only (app/(app)/...); the partner consoles, sign-in and legal pages keep
+    // load (and, second group, what the layout shares with any customer page). Customer pages only
+    // (app/(app)/...); the partner consoles, sign-in and legal pages keep
     // Next's defaults. JavaScript only: CSS keeps Next's own chunking and order.
     webpack: (config, { isServer }) => {
       if (isServer) return config;
       const splitChunks = config.optimization?.splitChunks;
       if (!splitChunks || typeof splitChunks !== 'object') return config;
       const appOwnCode = /[\\/](src[\\/]|lucide-react[\\/])/;
+      type ChunkModule = { type?: string; nameForCondition?: () => string | null };
+      const customerChunk = (chunk: { name?: string | null }) => /^app\/\(app\)\//.test(chunk.name ?? '');
+      const appOwnJs = (module: ChunkModule) => !module.type?.startsWith('css') && appOwnCode.test(module.nameForCondition?.() ?? '');
       splitChunks.cacheGroups = {
         ...(splitChunks.cacheGroups ?? {}),
         customerAppShared: {
           name: 'customer-app-shared',
-          chunks: (chunk: { name?: string | null }) => /^app\/\(app\)\//.test(chunk.name ?? ''),
-          test: (module: { type?: string; nameForCondition?: () => string | null }) =>
-            !module.type?.startsWith('css') && appOwnCode.test(module.nameForCondition?.() ?? ''),
+          chunks: customerChunk,
+          test: appOwnJs,
           minChunks: 12,
           minSize: 0,
           priority: 25,
+          reuseExistingChunk: true,
+        },
+        // [Size budget, CI perf #2222] The same copy, from the layout's side: a module the customer
+        // layout loads AND fewer than 12 customer pages load too (the chunk-retry helper, the shell's
+        // person and basket state, the Home feed check) was still in the layout's chunk and again in
+        // each of those pages' own chunks: about 1.5 kB twice on Home, 1 kB on a store page. The
+        // layout always loads customer-app-shared, so moving such a module there costs no page
+        // anything and loads it once.
+        customerAppLayoutShared: {
+          name: 'customer-app-shared',
+          chunks: customerChunk,
+          test: (module: ChunkModule, context?: { chunkGraph?: { getModuleChunksIterable: (_m: unknown) => Iterable<{ name?: string | null }> } }) =>
+            appOwnJs(module)
+            && [...(context?.chunkGraph?.getModuleChunksIterable(module) ?? [])].some((chunk) => chunk.name === 'app/(app)/layout'),
+          minChunks: 2,
+          minSize: 0,
+          priority: 24,
+          reuseExistingChunk: true,
+        },
+        // [WEBSITE 30 Oct · size budget] The same, for the public site's pages (app/(marketing)/...): a module the
+        // marketing layout loads (the footer's store links and the launch switch's one question to the server) and
+        // a page loads too was copied into that page's own chunk. One chunk the layout always loads holds it
+        // instead, so no marketing page downloads it twice. Pages outside (marketing) keep their chunking.
+        marketingLayoutShared: {
+          name: 'marketing-shared',
+          chunks: (chunk: { name?: string | null }) => /^app\/\(marketing\)\//.test(chunk.name ?? ''),
+          test: (module: ChunkModule, context?: { chunkGraph?: { getModuleChunksIterable: (_m: unknown) => Iterable<{ name?: string | null }> } }) =>
+            appOwnJs(module)
+            && [...(context?.chunkGraph?.getModuleChunksIterable(module) ?? [])].some((chunk) => chunk.name === 'app/(marketing)/layout'),
+          minChunks: 2,
+          minSize: 0,
+          priority: 23,
           reuseExistingChunk: true,
         },
       };

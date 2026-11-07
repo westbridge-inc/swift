@@ -6,17 +6,23 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Crypto from 'expo-crypto';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { space } from '@swift/ui';
-import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { Card, ChoiceChip, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutSeller, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
-import { liveCard } from '../../../lib/cardFee';
+import { checkoutReferences, checkoutSeller, checkoutWords, feeDate, feeMoney, FeeCheckoutSession, feeStatusOf, liveMmg, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { inPersonWaiting, PAY_IN_PERSON, PAY_IN_PERSON_ASK } from '../../../lib/weeklyFeeInPerson';
+import { feeExpiry, reopenableMmg, REOPEN_ALREADY_PAID } from '../../../lib/weeklyFeeReopen';
+import { adoptableCardSession, liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
-export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false }: {
+export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkoutRef, contextPending = false, onPayAll, checkingLatest = false }: {
   family: FeeFamily; sub?: FeeSubscription | null; loading?: boolean; error?: boolean;
+  /** [SPEED 30 Oct] The fee shown is the last known answer and Swift's new one is on its way (lib/checkingLatest): say so; Pay waits. */
+  checkingLatest?: boolean;
   refresh: () => unknown; checkoutRef?: string; contextPending?: boolean;
+  /** [ENTERPRISE E1b] The owner of several stores only: opens "Pay all my branches". */
+  onPayAll?: () => void;
 }) {
   const storeId = useStoreSwitcher((s) => s.selectedStoreId);
   const resolvingStore = useStoreSwitcher((s) => s.feeContextPending);
@@ -28,6 +34,8 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
   const [view, setView] = useState<CheckoutView>({ checkout: null, busy: false, returned: false, error: '', blocked: false });
   // A card Pay now that may still take money hides the MMG button too: one payment at a time.
   const [cardPending, setCardPending] = useState(false);
+  // [owner 6 Nov 2026] How many weeks to pay with MMG: 1 to 4, each offered only when the server says it fits.
+  const [weeks, setWeeks] = useState(1);
   const refreshRef = React.useRef(refresh); refreshRef.current = refresh;
   const session = useMemo(() => {
     const owner = getAuthSessionSnapshot();
@@ -56,13 +64,44 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
     return () => clearInterval(timer);
   }, []);
   const pull = usePullToRefresh(async () => { await refreshRef.current(); if (!contextPending) session.focus(undefined, checkoutRef); });
+  // [FEE-STATUS · owner 25 Oct] "The Refresh status button never worked": it re-read the fee with
+  // nothing to show while it did or after. It now spins while it re-reads, then says when it last
+  // checked. A failed re-read shows the screen's own error (the query's), never "Checked at".
+  // One re-read at a time.
+  const [checked, setChecked] = useState<{ busy: boolean; at: number | null }>({ busy: false, at: null });
+  const checking = React.useRef(false);
+  const refreshStatus = async () => {
+    if (checking.current) return;
+    checking.current = true;
+    setChecked((c) => ({ ...c, busy: true }));
+    if (!contextPending) session.focus(undefined, checkoutRef);
+    let ok = false;
+    try { ok = (await refresh() as { isError?: boolean } | undefined)?.isError !== true; } catch { ok = false; }
+    checking.current = false;
+    setChecked((c) => ({ busy: false, at: ok ? Date.now() : c.at }));
+  };
   const action = liveMmg(sub);
+  // [owner 6 Nov 2026] The server's choice of weeks (absent from an older API: one week); a choice gone stale is one week.
+  const choices = action?.weekOptions;
+  const chosen = choices?.find((c) => c.weeks === weeks);
   const checkout = view.returned ? view.checkout : view.checkout ?? sub?.latestMmgCheckout;
-  const mmgPending = contextPending || view.blocked || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const reopen = reopenableMmg(sub, checkout);
+  const mmgPending = contextPending || view.blocked || checkout?.status === 'OPEN' || checkout?.status === 'EXPIRED' || checkout?.status === 'CONFIRMING' || checkout?.status === 'HELD';
+  const canReopen = !!reopen && !contextPending && !view.blocked && !cardPending;
   const blocked = mmgPending || cardPending;
+  const reopenExpiresAt = sub?.reopenableMmgCheckout?.expiresAt;
+  const [, setExpiryTick] = useState(0);
+  useEffect(() => {
+    if (!reopenExpiresAt) return;
+    const delay = Date.parse(reopenExpiresAt) - Date.now();
+    if (!(delay > 0)) return;
+    const timer = setTimeout(() => { setExpiryTick(Date.now()); void refreshRef.current(); }, Math.min(delay, 2_147_483_647));
+    return () => clearTimeout(timer);
+  }, [reopenExpiresAt]);
   // The card choice exists only when the server says CARD is live (or a card payment of ours is in flight).
   const card = liveCard(sub?.payActions);
-  const showCard = !!card || cardPending || hasCardSession(cardContextKey(principal, generation, family, storeId));
+  const showCard = !!card || cardPending || hasCardSession(cardContextKey(principal, generation, family, storeId)) || !!adoptableCardSession(sub?.latestCardSession);
+  const feeStatus = sub ? feeStatusOf(sub) : null;
   return <Screen>
     <Header title="Weekly fee" />
     {contextError ? <Card>
@@ -73,12 +112,16 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
     {loading ? <LoadingBlock /> : error || !sub ? <ErrorState message="We couldn't load your weekly fee. Try again." onRetry={() => { void refresh(); }} /> :
       <ScrollView refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />} contentContainerStyle={{ padding: space['2xl'], gap: space.lg }}>
         <Card>
-          <T variant="heading">{dueLine(sub)}</T>
-          <T variant="body" style={{ marginTop: space.md }}>{subscriptionWords(checkout?.subscriptionStatus ?? sub.status)}</T>
+          {/* [FEE-STATUS] The API's words for where the fee stands: never a passed date as a next bill. */}
+          <T variant="heading" testID="weekly-fee-status">{feeStatus?.headline}</T>
+          {feeStatus?.detail ? <T variant="body" style={{ marginTop: space.md }}>{feeStatus.detail}</T> : null}
+          {sub.inPerson && sub.inPerson.waitingGyd !== null ? <T variant="body" testID="in-person-waiting" style={{ marginTop: space.md }}>{inPersonWaiting(sub.inPerson.waitingGyd)}</T> : null}
+          {checkingLatest && !checked.busy ? <T variant="caption" tone="muted" testID="weekly-fee-checking" style={{ marginTop: space.sm }}>Checking for the latest…</T> : null}
           {checkout ? <T variant="body" style={{ marginTop: space.md }}>{checkoutWords(checkout, view.returned)}</T> : null}
           {view.returned && !checkout ? <T variant="body">Waiting for MMG…</T> : null}
           {view.error ? <T variant="caption" tone="error" style={{ marginTop: space.md }}>{view.error}</T> : null}
-          <PillButton label="Refresh status" variant="soft" style={{ marginTop: space.lg }} onPress={() => { void refresh(); if (!contextPending) session.focus(undefined, checkoutRef); }} />
+          <PillButton label="Refresh status" variant="soft" loading={checked.busy} style={{ marginTop: space.lg }} onPress={refreshStatus} />
+          {checked.at ? <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{`Checked at ${new Date(checked.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Guyana' })}`}</T> : null}
           {/* [NO-DEAD-ENDS] A payment held for checking took the Pay button away
               and promised "Support will contact you", with no way to ask. The
               door opens a ticket that already carries the Swift reference. */}
@@ -94,14 +137,43 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
             })}
           /> : null}
         </Card>
+        {/* [ENTERPRISE E1b] Optional: this branch can still pay its own fee below. */}
+        {onPayAll ? <Card testID="weekly-fee-pay-all">
+          <T variant="heading">Pay all my branches</T>
+          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>One MMG payment for every branch with a weekly fee due. Optional: each branch can still pay on its own.</T>
+          <PillButton label="Pay all my branches" variant="soft" style={{ marginTop: space.lg }} onPress={onPayAll} />
+        </Card> : null}
         {action && !blocked && card ? <T variant="heading" accessibilityRole="header">Choose how to pay</T> : null}
+        {canReopen && reopen ? <Card>
+          <T variant="heading">Back to MMG&apos;s page</T>
+          <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{feeExpiry(reopen.expiresAt)}</T>
+          <T variant="body" style={{ marginTop: space.md }}>{REOPEN_ALREADY_PAID}</T>
+          <PillButton label="Back to MMG's page" loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.reopen(reopen.ref); }} />
+        </Card> : null}
         {action && !blocked ? <Card>
           <T variant="heading">Pay with MMG</T>
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>Opens MMG&apos;s page, then brings you back to Swift.</T>
-          <PillButton label={`Pay ${feeMoney(action.amountGyd)} with MMG`} loading={view.busy} style={{ marginTop: space.lg }} onPress={() => { void session.pay(); }} />
+          {choices && choices.length > 1 ? <View testID="mmg-weeks" style={{ marginTop: space.lg, gap: space.sm }}>
+            <T variant="label" weight="semibold">How many weeks?</T>
+            <T variant="caption" tone="muted">You can pay up to four weeks ahead.</T>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+              {choices.map((c) => <ChoiceChip key={c.weeks} label={`${c.weeks === 1 ? '1 week' : `${c.weeks} weeks`} · ${feeMoney(c.amountGyd)}`} active={(chosen?.weeks ?? 1) === c.weeks} onPress={() => setWeeks(c.weeks)} />)}
+            </View>
+          </View> : null}
+          <PillButton label={`Pay ${feeMoney(chosen?.amountGyd ?? action.amountGyd)} with MMG`} loading={view.busy} disabled={checkingLatest} style={{ marginTop: space.lg }} onPress={() => { void session.pay(choices && (chosen?.weeks ?? 1)); }} />
         </Card> : null}
-        {showCard ? <CardPaySection family={family} card={card} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
+        {showCard ? <CardPaySection family={family} card={card} latestSession={sub?.latestCardSession} contextPending={contextPending} otherPaymentPending={mmgPending} refresh={refresh} onPaymentPending={setCardPending} /> : null}
         <T variant="caption">The weekly fee is Swift&apos;s only charge, so you keep 100% of everything you earn.</T>
+        {sub.inPerson?.open ? <View testID="pay-in-person">
+          <T variant="caption">{PAY_IN_PERSON}</T>
+          <PillButton
+            testID="pay-in-person-ask"
+            label={PAY_IN_PERSON_ASK}
+            variant="soft"
+            style={{ marginTop: space.sm }}
+            onPress={() => navigation?.navigate?.('GetHelp', { category: 'PAYMENT', subject: 'I want to pay my weekly fee in person' })}
+          />
+        </View> : null}
         <View>
           <T variant="heading">Recent checkouts</T>
           {sub.recentCheckouts?.length ? sub.recentCheckouts.map((c) => {

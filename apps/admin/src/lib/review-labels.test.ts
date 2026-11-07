@@ -3,7 +3,8 @@ import * as labels from './review-center';
 describe('review copy', () => {
   it('uses one human label vocabulary for document, role and vehicle facts', () => {
     expect(labels.docLabel('owner_national_id')).toBe('National ID');
-    expect(labels.docLabel('gra_restaurant_licence')).toBe('GRA restaurant licence');
+    // [CHECKLIST-LEGAL · COORD 1 Nov 2026 (d) — a DELIBERATE change] the GRA's own name for the licence
+    expect(labels.docLabel('gra_restaurant_licence')).toBe('GRA Food Restaurant Licence');
     expect(labels.docLabel('drivers_licence')).toBe("Driver's licence");
     expect(labels.roleLabel('VENDOR_OWNER')).toBe('Business owner');
     expect(labels.roleLabel('MOVER')).toBe('Rider/Driver');
@@ -31,6 +32,25 @@ describe('taxi reviewer hints', () => {
     expect(reviewerHint('hire_car_driver_licence')).toMatch(/its own document/);
     expect(reviewerHint('vehicle_registration')).toMatch(/H-series \(e\.g\. HC 1234\)/);
     expect(reviewerHint('national_id')).toBeUndefined();
+  });
+
+  // [CARS-PLATES · owner 6 Nov 2026] the reviewer is the person who confirms the plate's letter: the hint says so, and
+  // that a private (P) plate car is approved for deliveries only.
+  it('the registration hint makes the reviewer match the plate and says a P car delivers only', async () => {
+    const { reviewerHint } = await import('./review-center');
+    expect(reviewerHint('vehicle_registration')).toMatch(/must match the plate the mover gave: its first letter decides the work/);
+    expect(reviewerHint('vehicle_registration')).toMatch(/private \(P\) plate car may do deliveries only/);
+    expect(reviewerHint('drivers_licence')).toMatch(/must cover motor cars, and so must a car delivery driver's/);
+  });
+
+  // [CARS-PLATES · owner 6 Nov ~05:20Z] the car photo is where a person matches the plate letter, next to the registration.
+  it('the car photo hint says to match the plate letter, and the photo sits right after the registration', async () => {
+    const { reviewerHint, groupApplicants } = await import('./review-center');
+    expect(reviewerHint('vehicle_exterior_photo')).toMatch(/match the Certificate of Registration and the plate the mover gave/);
+    expect(reviewerHint('vehicle_exterior_photo')).toMatch(/P \(private\) = deliveries only/);
+    const doc = (id: string, docType: string) => ({ id, docType, userId: 'u1', role: 'MOVER', createdAt: '2026-11-06T00:00:00Z', user: { firstName: 'A', lastName: 'B', phone: '' } });
+    const [applicant] = groupApplicants([doc('1', 'vehicle_exterior_photo'), doc('2', 'drivers_licence'), doc('3', 'vehicle_registration'), doc('4', 'vehicle_insurance')] as never);
+    expect(applicant!.documents.map((d) => d.docType)).toEqual(['drivers_licence', 'vehicle_registration', 'vehicle_exterior_photo', 'vehicle_insurance']);
   });
 
   it('the review screen shows the hint under the document heading', async () => {

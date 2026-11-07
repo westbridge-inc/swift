@@ -6,7 +6,8 @@ import { SignOutButton } from '@/components/sign-out-button';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { AccountBoundary, useAccountQuery } from '@/components/account/account-frame';
 import { accountApi } from '@/components/account/account-api';
-import { Avatar, useSwitchApp } from '@/components/customer-shell';
+import { useSwitchApp } from '@/components/customer-shell';
+import { Avatar } from '@/components/account-chrome';
 import { Pictogram } from '@/components/glyphs';
 import { Bone } from '@/components/customer-skeletons';
 
@@ -37,7 +38,8 @@ function Account() {
   const legalRows = [
     { href: '/legal/terms', label: 'Terms of service', Icon: FileText },
     { href: '/legal/privacy', label: 'Privacy policy', Icon: Shield },
-    { href: '/account/delete', label: 'Delete your account', Icon: Trash2 },
+    // [WEB-DELETE] The signed-in person deletes here (the public how-to page is linked from the flow).
+    { href: '/account/profile/delete', label: 'Delete my account', Icon: Trash2 },
   ];
 
   return (

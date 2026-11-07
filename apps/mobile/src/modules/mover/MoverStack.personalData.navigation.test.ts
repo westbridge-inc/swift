@@ -87,7 +87,7 @@ vi.mock('../../hooks', () => {
     useActiveJob: () => ({ data: null }), useBroadcastLocation: () => undefined,
     useMoverKind: () => ({ kind: 'DRIVER', profile: { isOnline: false } }),
     useVerificationStatus: () => ({ data: { roleVerified: true }, isLoading: false }),
-    useMoverStanding: () => read, useEarningsSummary: () => read, useMoverSubscription: () => read,
+    useActiveJobs: () => ({ legs: [] }), useMoverStanding: () => read, useEarningsSummary: () => read, useMoverSubscription: () => read,
     useSetMoverBillingMethod: () => write, useUploadVehiclePhoto: () => write,
   };
 });
@@ -108,6 +108,7 @@ vi.mock('../profile/screens/GetHelpScreen', () => ({ GetHelpScreen: () => null }
 vi.mock('../safety/screens/LivenessCheckScreen', () => ({ LivenessCheckScreen: () => null }));
 vi.mock('../safety/screens/GuardianDriverConfirmScreen', () => ({ GuardianDriverConfirmScreen: () => null }));
 vi.mock('./screens/MoverHomeScreen', () => ({ MoverHomeScreen: () => null }));
+vi.mock('./DeliveriesTooCard', () => ({ DeliveriesTooCard: () => null })); // [CARS-DELIVER] its own test: MoverAccount.deliveriesToo
 vi.mock('./screens/ActiveJobScreen', () => ({ ActiveJobScreen: () => null }));
 vi.mock('./screens/EarningsScreen', () => ({ EarningsScreen: () => null }));
 vi.mock('./screens/ClaimsScreen', () => ({ ClaimsScreen: () => null }));

@@ -74,15 +74,18 @@ export async function runFlows(roster: Roster, prov: Provisioned, _log: (s: stri
       : bad('A6c cash-only', `CARD checkout returned ${card.status}, expected 400`);
   });
 
-  // ── A10 L1 tier-gate ──────────────────────────────────────────────────────
-  await run('A10 L1 tier-gate (large order → 403)', async () => {
-    if (!prov.items.R1) return skip('A10 tier-gate', 'R1 not provisioned');
-    // C3 is L1; a large enough order must trip ID_VERIFICATION_REQUIRED. Pickup
-    // so the value gate is isolated from rider availability.
+  // ── A10 no customer ID gate (owner ruling 24 Oct 2026) ─────────────────────
+  await run('A10 L1 large order — no ID asked (owner 24 Oct 2026)', async () => {
+    if (!prov.items.R1) return skip('A10 no ID gate', 'R1 not provisioned');
+    // C3 is L1 (no ID on file). A large order used to trip ID_VERIFICATION_REQUIRED;
+    // since the owner's 24 Oct 2026 ruling it is placed like any other. Pickup so
+    // the check is isolated from rider availability; the order is cancelled at once.
     const big = await placeOrder(C3.session, R1.vendorId!, prov.items.R1.itemId, C3.lat, C3.lng, { payment: 'CASH', qty: 40, pickup: true });
-    return big.status === 403 && /ID_VERIFICATION/.test(big.text)
-      ? ok('A10 tier-gate', 'L1 large order → 403 ID_VERIFICATION_REQUIRED (server-side)')
-      : bad('A10 tier-gate', `got ${big.status} (${big.json?.error?.code ?? ''})`);
+    const placed: Array<{ id?: string }> = big.json?.data?.orders ?? (big.json?.data?.order ? [big.json.data.order] : []);
+    for (const o of placed) if (o.id) await POST(`/customer/orders/${o.id}/cancel`, { reason: 'live test cleanup' }, C3.session.token);
+    return big.status === 200 && !/ID_VERIFICATION/.test(big.text)
+      ? ok('A10 no ID gate', 'L1 large order → 200, never ID_VERIFICATION_REQUIRED (server-side)')
+      : bad('A10 no ID gate', `got ${big.status} (${big.json?.error?.code ?? ''})`);
   });
 
   // ── delivery fail-safe (no riders online → 409, offer pickup) ──────────────

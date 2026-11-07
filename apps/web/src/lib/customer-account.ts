@@ -14,7 +14,8 @@ export async function verifyOtp(phone: string, code: string): Promise<{ isNewUse
     body: JSON.stringify({ phone, code }),
   });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
+  // [FLOW-QA F16] the status and the server's wait ride along, for the page's plain words (lib/otp-send-refusal)
+  if (!res.ok || !json.success) throw Object.assign(new Error(json?.error?.message || 'That code is not valid.'), { status: res.status, code: json?.error?.code, retryAfterSeconds: json?.error?.details?.retryAfterSeconds });
   const d = json.data;
   if (!d.isNewUser && d.user?.id) { adoptSession(d.user.id); return { isNewUser: false, user: d.user, signedIn: true }; }
   return { isNewUser: true, signedIn: false };
@@ -40,6 +41,11 @@ export async function uploadSelfie(file: File): Promise<{ user: any }> {
   const form = new FormData();
   form.append('file', file, file.name || 'swift-profile-photo.jpg');
   return (await apiFetch('/api/v1/auth/selfie', { method: 'POST', body: form })).data as { user: any };
+}
+
+/** [ROLE-DOCS · owner 21 Oct 2026] Sign "I trade under my own name" for the store just created (in place of a business registration). */
+export async function signOwnName() {
+  return (await apiFetch('/api/v1/vendor/onboarding/own-name', { method: 'POST', body: JSON.stringify({ accept: true, attestationVersion: 'v1' }) })).data;
 }
 
 /** Partner onboarding — turn a fresh account into a vendor or a mover. */

@@ -179,10 +179,11 @@ export function bindBrowseTenant(app: FastifyInstance) {
   const bindPublicTenant = bindPublicMarketTenant(app);
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     if (request.headers.authorization !== undefined || carriesOwnSessionCookie(request)) {
-      await app.authenticate(request, reply);
-    } else {
-      await bindPublicTenant(request);
+      // [AUTH-FIX S2-3] A refused credential THROWS out of authenticate, so it
+      // never falls through to the guest binding below or reaches the handler.
+      return app.authenticate(request, reply);
     }
+    await bindPublicTenant(request);
   };
 }
 

@@ -1,5 +1,6 @@
 import { servedPhotoAddress } from '../../utils/photo-address';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { customerTimeline } from '../order/customer-timeline';
 import { shownRatingFor, shownSurface } from '../rating/rating-groups';
 import { ownerWallSystem } from '../../lib/owner-rls';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
@@ -7,26 +8,37 @@ import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
 import { cartMergeSchema, mergeGuestCart } from './cart-merge.service';
 import { requireRecentOtpOrStepUp } from '../auth/step-up';
+import { browserClientOf } from '../auth/browser-session';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
-import { velocityGuard } from '../integrity/velocity';
+import { readOrderPlacementBudget, refundOrderPlacement, reserveOrderPlacement, velocityGuard, type OrderPlacementReservation } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
 import { promoDiscount } from '../../utils/order-total';
 import { z } from '../../lib/zod';
+import { tenantCacheKey } from '../../utils/tenant-cache';
+import { readOrderSize, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { capacitySentence, storeRiderBacklog } from '../dispatch/delivery-capacity';
+import { deliveryPausedAt } from '../dispatch/delivery-pause';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
-import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
+import { EXPRESS_DELIVERY_SURCHARGE, deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
 import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
+import { storeVatEffective } from '../store-vat/store-vat';
+import { STORE_VAT_RATE_PERCENT } from '../store-vat/vat-rate';
+import { cartVatByVendor } from '../store-vat/order-vat';
 import { estimateDrivingDistance, estimateDeliveryMinutes } from '../../utils/distance';
+import { MAX_DELIVERY_RADIUS_KM, brandBranchesFor, brandFactsFor, collapseBrands, oneDishPerBrand } from '../vendor/brand';
 import { getMapsProvider, type LatLng } from '../../providers/maps/maps-provider';
-import { customerCancelView, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE, MMG_PAID_STORE_CANCELS_MESSAGE } from '../order/cancel-policy';
+import { readStoreCannotHandOver } from '../vendor/store-hold';
+import { customerCancelView, mmgPaidCancelMessage, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_CODE } from '../order/cancel-policy';
+import { answerMmgRefund, customerMmgRefund, tellStoreOfRefundAnswer } from '../order/mmg-refund-rail';
 import { readTooLateToDeliver } from '../dispatch/rescue';
 import { ORDER_TRANSITIONS } from '../order/order-status';
 import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
@@ -35,9 +47,13 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { HOME_CACHE_TTL, homeCacheKey, invalidateHomeCache, parseHomeDiscovery } from './home-cache';
 import { AppError, NotFoundError, ValidationError, ForbiddenError } from '../../utils/errors';
 import { zMoneyWhole } from '../../utils/money-schema';
-import { BookingService, type BookingConfig } from '../booking/booking.service';
-import { computeDaySlots, fmtSlotTime } from '../booking/availability';
+import { BookingService, LIVE_APPOINTMENT_ORDER_STATUSES, type BookingConfig } from '../booking/booking.service';
+import { instantBookingEnabled, listingConfirmsAutomatically } from '../booking/instant-booking';
+import { customerRescheduleVerdict } from '../booking/reschedule-policy';
+import { computeDaySlots, fmtSlotTime, MAX_BUFFER_MINUTES } from '../booking/availability';
 import { startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
+import { appointmentMovedData, appointmentMovedDedupeKey } from '../booking/appointment-moved';
+import { assertOneAppointment } from '../booking/appointment-checkout';
 import {
   publicOperatingHours,
   publicStorefrontCategory,
@@ -50,7 +66,6 @@ import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { notProhibitedStore, visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
 import { publicStorefrontSeller } from '../verification/storefront-seller';
-import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
@@ -81,13 +96,17 @@ import { setMarketingConsent } from '../legal/marketing-consent';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
+import { sellerVerifiedNow } from '../vendor/seller-verified';
 import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { counterpartPhone } from '../calls/counterpart-phone';
 import { ownRiderNotice } from '../order/own-rider-notice';
+import { customerPickupCode, saysPickupHandover } from '../order/pickup-code-view';
+import { orderStageRefusal } from '../order/order-status-words';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -192,7 +211,7 @@ const checkoutSchema = z.object({
   scheduledFor: z.string().max(40).optional(),
   promoCode: z.string().max(40).optional(),
   fulfillmentSelections: fulfillmentSelectionsSchema.optional(),
-  // Priority delivery: 1.5x delivery fee, dispatched ahead of standard orders
+  // Priority delivery: the delivery fee + the flat express premium (utils/markup.ts), dispatched ahead of standard orders
   express: z.boolean().optional(),
   // Requested slots for APPOINTMENT listings (booked at vendor acceptance).
   // mode: where the service happens when the business offers BOTH — at their
@@ -326,12 +345,15 @@ const promoValidateSchema = z.object({
 const referralRedeemSchema = z.object({
   code: z.string().trim().min(3).max(64),
 });
+/** [SEC-TRUST F16] Every referral code Swift issues is letters and digits only. Anything else is refused
+ *  before the lookup, so the case-insensitive match can never act as a pattern. */
+const REFERRAL_CODE_SHAPE = /^[A-Za-z0-9]{3,64}$/;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAX_DELIVERY_RADIUS_KM = 25;
+// [CHAINS PR3] One reach rule: the cart's gate and the brand card's "delivers to you" (modules/vendor/brand).
 // The cancel rule is imported from the ONE policy module [UG-CRAFT-01] —
 // the "must match order.service" comment era is over: the preview and the
 // cancel read the same verdict by construction.
@@ -397,6 +419,7 @@ async function buildCartResponse(
             select: {
               id: true, name: true, basePrice: true, imageUrl: true,
               isAvailable: true, vendorId: true, fulfillment: true,
+              vatClass: true,
               // [F4] Everything the one option validator reads, so the quote
               // marks a line whose choice sold out exactly as checkout refuses it.
               optionGroups: {
@@ -589,13 +612,23 @@ async function buildCartResponse(
   // cart's persisted tip.
   const tip = resolveTip(choices.tipAmount, cart.tipAmount);
   const priceWith = (feeOf: (p: VendorPlan) => number) => priceBasket({
-    plans: plans.map((p) => ({ vendorId: p.vendorId, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: feeOf(p) })),
+    plans: plans.map((p) => ({ vendorId: p.vendorId, fulfillment: p.fulfillment, subtotal: p.subtotal, deliveryFee: feeOf(p), standardDeliveryFee: p.standardDeliveryFee })),
     promo,
     tip,
   });
   const priced = priceWith((p) => p.deliveryFee);
   const discount = priced.discount;
   const totalAmount = sumOf(priced.perPlan.map((p) => p.total));
+  // [STORE-VAT · owner O-5] The VAT INSIDE each approved VAT store's goods (never added: the totals above are
+  // unchanged), by the same function and discount split checkout freezes. Only a discount the STORE gives lowers its
+  // VAT (REVIEW-M #2085 S3-1, VAT Act s.2): a Swift-funded promo is paid to the store, so it counts in full.
+  const vatByVendor = await cartVatByVendor(app.prisma, plans.map((p, i) => ({
+    vendorId: p.vendorId,
+    storeFundedGoodsDiscount: promo?.funder === 'VENDOR' ? (priced.perPlan[i]!.allocation?.goods ?? 0) : 0,
+    lines: itemDetails.filter((d) => d.vendorId === p.vendorId && d.isAvailable).map((d) => ({
+      id: d.id, amount: d.lineTotal, vatClass: cart.items.find((ci) => ci.id === d.id)?.item.vatClass ?? 'STANDARD',
+    })),
+  })));
   let promoInfo: { code: string; discountType: string; description: string } | null = null;
   if (promoCodeRecord) {
     promoInfo = {
@@ -610,7 +643,7 @@ async function buildCartResponse(
   // client. [E01] `expressTotal` is the same basket priced by the same pricer
   // with every delivery at its express fee — exact even when a promo's basis
   // depends on the fee — and IS `totalAmount` when the quote asked for express.
-  // Zero surcharge for services / pickup / free delivery.
+  // Zero surcharge for services and pickup (no rider).
   const expressSurcharge = sumOf(plans.map((p) => p.expressSurcharge));
   const expressTotal = choices.express === true
     ? totalAmount
@@ -656,6 +689,8 @@ async function buildCartResponse(
       minOrderAmount: p.minOrderAmount,
       meetsMinimum: p.meetsMinimum,
       amountToMinimum: p.amountToMinimum,
+      // [STORE-VAT] Additive: null unless this store's VAT is approved; then the VAT included in its goods.
+      vat: vatByVendor.get(p.vendorId) ?? null,
     })),
     subtotalBase,
     subtotalMarkup,
@@ -753,6 +788,28 @@ async function publishedStorePhoneOf(prisma: FastifyInstance['prisma'], vendorId
   return vendor ? publishedStorePhone(vendor) : null;
 }
 
+/** [BOOK-S6a · owner B2] The customer's live booking behind an appointment order (RESERVED or
+ *  CONFIRMED), with whether they may move it now: the move route's own verdict on its own
+ *  booking. Null when the order holds no live booking (a request whose time is taken only at
+ *  acceptance, a cancelled or finished one). */
+async function customerAppointmentBooking(prisma: FastifyInstance['prisma'], orderId: string, orderStatus: string, now: Date) {
+  const booking = await prisma.booking.findFirst({
+    where: { orderId, status: { in: ['RESERVED', 'CONFIRMED'] } },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, itemId: true, slotStart: true },
+  });
+  if (!booking) return null;
+  const verdict = LIVE_APPOINTMENT_ORDER_STATUSES.has(orderStatus)
+    ? customerRescheduleVerdict(booking.slotStart, now)
+    : { allowed: false, message: null };
+  return {
+    id: booking.id,
+    itemId: booking.itemId,
+    slotStart: booking.slotStart.toISOString(),
+    reschedule: { allowed: verdict.allowed, message: verdict.message },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -770,6 +827,9 @@ export async function customerRoutes(app: FastifyInstance) {
     // [owner #20] …and, for an order too big for a bike, only the movers whose vehicle can carry it.
     (point, floatRequired, packageSize) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired, undefined, packageSize),
     app.redis,
+    // [RIDER-SAFE 1] …and the HONEST capacity: the orders already waiting near
+    // the store, and stacked riders only where the stacking rules pass for it.
+    (probe) => dispatchForAvailability.getDeliveryCapacity(probe),
   );
   const picking = new PickingService(app.prisma, app.io);
   const ratingService = new RatingService(app.prisma, app.io, (vendorId) => scheduleVendorSearchSync(app, vendorId));
@@ -794,7 +854,8 @@ export async function customerRoutes(app: FastifyInstance) {
       if (!getTenantId()) enterPublicBrowse();
       return;
     }
-    await app.authenticate(request, reply);
+    // [AUTH-FIX S2-3] A refusal THROWS out of authenticate: nothing after this hook runs.
+    return app.authenticate(request, reply);
   });
 
   // ========================================================================
@@ -803,6 +864,9 @@ export async function customerRoutes(app: FastifyInstance) {
 
   const support = new SupportService(app.prisma, notificationService);
   const account = new AccountService(app);
+  // [WEB-DELETE] Where a closure request was confirmed, for its ticket: the website names itself (W-01 client header).
+  // (A request without headers, as some unit doubles build, is the app's.)
+  const closureSurfaceOf = (request: AuthRequest) => ((request.headers ? browserClientOf(request) : null) === 'web' ? 'website' as const : 'app' as const);
   const createTicketSchema = z.object({
     category: z.enum(['ORDER_ISSUE', 'PAYMENT', 'SAFETY', 'ACCOUNT', 'VENDOR', 'MOVER', 'OTHER']),
     subject: z.string().trim().min(3).max(120),
@@ -825,9 +889,13 @@ export async function customerRoutes(app: FastifyInstance) {
   // 0. REFERRAL — real attribution: redeeming a code writes Customer.referredBy
   // ========================================================================
 
-  app.post('/referral/redeem', async (request: AuthRequest) => {
+  app.post('/referral/redeem', { preHandler: [velocityGuard(app, 'referral.redeem')] }, async (request: AuthRequest) => {
     const { userId } = request.user;
     const { code } = referralRedeemSchema.parse(request.body);
+    // [SEC-TRUST F16] The same answer as an unknown code: nothing is looked up.
+    if (!REFERRAL_CODE_SHAPE.test(code)) {
+      throw new AppError(404, 'INVALID_REFERRAL', 'That referral code wasn’t found');
+    }
 
     const customer = await resolveCustomer(app, userId);
     if (customer.referredBy) {
@@ -928,11 +996,8 @@ export async function customerRoutes(app: FastifyInstance) {
         // time — a private object's key is unrenderable by any client.
         avatar: await resolveAvatarUrl(user.avatar),
         selfieCapturedAt: user.selfieCapturedAt,
-        // [Owner ruling 8 Oct 2026 — CUSTOMER ID] What the app may say about the customer's ID,
-        // truthfully (additive): NONE · ON_FILE (unlocked, no person reviewed it) · CHECKED (a person
-        // approved it) · WAITING (held for a person) · NOT_ACCEPTED.
-        // Never fails the profile: an unreadable answer is left out, and the app then claims nothing.
-        idCheck: await customerIdCheck(app.prisma, userId, user.trustLevel).catch(() => undefined),
+        // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] No `idCheck` any more: Swift keeps no customer ID. Builds 9-12
+        // read a missing answer as "claims nothing" (their own words under "Your ID").
         role: user.activeRole,
         activeRole: user.activeRole,
         lastMoverRole: user.lastMoverRole,
@@ -978,12 +1043,28 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, data };
   });
 
+  /** GET /account/deletion-check — [WEB-DELETE] what Delete would meet now, by the deletion's own rules and words:
+   *  closure by request or deletion, the live orders and jobs to finish first, the money to settle first. Reads only;
+   *  the delete re-checks everything under its locks. */
+  app.get('/account/deletion-check', async (request: AuthRequest) => {
+    const data = await account.deletionCheck(request.user.userId);
+    return { success: true, data };
+  });
+
   /** DELETE /account — DPA right to erasure: crypto-shred + de-identify. The
    *  client must log the user out afterwards; every session is already revoked. */
   app.post('/account/closure-request', async (request: AuthRequest, reply) => {
     await requireRecentOtpOrStepUp(app, request);
-    const result = await account.requestClosure(request.user.userId);
+    const result = await account.requestClosure(request.user.userId, closureSurfaceOf(request));
     reply.code(202);
+    return { success: true, data: result };
+  });
+
+  /** POST /account/closure-request/cancel — [WEB-DELETE · owner ruling 1 Nov 2026] the owner takes the request back:
+   *  resolved, and its pause on the stores' new orders lifted (audited). The same fresh code as asking. */
+  app.post('/account/closure-request/cancel', async (request: AuthRequest) => {
+    await requireRecentOtpOrStepUp(app, request);
+    const result = await account.cancelClosure(request.user.userId);
     return { success: true, data: result };
   });
 
@@ -1004,7 +1085,7 @@ export async function customerRoutes(app: FastifyInstance) {
       }
       throw error;
     });
-    const result = await account.deleteAccount(request.user.userId, true).catch(async (error: unknown) => {
+    const result = await account.deleteAccount(request.user.userId, true, closureSurfaceOf(request)).catch(async (error: unknown) => {
       const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
       if (user?.phone !== `deleted:${request.user.userId}`) throw error;
       app.log.error({ err: error, userId: request.user.userId }, 'Account erasure pending automatic retry');
@@ -1380,7 +1461,11 @@ export async function customerRoutes(app: FastifyInstance) {
     // A failed order read rejects the request. Never return cached order state
     // or turn a read failure into an empty active/recent-order projection.
     const [discovery, [activeOrder, recentOrders]] = await Promise.all([loadDiscovery(), loadOrders()]);
-    const enriched = discovery.vendors;
+    // [CHAINS PR3] One card per brand, opening its best branch for this customer (modules/vendor/brand). Read per
+    // request over the cached candidates: a brand set or split by Swift shows at once, and the cache keeps its shape.
+    const recentIds = recentOrders.map((o) => o.vendorId).filter((id): id is string => !!id);
+    const brandFacts = await brandFactsFor(app.prisma, [...discovery.vendors.map((v) => v.id), ...recentIds, ...discovery.popularItems.map((it) => it.vendorId)]);
+    const enriched = collapseBrands(discovery.vendors, brandFacts, { lat, lng });
 
     // Sections. "Orderable" must match the checkout gate exactly
     // (order.service.ts: isCurrentlyOpen && acceptingOrders && status ACTIVE —
@@ -1406,13 +1491,16 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // Order again: vendors from recent orders
     const recentVendorIds = new Set(recentOrders.map((o) => o.vendorId).filter(Boolean));
-    const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id)).slice(0, 6);
+    // [CHAINS PR3] A branch ordered from before brings back its brand's card (the brand's best branch for now).
+    const recentBrands = new Set(recentIds.map((id) => brandFacts.get(id)?.ownerId).filter(Boolean));
+    const orderAgain = enriched.filter((v) => recentVendorIds.has(v.id) || (v.brand !== null && recentBrands.has(brandFacts.get(v.id)?.ownerId))).slice(0, 6);
 
     const feed = {
       // The declared vertical rides with the card: SERVICE for a service
       // business's booking, otherwise the persisted type — never a client guess.
       activeOrder: activeOrder ? { ...activeOrder, vertical: orderVertical(activeOrder), promise: promiseView(activeOrder) } : activeOrder,
-      popularItems: discovery.popularItems,
+      // [CHAINS PR3] A chain sells the same dish at every branch: the rail shows it once (its most-ordered branch's).
+      popularItems: oneDishPerBrand(discovery.popularItems, brandFacts),
       featured,
       nearby,
       orderAgain,
@@ -1619,10 +1707,13 @@ export async function customerRoutes(app: FastifyInstance) {
     if (userLat != null && userLng != null && sort === 'distance') {
       enriched.sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
     }
+    // [CHAINS PR3] One card per brand on this page, opening its best branch for this customer. (The page's total
+    // still counts stores; a brand whose branches fall on two pages shows once on each.)
+    const browsed = collapseBrands(enriched, await brandFactsFor(app.prisma, enriched.map((v) => v.id)), { lat: userLat, lng: userLng });
 
     return {
       success: true,
-      ...paginatedResponse(enriched, total, { page, limit, skip }),
+      ...paginatedResponse(browsed, total, { page, limit, skip }),
     };
   });
 
@@ -1654,6 +1745,8 @@ export async function customerRoutes(app: FastifyInstance) {
         },
         operatingHours: true,
         images: true,
+        // [P35] The owner's synthetic markers, read only to compute isVerified (seller-verified.ts); never sent.
+        owner: { select: { user: { select: { isSynthetic: true, syntheticRunId: true } } } },
       },
     });
 
@@ -1701,13 +1794,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // [GUARDRAILS §8] Prohibited items (banned, or held for a check) are not on the menu;
     // a section they emptied goes with them (a section empty before stays as it was).
     const hiddenOnMenu = await hiddenAmong(app.prisma, vendor.categories.flatMap((cat) => cat.items.map((i) => i.id)));
+    // [STORE-VAT · owner O-5] The ONE predicate: VAT shows only for a store whose VAT a person approved.
+    const vatShown = storeVatEffective(vendor);
     const categories = vendor.categories
       .filter((cat) => cat.isActive)
       .flatMap((cat) => {
         const items = cat.items.filter((i) => !hiddenOnMenu.has(i.id));
         return items.length === 0 && cat.items.length > 0 ? [] : [{ ...cat, items }];
       })
-      .map(publicStorefrontCategory);
+      .map((cat) => publicStorefrontCategory(cat, vatShown));
 
     // Distance & ETA
     let distanceKm: number | null = null;
@@ -1734,6 +1829,12 @@ export async function customerRoutes(app: FastifyInstance) {
     // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
     // records on every read — never hand-written prose; incomplete blocks say what is missing.
     const disclosure = await compilePublicStorefrontDisclosure(app.prisma, id);
+    // [CHAINS PR3] The brand this store belongs to and its branches the customer may switch to (the same list rule
+    // as Home and browse: visible, not filed under a banned category), the best for them first.
+    const brand = await brandBranchesFor(app.prisma, id, { lat, lng }, {
+      ...visibleVendorForCaller(await readFeePause(app.prisma)),
+      ...notProhibitedStore(await prohibitedStoreIds(app.prisma, getTenantId() ?? null)),
+    });
 
     return {
       success: true,
@@ -1741,6 +1842,7 @@ export async function customerRoutes(app: FastifyInstance) {
         id: vendor.id,
         name: vendor.name,
         slug: vendor.slug,
+        brand,
         description: vendor.description,
         vendorType: vendor.vendorType,
         cuisineTypes: vendor.cuisineTypes,
@@ -1766,6 +1868,9 @@ export async function customerRoutes(app: FastifyInstance) {
         // serves), but a store the PLATFORM has suspended, or one it has not yet
         // approved, must not have Swift advertising a way to reach it.
         publicPhone: publishedStorePhone(vendor),
+        // [P35 · board 4b] "Verified seller": a person approved this store's papers AND they are still current
+        // (seller-verified.ts). From the row, because this route also resolves a store that is not customer-visible.
+        isVerified: sellerVerifiedNow(vendor),
         averageRating: vendor.averageRating,
         totalRatings: vendor.totalRatings,
         ...ratingSurface,
@@ -1784,6 +1889,10 @@ export async function customerRoutes(app: FastifyInstance) {
         deliveryFee,
         etaMin,
         promos: activePromos,
+        // [STORE-VAT · owner O-5] Additive: null unless a person approved this store's VAT. Then every STANDARD item's
+        // price INCLUDES VAT (VAT Act s.90(2)) and the screen marks it "incl. VAT"; the rate comes from here, never a
+        // literal in the app.
+        vat: vatShown ? { pricesIncludeVat: true as const, ratePercent: STORE_VAT_RATE_PERCENT } : null,
         // [Row 272] The field every phone build from 9 on reads (RestaurantScreen: the
         // "N promos available" row). Same list as `promos`, kept for older readers.
         activePromos,
@@ -1940,17 +2049,19 @@ export async function customerRoutes(app: FastifyInstance) {
     // THE availability computation (scheduling law: no double-source):
     // windows MINUS the vendor's exceptions MINUS non-cancelled bookings,
     // honoring buffers + lead time — the same math reservation validates.
+    // [BOOK-S1] The bookings are the BUSINESS's, on every listing: a time
+    // another listing holds is not offered here either.
     const dayStart = startOfGuyanaDay(date);
     const dayEnd = endOfGuyanaDay(date);
-    const [exceptions, takenRows] = item.isAvailable
+    // A candidate starts on this Guyana day and may run past its end by up to
+    // the listing's duration and gap.
+    const reachEnd = new Date(dayEnd.getTime() + (Math.max(0, duration) + MAX_BUFFER_MINUTES) * 60_000);
+    const [exceptions, time] = item.isAvailable
       ? await Promise.all([
           bookingService.exceptionsFor(item.vendorId, dayStart),
-          app.prisma.booking.findMany({
-            where: { itemId: id, status: { not: 'CANCELLED' }, slotStart: { gte: dayStart, lte: dayEnd } },
-            select: { slotStart: true },
-          }),
+          bookingService.businessTime(item.vendorId, dayStart, reachEnd),
         ])
-      : [[], [] as { slotStart: Date }[]];
+      : [[], { busy: [], capacity: 1 }];
     const slots = (item.isAvailable
       ? computeDaySlots({
           itemId: id,
@@ -1959,7 +2070,8 @@ export async function customerRoutes(app: FastifyInstance) {
           month: m!,
           day: d!,
           exceptions,
-          takenStarts: takenRows.map((b) => b.slotStart),
+          busy: time.busy,
+          capacity: time.capacity,
           now,
         })
       : []
@@ -1975,13 +2087,17 @@ export async function customerRoutes(app: FastifyInstance) {
         bookableWeekdays,
         serviceMode: config.serviceMode ?? 'AT_BUSINESS',
         serviceRadiusKm: config.serviceRadiusKm ?? null,
+        // [BOOK-S6a · owner A3/A4] With INSTANT_BOOKING on: whether a cash booking of this listing is
+        // confirmed at checkout (the business chose "Confirm bookings automatically"). The phone's
+        // "Instant confirmation" badge reads only this. Switch off: not sent (the answer is today's).
+        ...(instantBookingEnabled() ? { instantConfirmation: listingConfirmsAutomatically(item.bookingConfig) } : {}),
       },
     };
   });
 
   /** POST /bookings/:id/reschedule — move my appointment (scheduling 2.4).
-   *  New slot reserved FIRST (the partial unique judges the race), old freed
-   *  in the same transaction; the provider hears about it immediately. */
+   *  Old slot freed and new one judged and written in ONE transaction under
+   *  the business's lock [BOOK-S1]; the provider hears about it immediately. */
   app.post('/bookings/:id/reschedule', async (request: AuthRequest) => {
     const { userId } = request.user;
     const { id } = request.params as { id: string };
@@ -2001,7 +2117,9 @@ export async function customerRoutes(app: FastifyInstance) {
           title: 'Appointment moved',
           body: `${result.serviceName}: moved from ${fmtSlotTime(result.previousSlotStart)} to ${fmtSlotTime(result.booking.slotStart)}.`,
           audience: 'business',
-          data: { kind: 'booking_rescheduled', bookingId: result.booking.id },
+          // [BOOK-FU2] With the booking's order, so every released build opens the booking itself (appointment-moved.ts).
+          dedupeKey: appointmentMovedDedupeKey(result.booking.id),
+          data: appointmentMovedData(result.booking),
         }).catch(() => undefined);
       }
     }
@@ -2057,6 +2175,9 @@ export async function customerRoutes(app: FastifyInstance) {
         { itemId: item.id, available: item.stockQuantity });
     }
 
+    // [BOOK-FU3 · money] A booking line is one appointment: asking for more is a plain 400.
+    assertOneAppointment(item.fulfillment, quantity);
+
     // Validate vendor is active
     const vendor = await app.prisma.vendor.findUnique({
       where: { id: body.vendorId },
@@ -2105,7 +2226,8 @@ export async function customerRoutes(app: FastifyInstance) {
     if (existing) {
       await app.prisma.cartItem.update({
         where: { id: existing.id },
-        data: { quantity: existing.quantity + quantity },
+        // [BOOK-FU3] Re-adding the same booking never grows it past one appointment.
+        data: { quantity: item.fulfillment === 'APPOINTMENT' ? 1 : existing.quantity + quantity },
       });
     } else {
       await app.prisma.cartItem.create({
@@ -2152,8 +2274,10 @@ export async function customerRoutes(app: FastifyInstance) {
     }
     // [GUARDRAILS §8] A prohibited line cannot be grown or edited — only removed.
     if (body.quantity > 0) {
-      const lineItem = await app.prisma.item.findUniqueOrThrow({ where: { id: cartItem.itemId }, select: { id: true, name: true } });
+      const lineItem = await app.prisma.item.findUniqueOrThrow({ where: { id: cartItem.itemId }, select: { id: true, name: true, fulfillment: true } });
       await assertOrderableNow(app.prisma, [lineItem]);
+      // [BOOK-FU3 · money] A booking line stays one appointment (0 still removes it).
+      assertOneAppointment(lineItem.fulfillment, body.quantity);
     }
     // [M023] An edited selection passes the same validator as an added one.
     const editedSelection = body.selectedOptions === undefined || body.quantity <= 0
@@ -2424,6 +2548,8 @@ export async function customerRoutes(app: FastifyInstance) {
     // (releasing it is what let the receipt probe answer "none" for a placed
     // order) and the answer is the committed receipt.
     let commit = null as CheckoutCommit | null;
+    // [FULL-LAUNCH] The order limit's reservation: given back only on the confirmed rollback below.
+    let reservation = null as OrderPlacementReservation | null;
     try {
       result = await orderService.checkout({
         userId,
@@ -2440,6 +2566,9 @@ export async function customerRoutes(app: FastifyInstance) {
           ? { expectedPrices: { total: body.expectedTotal, lines: body.expectedLines } }
           : {}),
         ...(redisKey ? { idempotency: { key: idemKey as string, requestHash } } : {}),
+        reservePlacement: async (orders) => {
+          reservation = await reserveOrderPlacement(app.redis, await readOrderPlacementBudget({ prisma: app.prisma }, userId), orders);
+        },
         onCommitted: (committed) => { commit = committed; },
       });
     } catch (err) {
@@ -2468,6 +2597,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // hold the key hostage — release so the same key can retry once the
         // customer fixes the problem (e.g. MIN_ORDER). Only this request's own
         // claim: never a newer request's after this one's claim was lost.
+        await refundOrderPlacement(app.redis, reservation);
         if (redisKey) await releaseCheckoutClaim(app.redis, redisKey, claim).catch(() => {});
         throw err;
       }
@@ -2587,7 +2717,8 @@ export async function customerRoutes(app: FastifyInstance) {
       app.prisma.order.findMany({
         where,
         include: {
-          vendor: { select: { id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true, vendorType: true } },
+          // [PICKUP] requirePickupCode is read for pickupCode below, never passed through as a store field.
+          vendor: { select: { id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true, vendorType: true, requirePickupCode: true } },
           items: { select: { id: true, name: true, quantity: true, totalCustomer: true } },
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: false, withAvatar: true }) },
@@ -2611,7 +2742,7 @@ export async function customerRoutes(app: FastifyInstance) {
       // persisted type for everything else. The activity list's words read it.
       vertical: orderVertical(o),
       status: o.status,
-      vendor: o.vendor,
+      vendor: o.vendor ? (({ requirePickupCode: _code, ...vendor }) => vendor)(o.vendor) : o.vendor,
       items: o.items.map((i) => ({
         id: i.id,
         name: i.name,
@@ -2627,9 +2758,10 @@ export async function customerRoutes(app: FastifyInstance) {
       paymentMethod: o.paymentMethod,
       fulfillment: o.fulfillment,
       appointmentSlot: o.appointmentSlot,
-      // Takeaway handover gate — the customer PRESENTS this at the counter,
-      // so it must survive past the checkout confirmation screen.
-      pickupCode: o.pickupCode,
+      // Takeaway handover gate — the customer PRESENTS this at the counter when
+      // the store asks for it. [PICKUP · owner 30 Oct 2026] Store code off: no
+      // code (the counter checks the first name and order number).
+      pickupCode: customerPickupCode(o.pickupCode, o.vendor?.requirePickupCode),
       // Taxi context — a ride's identity is its route + class, not a vendor.
       rideClass: o.rideClass,
       pickupAddress: o.pickupAddress,
@@ -2656,7 +2788,9 @@ export async function customerRoutes(app: FastifyInstance) {
       include: {
         vendor: { select: { name: true, addressLine1: true, city: true, phone: true } },
         customer: { select: { firstName: true, lastName: true } },
-        items: { select: { name: true, quantity: true, totalCustomer: true, subStatus: true } },
+        items: { select: { name: true, quantity: true, totalCustomer: true, subStatus: true, vatClass: true } },
+        // [BUG-HUNT-2 G16] "The parties shown above" named nobody on a ride.
+        driver: { select: { licensePlate: true, vehicleColor: true, vehicleMake: true, vehicleModel: true, user: { select: { firstName: true } } } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -2676,7 +2810,12 @@ export async function customerRoutes(app: FastifyInstance) {
     const block = order.vendorId ? await publicStorefrontSeller(app.prisma, order.vendorId) : null;
     const seller = block ? { legalName: block.legalName, address: block.address, phone: block.phone } : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}), ...(stops ? { stops } : {}) } as never);
+    const driver = order.driver ? {
+      firstName: order.driver.user?.firstName ?? null,
+      vehicle: [order.driver.vehicleColor, order.driver.vehicleMake, order.driver.vehicleModel].filter(Boolean).join(' ') || null,
+      licensePlate: order.driver.licensePlate,
+    } : null;
+    return renderReceiptHtml({ ...order, driver, seller, ...(fareBreakdown ? { fareBreakdown } : {}), ...(stops ? { stops } : {}) } as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {
@@ -2697,6 +2836,7 @@ export async function customerRoutes(app: FastifyInstance) {
         vendor: {
           select: {
             id: true, name: true, slug: true, logoUrl: true, coverImageUrl: true,
+            requirePickupCode: true, // [O-2] read for pickupCodeRequired below
             // [S1 response-shaping · High #6] never `phone` — that is the
             // store's account/OTP line, not a number it chose to publish, and
             // it was handed to every customer on every order, for good. The
@@ -2832,6 +2972,7 @@ export async function customerRoutes(app: FastifyInstance) {
       ...order,
       noMoverFound: cancellableState && await readNoMoverFound(app.prisma, order),
       tooLateToDeliver: cancellableState && await readTooLateToDeliver(app.prisma, order, previewNow),
+      storeCannotHandOver: cancellableState && order.fulfillment === 'PICKUP' && order.status === 'READY_FOR_PICKUP' && await readStoreCannotHandOver(app.prisma, order.vendorId),
       // [owner ruling 14 Oct] A ride's, parcel's or booking's window runs from its acceptance.
       assignedAt: cancellableState ? await readAssignedAt(app.prisma, order) : null,
     };
@@ -2848,7 +2989,7 @@ export async function customerRoutes(app: FastifyInstance) {
     // one rail where it matters most.
     const refusal = cancelView?.cancelUnavailable
       ?? (cancellableStage && mmgPaidToStore && order.vendorId
-        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: MMG_PAID_STORE_CANCELS_MESSAGE }
+        ? { code: MMG_PAID_STORE_CANCELS_CODE, message: mmgPaidCancelMessage(order) }
         : null);
     const cancelUnavailable = refusal
       ? {
@@ -2861,12 +3002,15 @@ export async function customerRoutes(app: FastifyInstance) {
         }
       : null;
 
-    // Timeline
-    const timeline = order.statusHistory.map((sh) => ({
-      status: sh.status,
-      note: sh.note,
-      timestamp: sh.createdAt,
-    }));
+    // Timeline — [O-2 · REVIEW-F S3-2] the customer's projection (no store-tap row, no position evidence).
+    const timeline = customerTimeline(order.statusHistory);
+
+    // [BOOK-S6a · owner B2] With INSTANT_BOOKING on, the live booking behind an appointment and
+    // whether the customer may move it now — the same verdict the move itself applies
+    // (booking/reschedule-policy.ts). Switch off: not sent (the answer is today's).
+    const appointmentBooking = instantBookingEnabled() && order.fulfillment === 'APPOINTMENT'
+      ? await customerAppointmentBooking(app.prisma, order.id, order.status, previewNow)
+      : undefined;
 
     return {
       success: true,
@@ -2877,7 +3021,8 @@ export async function customerRoutes(app: FastifyInstance) {
         // The declared vertical — SERVICE for a service business's booking.
         vertical: orderVertical(order),
         status: order.status,
-        vendor: order.vendor,
+        // The store's own setting is read for pickupCodeRequired, not passed through as a store field.
+        vendor: order.vendor ? (({ requirePickupCode: _code, ...vendor }) => vendor)(order.vendor) : order.vendor,
         items: order.items.map((i) => ({
           id: i.id,
           itemId: i.itemId,
@@ -2919,10 +3064,16 @@ export async function customerRoutes(app: FastifyInstance) {
         mmgClaim: mmgClaimView(order),
         fulfillment: order.fulfillment,
         appointmentSlot: order.appointmentSlot,
+        ...(appointmentBooking !== undefined ? { appointmentBooking } : {}),
         // Takeaway handover gate — the customer PRESENTS this code at the
         // counter. It was only in the checkout response before, so it
         // vanished the moment they left the confirmation screen.
-        pickupCode: order.pickupCode,
+        // [PICKUP · owner 30 Oct 2026] Only when the store asks for it; the order
+        // screen of store build 12 (no pickupHandover=v1) keeps today's answer.
+        pickupCode: customerPickupCode(order.pickupCode, order.vendor?.requirePickupCode, !saysPickupHandover(request.query)),
+        // [O-2 · owner 22 Oct 2026] Whether the store asks for that code. Off by default: the store checks
+        // the customer's first name and order number instead (the code still works if it is asked for).
+        pickupCodeRequired: order.vendor?.requirePickupCode === true,
         // [MKT-F057] The delivery door PIN — the customer HOLDS this and gives
         // it to the rider at the door (taxi parity: holder sees, verifier enters).
         // Null on pickup/appointment/courier rows and once a store self-delivers
@@ -2959,6 +3110,8 @@ export async function customerRoutes(app: FastifyInstance) {
         promise: promiseView(order),
         // [AF-MOB-006] After pickup, a delivery problem is an owned case: the
         // customer sees its state and a plain sentence, never only "call support".
+        // [BUG-HUNT-2 G08] Who owes this customer what by MMG, and "Did it arrive?". Null on an order with no refund.
+        mmgRefund: order.paymentMethod === 'MOBILE_MONEY' ? await customerMmgRefund(app.prisma, order.id, order.vendor?.name ?? 'The store', previewNow) : null,
         custodyRecovery: mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'CUSTOMER', order) : null,
         rider: order.rider ? {
           firstName: order.rider.user?.firstName,
@@ -2966,7 +3119,8 @@ export async function customerRoutes(app: FastifyInstance) {
           // [S1 response-shaping] the mover's personal number is a handover
           // convenience, not a permanent gift: null once the order is closed,
           // exactly like the live coordinates two lines below.
-          phone: liveLocationVisible(order.status) ? order.rider.user?.phone : null,
+          // [O-1] Only an installed store build is sent it (it dials it); a bridge-aware client calls through Swift.
+          phone: liveLocationVisible(order.status) ? counterpartPhone(request, order.rider.user?.phone) : null,
           avatar: await resolveAvatarUrl(order.rider.user?.avatar), // [F-026-01]
           displayRating: riderSurface?.displayRating ?? null,
           // Trust visibility (master plan §5): the customer sees who and what
@@ -3023,6 +3177,104 @@ export async function customerRoutes(app: FastifyInstance) {
   });
 
   /**
+   * GET /delivery-availability — [RIDER-SAFE 1 · COORD ruling 29 Oct 2026]
+   * What the cart and checkout show BEFORE the customer orders delivery from
+   * one store: GOOD, BUSY ("Riders are busy — about N min extra"), NONE
+   * ("order for pickup instead"), or PAUSED (Swift's pause switch, or the
+   * store's own rider backlog). The same reads checkout decides with, for
+   * this customer's basket from this store (its size and cash) and drop-off.
+   * Levels and minutes only — never rider counts or positions. The rider
+   * read is cached 10 s per store, basket size, cash band and ~1 km drop-off
+   * cell; the two switches are read fresh.
+   * `gate` mirrors DISPATCH_AVAILABILITY: with it off, checkout does not
+   * refuse on riders, so clients show the truth but block nothing (the two
+   * switches refuse either way).
+   */
+  app.get('/delivery-availability', async (request: AuthRequest) => {
+    const q = z.object({
+      vendorId: z.string().min(1).max(64),
+      lat: z.coerce.number().min(-90).max(90).optional(),
+      lng: z.coerce.number().min(-180).max(180).optional(),
+      paymentMethod: z.enum(['CASH', 'MOBILE_MONEY']).optional(),
+    }).parse(request.query);
+    const userId = request.user.userId;
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } });
+    const vendor = await app.prisma.vendor.findFirst({
+      where: { id: q.vendorId, tenantId: user.tenantId },
+      select: { id: true, name: true, latitude: true, longitude: true, vendorType: true },
+    });
+    if (!vendor) throw new NotFoundError('Vendor', q.vendorId);
+    const gate = process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['DELIVERY_BLOCK_ON_NONE'] !== '0';
+    const storePoint = { lat: vendor.latitude, lng: vendor.longitude };
+
+    const pause = await deliveryPausedAt(app.prisma, user.tenantId, storePoint);
+    if (pause.paused) {
+      return { success: true, data: { level: 'PAUSED' as const, reason: 'SWIFT_PAUSED' as const, extraMinutes: null, gate,
+        message: 'Swift has paused delivery here for now — you can order for Pickup instead.' } };
+    }
+    const backlog = await storeRiderBacklog(app.prisma, vendor.id, user.tenantId);
+    if (backlog.paused) {
+      return { success: true, data: { level: 'PAUSED' as const, reason: 'STORE_BUSY' as const, extraMinutes: null, gate,
+        message: `${vendor.name} has orders waiting for riders, so delivery from this store is paused for a few minutes — you can order for Pickup instead.` } };
+    }
+
+    // The basket from this store: its vehicle size and the cash a rider fronts.
+    const cart = await app.prisma.cart.findUnique({
+      where: { customerId: userId },
+      select: {
+        deliveryAddressId: true,
+        items: { where: { item: { vendorId: vendor.id } }, select: { quantity: true, item: { select: { basePrice: true, bulkUnits: true } } } },
+      },
+    });
+    const lines = cart?.items ?? [];
+    const orderType = vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY';
+    // The size a vehicle must carry (capped) and the true band the stacking read weighs (utils/load readOrderSize).
+    const { required: packageSize, trueBand: loadBand } = lines.length > 0
+      ? readOrderSize({ orderType, courierPackageSize: null, items: lines.map((l) => ({ quantity: l.quantity, bulkUnits: l.item.bulkUnits ?? null })) }, DEFAULT_LOAD_BANDS)
+      : { required: null, trueBand: null };
+    const cash = q.paymentMethod === 'MOBILE_MONEY' ? 0 : lines.reduce((sum, l) => sum + Number(l.item.basePrice) * l.quantity, 0);
+    let dropoff: { lat: number; lng: number } | null = q.lat != null && q.lng != null ? { lat: q.lat, lng: q.lng } : null;
+    if (!dropoff) {
+      const addr = cart?.deliveryAddressId
+        ? await app.prisma.address.findFirst({ where: { id: cart.deliveryAddressId, userId }, select: { latitude: true, longitude: true } })
+        : await app.prisma.address.findFirst({ where: { userId, isDefault: true }, select: { latitude: true, longitude: true } });
+      if (addr) dropoff = { lat: addr.latitude, lng: addr.longitude };
+    }
+
+    const cacheKey = tenantCacheKey(`avail:DELIVERY:${vendor.id}:${packageSize ?? '-'}/${loadBand ?? '-'}:${Math.ceil(cash / 1000)}:${dropoff ? `${dropoff.lat.toFixed(2)}:${dropoff.lng.toFixed(2)}` : '-'}`);
+    type Reading = { level: 'GOOD' | 'BUSY' | 'NONE'; reason: 'NO_RIDERS' | 'RIDERS_BUSY' | null; riderWaitMinutes: number };
+    let reading: Reading | null = null;
+    const cached = await app.redis.get(cacheKey).catch(() => null);
+    if (cached) {
+      try { reading = JSON.parse(cached) as Reading; } catch { reading = null; }
+    }
+    if (!reading) {
+      const capacity = await dispatchForAvailability.getDeliveryCapacity({
+        tenantId: user.tenantId,
+        store: { id: vendor.id, ...storePoint },
+        orderType,
+        dropoff,
+        floatRequired: cash,
+        cashToCollect: cash,
+        packageSize,
+        loadBand,
+      });
+      reading = { level: capacity.level, reason: capacity.reason, riderWaitMinutes: capacity.riderWaitMinutes };
+      await app.redis.set(cacheKey, JSON.stringify(reading), 'EX', 10).catch(() => {});
+    }
+    return {
+      success: true,
+      data: {
+        level: reading.level,
+        reason: reading.reason,
+        extraMinutes: reading.level === 'BUSY' ? reading.riderWaitMinutes : null,
+        message: capacitySentence(reading),
+        gate,
+      },
+    };
+  });
+
+  /**
    * POST /orders/:id/convert-to-pickup — the ONE additive transition
    * (availability spec §4.2), flag-gated: when delivery dispatch struggles
    * and the food may already be cooking, the customer collects it instead.
@@ -3044,7 +3296,7 @@ export async function customerRoutes(app: FastifyInstance) {
         id: true, status: true, fulfillment: true, riderId: true, vendorId: true,
         deliveryFee: true, tipAmount: true, totalAmount: true, orderNumber: true,
         paymentMethod: true, paymentStatus: true,
-        vendor: { select: { name: true, ownerId: true } },
+        vendor: { select: { name: true, ownerId: true, requirePickupCode: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -3075,7 +3327,7 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'A rider already has this order — it is on its way.');
     }
     if (!['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(order.status)) {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot switch a ${order.status} order to pickup.`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot switch to pickup'));
     }
 
     const pickupCode = String(randomInt(100000, 1000000));
@@ -3101,7 +3353,7 @@ export async function customerRoutes(app: FastifyInstance) {
         throw new AppError(409, 'RIDER_ALREADY_ASSIGNED', 'This order can no longer switch to pickup.');
       }
       if (!['PENDING', 'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(locked.status)) {
-        throw new AppError(400, 'INVALID_STATUS', `Cannot switch a ${locked.status} order to pickup.`);
+        throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(locked.status, 'it cannot switch to pickup'));
       }
       const lockedFee = Number(locked.deliveryFee ?? 0);
       const lockedTip = Number(locked.tipAmount ?? 0);
@@ -3149,7 +3401,10 @@ export async function customerRoutes(app: FastifyInstance) {
       })
       .catch(() => {});
 
-    // Both sides hear it now.
+    // Both sides hear it now. [PICKUP · owner 30 Oct 2026 · REVIEW-F S3-1 on #2251] The words promise a code
+    // only when the store asks for one; off (the default) the counter checks the first name and order number
+    // (worded so it reads true on every store build: no button name).
+    const storeAsksForCode = order.vendor?.requirePickupCode === true;
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: statusAtConvert, fulfillment: 'PICKUP',
     });
@@ -3160,7 +3415,9 @@ export async function customerRoutes(app: FastifyInstance) {
           userId: owner.userId,
           type: 'ORDER_UPDATE',
           title: 'Order switched to pickup',
-          body: `#${order.orderNumber}: no rider is coming — the customer collects it with a pickup code.`,
+          body: storeAsksForCode
+            ? `#${order.orderNumber}: no rider is coming — the customer collects it with a pickup code.`
+            : `#${order.orderNumber}: no rider is coming — the customer collects it. Check their first name and order number before you hand it over.`,
           audience: 'business',
           data: { orderId: order.id, kind: 'converted_to_pickup' },
         });
@@ -3170,7 +3427,9 @@ export async function customerRoutes(app: FastifyInstance) {
       userId,
       type: 'ORDER_UPDATE',
       title: 'Switched to pickup',
-      body: `Show ${order.vendor?.name ?? 'the store'} your pickup code when you arrive.`,
+      body: storeAsksForCode
+        ? `Show ${order.vendor?.name ?? 'the store'} your pickup code when you arrive.`
+        : `Give ${order.vendor?.name ?? 'the store'} your first name and order number when you arrive.`,
       // [NOC-A F48] The pickup code is a handover SECRET — the same class the
       // verifier is never allowed to read (HND-003). A push payload transits
       // Google/Apple and is then persisted in notifications.data for 180 days,
@@ -3181,9 +3440,11 @@ export async function customerRoutes(app: FastifyInstance) {
 
     const updated = await app.prisma.order.findUniqueOrThrow({
       where: { id: order.id },
-      select: { id: true, fulfillment: true, pickupCode: true, totalAmount: true, deliveryFee: true, tipAmount: true },
+      select: { id: true, fulfillment: true, pickupCode: true, totalAmount: true, deliveryFee: true, tipAmount: true, vendor: { select: { requirePickupCode: true } } },
     });
-    return { success: true, data: updated };
+    // [PICKUP · owner 30 Oct 2026] The code goes to the customer only when the store asks for it.
+    const { vendor: store, ...switched } = updated;
+    return { success: true, data: { ...switched, pickupCode: customerPickupCode(updated.pickupCode, store?.requirePickupCode) } };
   });
 
   // [DOC-1 §31.5 · §31.6 · P31-2 · ORDER-SPINE S1-6] The customer's OWN claim, from their device:
@@ -3229,6 +3490,16 @@ export async function customerRoutes(app: FastifyInstance) {
         mmgClaim: mmgClaimView(facts),
       },
     };
+  });
+
+  /** POST /orders/:id/mmg-refunds/:sendId/answer — [BUG-HUNT-2 G08] "It arrived", or it did not, and then a support case opens.
+   *  Record only: Swift moves nothing, and the store is told. */
+  app.post('/orders/:id/mmg-refunds/:sendId/answer', async (request: AuthRequest) => {
+    const { id, sendId } = request.params as { id: string; sendId: string };
+    const { received } = z.object({ received: z.boolean() }).parse(request.body);
+    const outcome = await answerMmgRefund(app.prisma, { orderId: id, sendId, customerId: request.user.userId, received });
+    if (!outcome.replayed) await tellStoreOfRefundAnswer(app.prisma, notificationService, id, outcome);
+    return { success: true, data: { orderId: id, sendId, received, replayed: outcome.replayed } };
   });
 
   app.post('/orders/:id/cancel', async (request: AuthRequest) => {
@@ -3785,7 +4056,8 @@ export async function customerRoutes(app: FastifyInstance) {
         description = `$${Number(promo.discountValue).toLocaleString()} GYD off`;
         break;
       case 'FREE_DELIVERY':
-        description = 'Free delivery';
+        // [owner 1 Nov 2026] The code covers the normal fee; express still adds its flat premium.
+        description = `Free delivery (express still adds $${EXPRESS_DELIVERY_SURCHARGE.toLocaleString()} GYD)`;
         break;
     }
     if (promo.minOrderAmount) {

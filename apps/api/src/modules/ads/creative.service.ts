@@ -5,6 +5,8 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { AdsLifecycleService } from './lifecycle.service';
+import { AdLinkService } from './ad-link.service';
+import { assertAdvertiserApprovedWithin } from './advertiser.service';
 import { log } from '../../utils/logger';
 
 // Creative upload + review (ads-platform spec §9/§10). Reconciliation: the spec
@@ -44,8 +46,11 @@ export interface CreativeText {
 
 export class CreativeService {
   private lifecycle: AdsLifecycleService;
+  /** [ADS-ON] The ad's link is reviewed with the ad. */
+  readonly links: AdLinkService;
   constructor(private prisma: PrismaClient, private io: Server) {
     this.lifecycle = new AdsLifecycleService(prisma, io);
+    this.links = new AdLinkService(prisma, io);
   }
 
   /** Validate the §9.1 text specs for a placement tier (hero headline ≤60,
@@ -70,9 +75,14 @@ export class CreativeService {
   }): Promise<AdCreative> {
     const campaign = await this.prisma.adCampaign.findUnique({
       where: { id: input.campaignId },
-      include: { placement: { select: { tier: true, mediaKind: true } } },
+      include: { placement: { select: { tier: true, mediaKind: true } }, advertiser: { select: { status: true } } },
     });
     if (!campaign) throw new NotFoundError('AdCampaign', input.campaignId);
+    // [SEC-TRUST F6] A creative is uploaded by the advertiser: its account must be APPROVED (checked again
+    // under lock when the row is written, after the file is stored).
+    if (campaign.advertiser.status !== 'APPROVED') {
+      throw new AppError(403, 'ADVERTISER_NOT_APPROVED', 'Your advertiser account is not active. Contact support.');
+    }
     if (campaign.status === 'COMPLETED' || campaign.status === 'CANCELLED' || campaign.status === 'REJECTED') {
       throw new AppError(409, 'CAMPAIGN_TERMINAL', 'This campaign can no longer take creatives.');
     }
@@ -98,18 +108,21 @@ export class CreativeService {
       folder: `ads/${input.campaignId}`,
     });
 
-    const creative = await this.prisma.adCreative.create({
-      data: {
-        campaignId: input.campaignId,
-        kind: input.kind,
-        fileUrl: url,
-        headline: input.text.headline ?? null,
-        body: input.text.body ?? null,
-        ctaLabel: input.text.ctaLabel ?? null,
-        // Images are review-ready; videos wait on the transcode job (§9.2).
-        transcodeStatus: input.kind === 'VIDEO' ? 'QUEUED' : 'READY',
-        status: 'PENDING',
-      },
+    const creative = await this.prisma.$transaction(async (tx) => {
+      await assertAdvertiserApprovedWithin(tx, campaign.advertiserId);
+      return tx.adCreative.create({
+        data: {
+          campaignId: input.campaignId,
+          kind: input.kind,
+          fileUrl: url,
+          headline: input.text.headline ?? null,
+          body: input.text.body ?? null,
+          ctaLabel: input.text.ctaLabel ?? null,
+          // Images are review-ready; videos wait on the transcode job (§9.2).
+          transcodeStatus: input.kind === 'VIDEO' ? 'QUEUED' : 'READY',
+          status: 'PENDING',
+        },
+      });
     });
     log().info({ creativeId: creative.id, campaignId: input.campaignId, kind: input.kind }, 'ad creative uploaded — PENDING review');
     // §10.4 advisory pre-screen — fire-and-forget. It annotates the review
@@ -153,13 +166,24 @@ export class CreativeService {
   // ── Review (§10) ─────────────────────────────────────────────────────────
 
   /** The AD_CREATIVE_REVIEW queue — PENDING creatives ready to review (videos
-   *  only once transcoded), oldest first. */
+   *  only once transcoded), oldest first. [ADS-ON] Each carries the link the ad
+   *  opens: a reviewer approves the destination too, so it is on the screen. */
   async queue(limit = 50) {
-    return this.prisma.adCreative.findMany({
+    const rows = await this.prisma.adCreative.findMany({
       where: { status: 'PENDING', transcodeStatus: 'READY' },
       orderBy: { createdAt: 'asc' },
       take: limit,
+      include: {
+        campaign: {
+          select: {
+            tenantId: true, name: true, destinationType: true, destinationValue: true, destinationApprovedAt: true,
+            advertiser: { select: { companyName: true } },
+          },
+        },
+      },
     });
+    const links = await this.links.summaries(rows.map((r) => r.campaign));
+    return rows.map(({ campaign, ...creative }, i) => ({ ...creative, campaignName: campaign.name, advertiserName: campaign.advertiser.companyName, link: links[i] }));
   }
 
   /** §16 "review SLA at risk": reviewable (PENDING + READY — same filter as
@@ -181,9 +205,29 @@ export class CreativeService {
     const creative = await this.prisma.adCreative.findUnique({ where: { id: creativeId } });
     if (!creative) throw new NotFoundError('AdCreative', creativeId);
     if (creative.transcodeStatus !== 'READY') throw new AppError(409, 'NOT_READY', 'This creative is still processing.');
-    const moved = await this.prisma.adCreative.updateMany({
-      where: { id: creativeId, status: 'PENDING' },
-      data: { status: 'APPROVED', reviewedByUserId: adminUserId, reviewedAt: new Date() },
+    // [ADS-ON] The ad and its link are approved together, by the same person, or neither is. The redirect
+    // walk reads the network, so it runs before the transaction; the stamp commits with the approval.
+    const link = await this.prisma.adCampaign.findUniqueOrThrow({ where: { id: creative.campaignId } });
+    const stamp = await this.links.reviewLink(link);
+    const moved = await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.adCreative.updateMany({
+        where: { id: creativeId, status: 'PENDING' },
+        data: { status: 'APPROVED', reviewedByUserId: adminUserId, reviewedAt: new Date() },
+      });
+      if (claimed.count === 1 && stamp) {
+        const now = new Date();
+        await tx.adCampaign.update({
+          where: { id: creative.campaignId },
+          data: { destinationHost: stamp.destinationHost, destinationApprovedByUserId: adminUserId, destinationApprovedAt: now, destinationCheckedAt: now },
+        });
+        await tx.adsAuditLog.create({
+          data: {
+            tenantId: link.tenantId, actorUserId: adminUserId, action: 'CAMPAIGN_LINK_APPROVE', entityType: 'AdCampaign', entityId: creative.campaignId,
+            reason: link.destinationValue,
+          },
+        });
+      }
+      return claimed;
     });
     if (moved.count === 0) throw new AppError(409, 'ALREADY_REVIEWED', 'This creative was already reviewed.');
     await this.audit(creative.campaignId, adminUserId, 'CREATIVE_APPROVE', creativeId);

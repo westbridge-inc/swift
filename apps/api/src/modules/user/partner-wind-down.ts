@@ -1,4 +1,5 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { OPEN_SETTLEMENT } from '../cash/delivery-cash-settlement.service';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
@@ -6,12 +7,12 @@ import { formatMoney } from '../../utils/currency-amount';
 import { LATE_WINDOW_MS } from '../billing/mmg-checkout.service';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { openCreditRefunds } from '../billing/credit-refund';
+import { SUBSCRIPTION_OWNER_JOINS_SQL, subscriptionPaidBySql, subscriptionsPaidBy } from '../subscription/subscription-owner';
 
 /** Account closure preserves financial history. Earnings describe direct payments
  * between participants; Swift holds no balance to pay out. Open cash obligations
- * block erasure, and so does an open loss-protection claim: money Swift itself
- * owes the mover, which support pays or decides (coordinator ruling 2026-10-05,
- * Q1a). Rescue incentives deliberately do not block: they have no payout path
+ * block erasure, and so does an open case at the door: a person has not finished
+ * deciding it, and support pays or closes it (coordinator ruling 2026-10-05, Q1a). Rescue incentives deliberately do not block: they have no payout path
  * and ship switched off (rescue-incentive-deletion-rule.unit.test.ts). The
  * caller also checks live work under authority locks.
  *
@@ -48,7 +49,7 @@ export interface PartnerObligations {
   partialCashReturnReleaseAt?: Date | null;
   /** Historical direct-payment earnings; not a Swift payout obligation. */
   earningsOwed: number;
-  /** Loss-protection claims for this mover that Swift has neither paid nor rejected. */
+  /** Unpaid-door cases for this mover that Swift has neither paid nor rejected. */
   openClaimCount?: number;
   /** Fee checkouts MMG can still confirm, plus unresolved payment confirmation holds. */
   pendingFeePaymentCount?: number;
@@ -102,12 +103,12 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
   PARTIAL_CASH_RETURN:
     'You hold {amount} of a customer\u2019s cash from a delivery they could not pay in full, and the goods went back to the store. This partial cash still needs to be returned to the customer. Open Get help to arrange and confirm the cash return with operations, then return here to delete your account. If operations has not recorded it resolved by {date}, you can delete your account from that day; the record of the cash is kept.',
   OPEN_CLAIM:
-    'Swift has not finished paying a no-show claim it owes you. Wait for the payment, or open Get help to have it paid or closed, then return here to delete your account.',
+    'A person at Swift has not finished reviewing an unpaid cash order of yours. Open Get help to have it decided, then return here to delete your account.',
   FEE_PAYMENT_PENDING:
     'A weekly-fee payment is still in progress or being confirmed with MMG. Wait for it to finish, or open Get help to have it resolved, then return here to delete your account.',
   // [Owner ruling 2026-10-07] Unused credit is refunded by support (recorded
   // in the admin console), then the account can be deleted. [Owner ruling
-  // 8 Oct, NO "WALLET"; owner #62, NO PAYING AHEAD] It is named as money
+  // 8 Oct, NO "WALLET"; owner 6 Nov 2026, up to four weeks ahead] It is named as money
   // paid for weekly fees that have not started.
   FEE_CREDIT:
     'You have {amount} paid for weekly fees that have not started. Open Get help and we\u2019ll refund it, then your account can be deleted.',
@@ -179,7 +180,7 @@ export async function partnerObligations(
   }
 
   const unsettled = await tx.deliveryCashSettlement.count({
-    where: { status: { not: 'SETTLED' }, OR: [
+    where: { ...OPEN_SETTLEMENT, OR: [
       ...(rider ? [{ riderId: rider.id }] : []), { vendor: { owner: { userId } } },
     ] },
   });
@@ -202,14 +203,15 @@ export async function partnerObligations(
  *  and a confirmation is still credited [MMG-CHECKOUT-API, DS782]. */
 async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
   const subscriptions = await tx.subscription.findMany({
-    where: { OR: [{ rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } }] },
+    where: subscriptionsPaidBy(userId),
     select: { id: true },
   });
   if (subscriptions.length === 0) return { pendingFeePaymentCount: 0, feeCreditCount: 0, feeCreditAmount: 0, feeRefundPendingCount: 0 };
   const subscriptionId = { in: subscriptions.map((sub) => sub.id) };
   const lateHorizon = new Date(Date.now() - LATE_WINDOW_MS);
   const [checkouts, cardPayments, payments, holds, credit, reversals] = await Promise.all([
-    tx.mmgCheckoutIntent.count({ where: { subscriptionId, OR: [
+    // [ENTERPRISE E1] A store's own checkouts and every "pay all my branches" checkout that pays one of its stores.
+    tx.mmgCheckoutIntent.count({ where: { AND: [{ OR: [{ subscriptionId }, { parts: { some: { subscriptionId } } }] }, { OR: [
       { status: { in: ['OPEN', 'CONFIRMING', 'HELD'] } },
       // [DS782 S2] A late MMG reply re-arms an EXPIRED or NOT_PAID checkout and
       // a confirmation is still credited, so it is final only once no check is
@@ -219,7 +221,7 @@ async function feeMoney(tx: Prisma.TransactionClient, userId: string) {
         { createdAt: { gt: lateHorizon } },
         { replyAt: { gt: lateHorizon } },
       ] },
-    ] } }),
+    ] }] } }),
     // A card payment for the fee still open, unknown or held (saving a card moves no money).
     tx.cardSession.count({ where: { subscriptionId, purpose: 'PAY_NOW', status: { in: ['OPEN', 'UNKNOWN', 'HELD'] } } }),
     // The weekly MMG prompt and any other fee payment not yet settled.
@@ -271,9 +273,8 @@ export async function windDownPartner(
   await prisma.$queryRaw`SELECT id FROM users WHERE id=${userId} FOR UPDATE`;
   await prisma.$queryRaw`
     SELECT s.id FROM subscriptions s
-    LEFT JOIN riders r ON r.id=s."riderId" LEFT JOIN drivers d ON d.id=s."driverId"
-    LEFT JOIN vendors v ON v.id=s."vendorId" LEFT JOIN vendor_owners o ON o.id=v."ownerId"
-    WHERE r."userId"=${userId} OR d."userId"=${userId} OR o."userId"=${userId}
+    ${SUBSCRIPTION_OWNER_JOINS_SQL}
+    WHERE ${subscriptionPaidBySql(userId)}
     ORDER BY s.id FOR UPDATE OF s
   `;
   const owner = await prisma.vendorOwner.findUnique({ where: { userId }, select: { id: true } });
@@ -286,13 +287,16 @@ export async function windDownPartner(
   // order: starting vendor and subscription updates together allowed the
   // database to choose vendor-first here while billing held subscription-first,
   // producing a real ABBA deadlock under overlap.
-  const [rider, driver] = await Promise.all([
+  const [rider, driver, pro] = await Promise.all([
     prisma.rider.findUnique({ where: { userId }, select: { id: true } }),
     prisma.driver.findUnique({ where: { userId }, select: { id: true } }),
+    prisma.serviceProvider.findUnique({ where: { userId }, select: { id: true } }),
   ]);
   const links: Prisma.SubscriptionWhereInput[] = [];
   if (rider) links.push({ riderId: rider.id });
   if (driver) links.push({ driverId: driver.id });
+  // [BILL-PRO] A pro's own weekly fee winds down with the person, like a mover's.
+  if (pro) links.push({ serviceProviderId: pro.id });
   if (vendorIds.length) links.push({ vendorId: { in: vendorIds } });
   const subs = links.length === 0
     ? { count: 0 }

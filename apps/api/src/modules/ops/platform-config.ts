@@ -75,8 +75,31 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  photographer and tutor keep theirs.
  *  2026-10-16.1 [owner 16 Oct]: 2026-10-15.2 with the heavy-equipment operator
  *  HELD again (licence rules unconfirmed): its list is gone; pest control,
- *  chef, caterer, photographer and tutor keep theirs. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-16.1';
+ *  chef, caterer, photographer and tutor keep theirs.
+ *  2026-10-21.1 [ROLE-DOCS · owner 21 Oct]: 2026-10-16.1 with the optional
+ *  national ID gone for every mover, the optional police clearance kept for
+ *  taxi drivers only (MOVER_TAXI_EXTRA_OPTIONAL; MOVER_OPTIONAL removed), and
+ *  the unused CUSTOMER_L2 list removed.
+ *  2026-10-21.2 [ROLE-DOCS · owner 21 Oct]: 2026-10-21.1 plus the own-name
+ *  store lists (RESTAURANT_OWN_NAME, SUPERMARKET_OWN_NAME, STORE_OWN_NAME).
+ *  2026-10-22.1 [ROLE-DOCS PR 3 · owner 21 Oct]: 2026-10-21.2 plus the solar /
+ *  generator / inverter installer's GEI electrical licence
+ *  (SERVICE_PROVIDER_TRADE_SOLAR_GENERATOR_INVERTER_INSTALLER).
+ *  2026-10-24.1 [FOOD-PERMIT · owner 24 Oct]: 2026-10-22.1 with a registered restaurant's food handler's
+ *  certificate OPTIONAL (RESTAURANT and RESTAURANT_OWN_NAME no longer name it; RESTAURANT_OPTIONAL does): the owner
+ *  ticks for the store's food handlers instead (vendor/food-handlers.ts, asked by code, on no list). The self-declared
+ *  tier (RESTAURANT_UNREGISTERED), chef and caterer keep it required. Until the owner-signed seed lands, a stored
+ *  RESTAURANT list that still names the certificate wins (stricter): the tick is asked either way.
+ *  2026-10-29.1 [DEPT-PRICE · owner 29 Oct ~22:31Z]: 2026-10-24.1 with Guyana's department-store weekly fee at
+ *  GY$45,000 (was 60,000). Nothing else moves. Production bills it only after the owner-signed seed applies this
+ *  version; stores already billed above it then move down from their next weekly fee (BillingService
+ *  applyCardPriceCuts), never a fee already charged.
+ *  2026-11-01.1 [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 17:31Z (a)]: 2026-10-29.1 without the self-declared
+ *  (unregistered) tier: the RESTAURANT_UNREGISTERED, SUPERMARKET_UNREGISTERED and STORE_UNREGISTERED lists are gone.
+ *  Only a registered business, or a trader under their own name (the *_OWN_NAME lists), joins. Nothing else moves.
+ *  Until the owner-signed seed applies this version, a stored copy still names the three lists; nothing reads them
+ *  (country-config RETIRED_LIST_KEYS, doc-registry RETIRED_REGISTRY_LIST_KEYS). */
+export const PLATFORM_CONFIG_VERSION = '2026-11-01.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -105,8 +128,13 @@ export const COMPLETE_CARD = 'complete';
 // offered (config/vehicle-classes LAUNCH_HIDDEN_VEHICLE_TYPES), so nobody can
 // sign up on that rate and no price list shows it; the rate stays here for the
 // day they return. The owner, 13 Oct 2026: no franchise discount — every store
-// is its own account and pays its own tier by its own catalogue.
-// Existing subscriptions move at the next weekly re-tier.
+// is its own account and pays its own tier by its own catalogue. The owner,
+// 29 Oct 2026: department stores (10,000+ active items) pay 45,000 a week, down
+// from 60,000 (and a NEW department-store signup gets a 7-day free trial:
+// subscription/trial-length.ts).
+// Existing subscriptions move at the next weekly re-tier; a card price that
+// goes DOWN moves every store billed above it at once, from its next weekly
+// fee (BillingService.applyCardPriceCuts).
 export const guyanaTiers = {
   card: COMPLETE_CARD,
   mover: 6000,
@@ -116,7 +144,7 @@ export const guyanaTiers = {
   serviceVendor: 8000,
   smallVendor: 15000,
   largeVendor: 20000,
-  departmentVendor: 60000,
+  departmentVendor: 45000,
   largeCatalogueThreshold: 1000,
   departmentCatalogueThreshold: 10000,
 };
@@ -139,8 +167,9 @@ const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
 /**
  * The LAUNCH document checklists, as code. The CountryConfig row carries a copy the
  * founder may edit; readers merge these defaults UNDER the stored JSON so a key added
- * here (the UNREGISTERED tier lists, P3-2) exists on every environment without a reseed,
- * while an edited stored list still wins.
+ * here (the own-name store lists, ROLE-DOCS) exists on every environment without a reseed,
+ * while an edited stored list still wins. A key the owner retired is removed from the stored
+ * copy too (country-config RETIRED_LIST_KEYS), so an older seed never brings it back.
  *
  * Every list is REQUIRED: each type in it must be approved and current before the role
  * goes live. A `<KEY>_OPTIONAL` list (OPTIONAL_LIST_SUFFIX, doc-registry) names documents
@@ -150,15 +179,19 @@ const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
 export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // Movers: the base list holds what EVERY vehicle needs — nothing on its own since the
     // owner's rulings of 6 Oct 2026; each vehicle adds its profiles (config/vehicle-classes).
-    //  - Police clearance is OPTIONAL for every mover (rulings 1, 2): no Guyana law found
-    //    requires it of drivers or riders; an approved one is the "Police-cleared" flag.
-    //  - A driver's licence is photo ID, so a motorised mover's national ID is OPTIONAL;
-    //    a bicycle rider holds no licence and keeps the national ID (ruling 4).
+    //  - Police clearance is never REQUIRED of a mover (rulings 1, 2): no Guyana law found
+    //    requires it of drivers or riders. [owner 21 Oct] Only a taxi driver may add one.
+    //  - A driver's licence is photo ID, so a motorised mover is not asked for a national ID
+    //    at all [owner 21 Oct; was optional]; a bicycle rider holds no licence and keeps the
+    //    national ID (ruling 4).
     //  - The taxi's separate plate photo is merged into the car photo, which shows the
     //    plate (ruling 5). Nothing read the plate photo; the plate cross-check is the
     //    insurance review's, unchanged.
     MOVER: [],
-    MOVER_OPTIONAL: ['national_id', 'police_clearance'],
+    // [ROLE-DOCS · owner 21 Oct 2026] No mover is offered a second ID: a driver's licence is photo ID, so
+    // the optional national ID is gone for every vehicle partner (a bicycle rider keeps it REQUIRED, below).
+    // The optional police clearance stays for TAXI drivers only (MOVER_TAXI_EXTRA_OPTIONAL); delivery riders
+    // are not offered it (no Guyana law asks it of them, and it is criminal-record data, DPA 2023 s.2).
     MOVER_NO_LICENCE: ['national_id'],
     MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
     // [VERIFY-DOCS · ruling 8] A taxi's seven: the licence, registration and insurance above, plus the
@@ -166,19 +199,28 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // with the plate showing, and the certificate of fitness. The two licences replace the single
     // hire-car permit; [owner 15 Oct 2026] the permit never counts as either (no grace: verification/hire-permit-grace).
     MOVER_TAXI_EXTRA: ['hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'],
+    // [ROLE-DOCS · owner 21 Oct 2026] A taxi driver MAY add a police clearance (an approved, current one is
+    // the "Police-cleared" flag); it never gates. Not offered to delivery riders.
+    MOVER_TAXI_EXTRA_OPTIONAL: ['police_clearance'],
     MOVER_COMMERCIAL: ['road_service_licence', 'fitness_cert'],
     // [VERIFY-DOCS · ruling 7] No TIN certificate: no law found requires Swift to hold it, and the image
     // pairs a person's name and address with their tax-account login. A VAT-registered store may type its
     // VAT registration number on its profile instead (vendor.vatRegistrationNumber, for VAT invoices).
-    RESTAURANT: ['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo'],
+    // [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant no longer has to upload a food handler's certificate:
+    // its owner ticks that everyone who handles food there holds a current one (vendor/food-handlers.ts — asked of the
+    // store by code, never a list item). The certificate stays one it MAY add: reviewed, and shown on the storefront.
+    RESTAURANT: ['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'storefront_photo'],
+    RESTAURANT_OPTIONAL: ['food_handler_cert'],
     SUPERMARKET: ['owner_national_id', 'business_registration', 'storefront_photo'],
     STORE: ['owner_national_id', 'business_registration', 'storefront_photo'],
-    // [DOC-1 §3.2/§3.6 · FD-DOC-1 · P3-2] The UNREGISTERED tier of the same roles: identity, the signed
-    // self-declaration, the storefront photo, and — never waived — the food handler permit for food.
-    // TIN is optional at this tier (not blocking); the restaurant licence is a nudge, not a requirement.
-    RESTAURANT_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo', 'food_handler_cert'],
-    SUPERMARKET_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
-    STORE_UNREGISTERED: ['owner_national_id', 'self_declaration_unregistered', 'storefront_photo'],
+    // [ROLE-DOCS · owner 21 Oct 2026] A store trading under its owner's OWN name (Business Names (Registration) Act,
+    // Cap. 90:05, s.3: a true surname with only first names or initials needs no registration) gives the signed own-name
+    // declaration in place of the business registration; everything else is unchanged (vendor/own-name.ts).
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] There is no other way in: the self-declared (unregistered) tier and its
+    // three lists are removed. A registered business or a trader under their own name joins; nobody else.
+    RESTAURANT_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'gra_restaurant_licence', 'storefront_photo'],
+    SUPERMARKET_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
+    STORE_OWN_NAME: ['owner_national_id', 'own_name_declaration', 'storefront_photo'],
     // Service businesses (owner ruling, 6 Oct 2026 ~21:25 GYT): the store opens on the owner's ID;
     // a police clearance is OPTIONAL for the store, and a HOME-VISIT booking needs the owner's
     // approved, current one (modules/verification/home-visits) — in-shop bookings never do.
@@ -188,12 +230,16 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
+    // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] A solar / generator / inverter installer does electrical installation
+    // work, so it holds the same GEI electrical licence as an electrician (GPL's grid-tie certificate is applied for by
+    // the licensed electrician or contractor). Also a floor below (SERVICE_TRADE_LAUNCH_FLOOR).
+    SERVICE_PROVIDER_TRADE_SOLAR_GENERATOR_INVERTER_INSTALLER: ['gei_electrical_licence'],
     // [TRADES · owner 13 Oct 2026, decisions 23 + 40; R15 · owner 15 Oct, research A9/D9] The trades
     // opened at launch, each with the documents Guyana law ties to it. The base SERVICE_PROVIDER list
     // (national ID + police clearance) applies to every one of them; SERVICE_TRADE_LAUNCH_FLOOR below
     // keeps both halves required whatever a stored list says. Gas fitters, the barber group,
-    // accountants and [owner 16 Oct] heavy-equipment operators are HELD (services/service-catalog)
-    // and have no list here.
+    // accountants, [owner 16 Oct] heavy-equipment operators and [ROLE-DOCS · owner 21 Oct] AC & refrigeration
+    // technicians and movers are HELD (services/service-catalog) and have no list here.
     // Pesticides and Toxic Chemicals Control Act s.21 (operator licence) and regulation 89
     // (commercial applicator certificate, two years).
     SERVICE_PROVIDER_TRADE_PEST_CONTROL: ['pest_control_operator_licence', 'pesticide_applicator_certificate'],
@@ -207,23 +253,34 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     SERVICE_PROVIDER_TRADE_PHOTOGRAPHER: ['police_clearance'],
     // Works with children, often in their homes: the police clearance is required, never optional.
     SERVICE_PROVIDER_TRADE_TUTOR: ['police_clearance'],
-    CUSTOMER_L2: ['national_id', 'selfie'],
+    // [ROLE-DOCS · owner 21 Oct 2026] No CUSTOMER_L2 list: a customer's ID is `identity_l2` on its own
+    // (verification.service submitIdentity) and a customer never gives a photo (owner 16 Oct). The list
+    // was read by nothing but the registry seed, which minted a selfie requirement from it.
 };
+/** [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car's delivery profile adds ONE car photo with the plate showing, so a
+ *  person can match the plate's letter (no certificate of fitness): the same document type a taxi uploads. Named here,
+ *  in the registry's own text (DOC-INV-2), and read by country-config moverRequiredFrom. */
+export const PRIVATE_CAR_PHOTO_DOC = 'vehicle_exterior_photo';
 
 /**
  * [TRADES · owner 13 Oct 2026] The legal FLOOR of each trade opened at launch: identity, the
  * police clearance and the trade's own documents. The provider checklist is always a superset
  * of it — a stored CountryConfig edit can add documents but never take one of these away — so
  * an opened trade can never go live on identity documents alone. A trade without an entry here
- * (a held trade: the lawyer, gas fitter, barber group, accountant, heavy-equipment operator) gains
- * nothing from it.
+ * (a held trade: the lawyer, gas fitter, barber group, accountant, heavy-equipment operator and
+ * [ROLE-DOCS · owner 21 Oct 2026] the AC & refrigeration technician and the mover) gains nothing from it.
  */
 export const SERVICE_TRADE_LAUNCH_FLOOR: Readonly<Record<string, readonly string[]>> = {
   pest_control: ['national_id', 'police_clearance', 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
   chef: ['national_id', 'police_clearance', 'food_handler_cert'],
   caterer: ['national_id', 'police_clearance', 'food_handler_cert', 'eating_house_registration'],
+  // [ROLE-DOCS · REVIEW-G #2053 S4-4] The GEI electrical licence the electrician's list already names, now a floor too:
+  // a stored edit can no longer strip it (as for the solar installer below).
+  electrician: ['national_id', 'police_clearance', 'gei_electrical_licence'],
   photographer: ['national_id', 'police_clearance'],
   tutor: ['national_id', 'police_clearance'],
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] electrical installation work: the GEI electrical licence, like an electrician
+  solar_generator_inverter_installer: ['national_id', 'police_clearance', 'gei_electrical_licence'],
 };
 
 /**
@@ -481,8 +538,8 @@ export interface SpineOptions extends ApplyOptions {
 /** [PROD-PATH] What the approvers of a spine plan see beside the changes: the
  *  FX rate this very seed uses (the one the desired data was built with) and
  *  the first admin's phone. Printing and applying both use this, so they agree. */
-export function spineRequestContext(adminPhone?: string | null, solo = false, adminEmail?: string | null): RequestContext {
-  return { fxGydPerUsd: seedFxRate(), adminPhone: adminPhone ?? null, ...(adminEmail ? { adminEmail } : {}), ...(solo ? { solo: true } : {}) };
+export function spineRequestContext(adminPhone?: string | null, solo = false, adminEmail?: string | null, soloReseed = false): RequestContext {
+  return { fxGydPerUsd: seedFxRate(), adminPhone: adminPhone ?? null, ...(adminEmail ? { adminEmail } : {}), ...(solo ? { solo: true } : {}), ...(soloReseed ? { soloReseed: true } : {}) };
 }
 
 /**
@@ -499,7 +556,7 @@ export async function seedPlatformSpine(prisma: PrismaClient, opts: SpineOptions
   const desired = desiredPlatformConfig();
   const plan = await buildSeedPlan(prisma, databaseUrl, desired);
   if (opts.onPlan) await opts.onPlan(plan);
-  const result = await applySeedPlan(prisma, databaseUrl, desired, plan, { ...opts, request: spineRequestContext(opts.request?.adminPhone, opts.request?.solo === true, opts.request?.adminEmail) });
+  const result = await applySeedPlan(prisma, databaseUrl, desired, plan, { ...opts, request: spineRequestContext(opts.request?.adminPhone, opts.request?.solo === true, opts.request?.adminEmail, opts.request?.soloReseed === true) });
   if (opts.onApplied) await opts.onApplied(result);
   return plan;
 }

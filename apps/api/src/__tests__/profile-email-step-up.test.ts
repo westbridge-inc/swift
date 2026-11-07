@@ -12,6 +12,7 @@ import { grantStepUp } from './helpers/step-up';
 import { testPhone } from './helpers/fixture-ids';
 import { stepUpKey } from '../modules/auth/step-up';
 import { notificationFailuresCounter } from '../plugins/observability';
+import { RESEND_EMAILS_URL } from '../providers/notifications/resend-email';
 
 // ---------------------------------------------------------------------------
 // [L04 #1550] An account's email is where receipts and notices go, and a second
@@ -90,6 +91,12 @@ describe('[L04 #1550] a customer email change takes a fresh code on this session
 
     expect(res.statusCode, res.body).toBe(403);
     expect(res.json().error.code).toBe('STEP_UP_REQUIRED');
+    // The store binary without the code sheet shows this message under the email field:
+    // it must say nothing changed and how to get the screen that can (the update).
+    expect(res.json().error.message).toMatch(/Nothing was changed/);
+    expect(res.json().error.message).toMatch(/latest update/);
+    // An app WITH the sheet still gets what it needs to run it.
+    expect(res.json().error.details?.stepUp).toMatchObject({ send: 'POST /auth/step-up', verify: 'POST /auth/step-up/verify' });
     const after = await account(f.user.id);
     expect(after).toMatchObject({ email: f.user.email, firstName: 'Synthetic' });
     expect(after.emailChangedAt).toBeNull();
@@ -203,19 +210,25 @@ describe('[L04 #1550] a customer email change takes a fresh code on this session
     const failed = { sms: await failures('sms'), email: await failures('email') };
     // The text: the dev SMS is one shared (sealed) object, so the spy is the one the route calls.
     const sms = vi.spyOn(getChannels().sms, 'sendSms').mockRejectedValueOnce(new Error('synthetic SMS outage'));
-    // The email: a configured mailbox that cannot be reached (placeholder values
-    // only; a closed local port, so nothing reaches any network or account).
-    const keys = ['EMAIL_PROVIDER', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM', 'SMTP_TLS', 'SMTP_TIMEOUT_MS'] as const;
+    // The email: the production provider (Resend over HTTPS; the droplets cannot reach SMTP),
+    // with placeholder settings and its HTTPS call refused here, so nothing reaches any network or account.
+    const keys = ['EMAIL_PROVIDER', 'RESEND_API_KEY', 'EMAIL_FROM', 'RESEND_TIMEOUT_MS'] as const;
     const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-    Object.assign(process.env, {
-      EMAIL_PROVIDER: 'smtp', SMTP_HOST: '127.0.0.1', SMTP_PORT: '1', SMTP_USER: 'placeholder', SMTP_PASS: 'placeholder',
-      EMAIL_FROM: 'placeholder@example.test', SMTP_TLS: 'none', SMTP_TIMEOUT_MS: '1000',
+    Object.assign(process.env, { EMAIL_PROVIDER: 'resend', RESEND_API_KEY: 'placeholder', EMAIL_FROM: 'placeholder@example.test', RESEND_TIMEOUT_MS: '1000' });
+    const realFetch = globalThis.fetch;
+    const resendCalls: string[] = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url === RESEND_EMAILS_URL) { resendCalls.push(url); throw new TypeError('synthetic network refusal'); }
+      return realFetch(input, init);
     });
     try {
       expect((await put(f.token, { email: next })).statusCode).toBe(200);
       expect(sms, 'the text was attempted and failed').toHaveBeenCalledTimes(1);
+      expect(resendCalls, 'the old address note was attempted over HTTPS and failed').toHaveLength(1);
     } finally {
       sms.mockRestore();
+      fetchSpy.mockRestore();
       for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]!; }
     }
     expect(devChannelLog.slice(start).filter((n) => n.to === f.user.email || n.to === f.user.phone), 'nothing was delivered').toHaveLength(0);

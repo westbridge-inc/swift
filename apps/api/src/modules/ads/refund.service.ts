@@ -159,7 +159,12 @@ export class AdsRefundService {
       // and moves no money twice; booking flips are count-checked besides.
       const executedBefore = (await tx.adsAuditLog.count({ where: { entityType: 'AdRefundIntent', entityId: intentId, action: 'REFUND_EXECUTED' } })) > 0;
       let refundedMinor = 0n; let creditedMinor = 0n; let releasedSlots = 0;
-      for (const item of intent.items) {
+      // [R045-ADS-05] A late capture holds nothing: the expiry released its slots, and a later checkout of the campaign
+      // may have taken the same booking row for another invoice. No booking moves, and the whole payment is owed
+      // back, once, whatever its items name or the slot costs now.
+      const lateCapture = intent.reason === 'LATE_CAPTURE';
+      if (lateCapture && !executedBefore) refundedMinor = intent.amountMinor;
+      for (const item of lateCapture ? [] : intent.items) {
         if (item.kind === 'REFUND') {
           const booking = await tx.adBooking.findUnique({ where: { id: item.bookingId }, select: { placementId: true, city: true, weekStart: true } });
           const moved = await tx.adBooking.updateMany({ where: { id: item.bookingId, status: { in: ['CONFIRMED', 'RESERVED'] } }, data: { status: 'REFUNDED' } });
@@ -168,10 +173,6 @@ export class AdsRefundService {
             releasedSlots += 1;
             // Counted only when THIS execution flipped the booking: a forced
             // replay (an operator re-queuing an executed intent) moves nothing twice.
-            refundedMinor += item.amountMinor;
-          } else if (!executedBefore && intent.reason === 'LATE_CAPTURE') {
-            // [R045-ADS-05] A late-capture item's booking was RELEASED by the
-            // expiry — nothing to flip, but the money is owed back in full, once.
             refundedMinor += item.amountMinor;
           }
         } else if (!executedBefore) {
@@ -216,7 +217,8 @@ export class AdsRefundService {
     const existing = await tx.adRefundIntent.findUnique({ where: { idempotencyKey }, select: { id: true, amountMinor: true } });
     if (existing) return { intentId: existing.id, staged: false, totalMinor: existing.amountMinor };
     const currency = invoice.currency || CURRENCY_FALLBACK;
-    const bookings = await tx.adBooking.findMany({ where: { campaignId }, select: { id: true, amount: true } });
+    // Only what the expiry released: a row held again is another invoice's, at that invoice's price.
+    const bookings = await tx.adBooking.findMany({ where: { campaignId, status: 'RELEASED' }, select: { id: true, amount: true } });
     const totalMinor = majorDecimalToMinor(String(invoice.amount), currency);
     const intent = await tx.adRefundIntent.create({
       data: {
@@ -258,10 +260,14 @@ export class AdsRefundService {
     let processed = 0; let failed = 0; let deadLettered = 0;
     for (let i = 0; i < limit; i += 1) {
       const filter = options.intentIds?.length ? Prisma.sql`AND "refundIntentId" IN (${Prisma.join(options.intentIds)})` : Prisma.empty;
+      // `availableAt` is stamped on the app's clock and read on the database's, so a row just staged can read as a
+      // moment in the future, and the drain that named it finds nothing. It only ever means a failed attempt's
+      // back-off: a named row never tried has nothing to wait for. A failure's back-off still stands.
+      const due = options.intentIds?.length ? Prisma.sql`("availableAt" <= CURRENT_TIMESTAMP OR "attempts" = 0)` : Prisma.sql`"availableAt" <= CURRENT_TIMESTAMP`;
       const rows = await this.prisma.$queryRaw<Array<{ id: string; refundIntentId: string; attempts: number; maxAttempts: number; tenantId: string }>>(Prisma.sql`
         WITH candidate AS (
           SELECT "id" FROM "ad_refund_outbox"
-          WHERE "processedAt" IS NULL AND "deadLetteredAt" IS NULL AND "availableAt" <= CURRENT_TIMESTAMP
+          WHERE "processedAt" IS NULL AND "deadLetteredAt" IS NULL AND ${due}
             AND ("leaseExpiresAt" IS NULL OR "leaseExpiresAt" < CURRENT_TIMESTAMP) ${filter}
           ORDER BY "createdAt" ASC FOR UPDATE SKIP LOCKED LIMIT 1)
         UPDATE "ad_refund_outbox" AS o

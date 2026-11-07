@@ -32,7 +32,7 @@ async function makeUser(roles: UserRole[]) {
 async function makeAdvertiser(ownerUserId: string, status: 'PENDING_REVIEW' | 'APPROVED' = 'APPROVED') {
   const a = await app.prisma.advertiser.create({ data: { companyName: `Co ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: 'c@x.gy', contactPhone: '+5926000000', createdByUserId: ownerUserId, status } });
   advertiserIds.push(a.id);
-  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER' } });
+  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER', acceptedAt: new Date() } });
   return a;
 }
 async function makePlacement() {

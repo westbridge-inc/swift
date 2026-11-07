@@ -38,6 +38,7 @@ export const ERASURE_CLEARED: Readonly<Record<string, string>> = {
   'TripShareToken.createdByUserId': 'ephemeral high-risk rows (NR-3 gap 6): public trip shares',
   'RideQueueEntry.customerId': 'ephemeral high-risk rows (NR-3 gap 6): exact-location queue rows',
   'SupplyWatch.customerId': 'ephemeral high-risk rows (NR-3 gap 6): exact-location watch rows',
+  'CallSession.callerUserId': 'deleted with the account (the NR-3 ephemeral-rows step): the Swift-bridged calls the person asked for (roles and times; Swift stores no number for a call)',
   'FaceTemplate.accountId': 'identity-integrity purge: the biometric template, in every case',
   'IdentityKey.accountId': 'identity-integrity purge (kept only as salted fraud tombstones while IntegritySettings.tombstoneRetentionEnabled is ON; default OFF)',
   'IdentityClusterMember.accountId': 'identity-integrity purge (kept only as fraud tombstones while IntegritySettings.tombstoneRetentionEnabled is ON; default OFF)',
@@ -47,7 +48,10 @@ export const ERASURE_CLEARED: Readonly<Record<string, string>> = {
 export const ERASURE_DEIDENTIFIED: Readonly<Record<string, string>> = {
   'Rider.userId': 'the profile row stays for order history; vehicle, plate and last location are cleared (photos and documents go through the mover-object erasure)',
   'Driver.userId': 'the profile row stays for ride history; vehicle, plate, colour, last location and MMG pay link are cleared (photos and documents go through the mover-object erasure)',
-  'ServiceProvider.userId': 'the profile row stays for job history; the bio is cleared, and every portfolio photo Swift keeps gets a storage_orphans deletion row before its pointer is cleared (deleted after, a failed delete keeps the receipt pending)',
+  // [BOOK-P1 · REVIEW-X S4-3] Rows keyed by the provider PROFILE, not the person id, are deleted in the profile pass. The
+  // CLEARED census and the restore replay key on person ids, so this one lives here and a restored copy does not replay it yet.
+  'ServiceProviderTimeOff.providerId': 'de-identifying the provider profile deletes every time off it set (the dates the person was away: their schedule, named by no kept record). A restored backup does not replay this delete yet: profile-keyed rows are not in the restore replay (follow-up)',
+  'ServiceProvider.userId': 'the profile row stays for job history; the bio and the weekly hours are cleared, and every portfolio photo Swift keeps gets a storage_orphans deletion row before its pointer is cleared (deleted after, a failed delete keeps the receipt pending)',
   'Customer.userId': 'order totals stay; the referral link is cleared and the referral code retired',
   'CheckoutReceipt.userId': 'the replay record stays with its order ids and date (the amounts are on the kept orders); the frozen checkout response (names, phones, addresses, notes) and the request hash are replaced',
   // Owner 19 Oct (PRIVACY ASK 00:01Z, option A for all three; no LEGAL_VERSION): G1 fraud and abuse marks.
@@ -75,13 +79,15 @@ export const ERASURE_DEIDENTIFIED: Readonly<Record<string, string>> = {
 
 /** Link -> why the person's rows stay after erasure (they point at the de-identified account row). */
 export const ERASURE_KEPT: Readonly<Record<string, string>> = {
-  'Order.customerId': 'order history, kept for disputes, guarantees, tax and legal duties (Privacy Policy §6)',
+  'Order.customerId': 'order history, kept for disputes, payments Swift has decided to make, tax and legal duties (Privacy Policy §6)',
   'Order.riderId': 'order history (Privacy Policy §6)',
   'Order.driverId': 'ride history (Privacy Policy §6)',
   'Booking.customerId': 'ride history (Privacy Policy §6)',
-  'ServiceJob.customerId': 'order history, kept for disputes, guarantees, tax and legal duties (Privacy Policy §6)',
+  'ServiceJob.customerId': 'order history, kept for disputes, payments Swift has decided to make, tax and legal duties (Privacy Policy §6)',
   'ServiceJob.providerId': 'job history (Privacy Policy §6)',
   'ServiceQualification.providerId': 'the qualification a kept job was done under (job history, Privacy Policy §6); its document is purged',
+  // [BOOK-P1]
+  'ServiceOffering.providerId': 'the service, length and price a kept job was booked under (job history, Privacy Policy §6); the erasure switches every one off, so a closed account is never booked',
   'DeliveryRun.riderId': 'order history: the delivery run that carried kept orders (Privacy Policy §6)',
   'BatchEvaluation.riderId': 'order history: the dispatch check made for a kept order (Privacy Policy §6)',
   'AlertDelivery.recipientId': 'order history: the job offers made while dispatching a kept order (Privacy Policy §6)',
@@ -107,6 +113,7 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'MmgRefundSend.customerId': 'settlement history: a refund sent on a kept order (Privacy Policy §6)',
   'Subscription.riderId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
   'Subscription.driverId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
+  'Subscription.serviceProviderId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
   'BillingFeeNotice.userId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
   'BillingDunningClock.moverPayerUserId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
   'MoverFeeSubscription.userId': 'weekly-fee billing record (settlement history, Privacy Policy §6)',
@@ -117,6 +124,8 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'AdRefundIntent.requestedByUserId': "settlement history of the advertiser's refunds (Privacy Policy §6)",
   'ChatRoomParticipant.userId': "order-scoped chat is kept with its order's record (Privacy Policy §6)",
   'ChatMessage.senderId': "order-scoped chat is kept with its order's record (Privacy Policy §6)",
+  // [BOOK-FU2 · owner B3] Who at the business recorded that a customer did not come: kept with the order's record.
+  'AppointmentNoShow.recordedByUserId': "a missed-appointment record (which booking, when and who at the business recorded it) is kept with its order's record (Privacy Policy §6)",
   'Rating.raterId': 'the score stays in the other side\'s standing; the erasure strips the written comment and reply',
   'Rating.rateeId': 'the score stays in the other side\'s standing; the erasure strips the written comment and reply',
   'ItemFeedback.raterUserId': "a thumbs verdict on an item of a kept order (no text): it stays in the item's standing, like a rating's score",
@@ -130,11 +139,16 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'SensitiveReadLog.actorUserId': 'access to production data is audit-logged (Privacy Policy §7)',
   'SensitiveReadLog.subjectId': 'access to production data is audit-logged (Privacy Policy §7)',
   'AdCreative.reviewedByUserId': 'staff work: the reviewer of an ad (administrative trail, Privacy Policy §7)',
+  'FeeRefundCase.openedByUserId': 'staff work: who recorded a partner\'s ask for a weekly-fee payment back (administrative trail, Privacy Policy §7)',
+  'AdCampaign.destinationApprovedByUserId': 'staff work: who approved an ad link (administrative trail, Privacy Policy §7)',
+  'HouseAd.destinationApprovedByUserId': 'staff work: who approved a house ad link (administrative trail, Privacy Policy §7)',
+  'AdLinkDomain.reviewedByUserId': 'staff work: who decided an ad website (administrative trail, Privacy Policy §7)',
   'FxRate.setByUserId': 'staff work: who set a rate (administrative trail, Privacy Policy §7)',
   'PricingConfigVersion.createdBy': 'staff work: who published a price version (administrative trail, Privacy Policy §7)',
   'PromoTerms.createdBy': 'staff work: who published promo terms (administrative trail, Privacy Policy §7)',
   'StockAdjustment.createdBy': "a store's stock ledger: who adjusted stock (the store's business record)",
   'StockMovement.actorId': "a store's stock ledger: who moved stock (the store's business record)",
+  'PosImport.actorId': "a store's stock ledger: who applied a till export (the store's business record)",
   'SupportTicket.resolvedById': 'staff work: who resolved a ticket (administrative trail, Privacy Policy §7)',
   'OpsAlertRecipient.userId': 'staff work: who was paged for an operations alert and who acknowledged it (administrative trail, Privacy Policy §7)',
   'CustodyRecoveryCase.ownerUserId': 'staff work: the staff member who owned a parcel recovery case (administrative trail, Privacy Policy §7). A resolved case the person held or relayed as a rider loses its location and note (owner 19 Oct G3)',

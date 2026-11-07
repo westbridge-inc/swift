@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { Card, LabeledInput, LinkText, PillButton, T, useLogoutConfirm } from '../../../kit';
@@ -10,13 +11,15 @@ import { DocumentChecklist } from '../../../components/onboarding/DocumentCheckl
 import { TAXI_TWO_LICENCES } from '../../../components/onboarding/taxiDocumentCopy';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
 import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
-import { useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
+import { useActiveJobs, useMoverKind, useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
+import { moverLogoutBody } from '../../../lib/moverLogoutWords';
+import { MoverWorkDoors, useMoverPastSignUp } from '../MoverWorkDoors';
 import { useStepUp, type MutationGuard } from '../../../hooks/useStepUp';
 import { StepUpDismissed } from '../../../lib/stepUp';
 import { VEHICLE_COPY, vehicleOffered } from '../../../lib/vehicleOffer';
-import { taxiPlateMessage } from '../../../lib/taxiPlate';
+import { CAR_ROW_HINT, carPlateMessage, isHirePlate } from '../../../lib/taxiPlate';
 import { usePartnerPricing } from '../../../hooks/partnerPricing';
-import { FEE_TICK_COPY, feeTick, feeTickError, moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
+import { FEE_TICK_COPY, feeTick, feeTickError, privateCarsOpen, quoteGate, QUOTE_GATE_COPY, vehicleQuote } from '../../../lib/partnerPricing';
 import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useAuthStore } from '../../../stores/authStore';
@@ -32,10 +35,13 @@ import { GUTTER } from '../shared';
 // (lib/vehicleOffer): canters and box trucks stay listed here for the day they
 // are offered.
 export const VTYPES: { key: VehicleKind; label: string; icon: keyof typeof MaterialCommunityIcons.glyphMap; hint: string }[] = [
-  { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Small deliveries' },
-  { key: 'MOTORCYCLE', label: 'Motorbike', icon: 'moped', hint: 'Deliveries' },
-  { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi + delivery' },
-  { key: 'WAGON_CAR', label: 'Wagon Car', icon: 'car-estate', hint: 'Taxi + larger loads' },
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] A bicycle is a pedal bike; any bike with a motor (an e-bike or an
+  // e-scooter) signs up as a motorbike, with a motorbike's documents.
+  { key: 'BICYCLE', label: 'Bicycle', icon: 'bike', hint: 'Pedal bike, no motor · small deliveries' },
+  { key: 'MOTORCYCLE', label: 'Motorbike', icon: 'moped', hint: 'Deliveries · e-bikes and e-scooters too' },
+  // [BUG-HUNT F25 · owner ruling 15 Oct 2026] A taxi car carries passengers only: an H plate, the taxi papers, no goods.
+  { key: 'CAR', label: 'Car', icon: 'car', hint: 'Taxi · passengers only · H plate' },
+  { key: 'WAGON_CAR', label: 'Wagon Car', icon: 'car-estate', hint: 'Taxi · passengers only · H plate' },
   { key: 'BUS_9', label: 'Bus (9-seater)', icon: 'van-passenger', hint: 'Groups & tours' },
   { key: 'BUS_15', label: 'Bus (15-seater)', icon: 'bus', hint: 'Groups & airport runs' },
   { key: 'CANTER_SHORT', label: 'Short-Base Canter (Open Back)', icon: 'truck-flatbed', hint: 'Open cargo' },
@@ -55,7 +61,7 @@ function ValuePill({ icon, label }: { icon: keyof typeof MaterialCommunityIcons.
   );
 }
 
-function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active: boolean; onPress: () => void }) {
+function VehicleRow({ v, active, onPress, hint = v.hint }: { v: (typeof VTYPES)[number]; active: boolean; onPress: () => void; hint?: string }) {
   return (
     <Pressable onPress={onPress}>
       {({ pressed }) => (
@@ -80,7 +86,7 @@ function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active
               {v.label}
             </T>
             <T variant="caption" tone="muted">
-              {v.hint}
+              {hint}
             </T>
           </View>
           <MaterialCommunityIcons
@@ -104,7 +110,7 @@ function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active
 const TAXI_SIGNUP_KINDS: VehicleKind[] = ['CAR', 'WAGON_CAR'];
 
 export function VehicleSetup({
-  vt, setVt, onDone, mode = 'join', current = null, guard,
+  vt, setVt, onDone, mode = 'join', current = null, guard, onPlateChange,
 }: {
   vt: VehicleKind;
   setVt: (v: VehicleKind) => void;
@@ -113,6 +119,8 @@ export function VehicleSetup({
   mode?: 'join' | 'change';
   current?: VehicleKind | null;
   guard?: MutationGuard;
+  /** [CARS-PLATES] The plate typed so far, for the price card above (a P car is priced as a delivery rider). */
+  onPlateChange?: (plate: string) => void;
 }) {
   const become = useBecomePartner();
   const changeVehicle = useChangeVehicle(guard);
@@ -126,10 +134,7 @@ export function VehicleSetup({
   // exact version at provisioning, the same way signup records the Terms.
   const [agree, setAgree] = useState(false);
   const needsDetails = DRIVER_VEHICLE_KINDS.includes(vt);
-  // [Owner ruling 11 Oct 2026 — H-PLATE] A taxi plate starts with H: said under the field, and a
-  // non-H taxi plate cannot be saved (the server refuses it too, in the same words).
-  const plateMessage = needsDetails ? taxiPlateMessage(vt, plate) : null;
-  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate && !plateMessage?.error);
+  useEffect(() => { onPlateChange?.(plate); }, [plate, onPlateChange]);
   // The agreement was recorded when the first vehicle was saved; a change does not re-ask.
   const needsAgreement = mode === 'join';
   const sameAsSaved = mode === 'change' && vt === current && !needsDetails;
@@ -140,7 +145,14 @@ export function VehicleSetup({
   // no quote for the vehicle, or a stale quote disables the button and says so.
   const user = useAuthStore((s) => s.user) as { countryCode?: string } | null;
   const pricing = usePartnerPricing(user?.countryCode, true, { fresh: true });
-  const gate = quoteGate(pricing, (p) => moverQuote(p, vt));
+  // [Owner ruling 11 Oct 2026 — H-PLATE] A taxi plate starts with H: said under the field, and a
+  // non-H taxi plate cannot be saved (the server refuses it too, in the same words).
+  // [CARS-PLATES · owner 6 Nov 2026] While the server says private cars deliver, the plate decides the work instead:
+  // a P plate is a delivery car (never an error), an H plate a taxi that can add deliveries; priced to match.
+  const carsDeliver = privateCarsOpen(pricing.data);
+  const plateMessage = needsDetails ? carPlateMessage(vt, plate, carsDeliver) : null;
+  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate && !plateMessage?.error);
+  const gate = quoteGate(pricing, (p) => vehicleQuote(p, vt, plate, isHirePlate));
   const stale = !gate.ok && gate.why === 'stale';
   const { refetch: refetchPricing } = pricing;
   useEffect(() => {
@@ -187,13 +199,13 @@ export function VehicleSetup({
       </T>
       <View style={{ gap: space.sm, marginTop: space.md }}>
         {offered.map((v) => (
-          <VehicleRow key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} />
+          <VehicleRow key={v.key} v={v} active={v.key === vt} onPress={() => setVt(v.key)} hint={carsDeliver && TAXI_SIGNUP_KINDS.includes(v.key) ? CAR_ROW_HINT : v.hint} />
         ))}
       </View>
       {needsDetails ? (
         <View style={{ gap: space.md, marginTop: space.md }}>
           {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
-          {TAXI_SIGNUP_KINDS.includes(vt) ? <T variant="label" tone="muted">{TAXI_TWO_LICENCES}</T> : null}
+          {TAXI_SIGNUP_KINDS.includes(vt) && (!carsDeliver || isHirePlate(plate)) ? <T variant="label" tone="muted">{TAXI_TWO_LICENCES}</T> : null}
           <LabeledInput value={make} onChangeText={setMake} placeholder="Make (e.g. Toyota)" />
           <LabeledInput value={model} onChangeText={setModel} placeholder="Model (e.g. Allion)" />
           <View style={{ flexDirection: 'row', gap: space.md }}>
@@ -258,11 +270,15 @@ export function VehicleSetup({
 
 export function MoverOnboardingScreen({ status }: { status: any }) {
   const { moverPreset } = useAuthStore();
+  const navigation = useNavigation<any>();
+  // [BUG-HUNT F10] Someone Swift approved before reads about their documents, never a sales pitch.
+  const { approvedBefore } = useMoverPastSignUp();
+  const { legs } = useActiveJobs(useMoverKind().kind);
   // Signing up is mostly already on the server: the vehicle is saved by its
   // button and every document uploads the moment it is picked. The only thing
   // held on this device is a vehicle form not yet saved.
   const { requestLogout, logoutDialog } = useLogoutConfirm({
-    body: 'Anything you’ve saved or uploaded stays with your account. Vehicle details you haven’t saved yet are cleared.',
+    body: legs.length > 0 ? moverLogoutBody(legs) : 'Anything you’ve saved or uploaded stays with your account. Vehicle details you haven’t saved yet are cleared.',
   });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // [Owner, 1 Oct] Never a one-way door: "‹ Swift", Android's back and the iOS
@@ -274,6 +290,8 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
   // driver starts on Car, a rider on Motorcycle. A saved vehicle always wins.
   const presetVehicle: VehicleKind = moverPreset === 'taxi' ? 'CAR' : 'MOTORCYCLE';
   const [vt, setVt] = useState<VehicleKind>(savedVehicle ?? presetVehicle);
+  // [CARS-PLATES] The plate typed in the vehicle form, so the price card prices a private (P) car as a delivery rider.
+  const [draftPlate, setDraftPlate] = useState('');
   const [vehicleSaved, setVehicleSaved] = useState(!!savedVehicle);
   // [VEHICLES] "after you save vehicle you cant switch it at all": a saved vehicle has a
   // Change action. A change retires the old vehicle's papers, so the checklist below
@@ -298,11 +316,15 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
       </View>
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title" style={{ marginTop: space.sm }}>
-          Start earning with Swift
+          {approvedBefore ? 'Your documents need attention' : 'Start earning with Swift'}
         </T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-          Set up your vehicle and documents — we review them Monday to Saturday, 8:00–20:00 Guyana time, then you go online and start earning.
+          {approvedBefore
+            ? 'You can’t go online until the documents below are sorted — we review them Monday to Saturday, 8:00–16:00 Guyana time.'
+            : 'Set up your vehicle and documents — we review them Monday to Saturday, 8:00–16:00 Guyana time, then you go online and start earning.'}
         </T>
+        <MoverWorkDoors />
+        {approvedBefore ? null : <>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg }}>
           <ValuePill icon="check-decagram" label="Keep 100%" />
           {/* "Cash in hand", never "Cash payouts". A payout is money Swift
@@ -320,12 +342,13 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
             the vehicle picked below: a taxi driver, a delivery rider and a
             heavy-delivery rider each read their own rate. */}
         <View style={{ marginTop: space.lg }}>
-          <PricingCard kind="mover" vehicleType={vt} />
+          <PricingCard kind="mover" vehicleType={vt} plate={draftPlate} />
         </View>
+        </>}
 
         <View style={{ marginTop: space.xl }}>
           {!vehicleSaved ? (
-            <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} />
+            <VehicleSetup vt={vt} setVt={setVt} onDone={() => setVehicleSaved(true)} onPlateChange={setDraftPlate} />
           ) : changing ? (
             <VehicleSetup
               mode="change"
@@ -365,6 +388,10 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
             isError={!checklistStatus && statusError}
             onRetry={refetchStatus}
           />
+        </View>
+
+        <View style={{ marginTop: space.xl, alignItems: 'center' }}>
+          <LinkText label="Get help" onPress={() => navigation.navigate('GetHelp')} />
         </View>
       </ScrollView>
 

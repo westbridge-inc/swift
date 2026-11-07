@@ -3,6 +3,8 @@ import type { ServiceCatalog, ServiceCategory } from '@swift/types';
 import { AppError } from '../../utils/errors';
 import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { SERVICE_DOCUMENT_WORDS } from '../verification/doc-registry';
+// [BOOK-P2] The switch reader is a pure function with no imports.
+import { instantBookingEnabled } from '../booking/instant-booking';
 
 // ---------------------------------------------------------------------------
 // Services vertical (spec §4.6). Trust is risk-tiered: verify hard where someone
@@ -46,8 +48,9 @@ export const SERVICE_TRADE_CATALOG = {
     label: 'Appliance & electronics repair', riskTier: 'LOW',
     aliases: ['appliance repair', 'electronics repair', 'appliance and electronics repair'],
   },
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] electrical installation work: the GEI licence, the electrician's risk group
   solar_generator_inverter_installer: {
-    label: 'Solar / generator / inverter installer', riskTier: 'LOW',
+    label: 'Solar / generator / inverter installer', riskTier: 'HIGH',
     aliases: ['solar installer', 'generator installer', 'inverter installer', 'solar generator inverter installer'],
   },
   tiler: { label: 'Tiler', riskTier: 'LOW', aliases: ['tiler', 'tiling', 'tile installer'] },
@@ -125,13 +128,30 @@ export function requireCanonicalServiceTrade(input: string): ServiceTradeId {
 // [owner 16 Oct 2026] The heavy-equipment operator is held again: the licence
 // rules for its machines are not confirmed. Tutors and photographers stay open
 // (their home visits need the police clearance).
+// [ROLE-DOCS · owner ruling 21 Oct 2026 "not clear = held" · PR 3] The AC & refrigeration technician (NOAU
+// retrofitter licences exist; their legal basis was not found) and the mover (a goods vehicle for reward needs the
+// MVRTA s.87 goods licence: a counsel item) are held until their rules are confirmed.
 const PENDING_CATEGORIES = new Set<ServiceTradeId>([
   'lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant',
-  'heavy_equipment_operator',
+  'heavy_equipment_operator', 'ac_refrigeration', 'mover',
 ]);
 
 export function isServiceCategoryOperational(trade: ServiceTradeId): boolean {
   return !PENDING_CATEGORIES.has(trade);
+}
+
+/** [owner C4, 28 Oct 2026] The first pro categories with a bookable menu (BOOK-P1). A trade the
+ *  catalogue holds (the barber group, 15 Oct) is never bookable, whatever this list says. */
+export const BOOKABLE_PRO_TRADES: ReadonlySet<ServiceTradeId> = new Set<ServiceTradeId>(['tutor', 'cleaner', 'photographer']);
+
+export function isProTradeBookable(trade: ServiceTradeId | null): boolean {
+  return trade !== null && BOOKABLE_PRO_TRADES.has(trade) && isServiceCategoryOperational(trade);
+}
+
+/** [BOOK-P2] Can a customer book a time from a pro's menu in this category right now? Only
+ *  while INSTANT_BOOKING is on, for an allow-listed category (owner C4) that is not held. */
+export function categoryTakesAppointments(trade: ServiceTradeId): boolean {
+  return instantBookingEnabled() && isProTradeBookable(trade);
 }
 
 const PERSONAL_CARE = new Set<ServiceTradeId>(['barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist']);
@@ -155,6 +175,11 @@ const TRADE_NOTES: Partial<Record<ServiceTradeId, readonly string[]>> = {
   chef: ['Georgetown only for now. Your food handler’s certificate must be this year’s, from the Mayor and City Council of Georgetown. It is checked again every January.'],
   caterer: ['Georgetown only for now. Your food handler’s certificate and eating-house registration must be this year’s, from the Mayor and City Council of Georgetown. They are checked again every January.'],
   pest_control: ['Your Pesticides and Toxic Chemicals Control Board licence is checked again every January.'],
+  // [ROLE-DOCS · REVIEW-G #2053 S4-4] the electrician's GEI licence is now a floor (ops/platform-config), so its
+  // catalogue entry lists its documents like the solar installer's, with the same yearly re-check (R16)
+  electrician: ['Your GEI electrical licence is checked again every January.'],
+  // [ROLE-DOCS · PR 3] the same yearly re-check as an electrician's GEI licence (R16)
+  solar_generator_inverter_installer: ['Your GEI electrical licence is checked again every January.'],
 };
 
 function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] {
@@ -191,6 +216,9 @@ function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] 
     accountant: 'Professional credentials and authority for the services offered',
     // [owner 16 Oct] held until the licence rules for its machines are confirmed
     heavy_equipment_operator: 'Equipment competency and applicable licence requirements',
+    // [ROLE-DOCS · owner 21 Oct] held until their licence rules are confirmed
+    ac_refrigeration: 'Refrigerant handling and applicable licence requirements',
+    mover: 'Goods vehicle licence requirements for moving goods for payment',
   };
   if (pending[trade]) documents.push({
     key: `POLICY_${trade.toUpperCase()}`, label: pending[trade]!, status: 'POLICY_REVIEW_REQUIRED',
@@ -198,8 +226,14 @@ function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] 
   return documents;
 }
 
-/** This endpoint exposes intent and availability separately. It cannot enable
- * appointment checkout: slot/timezone/lifecycle repairs are still required. */
+/** This endpoint exposes intent and availability separately.
+ * [BOOK-P2] `appointmentsEnabled` (and the APPOINTMENT mode) is true only while
+ * INSTANT_BOOKING is on, for a category allow-listed for a bookable menu (owner C4:
+ * tutor, cleaner, photographer) that is not held: a customer can then book a time from
+ * a pro's menu (services/pro-booking.routes.ts). Builds 9, 11 and 12 read neither field
+ * (they keep the QUOTE_JOB mode, which every open category still has), and
+ * `availabilityMessage` stays the quote-only words those builds show: they cannot book
+ * from a menu. A build that reads `appointmentsEnabled` shows its own words. */
 export function publicServiceCatalog(): ServiceCatalog {
   return {
     version: 1,
@@ -207,9 +241,9 @@ export function publicServiceCatalog(): ServiceCatalog {
     categories: (Object.entries(SERVICE_TRADE_CATALOG) as Array<[ServiceTradeId, (typeof SERVICE_TRADE_CATALOG)[ServiceTradeId]]>)
       .map(([id, entry]) => ({
         id, label: entry.label, group: categoryGroup(id), riskTier: entry.riskTier,
-        modes: ['QUOTE_JOB'],
+        modes: categoryTakesAppointments(id) ? ['QUOTE_JOB', 'APPOINTMENT'] : ['QUOTE_JOB'],
         quoteRequestsEnabled: isServiceCategoryOperational(id),
-        appointmentsEnabled: false,
+        appointmentsEnabled: categoryTakesAppointments(id),
         availabilityMessage: !isServiceCategoryOperational(id)
           ? 'Not available yet — service-specific checks are being prepared.'
           : PERSONAL_CARE.has(id) || id === 'tutor'
@@ -315,8 +349,10 @@ export function profileOffersDroneWork(bio: string | null | undefined): boolean 
 }
 
 /** A credential can only badge the exact trade selected when it was submitted.
- * GEI is specifically an electrician credential; generic qualifications still
- * require a trusted reviewer and remain bound to their submitted trade. */
-export function qualificationTypeMatchesTrade(type: QualificationType, trade: ServiceTradeId): boolean {
-  return type !== 'GEI_LICENCE' || trade === 'electrician';
+ * Generic qualifications still require a trusted reviewer and remain bound to
+ * their submitted trade. [ROLE-DOCS · owner 21 Oct 2026] A GEI_LICENCE
+ * qualification badges nothing, for any trade: the electrician's GEI licence is
+ * the required checklist document, never a second, optional copy. */
+export function qualificationTypeMatchesTrade(type: QualificationType, _trade: ServiceTradeId): boolean {
+  return type !== 'GEI_LICENCE';
 }

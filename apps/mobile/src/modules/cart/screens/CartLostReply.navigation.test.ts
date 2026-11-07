@@ -66,7 +66,7 @@ vi.mock('../../../hooks/customer', () => {
   const mutation = () => ({ isPending: false, mutate: vi.fn(), reset: vi.fn() });
   return {
     useCart: () => ({ data: fx.cart, isLoading: false, isFetching: false, isPlaceholderData: false, refetch: vi.fn() }),
-    useClearCart: mutation, useRemoveCartItem: mutation, useRemoveCartPromo: mutation, useSetCartTip: mutation, useUpdateCartItem: mutation,
+    useClearCart: mutation, useRemoveCartItem: mutation, useRemoveCartPromo: mutation, useSetCartTip: mutation, useUpdateCartItem: mutation, useAddToCart: mutation, // [TAP-AUDIT] the steppers' add
     usePlaceOrder: () => ({
       ...mutation(), mutate: fx.place, reset: fx.reset,
       error: fx.error, isError: fx.error != null, isSuccess: false, checkingOutcome: fx.checkingOutcome,

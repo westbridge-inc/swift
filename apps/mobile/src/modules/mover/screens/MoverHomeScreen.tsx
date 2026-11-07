@@ -7,10 +7,13 @@ import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
+import { useRowHold } from '../../../lib/useRowHold';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
 import { boardPaused, recentBoard } from '../../../lib/moverBoard';
+import { oversizeLoadLabel } from '../../../lib/loadSize';
+import { offerKindOf, workModeLink } from '../../../lib/deliveriesToo';
 import { demandTapFor } from '../demandTap';
 import {
   useMoverKind,
@@ -29,6 +32,7 @@ import {
   useDeclineOffer,
   useVerificationStatus,
   useSelectMoverKind,
+  useEarnerPrefetch,
   type BoardJob,
   type DispatchOffer,
   type MoverKind,
@@ -49,6 +53,7 @@ import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { useBackgroundLocationDisclosure } from './BackgroundLocationDisclosure';
 import { offerEarnings } from './offer-earnings';
+import { OfferCashMath } from './OfferCashMath';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
@@ -207,25 +212,7 @@ export function DispatchOfferCard({
                     commitment beside it. Every number is server-computed and
                     the block is ABSENT unless the server could reconcile the
                     split — never rendered from client arithmetic. */}
-                {offer.cashMath ? (
-                  <View
-                    style={{
-                      marginTop: space.md,
-                      padding: space.md,
-                      borderRadius: radius.md,
-                      backgroundColor: color.surface.subtle,
-                      gap: 2,
-                    }}
-                  >
-                    <T variant="caption" weight="semibold">
-                      Cash job — collect {money(offer.cashMath.collectFromCustomer)} from the customer
-                    </T>
-                    <T variant="caption" tone="muted">
-                      Pay {offer.vendorName ?? 'the store'} {money(offer.cashMath.payToVendor)} · you keep{' '}
-                      {money(offer.cashMath.youKeep)}
-                    </T>
-                  </View>
-                ) : null}
+                <OfferCashMath cashMath={offer.cashMath} vendorName={offer.vendorName} />
                 {/* Judge the bag before you commit (grocery runs get big) */}
                 {offer.itemCount ? (
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: 6 }}>
@@ -233,6 +220,7 @@ export function DispatchOfferCard({
                       {offer.itemCount} item{offer.itemCount === 1 ? '' : 's'}
                     </T>
                     {offer.estLoad ? <TonePill label={String(offer.estLoad).toUpperCase()} tone="brand" /> : null}
+                    {oversizeLoadLabel(offer) ? <TonePill label={oversizeLoadLabel(offer)!.toUpperCase()} tone="warning" /> : null}
                   </View>
                 ) : null}
               </>
@@ -427,6 +415,7 @@ export function MoverHomeScreen({ navigation }: any) {
     loading,
     error: moverProfileError,
     ambiguous,
+    dual,
     refetch: refetchMoverProfiles,
   } = useMoverKind();
   const { latitude, longitude, status: locationStatus } = useLocationStore();
@@ -439,9 +428,15 @@ export function MoverHomeScreen({ navigation }: any) {
   const accept = useAcceptJob(k);
   const acceptOffer = useAcceptOffer(k);
   const decline = useDeclineOffer(k);
+  // [CARS-DELIVER PR4] On "taxi rides and deliveries" a delivery card can come in taxi mode: it is answered as one.
+  const acceptDelivery = useAcceptOffer('RIDER');
+  const declineDelivery = useDeclineOffer('RIDER');
+  const holdRow = useRowHold();
   const selectMoverKind = useSelectMoverKind();
   const earnings = useEarningsToday(kind);
   const daily = useDailyEarnings<any>(kind); // DASH-03: server-aggregated 7-day trend
+  // [SPEED 30 Oct] Earnings opens with its figures: its first reads, once Home's have landed.
+  useEarnerPrefetch({ kind, preview: !!preview });
   const stats = useMoverStats(kind);
   const vstatus = useVerificationStatus<any>('MOVER');
   const active = useActiveJob(kind);
@@ -450,7 +445,7 @@ export function MoverHomeScreen({ navigation }: any) {
   const online = !!profile?.isOnline;
   // [PERF partner #4] A taxi driver's board rests during a ride (one ride at a time).
   const available = useAvailableJobs(kind, online, !!active.data);
-  const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online);
+  const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online, dual === true && kind === 'DRIVER');
 
   const liveLocation = grantedLocationFix(latitude, longitude, locationStatus);
   const here = liveLocation
@@ -508,6 +503,12 @@ export function MoverHomeScreen({ navigation }: any) {
 
   const isDriver = kind === 'DRIVER';
   const activeJob = active.data;
+  // [CARS-DELIVER] An account with a taxi AND a delivery profile switches work mode from here (offline, no job).
+  const modeLink = workModeLink({ dual: dual === true, kind, online, hasActiveJob: !!activeJob });
+  // [CARS-DELIVER PR4] The card, its Accept and its Decline follow the offer's own kind (an older server: this app's).
+  const offerKind = offerKindOf(offer, k);
+  const answerAccept = offerKind === k ? acceptOffer : acceptDelivery;
+  const answerDecline = offerKind === k ? decline : declineDelivery;
   // While the board rests, its last answer is not shown (no stale pins on the map).
   // ...and after it, the board's answer from before the ride is not drawn again (#1919 review S4-1).
   const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : recentBoard(available.data, available.dataUpdatedAt, Date.now());
@@ -793,6 +794,31 @@ export function MoverHomeScreen({ navigation }: any) {
             />
           ) : null}
 
+          {/* [CARS-DELIVER] Taxi rides or deliveries, one at a time: the switch for an account with both. */}
+          {modeLink.show ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={modeLink.label}
+              disabled={selectMoverKind.isPending}
+              onPress={() => selectMoverKind.mutate(modeLink.target)}
+              hitSlop={6}
+            >
+              {({ pressed }) => (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md, opacity: pressed || selectMoverKind.isPending ? 0.7 : 1 }}>
+                  <Feather name="repeat" size={14} color={dk.accent} />
+                  <T variant="label" weight="bold" style={{ color: dk.accent }}>
+                    {selectMoverKind.isPending ? 'Switching…' : modeLink.label}
+                  </T>
+                </View>
+              )}
+            </Pressable>
+          ) : null}
+          {modeLink.show && selectMoverKind.isError ? (
+            <T variant="caption" style={{ color: dk.accent, marginTop: space.xs }}>
+              We couldn’t switch work modes. Finish any active job, check your connection and try again.
+            </T>
+          ) : null}
+
           {/* Why the switch snapped back — the gate's own words, right where you flipped it. */}
           {errMsg ? (
             <View style={{ borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginTop: space.md }}>
@@ -1007,6 +1033,7 @@ export function MoverHomeScreen({ navigation }: any) {
                       <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
                         {j.itemCount} item{j.itemCount === 1 ? '' : 's'}
                         {j.estLoad ? ` · ${j.estLoad} load` : ''}
+                        {oversizeLoadLabel(j) ? ` · ${oversizeLoadLabel(j)!.toLowerCase()}` : ''}
                       </T>
                     ) : null}
                     {/* Who you'd front cash for — trust before float (§4d) */}
@@ -1039,18 +1066,19 @@ export function MoverHomeScreen({ navigation }: any) {
           <DispatchOfferCard
           offer={offer}
           job={jobs.find((j) => j.id === offer.orderId)}
-          kind={k}
-          accepting={acceptOffer.isPending}
-          onAccept={() => acceptOffer.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
+          kind={offerKind}
+          accepting={answerAccept.isPending}
+          onAccept={() => !answerAccept.isPending && answerAccept.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {
             // [WR-010] Dismiss immediately (never trap a mover on a card they
             // refused) but be honest if dispatch never heard the decline.
-            decline.mutate(
+            // [BUG-GUARDS C2] Held per offer: a second tap on THIS card sends nothing, while the next offer's
+            // Decline is never held by an earlier decline still in flight.
+            holdRow(offer.offerAttemptId ?? offer.orderId, () => answerDecline.mutateAsync(
               { orderId: offer.orderId, offerAttemptId: offer.offerAttemptId },
-              { onError: () => toast.show("Couldn't tell dispatch — the offer will time out on its own.") },
-            );
+            ).catch(() => toast.show("Couldn't tell dispatch — the offer will time out on its own.")));
             dismiss();
           }}
         />

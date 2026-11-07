@@ -3,21 +3,29 @@ import { scanUpload } from '../../lib/malware-scan';
 import { z } from '../../lib/zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
-import { partnerPriceList } from '../country/partner-pricing';
+import { partnerPriceList, privateCarPrices } from '../country/partner-pricing';
+import { carDeliveriesEnabled } from '../../config/vehicle-classes';
 import { weeklyFeeTerms } from '../partner/weekly-fee-ack';
+import { WEEKLY_RETIER_ON } from '../billing/weekly-retier';
+import { FEE_RISE_NOTICE_DAYS } from '../billing/fee-rise-notice';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
 import { AppError } from '../../utils/errors';
 import { ReviewDemoCredentialRefusedError } from '../review/demo-policy';
 import { consentSurfaceOf } from '../legal/consent-surface';
-import { acceptanceStatus, recordReacceptance } from '../legal/reaccept';
+import { acceptanceStatus, proAgreementState, recordReacceptance } from '../legal/reaccept';
+import { ensureProFeeBorn } from '../services/pro-fee';
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { sendStepUpOtp, verifyStepUp, requireStepUp, STEP_UP_TTL_S } from './step-up';
 import { zPhone } from '../../utils/phone';
+import { AUTH_LIMITS, bodyPhone, loginCredential, perAddress, perCredential, sessionCookie } from './auth-rate-limits';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
+import { openSealedPhoto, photoSealingAvailable, sealedPhotoParts, sealPhoto, SEALED_AVATAR_TTL_SECONDS, verifySealedAvatarLink } from '../../providers/storage/sealed-photo';
+import { isProduction } from '../../utils/runtime-mode';
+import { runAsSystem } from '../../plugins/tenant-context';
 import {
   browserClientOf,
   clearSessionCookies,
@@ -95,12 +103,6 @@ const authRateLimit = {
   },
 };
 
-const otpRateLimit = {
-  config: {
-    rateLimit: { max: 5, timeWindow: '1 minute' },
-  },
-};
-
 // The storage adapters preserve the supplied filename extension. Avatar
 // authority deliberately accepts only the exact server-issued
 // nanoid-plus-alphanumeric-extension shape, so never let a multipart filename
@@ -113,14 +115,21 @@ const SELFIE_FILENAME_BY_MIME: Readonly<Record<string, string>> = {
 
 export async function authRoutes(app: FastifyInstance) {
   const authService = new AuthService(app);
+  // [FLOW-QA F15] Two ceilings per sign-in route (auth-rate-limits.ts): the tight one per address AND number (or
+  // session cookie), and a higher one per address alone, so people sharing one carrier address do not lock each other out.
+  // [REVIEW-GMF2 S4] each code route has its own per-number bucket: a send, three wrong tries and a resend are not one count.
+  const codeLimits = (route: 'send' | 'verify' | 'reset-request' | 'reset') => ({ config: perAddress(AUTH_LIMITS.codePerAddress), preValidation: perCredential(app, `code-${route}`, AUTH_LIMITS.codePerNumber, bodyPhone) });
+  const accountLimits = { config: perAddress(AUTH_LIMITS.accountPerAddress), preValidation: perCredential(app, 'account', AUTH_LIMITS.accountPerNumber, bodyPhone) };
+  const passwordLimits = { config: perAddress(AUTH_LIMITS.passwordPerAddress), preValidation: perCredential(app, 'password', AUTH_LIMITS.passwordPerCredential, loginCredential, 'credential') };
+  const refreshLimits = { config: perAddress(AUTH_LIMITS.refreshPerAddress), preValidation: perCredential(app, 'refresh', AUTH_LIMITS.refreshPerSession, sessionCookie) };
 
-  app.post('/send-otp', otpRateLimit, async (request, reply) => {
+  app.post('/send-otp', codeLimits('send'), async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
     const result = await authService.sendOtp(body.phone, request.ip);
     return reply.send({ success: true, data: result });
   });
 
-  app.post('/verify-otp', otpRateLimit, async (request, reply) => {
+  app.post('/verify-otp', codeLimits('verify'), async (request, reply) => {
     const body = verifyOtpSchema.parse(request.body);
     const result = await authService.verifyOtp(body.phone, body.code, {
       deviceId: (request.headers['x-device-id'] as string) || 'unknown',
@@ -146,9 +155,24 @@ export async function authRoutes(app: FastifyInstance) {
 
   /** [A-01] The session bootstrap a browser shell gates on — the server's attestation, never a token's presence. */
   app.get('/me', { preHandler: [app.authenticate] }, async (request) => {
-    const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true, tenant: { select: { kind: true } } } });
-    if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
-    return { success: true, data: { user, sessionId: request.authSessionId, client: browserClientOf(request) } };
+    const found = await app.prisma.user.findUnique({
+      where: { id: request.user.userId },
+      select: {
+        id: true, phone: true, firstName: true, lastName: true, roles: true, activeRole: true, status: true, tenant: { select: { kind: true } },
+        rider: { select: { id: true } }, driver: { select: { id: true } }, serviceProvider: { select: { id: true } },
+        vendorStaffMemberships: { select: { id: true }, take: 1 },
+      },
+    });
+    if (!found) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
+    const { rider, driver, serviceProvider, vendorStaffMemberships, ...person } = found;
+    // [BUG-HUNT F03] Branch staff hold no partner role: this is what tells the website they work at a store (AuthService signInVerified says the same).
+    const user = { ...person, storeStaff: vendorStaffMemberships.length > 0 };
+    // [PORTAL-404 · FLOW-QA F29] Which of this person's own partner profiles exist, as yes/no only: the same row each
+    // profile route reads (GET /rider/profile, /driver/profile, /provider/subscription answer 404 or 403 exactly when
+    // it is false). The website asks only for the profiles it holds, so a browser never logs a 404 for one it does
+    // not. The routes themselves are unchanged (the phone relies on their 404 to open onboarding).
+    const profiles = { rider: rider !== null, driver: driver !== null, provider: serviceProvider !== null };
+    return { success: true, data: { user, profiles, sessionId: request.authSessionId, client: browserClientOf(request) } };
   });
 
   /** [Legal research G2 · R26] GET /legal-acceptance — whether this person must accept the served legal texts
@@ -157,24 +181,29 @@ export async function authRoutes(app: FastifyInstance) {
   app.get('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
     const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
     if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
-    return { success: true, data: acceptanceStatus(user) };
+    // [BILL-PRO] A pro is asked for the Business Agreement that covers Providers (reaccept.ts).
+    return { success: true, data: acceptanceStatus({ ...user, pro: await proAgreementState(app.prisma, request.user.userId) }) };
   });
 
   /** [Legal research G2 · R26] POST /legal-acceptance { version, accept: true } — the fresh tick, recorded in the
    *  consent ledger for the Terms, the Privacy Policy and the person's partner agreements at the served version. */
   app.post('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
-    const body = z.object({ version: z.string().min(10).max(10), accept: z.literal(true) }).parse(request.body);
+    // [ROLE-DOCS · COORD rulings 21 Oct 2026 + 23 Oct] a same-day second stamp carries a suffix (2026-10-22.1)
+    const body = z.object({ version: z.string().regex(/^\d{4}-\d{2}-\d{2}(\.\d{1,3})?$/), accept: z.literal(true) }).parse(request.body);
     if (body.version !== LEGAL_VERSION) {
       throw new AppError(409, 'LEGAL_VERSION_CHANGED', 'The Terms changed again while you were reading. Please read the new version.', { currentVersion: LEGAL_VERSION });
     }
     const user = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
     if (!user) throw new AppError(401, 'UNAUTHORIZED', 'This session is no longer active');
     await recordReacceptance(app.prisma, { userId: request.user.userId, roles: user.roles, hadAccepted: user.tosVersion !== null, surface: consentSurfaceOf(request), ip: request.ip });
+    // [BILL-PRO PR3 · owner A1] A pro's tick may make their weekly fee due (PRO_WEEKLY_FEE on; never without the
+    // tick): born now, its 14-day trial starting today. Never fails the tick: the reconcile sweep retries a failure.
+    await ensureProFeeBorn(app.prisma, request.user.userId);
     const after = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { tosVersion: true, roles: true } });
-    return { success: true, data: acceptanceStatus(after ?? user) };
+    return { success: true, data: acceptanceStatus({ ...(after ?? user), pro: await proAgreementState(app.prisma, request.user.userId) }) };
   });
 
-  app.post('/register', authRateLimit, async (request, reply) => {
+  app.post('/register', accountLimits, async (request, reply) => {
     const body = registerSchema.parse(request.body);
     // [MC-PR3] "TEST-" names belong to test accounts (+5920…) only — checked before the signup proof is spent.
     assertNameNotReserved(body.firstName, body.phone);
@@ -216,7 +245,7 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.status(201).send({ success: true, data: result });
   });
 
-  app.post('/refresh', authRateLimit, async (request, reply) => {
+  app.post('/refresh', refreshLimits, async (request, reply) => {
     // [A-01 / W-01] a browser refreshes from its HttpOnly refresh cookie (client header + allowed origin), never from a body it could not have
     const credential = refreshCredentialOf(request);
     if (!credential) {
@@ -299,12 +328,22 @@ export async function authRoutes(app: FastifyInstance) {
 
     await scanUpload(buffer, { surface: 'avatar', log: request.log });
     const storage = getStorageProvider();
-    const { url } = await storage.upload({
-      buffer,
-      filename: canonicalFilename,
-      mimeType: file.mimetype,
-      folder: `avatars/${request.user.userId}`,
-    });
+    // [DOC-SECURITY G2] Sealed like a verification document (providers/storage/sealed-photo.ts): the bucket only
+    // ever holds ciphertext, the key is wrapped by MASTER_KEK. Production never boots without one; a development
+    // server with none keeps the plain photo, as before.
+    let url: string;
+    if (photoSealingAvailable()) {
+      url = await sealPhoto(app.prisma, storage, { buffer, declaredMimeType: file.mimetype, ownerId: request.user.userId, folder: 'avatars' });
+    } else if (isProduction()) {
+      throw new AppError(503, 'PHOTO_SEALING_UNAVAILABLE', 'Photo upload is temporarily unavailable. Try again later.');
+    } else {
+      ({ url } = await storage.upload({
+        buffer,
+        filename: canonicalFilename,
+        mimeType: file.mimetype,
+        folder: `avatars/${request.user.userId}`,
+      }));
+    }
 
     // [REPORT-022 F-022-21] conditional write: a deletion finishing between
     // auth and this point cannot re-personalize the tombstone with a fresh
@@ -403,9 +442,37 @@ export async function authRoutes(app: FastifyInstance) {
     return reply.send({ success: true, data: { user: { ...user, avatar: await resolveAvatarUrl(user.avatar) } } });
   });
 
+  // [DOC-SECURITY G2] GET /selfie/:userId/:file?expires&sig — a sealed profile photo, opened by the signed link the
+  // API mints where it decided to show it (resolveAvatarUrl), as a presigned bucket link was before. The signature
+  // IS the authority (no session: an <img> loads it). It opens only the photo the account points at NOW (a replaced
+  // or erased photo's links die), decrypted in memory. Every refusal is the same 404.
+  app.get<{ Params: { userId: string; file: string }; Querystring: { expires?: string; sig?: string } }>('/selfie/:userId/:file', async (request, reply) => {
+    const refuse = () => reply.code(404).header('Cache-Control', 'no-store').send({ success: false, error: { code: 'PHOTO_UNAVAILABLE', message: 'This photo is not available.' } });
+    const { userId, file } = request.params;
+    const expires = Number(request.query.expires);
+    const sig = typeof request.query.sig === 'string' ? request.query.sig : '';
+    if (!verifySealedAvatarLink(userId, file, expires, sig)) return refuse();
+    const photo = await runAsSystem('signup-selfie-sealed-read', async () => {
+      const owner = await app.prisma.user.findUnique({ where: { id: userId }, select: { avatar: true } });
+      const parts = sealedPhotoParts(owner?.avatar);
+      if (!owner?.avatar || !parts || parts.folder !== 'avatars' || parts.ownerId !== userId || parts.file !== file) return null;
+      return openSealedPhoto(app.prisma, getStorageProvider(), { fileKey: owner.avatar, ownerId: userId }).catch(() => null);
+    });
+    if (!photo) return refuse();
+    const maxAge = Math.max(0, Math.min(SEALED_AVATAR_TTL_SECONDS, expires - Math.floor(Date.now() / 1000)));
+    return reply
+      .type(photo.mimeType)
+      .header('Cache-Control', `private, max-age=${maxAge}`)
+      .header('X-Content-Type-Options', 'nosniff')
+      .header('Content-Disposition', 'inline')
+      // The link is the authority, like the presigned bucket link before it: the console and the website load it from their own origin.
+      .header('Cross-Origin-Resource-Policy', 'cross-origin')
+      .send(photo.bytes);
+  });
+
   // ── Email + password (secondary to phone OTP) ──────────────────────────
 
-  app.post('/password/login', authRateLimit, async (request, reply) => {
+  app.post('/password/login', passwordLimits, async (request, reply) => {
     const body = passwordLoginSchema.parse(request.body);
     const result = await authService.loginWithPassword(
       { phone: body.phone, email: body.email },
@@ -454,13 +521,13 @@ export async function authRoutes(app: FastifyInstance) {
 
   // Reset request = the normal OTP send, for the reset purpose only: this code
   // resets a password and cannot sign in [L04 · AUTH-2]
-  app.post('/password/reset-request', otpRateLimit, async (request, reply) => {
+  app.post('/password/reset-request', codeLimits('reset-request'), async (request, reply) => {
     const body = sendOtpSchema.parse(request.body);
     const result = await authService.sendOtp(body.phone, request.ip, 'password-reset');
     return reply.send({ success: true, data: result });
   });
 
-  app.post('/password/reset', otpRateLimit, async (request, reply) => {
+  app.post('/password/reset', codeLimits('reset'), async (request, reply) => {
     const body = resetPasswordSchema.parse(request.body);
     await authService.resetPassword(body.phone, body.code, body.newPassword);
     return reply.send({ success: true, data: { message: 'Password reset. All sessions logged out.' } });
@@ -515,11 +582,20 @@ export async function authRoutes(app: FastifyInstance) {
         currencyCode: config.currencyCode,
         currencySymbol: config.currencySymbol,
         isActive: config.isActive,
+        // The trial every new store and mover starts on (14 days), which build 12 reads. [DEPT-PRICE · owner 29 Oct 2026]
+        // Each catalogue step carries its own `trialDays` too: a NEW store at the department step when Swift approves it
+        // gets 7 days (subscription/trial-length.ts).
         trialDays: TRIAL_DAYS,
         ...partnerPriceList(config.subscriptionTiers),
+        // [CARS-PLATES · owner 6 Nov 2026] A private (P) plate car: deliveries only, at the delivery rider's weekly fee.
+        privateCars: privateCarPrices(config.subscriptionTiers, carDeliveriesEnabled()),
         // [Row 628] The weekly fee's words, shown with the amount before a partner signs up; the
         // "I understand the weekly fee" tick is recorded anchored to exactly these (partner/weekly-fee-ack.ts).
         feeTerms: weeklyFeeTerms(),
+        // [RETIER PR-B · owner 30 Oct 2026] Whether Swift moves an existing store between catalogue steps, and the
+        // notice a rise gets (billing/weekly-retier.ts, billing/fee-rise-notice.ts). The apps word the pricing card from
+        // it, so switching the re-tier on (the owner's go, after launch) changes their words with it.
+        catalogueRetier: { on: WEEKLY_RETIER_ON, noticeDays: FEE_RISE_NOTICE_DAYS },
       },
     });
   });

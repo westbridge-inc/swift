@@ -57,9 +57,17 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   // search) and the admin catalogue check; the request tenant is bound and named in the SQL.
   'modules/compliance/prohibited-scan.service.ts': { sites: 1, role: 'REQUEST' },
   'modules/discovery/discovery.routes.ts': { sites: 1, role: 'REQUEST' },
-  'modules/dispatch/dispatch.service.ts': { sites: 4, role: 'SHARED' },
+  // [CARS-PLATES · re-applied #2138] +1: the "taxi + deliveries" candidate search, tenant-filtered on the joined user as the
+  // two pools are (findCandidates).
+  'modules/dispatch/dispatch.service.ts': { sites: 5, role: 'SHARED' },
+  // [RIDER-SAFE 1] Riders online near a store, busy or not (the honest capacity's "riders who will free up"):
+  // reached from checkout and the cart's availability read; tenant-filtered on the joined user like findCandidates.
+  'modules/dispatch/delivery-capacity.ts': { sites: 1, role: 'SHARED' },
   'modules/mover-authority-cutover-preparation.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/mover-revocation-outbox.ts': { sites: 4, role: 'JOB_PENDING' },
+  // [Off-site erasure ledger, #1984] The platform watch: counts and ages of unshipped ledger entries only
+  // (erasure_ledger_entry / erasure_ledger_shipment are not tenant tables; swift_app may only SELECT them).
+  'modules/ops/erasure-ledger-watch.ts': { sites: 1, role: 'INFRA' },
   'modules/ops/purge-plan.ts': { sites: 2, role: 'INFRA' },
   'modules/order/checkout-outbox.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/order/order.service.ts': { sites: 3, role: 'REQUEST' },

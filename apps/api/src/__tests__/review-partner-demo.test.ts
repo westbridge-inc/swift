@@ -33,7 +33,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
 import { beginRequestTenantContext, runWithoutTenant } from '../plugins/tenant-context';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { ridesRoutes } from '../modules/rides/rides.routes';
@@ -150,7 +150,7 @@ beforeAll(async () => {
   recordDispatchQueue(app);
   // As server.ts does: a fresh tenant store per request BEFORE any auth hook.
   app.addHook('onRequest', async () => { beginRequestTenantContext(); });
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
@@ -282,10 +282,13 @@ describe('[REVIEW-PARTNER] seed: verified partners inside the fiction, by the pr
     expect(first.state).toBe('PRESENT');
     expect(first.partners).toMatchObject({ RIDER: { credentials: 1, ready: 1 }, DRIVER: { credentials: 1, ready: 1 }, profiles: 2 });
     // GY: a motorbike rider's checklist (identity, police, licence, registration, insurance) and a taxi's (+ hire permit, plate, car photos, fitness).
-    // [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] a motorbike rider proves identity by the licence; the
-    // national ID is optional and the pack partner still presents it (so it stays L2); no police clearance.
-    expect(riderChecklist).toEqual(expect.arrayContaining(['national_id', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance']));
+    // [VERIFY-DOCS · owner rulings 1, 2 and 4, 6 Oct 2026] a motorbike rider proves identity by the licence.
+    // [ROLE-DOCS · owner 21 Oct 2026 — a DELIBERATE change] no vehicle partner is offered a second ID any more, so the
+    // pack partner presents none (it keeps the L2 it always had: partner-pack.ts); no police clearance.
+    expect(riderChecklist).toEqual(expect.arrayContaining(['drivers_licence', 'vehicle_registration', 'vehicle_insurance']));
+    expect(riderChecklist).not.toContain('national_id');
     expect(riderChecklist).not.toContain('police_clearance');
+    expect(driverChecklist).not.toContain('national_id');
     // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
     expect(driverChecklist).toEqual(expect.arrayContaining(['vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence']));
     expect(first.partnerDocumentsCommitted).toBe(riderChecklist.length + driverChecklist.length);

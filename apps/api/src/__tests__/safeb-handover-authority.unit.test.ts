@@ -19,8 +19,9 @@ const DOOR = { lat: 6.81, lng: -58.16 };
 afterEach(() => vi.restoreAllMocks());
 
 function fixture() {
+  // [#2108] Loss protection is the default tenant's program (rlp.ts RLP_TENANT): a payout fixture lives there.
   const order: any = {
-    id: 'safeb-order', tenantId: 'safeb-tenant', orderType: 'TAXI',
+    id: 'safeb-order', tenantId: 'swift-default', orderType: 'TAXI',
     driverId: 'safeb-driver', riderId: null, customerId: 'safeb-customer',
     status: 'RIDE_IN_PROGRESS', paymentMethod: 'CASH', paymentStatus: 'PENDING',
     deliveryLat: DOOR.lat, deliveryLng: DOOR.lng, deliveredAt: null,
@@ -29,7 +30,7 @@ function fixture() {
     customer: { id: 'safeb-customer', phone: '+5920000000', countryCode: 'GY' },
   };
   const driver = {
-    id: 'safeb-driver', userId: 'safeb-driver-user', tenantId: 'safeb-tenant', locationSessionId: 'safeb-session',
+    id: 'safeb-driver', userId: 'safeb-driver-user', tenantId: 'swift-default', locationSessionId: 'safeb-session',
     currentLat: 7.5, currentLng: -58.5, lastLocationUpdate: new Date(Date.now() - 3_600_000),
   };
   const state = {
@@ -112,7 +113,7 @@ function fixture() {
     order.status = 'FAILED'; order.paymentStatus = 'FAILED';
     state.claim = {
       id: 'safeb-claim', orderId: order.id, riderId: null, driverId: driver.id,
-      customerId: order.customerId, amount: 1000, status: 'AUTO_APPROVED', reason: 'refused',
+      customerId: order.customerId, amount: 1000, status: 'APPROVED', reason: 'refused',
       gpsLat: DOOR.lat, gpsLng: DOOR.lng, photoUrl, createdAt: new Date(), reviewedBy: null,
     };
     return state.claim;
@@ -173,7 +174,7 @@ describe('failed handover needs authoritative evidence', () => {
     expect.soft(result).toBe('RLP_EVIDENCE_INCOMPLETE');
     expect.soft(h.state.draws).toHaveLength(0);
     expect.soft(h.state.reserve).toBe(10_000);
-    expect.soft(h.state.claim.status).toBe('AUTO_APPROVED');
+    expect.soft(h.state.claim.status).toBe('APPROVED');
   });
 
   it('rechecks changed completion evidence within the payout transaction', async () => {

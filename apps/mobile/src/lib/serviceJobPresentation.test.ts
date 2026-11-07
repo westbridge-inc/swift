@@ -5,6 +5,7 @@ import {
   armServiceJobDueWakeup,
   parseServiceQuoteInput,
   SERVICE_JOB_BOOKED_CANCEL_WORDS,
+  serviceJobSlotWords,
   SERVICE_JOB_STARTED_CANCEL_WORDS,
   serviceJobCancelView,
   serviceJobDueDelayMs,
@@ -143,9 +144,32 @@ describe('[coordinator ruling 14 Oct · Terms 2026-10-15 §7] who may cancel a s
 
   it('the job card asks this one rule for its Cancel button and its contact words', () => {
     const SCREEN = readFileSync(join(process.cwd(), 'src/modules/services/screens/ServiceJobsScreen.tsx'), 'utf8');
-    expect(SCREEN).toMatch(/serviceJobCancelView\(job\.status, isCustomer\)/);
-    expect(SCREEN).toMatch(/\{cancelView\.canCancel \? \(\s*<PillButton label="Cancel"/);
-    expect(SCREEN).toMatch(/\{cancelView\.contactWords\}/);
+    // [BOOK-P3] Through serviceJobControls (lib/proBooking), which reads the server's appointment view for a job
+    // booked from a pro's list and THIS rule for every other job (proBooking.test.ts pins both).
+    const CONTROLS = readFileSync(join(process.cwd(), 'src/lib/proBooking.ts'), 'utf8');
+    expect(CONTROLS).toMatch(/serviceJobCancelView\(job\.status, isCustomer\)/);
+    expect(SCREEN).toMatch(/serviceJobControls\(job, isCustomer\)/);
+    expect(SCREEN).toMatch(/\{controls\.canCancel \? \(\s*<PillButton label="Cancel"/);
+    expect(SCREEN).toMatch(/\{controls\.contactWords\}/);
     expect(SCREEN).not.toMatch(/\['REQUESTED', 'QUOTED', 'SCHEDULED', 'IN_PROGRESS'\]\.includes\(job\.status\)/);
+  });
+});
+
+describe('the time on a job card agrees with the cancel door', () => {
+  const CARD = readFileSync(join(process.cwd(), 'src/modules/services/screens/ServiceJobsScreen.tsx'), 'utf8');
+
+  it('a time the pro has not confirmed is not called booked', () => {
+    expect(serviceJobSlotWords({ status: 'SCHEDULED', providerConfirmedAt: null }, 'Tue 10:00')).toBe('requested Tue 10:00, not confirmed yet');
+    expect(serviceJobSlotWords({ status: 'SCHEDULED' }, 'Tue 10:00')).toBe('requested Tue 10:00, not confirmed yet');
+  });
+
+  it('a confirmed time, and a job past that point, are', () => {
+    expect(serviceJobSlotWords({ status: 'SCHEDULED', providerConfirmedAt: '2026-11-04T12:00:00.000Z' }, 'Tue 10:00')).toBe('booked Tue 10:00');
+    for (const status of ['IN_PROGRESS', 'COMPLETED', 'CANCELLED']) expect(serviceJobSlotWords({ status, providerConfirmedAt: null }, 'Tue 10:00')).toBe('booked Tue 10:00');
+  });
+
+  it('the card reads these words', () => {
+    expect(CARD).toContain('serviceJobSlotWords(job, formatAppointmentSlot(job.scheduledFor))');
+    expect(CARD).not.toContain('· booked ${');
   });
 });

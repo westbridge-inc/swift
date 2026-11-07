@@ -394,12 +394,16 @@ export function registerRoutedWhileDegradedCounter(app: FastifyInstance): void {
     if (!snap || snap.ready) return;
     const path = request.url.split('?')[0] ?? '';
     if (PROBE_PATHS.has(path)) return;
-    routedWhileDegradedCounter.labels(apiFamilyOf(path)).inc();
+    routedWhileDegradedCounter.labels(apiFamilyOf(request.routeOptions?.url)).inc();
   });
 }
 
-function apiFamilyOf(path: string): string {
-  const m = /^\/api\/v1\/([a-z-]+)/.exec(path);
+/** The family label, from the matched route's TEMPLATE (bounded by the routes
+ *  this server registers), never the caller's path; a request no route matched
+ *  is the one 'unmatched' series. */
+function apiFamilyOf(routeUrl: string | undefined): string {
+  if (routeUrl === undefined) return 'unmatched';
+  const m = /^\/api\/v1\/([a-z-]+)/.exec(routeUrl);
   return m?.[1] ?? 'other';
 }
 

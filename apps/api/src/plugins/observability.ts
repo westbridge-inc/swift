@@ -1023,7 +1023,7 @@ export const guardianDeliveryGauge = new client.Gauge({
 });
 export const guardianDeliveryCounter = new client.Counter({
   name: 'swift_guardian_checkin_delivery_events_total',
-  help: 'Guardian check-in delivery events (staged, sent, skipped, failed, dead_letter, backfilled, deadline_held, deadline_without_delivery_escalated)',
+  help: 'Guardian check-in delivery events (staged, sent, skipped, failed, dead_letter, backfilled, deadline_held, deadline_without_delivery_escalated, sms_fallback, passenger_unreached, answered_by_link)',
   labelNames: ['event'] as const,
   registers: [registry],
 });
@@ -1094,7 +1094,7 @@ export const tripShareGauge = new client.Gauge({
  *  A quiet counter is the normal state; a rising one is an access review. */
 export const handoverBreakGlassCounter = new client.Counter({
   name: 'swift_handover_break_glass_total',
-  help: 'Handover secret break-glass events (reveal, reveal_no_code, rotate, reset_delivery_pin)',
+  help: 'Handover secret break-glass events (reveal, reveal_no_code, rotate, reset_delivery_pin, reset_ride_pin)',
   labelNames: ['event'] as const,
   registers: [registry],
 });

@@ -36,7 +36,10 @@ function initialState(): TransactionState {
       status: 'IN_PROGRESS',
       quoteAmount: null,
       scheduledFor: new Date('2026-09-20T13:00:00.000Z'),
+      offeringId: null,
+      endsAt: null,
       providerConfirmedAt: new Date('2026-09-19T13:00:00.000Z'),
+      providerMovedAt: null,
       chatRoomId: 'room-1',
       completedAt: null,
       cancelledAt: null,
@@ -101,6 +104,8 @@ function rollbackModel(state: TransactionState, failAt?: 'audit' | 'chat' | 'not
             return { id: 'notice-1' };
           }),
         },
+        // [SEC-TRUST F2] No block stands between the parties in this model.
+        userBlock: { findFirst: vi.fn(async () => null) },
       } as unknown as Prisma.TransactionClient;
 
       try {

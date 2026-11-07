@@ -246,13 +246,16 @@ describe('[typed fields] a business registration says what it is (R16)', () => {
 describe('[typed fields] a customer’s ID is never asked for its number (rule 11 Oct 2026: no ID-number duplicate check at launch)', () => {
   const user = (id: string) => system(() => app.prisma.user.findUniqueOrThrow({ where: { id }, select: { trustLevel: true } }));
 
-  it('a held customer ID is approved with nothing typed, and the customer reaches L2', async () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change] Swift keeps no customer ID: one still waiting
+  // is never approved (it is withdrawn and deleted by the daily sweep), so nothing is typed and nobody reaches L2.
+  it('a waiting customer ID is not approved any more, with or without anything typed', async () => {
     const who = await subject('CUSTOMER');
     const doc = await pending(who, 'identity_l2', 'CUSTOMER');
     const res = await approve(doc.id, {});
-    expect(res.statusCode, res.body).toBe(200);
-    expect(await statusOf(doc.id)).toBe('APPROVED');
-    expect(await user(who)).toEqual({ trustLevel: 'L2' });
+    expect(res.statusCode, res.body).toBe(410);
+    expect(res.json().error.code).toBe('CUSTOMER_ID_RETIRED');
+    expect(await statusOf(doc.id)).toBe('PENDING');
+    expect(await user(who)).toEqual({ trustLevel: 'L1' });
     expect((await keysOf(who)).filter((k) => k.type === 'ID_DOC_NUMBER')).toEqual([]);
   });
 
@@ -267,8 +270,8 @@ describe('[typed fields] a customer’s ID is never asked for its number (rule 1
     const who = await subject('CUSTOMER');
     const doc = await pending(who, 'identity_l2', 'CUSTOMER');
     const res = await approve(doc.id, { documentNumber: number });
-    expect(res.statusCode, res.body).toBe(200);
-    expect(await user(who)).toEqual({ trustLevel: 'L2' });
+    expect(res.statusCode, res.body).toBe(410); // [CHECKLIST-LEGAL] never approved now; the number is still dropped
+    expect(await user(who)).toEqual({ trustLevel: 'L1' });
     expect((await keysOf(who)).filter((k) => k.type === 'ID_DOC_NUMBER')).toEqual([]);
     expect(await system(() => clusterMemberIds(app.prisma, who))).not.toContain(partner);
     expect(await system(() => clusterMemberIds(app.prisma, partner))).not.toContain(who);

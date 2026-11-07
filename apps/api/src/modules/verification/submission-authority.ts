@@ -28,7 +28,7 @@ export function moverProfileRequired(): AppError {
   return new AppError(409, 'MOVER_PROFILE_REQUIRED', 'Choose Rider or Driver before submitting vehicle documents.');
 }
 export function moverAuthorityChanged(): AppError {
-  return new AppError(409, 'MOVER_AUTHORITY_CHANGED', 'Your mover profile changed. Check the vehicle and submit again.');
+  return new AppError(409, 'MOVER_AUTHORITY_CHANGED', 'Your vehicle details changed. Check the vehicle and submit again.');
 }
 
 /** Capture before processing. Generic MOVER may use a sole profile, never a guessed dual profile. */

@@ -95,11 +95,11 @@ for (const role of ['rider', 'driver'] as const) describe(`${role} legacy docume
   it('keeps held objects, then the account retry worker purges after legal-hold release', async () => {
     const p = await mover(role);
     const doc = await app.prisma.verificationDocument.create({ data: { userId: p.userId, role: 'MOVER', docType: 'national_id', fileUrl: p.urls['nationalIdUrl']! } });
-    const { hold } = await placeDocLegalHold(app.prisma, { subjectUserId: p.userId, placedBy: p.userId, ownerId: p.userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86400000) });
+    const { hold } = await placeDocLegalHold(app.prisma, { subjectUserId: p.userId, placedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, ownerId: p.userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86400000) });
     expect(await service().deleteAccount(p.userId)).toMatchObject({ deleted: false, status: 'PENDING_LEGAL_HOLD' });
     expect((await p.read()).nationalIdUrl).toBe(p.urls['nationalIdUrl']);
     for (const key of Object.values(p.urls)) await expect(storage.getObject(key)).resolves.toEqual(bytes);
-    await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: p.userId, reason: 'Synthetic case closed' });
+    await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, reason: 'Synthetic case closed' });
     await retryAccountErasures({ prisma: app.prisma, log: app.log, io: { in: () => ({ disconnectSockets: () => undefined }) } as any });
     expect((await p.read()).nationalIdUrl).toBeNull();
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).purgedAt).not.toBeNull();

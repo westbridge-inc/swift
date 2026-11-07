@@ -42,13 +42,16 @@ import { LocationPickerScreen } from '../modules/profile/screens/LocationPickerS
 
 // Surviving verticals + infra (outside this rebuild's scope, still reachable)
 import { TaxiScreen } from '../modules/movement/screens/TaxiScreen';
+import { RideDetailScreen } from '../modules/movement/screens/RideDetailScreen';
 import { CourierScreen } from '../modules/movement/screens/CourierScreen';
 import { DestinationSearchScreen } from '../modules/movement/screens/DestinationSearchScreen';
 import { PinConfirmScreen } from '../modules/movement/screens/PinConfirmScreen';
 import { ServicesScreen } from '../modules/services/screens/ServicesScreen';
 import { ServiceJobsScreen } from '../modules/services/screens/ServiceJobsScreen';
 import { ServiceProviderScreen } from '../modules/services/screens/ServiceProviderScreen';
-import { IdentityVerificationScreen } from '../modules/account/screens/IdentityVerificationScreen';
+import { ProviderWeeklyFeeScreen } from '../modules/services/screens/ProviderWeeklyFeeScreen';
+import { ProBookingScreen } from '../modules/services/screens/ProBookingScreen';
+import { ProBookableScreen } from '../modules/services/screens/ProBookableScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -176,13 +179,17 @@ export function CustomerStack() {
       <Stack.Screen name="LocationPicker" component={LocationPickerScreen} />
       {/* Surviving verticals + infra */}
       <Stack.Screen name="Taxi" component={TaxiScreen} />
+      <Stack.Screen name="RideDetail" component={RideDetailScreen} />
       <Stack.Screen name="Courier" component={CourierScreen} />
       <Stack.Screen name="DestinationSearch" component={DestinationSearchScreen} />
       <Stack.Screen name="PinConfirm" component={PinConfirmScreen} />
       <Stack.Screen name="Services" component={ServicesScreen} />
       <Stack.Screen name="ServiceJobs" component={ServiceJobsScreen} />
       <Stack.Screen name="ServiceProvider" component={ServiceProviderScreen} />
-      <Stack.Screen name="IdentityVerification" component={IdentityVerificationScreen} />
+      {/* [BILL-PRO PR5] A pro's own weekly fee (pros work in the customer app). */}
+      <Stack.Screen name="ProviderWeeklyFee" component={ProviderWeeklyFeeScreen} />
+      <Stack.Screen name="ProBooking" component={ProBookingScreen} />
+      <Stack.Screen name="ProBookable" component={ProBookableScreen} />
     </Stack.Navigator>
   );
 }

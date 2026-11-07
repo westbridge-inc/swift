@@ -221,14 +221,36 @@ and disk budget are reviewed. Their Compose file publishes no host ports.
 ### The upload malware scanner (row 312)
 
 Every upload is scanned by the `clamd` service (ClamAV, pinned by tag and
-digest in docker-compose.yml) on the private network before it is stored; the
-API and worker reach it as `clamd:3310` and it publishes no port. pilot-up.sh
+digest in docker-compose.yml) before it is stored. clamd sits on its own
+internal network (`swift_scanner`), shared only with the API and the worker,
+which reach it as `clamd:3310`; nothing else on the host can reach it, and it
+publishes no port (a second network of its own lets freshclam download). pilot-up.sh
 starts it before anything is stopped, waits until it is healthy (signatures
 loaded; a first start on a new volume can take a few minutes) and proves, from
-the new API image on the private network, that the EICAR test string is refused
+the new API image on the scanner network, that the EICAR test string is refused
 and ordinary bytes pass. While clamd does not answer, every upload is refused
-(503) -- the shift liveness selfie included -- and the worker pages ops after
-two failed checks (two minutes apart). `./deploy/doctor.sh` reports it.
+(503) and the worker pages ops after two failed checks (two minutes apart).
+`./deploy/doctor.sh` reports it. clamd is the container's main process, so a
+SHUTDOWN restarts the container. Two kinds of upload are stored before a clean
+scan and owe one (upload_scan_debts; the worker rescans every five minutes once
+clamd answers, and a positive or unscannable file is quarantined and paged).
+Evidence (safety evidence, delivery and handover proof) is never refused, but it
+is stored only in the held quarantine folder: served to no one and admitted as
+proof by no claim until a scan answers CLEAN, which moves it to its normal
+folder (custody never waits: the delivery goes on). The production emergency
+switch `MALWARE_SCAN_BYPASS=1` in deploy/.env (then recreate api and worker)
+covers exactly the liveness selfies, onboarding documents and vehicle photos.
+Never a profile picture. They are stored unscanned in their normal folder only
+while clamd is UNREACHABLE (the connection fails AND a fresh PING fails) and no
+file has failed a scan in the last 30 minutes (a file that crashes clamd must
+not make the next upload look "down"; the cool-down is shared through Redis).
+While it is set, pilot-up, the doctor and the preflight shout and ops are paged
+every hour. Remove it as soon as clamd answers. If clamd is UP but fails on one
+file (an error or a timeout on the file itself), that file is refused, bypass or
+not; evidence is instead HELD in the quarantine and paged, and a platform admin
+retries its scan (`GET /admin/upload-scan-debts/held`, `POST
+/admin/upload-scan-debts/:id/release` with a reason; audited): it leaves the
+quarantine only on a CLEAN answer.
 
 Memory: about 1 GB with the signatures loaded and about 2 GB for the moment of
 a signature reload (freshclam checks 12 times a day); the service's ceiling is
@@ -357,6 +379,13 @@ What the public names get:
   it, then recreate the website container (`docker compose up -d web`, or
   redeploy as usual); no rebuild is needed, and closing it again is the same
   one change. The staging name always keeps the full marketplace.
+
+The App Store and Google Play links follow their own switch, `APP_STORES`
+in deploy/.env (empty by default: every page says "Store download links will
+appear here when available"). Set `APP_STORES=live` (exactly that; pilot-up
+refuses anything else) only once BOTH stores show the app live, then recreate
+the website container as above; no rebuild. Like the front door it governs
+the public names only: the staging name never shows store links.
 
 What the front door is: presentation-only. It decides what the website shows
 on the public names. The API stays open to the apps, and to any API client, by
@@ -567,10 +596,31 @@ From the retained root session after the deploy user can run Docker:
     systemctl list-timers swift-backup.timer
 
 The timer runs as swift-deploy and requires BACKUP_BUCKET and the R2/S3
-endpoint in deploy/.env, and AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in the
-encrypted store: the unit declares them as LoadCredentialEncrypted= and systemd
-hands them to backup.sh in a private credentials directory for the run. The
-unit does not start until both are stored. backup.sh runs pg_dump inside the
+endpoint in deploy/.env, and the BACKUP store. [SEC-BACKUP] The backup,
+erasure-ledger and restore units never load the API's AWS_ACCESS_KEY_ID /
+AWS_SECRET_ACCESS_KEY: they load BACKUP_AWS_ACCESS_KEY_ID,
+BACKUP_AWS_SECRET_ACCESS_KEY, BACKUP_KEY_SOURCE and BACKUP_SIGNING_KEY from
+/etc/credstore.encrypted/swift-backup/, a directory `swift-secrets
+materialize` never reads, so the api and worker containers never hold a key
+to the backup bucket. Before installing the units (and after installing the
+current /usr/local/sbin/swift-secrets, §2), run once:
+
+    swift-secrets backup init
+
+It creates the signing key (its public half goes to
+/etc/swift/backup-allowed-signers; keep a copy of that file off the host) and,
+until the owner stores the backup bucket's own key, a COPY of the API's pair
+under the backup names (BACKUP_KEY_SOURCE=shared-api-key), so backups never
+stop. Every run then warns "BACKUPS STILL SHARE THE API'S STORAGE KEY", the
+API pages weekly ("Backups are not protected from the API key") and
+doctor.sh warns, until the owner creates a key limited to the backup bucket
+and stores it (`swift-secrets backup set-keys`, two lines on stdin; from a
+Mac: deploy/owner/swift-backup-key.command, which also does this install).
+Only after a backup has run on the new key does the API's own key lose
+access to the backup bucket. The unit does not start until the backup store
+exists. Every dump is signed on the host and its signature uploaded beside it
+as `<object>.sig`; restore.sh and backup-drill.sh refuse a dump that does not
+verify. backup.sh runs pg_dump inside the
 private Postgres container (which reads its own password file), checks the
 archive table of contents, uploads to the separate bucket, checks the remote
 object length, and records a heartbeat. A successful object-length check is
@@ -628,6 +678,129 @@ backups. Before the first production backup:
    (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
    daily snapshots stay on as well.
 
+   **Off-site retention (owner ruling, 29 Oct): hourly dumps are kept 30
+   days.** `deploy/backup-versioning.sh` (step 3 of
+   `deploy/owner/swift-backup-key.command`) sets a lifecycle rule,
+   `swift-backup-dump-retention`, that deletes every object whose key starts
+   with `$BACKUP_PREFIX/swift-` (the dumps and their `.sig`) 30 days after it
+   was made (`BACKUP_OFFSITE_RETAIN_DAYS`), beside the rule that deletes old
+   versions after `BACKUP_VERSION_RETAIN_DAYS`. With versioning on, an expired
+   dump stays as an old version for those days before it is gone. The rule
+   never matches `$BACKUP_PREFIX/erasure-ledger/`: the ledger is never
+   expired, because a restore needs every signed batch of its chain. The
+   script keeps the bucket's other rules, but if any enabled rule would expire
+   a current object under the ledger prefix it changes NOTHING and names that
+   rule (narrow it first); `--status` fails without the dump rule or with
+   such a rule. A dump asked for after it expired is reported as gone
+   ("is not in the backup bucket"), never as an unsigned dump. A dump you
+   want kept longer (one taken before a risky change, say) must be copied out
+   of the bucket's dump prefix before it expires.
+4. Install the OFF-SITE ERASURE LEDGER timer (production and staging). Every
+   erasure writes its ledger entry in its own transaction; this unit ships the
+   unshipped entries every minute, encrypted to the same owner key, to
+   `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`:
+
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.service /etc/systemd/system/swift-erasure-ledger.service
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.timer /etc/systemd/system/swift-erasure-ledger.timer
+       systemctl daemon-reload
+       systemctl enable --now swift-erasure-ledger.timer
+       systemctl list-timers swift-erasure-ledger.timer
+
+   The ledger objects live under the backups' own prefix but are NEVER
+   expired: the dump retention rule matches `$BACKUP_PREFIX/swift-` only, and
+   `deploy/backup-versioning.sh` refuses a configuration with any rule that
+   would expire `erasure-ledger/`. Never add one by hand. An entry
+   still unshipped after 10 minutes pages the platform responders (the API's
+   erasure-ledger watch; production only), and doctor.sh FAILs. pilot-up.sh
+   refuses a production stage that starts the API unless this timer is
+   enabled and active. Every batch is encrypted to the owner key in every
+   environment, so staging needs BACKUP_GPG_RECIPIENT_FILE and
+   BACKUP_GPG_FINGERPRINT too, or it ships nothing (and doctor.sh FAILs).
+
+   Every batch is signed on the host with the backup signing key, as every
+   dump is: `<batch>.jsonl.gpg.sig` sits beside each `<batch>.jsonl.gpg`
+   (it holds the batch's name, size and digests, no entry). The unit loads
+   the key from the backup store (`BACKUP_SIGNING_KEY`); a unit installed
+   before this ships unsigned batches with a loud warning. Once one signed
+   batch has shipped, the host records the time in
+   `/var/backups/swift/.first-signed-erasure-ledger` (keep a copy of that
+   stamp with the allowed-signers file, as `BACKUP_LEDGER_SIGNED_SINCE`), and
+   from then on a run without a working key ships NOTHING (the entries wait,
+   and the 10-minute watch pages) rather than a batch no restore would take.
+   The signed batches form ONE CHAIN: each one's signature names the batch
+   shipped before it (and the digest of that batch's signature); the first
+   says `prev none`. Each batch links to the newest proven signature in the
+   bucket, so the chain never forks. The host keeps a record of its own last
+   batch in `/var/backups/swift/.erasure-ledger-chain`, written only after the
+   signature upload is proven. If that batch is no longer the bucket's newest
+   one, or its signature was replaced, the host ships nothing (a shipped batch
+   was deleted).
+
+   **One shipper per bucket prefix; stop the old host's timer before a new
+   host ships; drills use their own prefix.** Two hosts shipping to the same
+   `$BACKUP_PREFIX` fork the chain (each links to the newest batch it saw).
+   When a server is replaced, `systemctl disable --now
+   swift-erasure-ledger.timer swift-backup-hourly.timer` (or
+   `swift-backup.timer`) on the old host first, then start the new host's
+   timers. A drill, rehearsal or copy host that runs backup.sh or the
+   shipper sets its own `BACKUP_PREFIX` (for example `drill-<date>`) in its
+   deploy/.env, so it never writes under the production prefix.
+
+   Replaying it (a restore without the live database):
+   - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`,
+     the `.jsonl.gpg` batches AND their `.jsonl.gpg.sig` signatures, into one
+     directory. The ones from before the backup you restore are harmless (each
+     fact is applied once). Fetch them all rather than guess the cut.
+   - On the owner's own computer, decrypt each batch beside its signature,
+     keeping its name without `.gpg` (`gpg --output <batch>.jsonl --decrypt
+     <batch>.jsonl.gpg`), then `chmod 600` the files and `chmod 700` the
+     directory. Do not concatenate them: each batch is checked against its own
+     signature.
+   - Copy the directory to the restore host and run `restore.sh --project <name>
+     --no-live-ledger --i-know-live-is-gone --ledger-from <directory> <dump>`. Add
+     the two DR flags only when the live database is really gone; with it,
+     `--ledger-from` joins the live ledger. Every signed batch is verified
+     before anything is created (a batch that fails, or a signature whose
+     batch is missing, stops the restore). The chain must be unbroken: a batch
+     missing from the start or the middle, out of order, or a fork (two
+     batches after the same one) stops the restore (`CHAIN_BROKEN`).
+     **A forked ledger whose branches both verify** (two hosts shipped to one
+     prefix) is refused by default. First find out why (which host shipped
+     each branch, and that both hosts were Swift's own). Only then may the
+     owner add `--ledger-accept-fork`: every batch on every branch must still
+     verify, there must be one first batch, and every link must be present,
+     older and point at the exact signature it followed; anything else is still
+     `CHAIN_BROKEN`. The restore then replays the entries of ALL branches
+     (applying more erasures is the safe direction), prints `WARNING: LEDGER
+     FORK ACCEPTED` naming the fork, and its result line says `the signed
+     batches FORK` instead of `one unbroken chain`. Then stop the second
+     shipper (above) before the next shipment. With `BACKUP_BUCKET` set (and the backup key), the
+     restore also lists the bucket's `erasure-ledger/` prefix, read-only, and
+     stops if the bucket holds any batch or signature that is not in the
+     directory, so none is missing from the end either. With versioning on
+     (`deploy/backup-versioning.sh`), it also lists the versions there and stops
+     when a batch or signature was deleted (its newest version is a delete
+     marker, or it has only old versions): restore that version, fetch it, and
+     run again. With versioning off, it warns that a deletion would not be
+     noticed. Only when the bucket is
+     gone, pass `--ledger-no-bucket-check`; the result then says the end of the
+     ledger was not checked. A batch without a signature whose
+     entries are all in a signed batch is set aside (its signature never
+     reached the bucket; the next run shipped it again, signed). Any other
+     unsigned batch is refused, unless it is from before signing began and the
+     owner adds `--allow-unsigned-legacy` (on a new host, also
+     `BACKUP_LEDGER_SIGNED_SINCE`, or `--legacy-without-signing-record` only if
+     no batch was ever signed).
+   - When the restore is done, shred the decrypted files on BOTH machines
+     (`shred -u <file>`, or `rm -P` on a Mac).
+
+   Every restore (drill, rehearsal or DR) also prints
+   `NOT erasure-complete for #1905/#1945 de-identifications`: the replay does not yet re-run the
+   app's own erasure passes, so those de-identifications (updates, not
+   deletes) are not re-applied to the copy. Until the follow-up lands, re-apply
+   them by hand for every closed account before anything from a restored copy
+   is used.
+
 ## 5. Restore drill, with no live overwrite
 
 Take a fresh backup through the unit (it holds the storage keys) and copy the
@@ -641,16 +814,54 @@ scratch database through a transient unit that receives the same two keys:
     SCRATCH_DB="swift_restore_$(date -u +%Y%m%d%H%M%S)"
     sudo systemd-run --pipe --wait --collect --uid=swift-deploy --gid=swift-deploy \
       -p SupplementaryGroups=docker -p WorkingDirectory=/opt/swift \
-      -p "UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE" \
-      -p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
-      -p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
+      -p "UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE BACKUP_AWS_ACCESS_KEY_ID_FILE BACKUP_AWS_SECRET_ACCESS_KEY_FILE BACKUP_KEY_SOURCE_FILE" \
+      -p LoadCredentialEncrypted=BACKUP_AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_ACCESS_KEY_ID.cred \
+      -p LoadCredentialEncrypted=BACKUP_AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift-backup/BACKUP_AWS_SECRET_ACCESS_KEY.cred \
+      -p LoadCredentialEncrypted=BACKUP_KEY_SOURCE:/etc/credstore.encrypted/swift-backup/BACKUP_KEY_SOURCE.cred \
       /opt/swift/deploy/restore.sh --project swift "$OFFSITE_OBJECT" "$SCRATCH_DB"
+
+[SEC-BACKUP F2] restore.sh first fetches `<object>.sig` and verifies it
+against /etc/swift/backup-allowed-signers (BACKUP_SIGNING_ALLOWED_SIGNERS):
+the signature, the object's name, size and SHA-256. A dump with NO signature
+(made before signing existed) is restored only with `--allow-unsigned-legacy`,
+the owner's explicit decision, and it warns loudly; and only when the bucket's
+own LastModified for the object is BEFORE the first signed backup (backup.sh
+records that stamp once in /var/backups/swift/.first-signed-backup; on a new
+host set the owner's copy as BACKUP_SIGNED_SINCE in deploy/.env). An unsigned
+object written after signing began is refused even with the flag; with no
+record at all it is refused unless BACKUP_SIGNED_SINCE is set or
+`--legacy-without-signing-record` is added too (a host that never signed). The
+version whose time is checked is the version downloaded (VersionId and ETag
+pinned). A signature
+that fails is refused whatever the flags. The archive is then restored into a THROWAWAY
+Postgres instance (a container of the live database's image, no network, its
+own volume `swift-restore-<scratch>`), never into the live cluster, by a login
+named like the live owner that is NOT a superuser there and owns only the
+scratch database; the instance's own superuser only creates the roles the
+dump grants to (no login) and the extensions it names (a fixed allowlist).
+The live database is only read (erasure ledger, --compare-source snapshot).
+When the run ends the instance AND its volume are removed, whatever the
+outcome (success, a failed comparison or check, any error): the copy holds
+everyone's data and is erasure-complete only at the moment of the restore.
+`--keep-for-inspection` keeps it and prints how to remove it
+(`docker rm -f swift-restore-<scratch> && docker volume rm swift-restore-<scratch>`)
+within 24 hours; doctor.sh lists every labelled restore volume and FAILs on
+one older than a day. A disaster-recovery restore (`--no-live-ledger
+--i-know-live-is-gone`) keeps its copy by purpose, so it needs
+`--keep-for-inspection` up front. For a disaster recovery on a NEW host,
+put the owner's copy of the allowed-signers file at
+/etc/swift/backup-allowed-signers first.
 
 On production the off-site objects are `.dump.gpg` and the host cannot
 decrypt them: restore.sh refuses an encrypted dump. The drill runs from the
 OWNER's computer instead:
 
     SWIFT_RESTORE_PROJECT=swift ./deploy/backup-drill.sh swift-deploy@<host> <ssh-key-file> 's3://<backup-bucket>/<prefix>/swift-<stamp>.dump.gpg'
+
+The host first verifies the object's signature (`restore.sh --fetch-signature`);
+the drill carries that verified signature to the restore, which checks the
+decrypted dump against the digest signed with it. An object made before
+signing existed needs `--allow-unsigned-legacy` as the drill's first argument.
 
 It asks for the private key (paste the armored block) and its passphrase at
 hidden prompts and keeps them only in a throwaway keyring for the run. The
@@ -690,9 +901,11 @@ are left out, since backup.sh writes them after the dump). A row written to
 the live database since the dump is a mismatch, so run it right after the
 backup. Restore an encrypted document from the separate document
 bucket and verify it can be decrypted with the off-host MASTER_KEK escrow
-copy; the database dump alone cannot prove this. Keep the scratch database
-until the drill evidence is reviewed. A controlled cleanup then uses a
-separately reviewed SQL DROP DATABASE command against that scratch name only.
+copy; the database dump alone cannot prove this. The drill's evidence is its
+printed lines (both summaries, the compare-source line, RESTORE OK); the
+scratch copy itself is removed with its throwaway instance when the run ends
+(add `--keep-for-inspection` to restore.sh only to look inside it, and remove
+it the same day).
 
 ## 6. Seed the platform spine (first SUPER_ADMIN)
 
@@ -800,6 +1013,23 @@ logs without printing environment values:
     cd /opt/swift
     docker compose -f deploy/docker-compose.yml logs --tail=100 migrate api worker caddy
     docker compose -f deploy/docker-compose.routing.yml logs --tail=100 osrm
+
+Logs outlive a recreate in two places, both bounded and both free of anything
+that names a person:
+
+- pilot-up.sh runs `deploy/keep-logs.py` before it recreates anything. It copies
+  the api, worker, caddy, web and admin logs to `~/kept-logs` (the deploy user's
+  own directory, one gzip file per service), scrubbed of phones, emails, tokens,
+  URL queries, addresses and coordinates. Kept 30 days and 500 MB at most. If a
+  scrub or a read fails, nothing is kept for that service and it warns; it never
+  stops a deploy. Anything else that recreates a service should run
+  `python3 deploy/keep-logs.py` first.
+- Caddy's access log says which status went out, for which host, and when, with
+  no URI, address or header. Read it with
+  `docker compose -f deploy/docker-compose.yml exec caddy tail /data/access-logs/access.log`.
+  It stays on Caddy's data volume: 10 MiB a file, 5 old files, 30 days.
+
+    gunzip -c ~/kept-logs/<time>-api.log.gz | grep 'Unhandled error'
 
 After confirming the new schema remains backward-compatible with the
 previous binary, redeploy the previous approved main SHA:
@@ -1033,9 +1263,12 @@ checkout moves to the requested SHA; everything else before that):
 - a test-environment name (a label that is or starts uat, test, sandbox, dev,
   qa or demo) anywhere a staging name is refused;
 - API_PUBLIC_URL other than `https://<API_HOST>` (storage links and card
-  return pages are built from it); an APP_PUBLIC_URL that is not the public
-  website's `https://` origin (every printed QR code and trip-share link
-  names it); and a CORS_ORIGIN that is empty or has an entry that is not an
+  return pages are built from it); an APP_PUBLIC_URL that is not exactly
+  `https://swiftgy.com`, the domain the app claims for its links, read from
+  apps/mobile/app.config.ts (every store share link, printed QR code and
+  trip-share link names it, and a link on any other host, the staging site
+  or www included, never opens the app; no trailing slash; an app config
+  whose link domain cannot be read is refused too); and a CORS_ORIGIN that is empty or has an entry that is not an
   `https://` origin of a public name (no http, localhost, address or
   wildcard), or is a staging or test name;
 - for the whole stack, a served name that does not already resolve to this
@@ -1093,7 +1326,11 @@ explicitly off. Beyond the earlier guards:
 - **OPS_ONCALL_PHONES.** One or more E.164 numbers, comma-separated. An
   unacknowledged SOS escalates to them by SMS.
 - **Email.** `EMAIL_PROVIDER=smtp` with SMTP_HOST, SMTP_PORT, SMTP_USER,
-  EMAIL_FROM and the SMTP_PASS secret (wired as SMTP_PASS_FILE).
+  EMAIL_FROM and the SMTP_PASS secret (wired as SMTP_PASS_FILE), or
+  `EMAIL_PROVIDER=resend` (email over HTTPS, for a host that cannot reach
+  SMTP) with EMAIL_FROM on the domain verified in Resend and the
+  RESEND_API_KEY secret (wired as RESEND_API_KEY_FILE). Dev, unset or any
+  other value is refused.
 - **The launch money rules.** `BILLING_TOPUP_HOLD` exactly `1`, and no
   AGENT_CASH_WEBHOOK_SECRET (nor its `_FILE`): the same two rules pilot-up.sh
   checks, held by the API itself however it is started (a hand-run compose,
@@ -1184,7 +1421,8 @@ must be pinned first (section 6b, step 1).
 
 **Solo mode (owner ruling, 13 Oct): one approver while there is no second
 admin.** Only for the seed that mints the FIRST SUPER_ADMIN (none exists, and
-SEED_ADMIN_PHONE is set); anything else on production keeps two people.
+SEED_ADMIN_PHONE is set); anything else on production keeps two people,
+except the solo re-seed below.
 SEED_APPROVER_KEYS may then pin just the one approver's key.
 
    a. Request: `SEED_SOLO=1` with the same command as step 1. The request says,
@@ -1215,6 +1453,38 @@ SEED_APPROVER_KEYS may then pin just the one approver's key.
    The request file and the signed line therefore carry the masked email and
    its digest: personal data. Keep them with the owner's private stand-up
    evidence only, never in tickets, chat, logs or the repository.
+
+**Solo re-seed (owner ruling, 26 Oct, under the 13 Oct solo mode): a LATER
+production re-seed approved by the owner alone, while the owner is the ONLY
+admin.** On a database that already has its SUPER_ADMIN, `SEED_SOLO=1` is the
+solo re-seed. SEED_ADMIN_PHONE is the owner's own phone (the only admin's)
+and the owner's email must be the one on that account: the sign-in code and
+the notices go to them. The seed container sends them through the stack's own
+email and text providers (deploy/.env, as the API's); without working email
+and texts a solo re-seed refuses.
+
+   a. Request: `SEED_SOLO=1` with the same command as step 1 (exit 2). Its
+      words say solo re-seed, the 12-hour wait from when it starts, that it
+      can be cancelled, and the sign-in code; valid 48 hours from issue.
+   b. The owner signs it on their own computer (section 6b, step 3).
+   c. Start the wait (exit 4): the same command with `SEED_PLAN_APPROVALS='[<the one line>]'`.
+      An append-only audit row (SEED_SOLO_RESEED REQUESTED), an email and a
+      text to the owner, all or nothing. It prints from when it may run.
+   d. To cancel at any time before it runs (no approval, phone, email or FX):
+
+          SEED_SOLO_CANCEL=1 ./deploy/seed-production.sh "$SHA"
+
+   e. No earlier than 12 hours after c, before the request expires, the same
+      command as c, in the OWNER's own terminal: the seed counts the admins
+      again (exactly one, the owner, or it refuses: two people then), texts a
+      sign-in code to the owner's phone and reads it from the terminal (not
+      shown; five minutes; three wrong or late codes cancel the re-seed),
+      then applies the plan in one transaction, counting again, consuming the
+      approval with its signed record, and emailing and texting the owner
+      last (a notice that cannot go rolls it all back).
+
+   A second admin turns solo off: a waiting re-seed never runs, and only the
+   two-person ceremony above applies.
 
 4. SEED_PLAN_SECRET is no longer used (approvals are the approvers' own
    signatures). If the production store still holds it, from 5 Oct, remove
@@ -1289,6 +1559,31 @@ line `upload malware scanner ready: … EICAR refused`); if either is missing,
 `docker compose -f deploy/docker-compose.yml up -d --wait clamd` at once
 (uploads fail closed until it is healthy) and rerun pilot-up with the same SHA
 for the proof.
+
+### Ordering day: approve partners, then open ordering
+
+Owner rule: partners are approved in a batch on the same day ordering is switched
+on, and each free trial starts the day its partner is approved. Until then
+`PARTNER_APPROVALS_OPEN` stays empty in production, and reviewers check documents
+as they arrive. The last paper a partner needs cannot be approved: the Review
+Center says so, the paper stays waiting, and it is marked **Held for ordering day**
+so nobody checks it twice. Nothing machine-approves, no free trial starts and no
+store goes live.
+
+In this order, on the owner's go:
+
+1. In deploy/.env set `PARTNER_APPROVALS_OPEN=1` (exactly that; pilot-up refuses a
+   near miss, and anything but 1 reads as closed). Recreate the API and the worker,
+   so both read it: `docker compose up -d api worker`, or redeploy as usual.
+2. In the Review Center, tick **Held for ordering day** and approve the batch. Each
+   approval needs what the document type asks the reviewer to type, and no second
+   check of the paper. Each approval starts that partner's free trial.
+3. Check that the partners are live and each has a weekly fee on record.
+4. Only then open ordering (`WEB_ORDERING=live`, section 3c). Preflight warns if
+   ordering is open while approvals are closed.
+
+To brake again, empty the setting and recreate both services. Approved partners
+stay approved and their trials keep running; only new partners wait.
 
 ## 13. The least-privilege database logins (TA-S0-003)
 

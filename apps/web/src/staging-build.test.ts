@@ -159,9 +159,9 @@ describe('[Size budget] the customer app\u2019s shared code is one chunk', () =>
     return out.optimization.splitChunks.cacheGroups as Record<string, unknown>;
   };
 
-  it('the browser build gains one group; Next\u2019s own groups stay; the server build is untouched', async () => {
+  it('the browser build gains three groups; Next\u2019s own groups stay; the server build is untouched', async () => {
     const client = await run(false);
-    expect(Object.keys(client).sort()).toEqual(['customerAppShared', 'framework']);
+    expect(Object.keys(client).sort()).toEqual(['customerAppLayoutShared', 'customerAppShared', 'framework', 'marketingLayoutShared']);
     expect(Object.keys(await run(true))).toEqual(['framework']);
   });
 
@@ -176,5 +176,44 @@ describe('[Size budget] the customer app\u2019s shared code is one chunk', () =>
     expect(group.test(mod('/w/node_modules/.pnpm/lucide-react@0.475.0/node_modules/lucide-react/dist/esm/icons/x.js'))).toBe(true);
     expect(group.test(mod('/w/node_modules/.pnpm/react-dom@19/node_modules/react-dom/index.js'))).toBe(false);
     expect(group.test(mod('/w/apps/web/src/app/(app)/cart/cart.module.css', 'css/mini-extract'))).toBe(false);
+  });
+
+  // [CI perf #2222] What the customer layout loads AND a customer page loads too was copied into both chunks
+  // (chunk-retry, shell data, basket state: ~1.5 kB twice on Home). The second group sends such a module to the
+  // same customer-app-shared chunk the layout always loads; a module the layout does not load is left alone.
+  it('the layout\u2019s shared code joins the same chunk: customer pages only, own JavaScript, loaded by the layout', async () => {
+    type LayoutGroup = Omit<Group, 'test'> & { priority: number; test: (_m: { type?: string; nameForCondition?: () => string | null }, _c?: unknown) => boolean };
+    const group = (await run(false))['customerAppLayoutShared'] as LayoutGroup;
+    expect(group).toMatchObject({ name: 'customer-app-shared', minChunks: 2, minSize: 0 });
+    expect(group.priority).toBeLessThan(((await run(false))['customerAppShared'] as { priority: number }).priority);
+    expect(group.chunks({ name: 'app/(app)/page' })).toBe(true);
+    for (const name of ['app/dashboard/layout', 'app/portal/page', 'app/login/page', 'app/layout', null]) expect(group.chunks({ name })).toBe(false);
+    const mod = (path: string, type = 'javascript/auto') => ({ type, nameForCondition: () => path });
+    const inChunks = (...names: string[]) => ({ chunkGraph: { getModuleChunksIterable: () => names.map((name) => ({ name })) } });
+    const retry = mod('/w/apps/web/src/lib/chunk-retry.ts');
+    expect(group.test(retry, inChunks('app/(app)/layout', 'app/(app)/page'))).toBe(true);
+    expect(group.test(retry, inChunks('app/(app)/page', 'app/(app)/store/[slug]/page'))).toBe(false);
+    expect(group.test(retry)).toBe(false);
+    expect(group.test(mod('/w/node_modules/.pnpm/react-dom@19/node_modules/react-dom/index.js'), inChunks('app/(app)/layout', 'app/(app)/page'))).toBe(false);
+    expect(group.test(mod('/w/apps/web/src/app/(app)/cart/cart.module.css', 'css/mini-extract'), inChunks('app/(app)/layout'))).toBe(false);
+  });
+
+  // [WEBSITE 30 Oct · size budget] The public site's pages had the same double copy: the footer's store links and
+  // the launch switch's question, loaded by the marketing layout AND by the front door, /welcome or the FAQ (1 to 3.5
+  // kB twice). The third group sends such a module to one marketing-shared chunk the marketing layout always loads.
+  it('the marketing layout\u2019s shared code gets the same treatment: (marketing) pages only, own JavaScript, loaded by its layout', async () => {
+    type LayoutGroup = Omit<Group, 'test'> & { priority: number; test: (_m: { type?: string; nameForCondition?: () => string | null }, _c?: unknown) => boolean };
+    const group = (await run(false))['marketingLayoutShared'] as LayoutGroup;
+    expect(group).toMatchObject({ name: 'marketing-shared', minChunks: 2, minSize: 0 });
+    for (const name of ['app/(marketing)/launching-soon/page', 'app/(marketing)/welcome/page', 'app/(marketing)/layout']) expect(group.chunks({ name }), name).toBe(true);
+    for (const name of ['app/(app)/page', 'app/dashboard/layout', 'app/portal/page', 'app/login/page', 'app/legal/terms/page', 'app/layout', null]) expect(group.chunks({ name }), String(name)).toBe(false);
+    const mod = (path: string, type = 'javascript/auto') => ({ type, nameForCondition: () => path });
+    const inChunks = (...names: string[]) => ({ chunkGraph: { getModuleChunksIterable: () => names.map((name) => ({ name })) } });
+    const links = mod('/w/apps/web/src/components/app-store-links.tsx');
+    expect(group.test(links, inChunks('app/(marketing)/layout', 'app/(marketing)/launching-soon/page'))).toBe(true);
+    expect(group.test(links, inChunks('app/(marketing)/welcome/page', 'app/(marketing)/faq/page'))).toBe(false);
+    expect(group.test(links)).toBe(false);
+    expect(group.test(mod('/w/node_modules/.pnpm/react-dom@19/node_modules/react-dom/index.js'), inChunks('app/(marketing)/layout', 'app/(marketing)/faq/page'))).toBe(false);
+    expect(group.test(mod('/w/apps/web/src/app/(marketing)/stores/stores.module.css', 'css/mini-extract'), inChunks('app/(marketing)/layout'))).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import type { MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
+import { ReplyGateBusyError, mmgReplyGate, plausibleReplyToken, type ReplyDecryptGate } from './mmg-reply-gate';
 
 // ---------------------------------------------------------------------------
 // What a reply from MMG's checkout page SAYS, before anything is done with it
@@ -72,21 +73,55 @@ export function replyCodeClass(code: string | null): ReplyCodeClass {
 export const MAX_REPLY_VALUES = 16;
 export const MAX_REPLY_VALUE_CHARS = 4096;
 
-/** The values a reply may be carried in: every string, bounded in count and size. */
-export function replyValues(params: unknown): string[] {
+/**
+ * [SEC-DOS F8] The ONE field a reply token is read from, on both doors.
+ * MMG's official docs page (2026-09-30, the owner's copy) says MMG posts the
+ * encrypted TOKEN to the configured Response URL without spelling the
+ * transport field; the repo's established reading is `token` (the demo's own
+ * `?token=`, the address-path `token=` the web page forwards as params.token).
+ * The docs do not describe Notify at all, so Notify reads the same field and
+ * nothing else (COORD ruling, 28 Oct): if MMG documents a different Notify
+ * field, exactly that field is added here. Opening a value costs a
+ * private-key operation, so no other value is ever tried.
+ */
+export const REPLY_TOKEN_FIELD = 'token';
+
+/** The values under the token field (any case), bounded in count and size. A
+ *  key repeated on the return page arrives as an array of its values; the
+ *  routes refuse that before anything is opened ([DS635]). */
+export function replyTokenValues(params: unknown): string[] {
   if (!params || typeof params !== 'object' || Array.isArray(params)) return [];
-  return Object.values(params as Record<string, unknown>)
-    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+  return Object.entries(params as Record<string, unknown>)
+    .filter(([key]) => key.toLowerCase() === REPLY_TOKEN_FIELD)
+    .flatMap(([, value]) => (Array.isArray(value) ? value : [value]))
     .slice(0, MAX_REPLY_VALUES)
     .filter((value): value is string => typeof value === 'string' && value.length > 0 && value.length <= MAX_REPLY_VALUE_CHARS);
 }
 
-/** The first value that decrypts under our key is the reply; nothing else is. */
-export function openReply(provider: MmgCheckoutProvider, params: unknown): Record<string, unknown> | null {
-  for (const value of replyValues(params)) {
+/** A reply as the route opened it, handed to the service so it is never opened twice. `reply` null: nothing opened. */
+export interface OpenedReply {
+  readonly reply: Record<string, unknown> | null;
+}
+
+/**
+ * The first token-field value that decrypts under our key is the reply;
+ * nothing else is. Each value must look like one RSA block before it is
+ * tried, and the private-key operation runs under the process's reply gate
+ * (mmg-reply-gate.ts), which throws ReplyGateBusyError when too many wait.
+ * `source` is who sent it (the per-source share of the wait).
+ */
+export async function openReply(
+  provider: MmgCheckoutProvider,
+  params: unknown,
+  source: string,
+  gate: ReplyDecryptGate = mmgReplyGate,
+): Promise<Record<string, unknown> | null> {
+  for (const value of replyTokenValues(params)) {
+    if (!plausibleReplyToken(value)) continue;
     try {
-      return provider.decryptCheckoutResult(value);
-    } catch {
+      return await gate.run(source, () => provider.decryptCheckoutResult(value));
+    } catch (err) {
+      if (err instanceof ReplyGateBusyError) throw err;
       // not a token for us; try the next value
     }
   }

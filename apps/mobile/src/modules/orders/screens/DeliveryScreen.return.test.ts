@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { orderTimelineIndex } from '../timeline-states';
 
 // ---------------------------------------------------------------------------
 // [E17 · DS231 F2/F3] The sender's tracking screen on a parcel coming back.
@@ -27,7 +28,8 @@ describe('the return leg is tracked like the forward leg', () => {
   });
 
   it('RETURNING shows the travel step, relabelled for the way back', () => {
-    expect(block(/function timelineIndex\(/, /\n}\n/)).toMatch(/courier && status === 'RETURNING'\) return 3;/);
+    // [#2252 S4-1] The step function moved to ../timeline-states.ts (shared with the website): read it as behaviour.
+    expect(orderTimelineIndex({ orderType: 'COURIER', status: 'RETURNING' }, false, false)).toBe(3);
     expect(SCREEN).toMatch(/transitLabel = 'Coming back to you';/);
   });
 });
@@ -52,6 +54,7 @@ describe('a returned parcel is over', () => {
   });
 
   it('RETURNED has no forward-timeline step (the timeline would promise a delivery)', () => {
-    expect(block(/function timelineIndex\(/, /\n}\n/)).not.toMatch(/RETURNED/);
+    expect(orderTimelineIndex({ orderType: 'COURIER', status: 'RETURNED' }, false, false)).toBeNull();
+    expect(orderTimelineIndex({ status: 'RETURNED' }, false, false)).toBeNull();
   });
 });

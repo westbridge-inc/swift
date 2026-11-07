@@ -35,7 +35,7 @@ import { orderSocketFixture } from './helpers/order-socket-fixture';
 // by id, the pending-alert banner, its dashboard counters and analytics, a
 // real socket client asking to follow the order, and its low-stock pushes.
 //
-// Time: the hold is the real five minutes. "Five minutes later" is modelled by
+// Time: the hold is the real one minute (HOLD_MS). "A minute later" is modelled by
 // moving the order's clock back (placement, hold and any cancel together, so
 // their order is kept) — the server clock owns the window, as in production.
 // ---------------------------------------------------------------------------
@@ -46,7 +46,8 @@ import { orderSocketFixture } from './helpers/order-socket-fixture';
 // reserve — deliberately avoided).
 const PHONE_PREFIX = '+5920861';
 const DAY = 24 * 60 * 60 * 1000;
-const HOLD_MS = 5 * 60_000;
+// [owner 30 Oct 2026] The store-order hold is ONE minute (was five): this journey runs on the unset default.
+const HOLD_MS = 1 * 60_000;
 
 let app: FastifyInstance;
 let socketUrl = '';
@@ -295,22 +296,22 @@ async function storeSees(store: Store, orderId: string) {
   };
 }
 
-/** The store's own counters: the dashboard overview, the popular-items card,
- *  busy hours and the tier meter. The store is fresh per case, so every one of
- *  them counts only that case's orders. */
+/** The store's own counters: the dashboard overview, the popular-items card
+ *  and busy hours. The store is fresh per case, so every one of them counts
+ *  only that case's orders. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a) — a DELIBERATE
+ *  change] No tier meter: the self-declared tier and its caps are removed. */
 async function storeDashboard(store: Store) {
   const overview = await call('GET', '/api/v1/vendor/analytics/overview', store.owner.token);
   const popular = await call('GET', '/api/v1/vendor/analytics/popular-items', store.owner.token);
   const busy = await call('GET', '/api/v1/vendor/analytics/busy-hours', store.owner.token);
-  const tier = await call('GET', '/api/v1/vendor/tier', store.owner.token);
-  for (const res of [overview, popular, busy, tier]) expect(res.statusCode, res.body).toBe(200);
+  for (const res of [overview, popular, busy]) expect(res.statusCode, res.body).toBe(200);
   const o = overview.json().data;
   const item = (popular.json().data as Array<{ id: string; totalOrdered: number; recentOrders: number }>).find((i) => i.id === store.itemId);
   return {
     today: o.today.orders as number, week: o.week.orders as number, month: o.month.orders as number,
     pending: o.pendingOrders as number, totalOrders: o.vendor.totalOrders as number,
     itemTotalOrdered: item?.totalOrdered ?? null, itemRecent: item?.recentOrders ?? null,
-    busyHours: busy.json().data.total as number, tierToday: tier.json().data.usage.ordersToday as number,
+    busyHours: busy.json().data.total as number,
   };
 }
 /** The store counts an order in the GUYANA day it was placed (#1491). The
@@ -321,7 +322,7 @@ async function countedToday(orderId: string): Promise<0 | 1> {
   const { placedAt } = await orderRow(orderId);
   return placedAt >= startOfGuyanaDay(guyanaDayKey(new Date())) ? 1 : 0;
 }
-const DASHBOARD_EMPTY = { today: 0, week: 0, month: 0, pending: 0, totalOrders: 0, itemTotalOrdered: 0, itemRecent: 0, busyHours: 0, tierToday: 0 };
+const DASHBOARD_EMPTY = { today: 0, week: 0, month: 0, pending: 0, totalOrders: 0, itemTotalOrdered: 0, itemRecent: 0, busyHours: 0 };
 
 /** The store's low-stock notices for its item: inbox rows and pushes. */
 async function lowStockNotices(store: Store) {
@@ -462,7 +463,7 @@ afterAll(async () => {
 describe.each([
   { label: 'restaurant', vendorType: 'RESTAURANT' as const, orderType: 'FOOD_DELIVERY', stock: undefined },
   { label: 'store', vendorType: 'SUPERMARKET' as const, orderType: 'GROCERY_DELIVERY', stock: 10 },
-])('Q12 · $label — the customer cancels inside the five-minute window', ({ vendorType, orderType, stock }) => {
+])('Q12 · $label — the customer cancels inside the one-minute window', ({ vendorType, orderType, stock }) => {
   let store: Store;
   let buyer: Actor;
   let order: Placed;
@@ -472,7 +473,7 @@ describe.each([
     buyer = await makeCustomer(vendorType === 'RESTAURANT' ? 'Asha' : 'Dev');
   });
 
-  it('checkout holds the order for exactly the five-minute window and tells the store nothing', async () => {
+  it('checkout holds the order for exactly the one-minute window and tells the store nothing', async () => {
     order = await placeOrder(buyer, store, 2);
     const row = await orderRow(order.id);
     expect(row.orderType).toBe(orderType);
@@ -524,9 +525,10 @@ describe.each([
 
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, buyer.token);
     expect(mine.json().data).toMatchObject({ status: 'CANCELLED', canCancel: false, cancellationFee: 0 });
-    // A second tap is refused, never a second cancellation.
+    // A second tap gets the first tap's answer, never a second cancellation.
     const again = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, buyer.token, {});
-    expect(again.statusCode).toBe(400);
+    expect(again.statusCode).toBe(200);
+    if (stock != null) expect(await stockOf(store.itemId)).toBe(stock);
 
     expect(await storeHeard(store, order)).toEqual(HEARD_NOTHING);
   });
@@ -601,7 +603,7 @@ describe.each([
     expect(row.status).toBe('PENDING'); // release is visibility, not a transition
     // Counted by the store's own counters at the release — once.
     const today = await countedToday(order.id);
-    const counted = { today, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1, tierToday: today };
+    const counted = { today, week: 1, month: 1, pending: 1, totalOrders: 1, itemTotalOrdered: 1, itemRecent: 1, busyHours: 1 };
     expect(await storeSees(store, order.id)).toMatchObject({ board: true, detail: 200, banner: true, dashboard: counted });
 
     // Exactly once: every later sweep is a no-op on every channel and counter.
@@ -996,7 +998,7 @@ describe('Q12 · express — never held, so the store sees it at once; a cancel 
     const order = await placeOrder(buyer, store, 1, { paymentMethod: 'CASH', express: true });
     const row = await orderRow(order.id);
     expect(row.isExpress).toBe(true);
-    expect(row.holdExpiresAt).toBeNull(); // the customer paid 1.5x to skip the wait
+    expect(row.holdExpiresAt).toBeNull(); // the customer paid the express premium to skip the wait
 
     const alerted = await storeHeard(store, order);
     expect([...alerted.sockets].sort()).toEqual(['notification', 'order:new', 'vendor:order_alert']);

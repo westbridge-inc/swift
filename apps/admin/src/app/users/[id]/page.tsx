@@ -4,15 +4,20 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { fetchUserDetail, suspendUser, unsuspendUser, banUser } from '@/lib/api';
+import { allowMoverPlanMove, changeLegalName, fetchUserDetail, suspendUser, unsuspendUser, banUser, revealUserPhone, liftStrikeRestriction, deleteVerifiedRequest } from '@/lib/api';
 import { label } from '@/lib/labels';
 import type { Outcome } from '@/lib/outcome';
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { PhoneChangeAction } from './phone-change-action';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
+import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
+import { gyDate, gyDateTime } from '@/lib/dates';
+import { liveDocumentsLabel, liveDocumentsOk } from '@/lib/live-documents';
+import { ServiceJobsCard } from './service-jobs';
 
 /** [BUG-GUARDS C5] Why a strike was given, in words (cash-rules.service writes
  *  `failed_payment_<outcome>` when a cash order fails at the door). */
@@ -32,8 +37,11 @@ const STRIKE_REASON: Record<string, string> = {
 // ---------------------------------------------------------------------------
 
 const when = (iso?: string | null, withTime = false) =>
-  iso ? new Date(iso).toLocaleString('en-GB', withTime ? { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' } : { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+  iso ? (withTime ? gyDateTime(iso) : gyDate(iso)) : '—';
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
+
+/** The server's rule on a verified deletion's note: six digits, however spaced, or an address, is refused. */
+const NO_ID_OR_ADDRESS = /^(?![\s\S]*@)(?![\s\S]*(?:\d[\s-]*){6})/;
 
 function Row({ label: name, children }: { label: string; children: React.ReactNode }) {
   if (children == null || children === '') return null;
@@ -53,6 +61,8 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
   const dialog = useActionDialog();
   const [result, setResult] = useState<Outcome | null>(null);
   const person = useQuery({ queryKey: ['user', id], queryFn: () => fetchUserDetail(id) });
+  // [FOLLOWUPS · follows O-1] The number is masked; "Show number" is the audited read, for this page view only.
+  const { revealed, revealFor } = usePhoneReveal(async (request) => show(await dialog.run(request)));
 
   const show = (outcome: Outcome | null) => {
     if (!outcome) return;
@@ -98,6 +108,39 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
     submit: ({ reason }) => unsuspendUser(id, reason),
     success: () => `${name} can use Swift again.`,
   }));
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] After repeated failed cash payments ordering is paused until the
+  // strikes are 90 days old; a person who reviewed the account (from Help) can open it sooner. The server says whether
+  // there is a restriction to lift; the strikes stay on the record and still count toward a ban.
+  // [BUG-HUNT F21] A partner's name is locked in the apps once a person has checked it: the door the refusal points at.
+  const changeName = async () => show(await dialog.run({
+    title: `Change the name of ${name}?`,
+    body: <p>Check the new name against a current ID before you change it. Stores and passengers see this name, and they are told it was checked.</p>,
+    confirmLabel: 'Change name',
+    fields: [
+      { kind: 'text', name: 'firstName', label: 'First name', required: true, minLength: 1, maxLength: 80 },
+      { kind: 'text', name: 'lastName', label: 'Last name', required: true, minLength: 1, maxLength: 80 },
+    ],
+    reason: { hint: 'How the new name was checked. Kept on the permanent record.' },
+    submit: ({ reason, values }) => changeLegalName(id, String(values['firstName']).trim(), String(values['lastName']).trim(), reason),
+    success: () => 'The name is changed and the person is told.',
+  }));
+  // [BUG-HUNT F05] "Contact support to move it to taxi work": this is that door. The person makes the move in the app.
+  const allowPlanMove = async () => show(await dialog.run({
+    title: `Let ${name} move between delivery and taxi work?`,
+    body: <p>They get one move, for 7 days, and make it themselves in the app. Their weekly fee follows the new work: a higher fee starts only after 14 days’ notice, and a week they have paid keeps its price. No money moves.</p>,
+    confirmLabel: 'Allow the move',
+    reason: { hint: 'Kept on the permanent record.' },
+    submit: ({ reason }) => allowMoverPlanMove(id, reason),
+    success: () => `${name} is told, and can change their vehicle in the app for the next 7 days.`,
+  }));
+  const liftRestriction = async () => show(await dialog.run({
+    title: `Open ordering again for ${name}?`,
+    body: <p>Their strikes stay on the record and still count toward a ban, but the ones given until now stop pausing their orders and rides. Use this after you have reviewed the account with them through Help.</p>,
+    confirmLabel: 'Open ordering again',
+    reason: { hint: 'Kept on the permanent record.' },
+    submit: ({ reason }) => liftStrikeRestriction(id, reason),
+    success: () => `${name} can order and ride again.`,
+  }));
   const ban = async () => show(await dialog.run({
     title: `Permanently ban ${name}?`,
     body: <p>They lose access for good, and their documents are scheduled for deletion under the retention rules. Only a super admin can lift a ban.</p>,
@@ -105,6 +148,26 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
     reason: { hint: 'Kept on the account and the permanent record.' },
     submit: ({ reason }) => banUser(id, reason),
     success: () => `${name} is banned.`,
+  }));
+
+  // [BUG-HUNT F20] A verified deletion request from someone who cannot sign in (docs/ops/verified-deletion-request.md).
+  // The server holds every rule; this offers the door only where it can work.
+  const staffAccount = (u.roles ?? []).some((role: string) => role === 'ADMIN' || role === 'SUPER_ADMIN');
+  const canDelete = u.viewer?.superAdmin === true && !staffAccount && u.status !== 'DEACTIVATED' && u.status !== 'BANNED';
+  const deleteAccount = async () => show(await dialog.run({
+    title: `Delete ${name}'s account?`,
+    body: <p>Only for a request you have verified, from someone who cannot sign in. This runs the person&apos;s own deletion: live orders or open cash refuse it, and financial and legal records are kept. It cannot be undone, and it needs approval first.</p>,
+    confirmLabel: 'Ask to delete account',
+    reason: { hint: 'Kept on the permanent record.' },
+    fields: [
+      { kind: 'choice', name: 'identityCheck', label: 'How identity was checked', options: [
+        { value: 'CODE_TO_ACCOUNT_NUMBER', label: 'A code sent to the number on the account' },
+        { value: 'OWNER_CHECKED', label: 'Another way, checked by the owner' },
+      ] },
+      { kind: 'text', name: 'identityNote', label: 'What was done', required: true, minLength: 12, maxLength: 300, hint: 'In words. Never copy from an identity document.', pattern: NO_ID_OR_ADDRESS, patternMessage: 'Say how it was checked, in words: no ID or phone numbers, no addresses.' },
+    ],
+    submit: ({ reason, values }) => deleteVerifiedRequest(id, { identityCheck: String(values['identityCheck']), identityNote: String(values['identityNote']) }, reason),
+    success: () => 'Account closed.',
   }));
 
   return (
@@ -116,15 +179,18 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           {name.charAt(0).toUpperCase()}
         </div>
         <div className="min-w-0 flex-1 basis-56">
-          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+          <h2 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
             <Truncate text={name} lines={2} focusable />
-          </h1>
+          </h2>
           <div className="flex flex-wrap items-center gap-2 mt-2">
             <StatusBadge group="UserStatus" value={u.status} />
             {(u.roles ?? []).map((r: string) => <span key={r} className="mc-badge">{label('UserRole', r)}</span>)}
             {u.trustLevel ? <span className="mc-badge mc-tone-info">Trust {u.trustLevel}</span> : null}
           </div>
-          <p className="mc-muted mt-1.5">{[u.phone, u.email].filter(Boolean).join(' · ')}</p>
+          <p className="mc-muted mt-1.5">
+            <PhoneReveal phone={u.phone} revealed={revealed[`person:${u.id}`]} onReveal={revealFor(`person:${u.id}`, `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealUserPhone(id, reason))} />
+            {u.phone && u.email ? ' · ' : ''}{u.email}
+          </p>
         </div>
         <div className="flex flex-wrap gap-2 w-full sm:w-auto sm:ml-auto">
           {u.status === 'SUSPENDED' ? (
@@ -132,7 +198,11 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
           ) : u.status !== 'BANNED' ? (
             <button type="button" className="mc-btn" onClick={suspend}>Suspend…</button>
           ) : null}
+          <button type="button" className="mc-btn" onClick={changeName}>Change name…</button>
+          {(u.roles ?? []).some((r: string) => r === 'ADMIN' || r === 'SUPER_ADMIN') ? null : <PhoneChangeAction userId={id} name={name} onResult={show} />}
+          {u.rider || u.driver ? <button type="button" className="mc-btn" onClick={allowPlanMove}>Allow plan move…</button> : null}
           {u.status !== 'BANNED' ? <button type="button" className="mc-btn mc-btn-danger" onClick={ban}>Ban…</button> : null}
+          {canDelete ? <button type="button" className="mc-btn mc-btn-danger" onClick={deleteAccount}>Delete account…</button> : null}
         </div>
       </header>
 
@@ -156,21 +226,26 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             />
           </section>
 
+          <ServiceJobsCard userId={id} onResult={show} />
+
           <section aria-labelledby="strikes" className="mc-card">
             <h2 id="strikes" className="mc-label">Strikes</h2>
             {(u.strikes ?? []).length === 0 ? (
               <p className="mc-muted">Clean record — no strikes.</p>
             ) : (
-              <ul className="grid gap-2">
-                {u.strikes.map((s: { id: string; reason: string; createdAt: string }) => (
-                  <li key={s.id} className="mc-doc mc-doc-bad">
-                    <span className="min-w-0 flex-1">
-                      <span className="block font-semibold">{STRIKE_REASON[s.reason] ?? 'Strike'}</span>
-                      <span className="block mc-muted text-xs">{when(s.createdAt, true)}</span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="grid gap-2">
+                  {u.strikes.map((s: { id: string; reason: string; createdAt: string }) => (
+                    <li key={s.id} className="mc-doc mc-doc-bad">
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-semibold">{STRIKE_REASON[s.reason] ?? 'Strike'}</span>
+                        <span className="block mc-muted text-xs">{when(s.createdAt, true)}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <button type="button" className="mc-btn mt-3" onClick={() => void liftRestriction()}>Open ordering again…</button>
+              </>
             )}
           </section>
         </div>
@@ -180,15 +255,23 @@ export default function UserDetailPage({ params }: { params: Promise<{ id: strin
             <h2 id="profiles" className="mc-label">Profiles</h2>
             <ul className="grid gap-1">
               {u.rider ? (
-                <li><Link href={`/riders/${u.rider.id}`} className="mc-row min-h-11"><span>Rider profile</span><span className={`mc-badge${u.rider.documentsVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.rider.documentsVerified ? 'Verified' : 'Not verified'}</span></Link></li>
+                <li><Link href={`/riders/${u.rider.id}`} className="mc-row min-h-11"><span>Rider profile</span><span className={`mc-badge${liveDocumentsOk(u.rider) ? ' mc-tone-good' : ' mc-tone-warn'}`}>{liveDocumentsLabel(u.rider)}</span></Link></li>
               ) : null}
               {u.driver ? (
-                <li><Link href={`/drivers/${u.driver.id}`} className="mc-row min-h-11"><span>Driver profile</span><span className={`mc-badge${u.driver.documentsVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.driver.documentsVerified ? 'Verified' : 'Not verified'}</span></Link></li>
+                <li><Link href={`/drivers/${u.driver.id}`} className="mc-row min-h-11"><span>Driver profile</span><span className={`mc-badge${liveDocumentsOk(u.driver) ? ' mc-tone-good' : ' mc-tone-warn'}`}>{liveDocumentsLabel(u.driver)}</span></Link></li>
               ) : null}
               {(u.vendorOwner?.vendors ?? []).map((v: { id: string; name: string; status: string }) => (
                 <li key={v.id}><Link href={`/vendors/${v.id}`} className="mc-row min-h-11"><Truncate text={v.name} /><StatusBadge group="VendorStatus" value={v.status} /></Link></li>
               ))}
-              {!u.rider && !u.driver && (u.vendorOwner?.vendors ?? []).length === 0 ? <li className="mc-muted">Customer only.</li> : null}
+              {u.serviceProvider ? (
+                <li className="mc-row min-h-11"><span>Service provider: {u.serviceProvider.trade}</span><span className={`mc-badge${u.serviceProvider.isVerified ? ' mc-tone-good' : ' mc-tone-warn'}`}>{u.serviceProvider.isVerified ? 'Documents approved' : 'Documents not approved'}</span></li>
+              ) : null}
+              {/* A MOVER who stopped before the vehicle step has neither profile: not a customer, and which kind is not known yet. */}
+              {!u.rider && !u.driver && (u.roles ?? []).includes('MOVER') ? (
+                <li className="mc-muted">Signed up as a rider or driver and has not added a vehicle yet, so which one is not known.</li>
+              ) : !u.rider && !u.driver && !u.serviceProvider && (u.vendorOwner?.vendors ?? []).length === 0 ? (
+                <li className="mc-muted">Customer only.</li>
+              ) : null}
             </ul>
           </section>
 

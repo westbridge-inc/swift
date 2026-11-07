@@ -117,6 +117,10 @@ describe('[DOC-1 P1-2] every new submission writes a subject and a link', () => 
     expect((await docOf(reg.id)).subjectId).toBe(vid);
     const links = (await subjectOf(vid)).links.map((l) => [l.accountId, l.relation]).sort();
     expect(links).toEqual([[a, 'ASSIGNED_DRIVER'], [b, 'ASSIGNED_DRIVER']].sort());
+    // [SEC-TRUST F9] a registered the vehicle, but its link is PENDING too until a person approves
+    // (a paper of its own, or the assignment).
+    expect(await linkedAccountIds(app.prisma, vid)).toEqual([]);
+    expect((await system(() => service.approveVehicleAssignment(a))).approved).toBe(1);
     // [High #9 · DS109] b's cross-account link is PENDING — it names the same vehicle but
     // propagates none of its evidence until the admin approves the assignment.
     expect((await linkedAccountIds(app.prisma, vid)).sort()).toEqual([a].sort());

@@ -25,8 +25,9 @@ export interface MoneyColumn {
   unit: MoneyUnit;
 }
 
-/** The regex the census applies to a Decimal field's name to call it money-ish. */
-export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding/i;
+/** The regex the census applies to a Decimal field's name to call it money-ish. [STORE-VAT] `vat` and `goods`: a store's
+ *  VAT and its goods by VAT class are money (Order.vatBase / vatStandardGoods / vatExemptGoods match no other word). */
+export const MONEY_FIELD_PATTERN = /amount|fee|total|price|fare|discount|tip|balance|gyd|usd|cost|spend|subtotal|deposit|credit|debit|value|rate|float|minimum|markup|budget|cap|revenue|earning|payout|refund|charge|pay|money|cash|gross|net|share|surcharge|changefor|roundingincrement|perkm|sales|collection|receivable|payable|funding|vat|goods/i;
 
 export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'AdBooking', field: 'amount', unit: 'MAJOR_2DP' },
@@ -88,14 +89,19 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'FeeReceiptAllocation', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'FxRate', field: 'rate', unit: 'FX_RATE' },
   { model: 'Item', field: 'basePrice', unit: 'MAJOR_WHOLE' },
+  // [VAT-DOCS] The price a store typed before VAT, while its VAT is added to the item (vat-pricing.ts).
+  { model: 'Item', field: 'vatListedPrice', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'credit', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'debit', unit: 'MAJOR_WHOLE' },
   { model: 'MmgAgentPayment', field: 'amount', unit: 'MAJOR_WHOLE' },
   // [MMG checkout 2/6] What a partner was asked to pay on the MMG page: whole GYD.
   { model: 'MmgCheckoutIntent', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'MmgCheckoutPart', field: 'amount', unit: 'MAJOR_WHOLE' },
   // [MMG REVERSAL] A returned payment: always the whole checkout amount.
   { model: 'MmgFeeReversal', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'FeeRefundCase', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'Option', field: 'additionalPrice', unit: 'MAJOR_WHOLE' },
+  { model: 'Option', field: 'vatListedAdditionalPrice', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'deliveryFee', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'discount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'serviceFee', unit: 'MAJOR_WHOLE' },
@@ -109,6 +115,12 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'Order', field: 'taxiFareTotal', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'tipAmount', unit: 'MAJOR_WHOLE' },
   { model: 'Order', field: 'totalAmount', unit: 'MAJOR_WHOLE' },
+  // [STORE-VAT · owner O-5] The VAT included in a VAT store's goods and the goods by class: whole GYD, like the goods.
+  { model: 'Order', field: 'vatAmount', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatBase', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatExemptGoods', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatStandardGoods', unit: 'MAJOR_WHOLE' },
+  { model: 'Order', field: 'vatZeroRatedGoods', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'basePrice', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'markedUpPrice', unit: 'MAJOR_WHOLE' },
   { model: 'OrderItem', field: 'markupAmount', unit: 'MAJOR_WHOLE' },
@@ -153,6 +165,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'RunStop', field: 'cashToCollect', unit: 'MAJOR_WHOLE' },
   { model: 'RunStop', field: 'changeFor', unit: 'MAJOR_WHOLE' },
   { model: 'ServiceJob', field: 'quoteAmount', unit: 'MAJOR_WHOLE' },
+  // [BOOK-P1] A pro's fixed price becomes the booked job's quoteAmount: the same unit.
+  { model: 'ServiceOffering', field: 'price', unit: 'MAJOR_WHOLE' },
   { model: 'Settlement', field: 'netSales', unit: 'MAJOR_2DP' },
   { model: 'Settlement', field: 'goodsSales', unit: 'MAJOR_2DP' },
   { model: 'Settlement', field: 'vendorPromoDiscount', unit: 'MAJOR_2DP' },
@@ -179,6 +193,8 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'Transaction', field: 'balanceAfter', unit: 'MAJOR_WHOLE' },
   { model: 'User', field: 'walletBalance', unit: 'MAJOR_WHOLE' },
   { model: 'Vendor', field: 'minOrderAmount', unit: 'MAJOR_WHOLE' },
+  // [CHAINS] A chain deal: a weekly fee, the unit of Subscription.customRate it is written to.
+  { model: 'VendorOwner', field: 'dealWeeklyRate', unit: 'MAJOR_WHOLE' },
   { model: 'Zone', field: 'deliveryBaseFee', unit: 'MAJOR_WHOLE' },
   { model: 'Zone', field: 'deliveryPerKm', unit: 'MAJOR_WHOLE' },
   // [ZONE-FARES] A zone's own taxi per-km rate: whole units of the market's

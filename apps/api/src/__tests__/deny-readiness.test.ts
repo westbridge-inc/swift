@@ -24,6 +24,7 @@ export const DENY_UNREADY_GETS: readonly string[] = [];
 let app: FastifyInstance;
 const routes: RouteOptions[] = [];
 const priorPolicy = process.env['TENANT_UNSCOPED_ACCESS'];
+const priorRunWorkers = process.env['RUN_WORKERS'];
 
 // This file's fixture block (+5920863nnn): the one signed-in customer below.
 const PHONE_PREFIX = '+5920863';
@@ -35,6 +36,10 @@ let priorRailFlag: { value: unknown } | null = null;
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
   process.env['TENANT_UNSCOPED_ACCESS'] = 'deny';
+  // This suite needs the real queue producers/routes but never consumers.
+  // Letting buildApp boot workers schedules repeatables that app.close() does
+  // not own, leaking them into whichever test runs next on this Redis target.
+  process.env['RUN_WORKERS'] = '0';
   app = await buildApp({ onRoute: (r) => { routes.push(r); } });
   await app.ready();
   // [Q12-B] The category rail is ON for the whole census, stated here: with
@@ -83,6 +88,7 @@ afterAll(async () => {
   resetDiscoveryCacheForTests();
   if (priorPolicy === undefined) delete process.env['TENANT_UNSCOPED_ACCESS']; else process.env['TENANT_UNSCOPED_ACCESS'] = priorPolicy;
   await app.close();
+  if (priorRunWorkers === undefined) delete process.env['RUN_WORKERS']; else process.env['RUN_WORKERS'] = priorRunWorkers;
 });
 
 const withDummyParams = (url: string) => url.replace(/:[a-zA-Z_]+\??/g, 'x').replace(/\*/g, 'x');

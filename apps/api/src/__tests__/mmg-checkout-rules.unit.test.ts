@@ -5,10 +5,13 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import { bindingOf, checkoutReplyFrom, judge, mmgCreationInstant, sameMsisdn, successAnswerOf, type PaymentHistory } from '../modules/billing/mmg-checkout.service';
 import {
   FEE_CHECKOUT_PLATFORMS_KEY,
+  FEE_CHECKOUT_REOPEN_PLATFORMS_KEY,
   checkoutAmountGyd,
+  checkoutAmountForWeeks,
   clientPlatform,
   feePayActions,
   mmgCheckoutLive,
+  mmgReopenSwitchedOn,
   resetFeeCheckoutSwitchCache,
 } from '../modules/billing/fee-pay-actions';
 import { FEE_RESTORE_LINE, feeCoveredLine, feeDueLine, guyanaDay, mmgPayLine } from '../modules/billing/fee-notice-copy';
@@ -425,6 +428,14 @@ describe('the amount a checkout charges [I1]', () => {
     expect(checkoutAmountGyd({ weeklyFeeGyd: 2100, amountDueGyd: 1049.01 })).toBe(1050);
     expect(checkoutAmountGyd({ weeklyFeeGyd: 2100, amountDueGyd: 0 })).toBe(2100);
   });
+
+  it('[owner 6 Nov] for more weeks: what the first week asks, plus a whole weekly fee for each week after it', () => {
+    expect(checkoutAmountForWeeks({ weeklyFeeGyd: 2100, amountDueGyd: 0 }, 1)).toBe(2100);
+    expect(checkoutAmountForWeeks({ weeklyFeeGyd: 2100, amountDueGyd: 0 }, 4)).toBe(8400);
+    expect(checkoutAmountForWeeks({ weeklyFeeGyd: 2100, amountDueGyd: 1049.5 }, 2)).toBe(3150);
+    expect(checkoutAmountForWeeks({ weeklyFeeGyd: 2100.5, amountDueGyd: 0 }, 3)).toBe(6302);
+    for (const w of [1, 2, 3, 4]) expect(checkoutAmountForWeeks({ weeklyFeeGyd: 2100, amountDueGyd: 2100 }, w)).toBe(2100 * w);
+  });
 });
 
 // -- payActions ------------------------------------------------------------------
@@ -525,14 +536,26 @@ describe('payActions — MMG_CHECKOUT is live only when it truly is, and off is 
     const prisma = {
       ...configWith(undefined),
       prepaidBalance: { findUnique: vi.fn(async () => ({ balance: new Prisma.Decimal(600) })) },
-      // [owner #62] A button is shown only when the payment fits one week ahead: the room is read too.
+      // [owner 6 Nov] A button, and each choice of weeks, is shown only when it fits the four-week limit: the room is read too.
       subscription: { findUnique: vi.fn(async () => ({ ...sub(), isTrialActive: false, trialEndDate: null })) },
       // [#1389] payInfo's due-now reads an issued charge first; none here.
       subscriptionPayment: { findFirst: vi.fn(async () => null) },
       tenantBillingCurrency: { findUnique: vi.fn(async () => null) },
     } as never;
+    // The week is due: GY$1,500 of it (GY$600 already received pays the rest), then a whole weekly fee for each week
+    // after it. All four choices fit the limit: the week due plus four weeks ahead.
     expect(await feePayActions(prisma, sub(), 'ios', liveProvider)).toEqual([
-      { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD' },
+      { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD', weekOptions: [
+        { weeks: 1, amountGyd: 1500 }, { weeks: 2, amountGyd: 3600 }, { weeks: 3, amountGyd: 5700 }, { weeks: 4, amountGyd: 7800 },
+      ] },
+      { id: 'CARD', state: 'off' },
+    ]);
+    // GY$8,000 already received: the week due is paid from it, and GY$2,500 is the most still taken (GY$8,400 + GY$2,100
+    // - GY$8,000). One more week fits; two would go past the limit, so they are not offered.
+    resetFeeCheckoutSwitchCache();
+    const held = { ...(prisma as object), prepaidBalance: { findUnique: vi.fn(async () => ({ balance: new Prisma.Decimal(8000) })) } } as never;
+    expect(await feePayActions(held, sub(), 'ios', liveProvider)).toEqual([
+      { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: [{ weeks: 1, amountGyd: 2100 }] },
       { id: 'CARD', state: 'off' },
     ]);
     resetFeeCheckoutSwitchCache();
@@ -586,5 +609,50 @@ describe('the census: no fee-notice source offers an agent, cash, a Swift Number
       .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
       .join('\n');
     expect(code.match(PARTNER_OFFER)?.[0] ?? null).toBeNull();
+  });
+});
+
+
+describe('[MMG reopen · review F2] the reopen switch is its own, and OFF unless switched on', () => {
+  beforeEach(() => resetFeeCheckoutSwitchCache());
+  const reopenRow = (value: unknown): Pick<PrismaClient, 'platformConfig'> => ({ platformConfig: { findUnique: vi.fn(async ({ where }: { where: { key: string } }) => (
+    where.key === FEE_CHECKOUT_REOPEN_PLATFORMS_KEY && value !== undefined ? { key: where.key, value } : null)) } } as unknown as Pick<PrismaClient, 'platformConfig'>);
+
+  it('is off on every platform with no row, and with the Pay switch row alone', async () => {
+    for (const platform of ['ios', 'android', 'web', 'unknown'] as const) {
+      resetFeeCheckoutSwitchCache();
+      expect(await mmgReopenSwitchedOn(reopenRow(undefined), platform), platform).toBe(false);
+    }
+    expect(FEE_CHECKOUT_REOPEN_PLATFORMS_KEY).not.toBe(FEE_CHECKOUT_PLATFORMS_KEY);
+  });
+
+  it('turns a platform on only for the JSON boolean true; a missing platform is off; unknown needs all three', async () => {
+    const cases: Array<[unknown, Record<'ios' | 'android' | 'web' | 'unknown', boolean>]> = [
+      [{ ios: true, android: true, web: true }, { ios: true, android: true, web: true, unknown: true }],
+      [{ web: true }, { ios: false, android: false, web: true, unknown: false }],
+      [{ ios: 'true', android: 1, web: true }, { ios: false, android: false, web: true, unknown: false }],
+      [{ ios: false, android: true, web: true }, { ios: false, android: true, web: true, unknown: false }],
+      [true, { ios: false, android: false, web: false, unknown: false }],
+      ['on', { ios: false, android: false, web: false, unknown: false }],
+      [[true, true, true], { ios: false, android: false, web: false, unknown: false }],
+    ];
+    for (const [value, expected] of cases) {
+      for (const platform of ['ios', 'android', 'web', 'unknown'] as const) {
+        resetFeeCheckoutSwitchCache();
+        expect(await mmgReopenSwitchedOn(reopenRow(value), platform), `${JSON.stringify(value)} ${platform}`).toBe(expected[platform]);
+      }
+    }
+  });
+
+  it('is documented as OFF when missing and can be written through the admin config route', () => {
+    const contract = readFileSync(join(__dirname, '..', 'modules/billing/MMG-CHECKOUT-API.md'), 'utf8');
+    expect(contract).toContain(`\`${FEE_CHECKOUT_REOPEN_PLATFORMS_KEY}\``);
+    expect(contract).toContain('A missing row, or a missing platform in it, is **off**.');
+    // [review F1] The contract never claims the start route is what Back calls.
+    expect(contract).not.toContain('The button calls the existing start route');
+    const routes = readFileSync(join(__dirname, '..', 'modules/admin/admin.routes.ts'), 'utf8');
+    const literal = routes.match(/const configKeySchema = z\.string\(\)\.regex\(\/(.+?)\/([a-z]*),/);
+    expect(literal, 'configKeySchema is still a single regex').not.toBeNull();
+    expect(new RegExp(literal![1]!, literal![2]).test(FEE_CHECKOUT_REOPEN_PLATFORMS_KEY)).toBe(true);
   });
 });

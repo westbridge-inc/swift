@@ -101,7 +101,7 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
   const POLICY_TO_REGISTER: ReadonlyArray<readonly [string, string, RegExp]> = [
     ['DigitalOcean', 'HOSTING', /^DigitalOcean\b/], ['DigitalOcean', 'OBJECT_STORE', /^DigitalOcean Spaces\b/],
     ['Cloudflare', 'CLOUDFLARE', /^Cloudflare\b/], ['Twilio', 'TWILIO', /^Twilio\b/], ['Expo', 'EXPO_PUSH', /^Expo\b/],
-    ['GoDaddy', 'SMTP_EMAIL', /^GoDaddy\b/], ['MMG', 'MMG', /^Mobile Money Guyana\b/],
+    ['GoDaddy', 'SMTP_EMAIL', /^GoDaddy\b/], ['Resend', 'RESEND_EMAIL', /^Resend\b/], ['MMG', 'MMG', /^Mobile Money Guyana\b/],
     ['Google Places', 'GOOGLE_PLACES', /^Google LLC \(Places API/], ['MapTiler', 'MAPTILER', /^MapTiler\b/],
   ];
   it('every processor the Privacy Policy names has a register row or a declared no-egress reason', () => {
@@ -122,6 +122,20 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
     expect(processorsParagraph).not.toMatch(/Distance Matrix/);
   });
 
+  // [EMAIL-HTTPS 27 Oct] Swift's emails leave over HTTPS through Resend: its host resolves to its own row, which
+  // carries what an email is (the address and the message), that it leaves Guyana, and on what basis.
+  it('Resend: api.resend.com resolves to the RESEND_EMAIL row (contact data, leaves the country, contract clauses); a look-alike does not', () => {
+    expect(coverageOfHost('api.resend.com')).toEqual({ kind: 'PROCESSOR', ref: 'RESEND_EMAIL' });
+    expect(coverageOfHost('notresend.com')).toBeNull();
+    const row = processorByRef('RESEND_EMAIL')!;
+    expect(row.providerDirs).toEqual(['notifications']);
+    expect(row.payload).toEqual(['CONTACT']);
+    expect(row.modelBacked).toBe(false);
+    expect(row).toMatchObject({ leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null });
+    expect(row.country).toMatch(/^US\b/);
+    expect(processorsParagraph).toMatch(/Resend \(delivers our emails — your email address, if you gave one, and the email itself; it sends them from Brazil and keeps its records in the United States\)/);
+  });
+
   it('Google: address search from Swift\'s servers is the live row; the routing adapter is not used at launch', () => {
     expect(coverageOfProviderDir('places')).toEqual({ kind: 'PROCESSOR', refs: ['GOOGLE_PLACES', 'OSM_PLACES'] });
     expect(coverageOfHost('places.googleapis.com')).toEqual({ kind: 'PROCESSOR', ref: 'GOOGLE_PLACES' });
@@ -140,9 +154,12 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
     expect(coverageOfHost('notmymmg.gy')).toBeNull();
   });
 
-  it('the live verification path calls the gate at both send sites (doc submission and the L1→L2 identity check)', () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change] the L1→L2 customer-ID check is removed with
+  // the customer ID, so document submission is the one send site left, and it still calls the gate.
+  it('the live verification path calls the gate at its send site (document submission; the customer-ID check is gone)', () => {
     const svc = readFileSync(join(SRC, 'modules/verification/verification.service.ts'), 'utf8');
-    expect(svc.match(/assertExternalProcessingPermitted\(/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(svc.match(/assertExternalProcessingPermitted\(/g)?.length ?? 0).toBeGreaterThanOrEqual(1);
+    expect(svc).not.toMatch(/async submitIdentity\(/);
     for (const call of svc.matchAll(/assertExternalProcessingPermitted\([^\n]*/g)) expect(call[0]).toMatch(/this\.kyc\.engine/);
   });
 });

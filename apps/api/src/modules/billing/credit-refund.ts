@@ -6,7 +6,7 @@ import { lockMoverFeeAuthority, lockSubscriptionPayer } from '../subscription/mo
 import { z } from '../../lib/zod';
 import { isSoleApprover } from '../admin/solo-approval';
 import { normaliseReference } from '../money/evidence';
-import { postLedger, refundPaidPostings, refundReleasePostings, refundSetAsidePostings } from './ledger';
+import { postLedger, refundPaidPostings, refundReleasePostings, refundSetAsidePostings, type RefundMethod } from './ledger';
 import { feeReversalOpenInTx } from './dunning-clock';
 import { feeReturnMayStillLandInTx, referenceOnRecord } from './mmg-fee-reversal';
 import { formatGuyanaTime } from '../../utils/guyana-day';
@@ -21,7 +21,8 @@ import { recordSetAsideReleasedInTx, recordWalletDebitInTx } from './fee-receipt
 //      REFUND_PAYABLE. Billing can no longer spend it and a later top-up is new
 //      credit, so nothing that happens next can change what is owed back.
 //      Nothing is paid before this step has happened.
-//   2. PAY, outside Swift.
+//   2. PAY, outside Swift. [OWNER 5 Nov 2026] Money paid in person goes back the
+//      same way the partner agrees: MMG, bank transfer, cheque or cash.
 //   3. RECORD THE PAYOUT (two admins). The set-aside amount and the transfer
 //      reference. One transfer reference records one refund across every
 //      account (the event key is the reference alone, under a unique index),
@@ -36,7 +37,7 @@ import { recordSetAsideReleasedInTx, recordWalletDebitInTx } from './fee-receipt
 // ---------------------------------------------------------------------------
 
 type Db = PrismaClient | Prisma.TransactionClient;
-export type RefundMethod = 'MMG' | 'BANK_TRANSFER';
+export type { RefundMethod };
 
 const SET_ASIDE_KEY = 'credit-refund-reserve:';
 const PAID_KEY = 'credit-refund-paid:';
@@ -245,10 +246,10 @@ export const REFUND_AMOUNT = z.number().positive().max(9_999_999_999.99)
   .refine((n) => new Prisma.Decimal(n).decimalPlaces() <= 2, 'At most two decimal places');
 export const REFUND_SET_ASIDE_ID = z.string().min(1, 'Name the set-aside this step is for.').max(64);
 /** The payout record's body: one schema for the approval gate's ask check and the route. */
-export const PAID_REFUND_BODY = z.object({ amount: REFUND_AMOUNT, method: z.enum(['MMG', 'BANK_TRANSFER']), reference: z.string().max(200), setAsideId: REFUND_SET_ASIDE_ID });
+export const PAID_REFUND_BODY = z.object({ amount: REFUND_AMOUNT, method: z.enum(['MMG', 'BANK_TRANSFER', 'CHEQUE', 'CASH']), reference: z.string().max(200), setAsideId: REFUND_SET_ASIDE_ID });
 export const refundReferenceOf = (raw: unknown) => normaliseReference(raw, {
-  required: 'Enter the MMG or bank reference of the refund you paid. It is the only proof the money went back.',
-  invalid: 'That does not look like a transfer reference. Copy it from the MMG or bank record.',
+  required: 'Enter the MMG or bank reference, cheque number or receipt number of the refund you paid. It is the only proof the money went back.',
+  invalid: 'That does not look like a reference. Copy it from the MMG or bank record, the cheque, or the receipt the partner signed.',
 }, 'REFUND_REFERENCE');
 
 const REFERENCE_REUSED = 'This transfer reference already recorded a refund. One transfer pays one refund: check the reference.';

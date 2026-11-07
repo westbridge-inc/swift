@@ -2,8 +2,8 @@ import {
   Activity, FileCheck2, Stamp, Flag, LifeBuoy, PackageOpen, ShieldAlert,
   Users, Store, Bike, Car, ShoppingCart,
   RefreshCw, DollarSign, Receipt, Banknote, Tag, ShieldCheck,
-  Radar, Headphones, Scale, ListRestart, Megaphone,
-  FileText, Globe, Map, Settings, Compass, Fingerprint, Megaphone as AdsIcon,
+  Radar, Headphones, Scale, ListRestart, Megaphone, BellRing, Siren,
+  FileText, Globe, Map, Settings, Compass, Fingerprint, Megaphone as AdsIcon, Truck,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -27,6 +27,9 @@ export interface NavItem {
   blurb: string;
   /** Extra words the ⌘K "Go to" search matches. */
   keywords?: string;
+  /** [ADMIN-AUDIT S3-2] The page's own read is a founder control (the API's platformControlGuard: SUPER_ADMIN of
+   *  the default tenant). It is not listed for any other admin, who would only be refused there. */
+  founderOnly?: true;
 }
 
 export interface NavGroup {
@@ -45,6 +48,8 @@ export const NAV_GROUPS: NavGroup[] = [
     title: 'Queues',
     items: [
       { label: 'Documents', href: '/verification', icon: FileCheck2, blurb: 'Review each document and decide it', keywords: 'verification review center kyc id licence' },
+      // [STORE-VAT · owner O-5] A store's VAT shows only after a person checked its GRA VAT certificate here.
+      { label: 'Store VAT', href: '/store-vat', icon: Receipt, blurb: 'Stores waiting for a person to check their GRA VAT certificate', keywords: 'vat gra tax certificate registration' },
       // [ADM-005] A pending row means a colleague asked for something and it has not happened yet.
       { label: 'Approvals', href: '/approvals', icon: Stamp, blurb: 'Money and platform actions waiting for a second admin', keywords: 'second signature two person' },
       { label: 'Moderation', href: '/moderation', icon: Flag, blurb: 'Reports about reviews, messages, people and stores', keywords: 'reports abuse' },
@@ -52,7 +57,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Catalogue check', href: '/catalogue-check', icon: ShieldAlert, blurb: 'Items a banned word holds hidden until a person checks them', keywords: 'banned prohibited items hidden held' },
       { label: 'Custody cases', href: '/custody', icon: LifeBuoy, blurb: 'Goods a rider is holding that must be returned or handed over', keywords: 'recovery relay return' },
       { label: 'Returns', href: '/returns', icon: PackageOpen, blurb: 'Customer returns and refunds owed', keywords: 'refund' },
-      { label: 'Claims', href: '/claims', icon: ShieldAlert, blurb: 'Reimbursement claims to decide and pay', keywords: 'guarantee reimbursement' },
+      { label: 'MMG refunds', href: '/mmg-refunds', icon: PackageOpen, blurb: 'What stores owe customers back by MMG', keywords: 'refund mmg overdue' },
+      { label: 'Unpaid cash orders', href: '/claims', icon: Banknote, blurb: 'To decide and pay', keywords: 'claims reimbursement cash' },
     ],
   },
   {
@@ -73,16 +79,22 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'MMG payments', href: '/mmg-payments', icon: Receipt, blurb: 'Find a weekly-fee payment by any reference', keywords: 'checkout mobile money' },
       { label: 'Payment confirmations', href: '/payment-confirmations', icon: ShieldCheck, blurb: 'Weekly-fee payments waiting for a PAID or NOT PAID decision', keywords: 'mmg confirmation hold weekly fee review' },
       { label: 'Received agent cash', href: '/cash', icon: Banknote, blurb: 'Attach or refund cash already received', keywords: 'agent san collections' },
-      { label: 'Promos', href: '/promos', icon: Tag, blurb: 'Discount codes', keywords: 'discounts codes' },
+      { label: 'Promos', href: '/promos', icon: Tag, blurb: 'Discount codes', keywords: 'discounts codes', founderOnly: true },
     ],
   },
   {
     title: 'Operations',
     items: [
       { label: 'Live Ops', href: '/ops', icon: Radar, blurb: 'Movers and orders on the road now', keywords: 'live map dispatch' },
+      // [RIDER-SAFE 5/6] When riders run short: free riders vs waiting orders, Swift's delivery pause, late orders.
+      { label: 'Delivery', href: '/delivery', icon: Truck, blurb: 'Riders vs waiting orders, the delivery pause, and late orders', keywords: 'riders short pause sla late backlog' },
+      // [SAFETY BOARD] Who asked for help and where; the cases, and the only lift for a safety suspension.
+      { label: 'Safety', href: '/safety', icon: Siren, blurb: 'Open SOS alerts and safety cases', keywords: 'sos emergency incident case suspended lift interim war room' },
+      // [DRILL-STORM] An SOS or ops page keeps re-paging until a person acknowledges it here.
+      { label: 'Ops alerts', href: '/ops-alerts', icon: BellRing, blurb: 'SOS and operations pages waiting for a person to acknowledge them', keywords: 'sos page acknowledge drill on-call escalation paging' },
       { label: 'Support', href: '/support', icon: Headphones, blurb: 'Help tickets from customers and partners', keywords: 'tickets help' },
       { label: 'Compliance', href: '/compliance', icon: Scale, blurb: 'Movers taken offline for lapsed documents or cover', keywords: 'liability insurance' },
-      { label: 'Background jobs', href: '/jobs', icon: ListRestart, blurb: 'Jobs that failed and can be retried', keywords: 'queues dlq workers' },
+      { label: 'Background jobs', href: '/jobs', icon: ListRestart, blurb: 'Jobs that failed and can be retried', keywords: 'queues dlq workers', founderOnly: true },
       { label: 'Broadcast', href: '/broadcast', icon: Megaphone, blurb: 'Send one message to everyone', keywords: 'announcement notification' },
     ],
   },
@@ -91,16 +103,26 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { label: 'Audit log', href: '/audit', icon: FileText, blurb: 'Who did what, and why', keywords: 'history trail' },
       { label: 'Markets', href: '/markets', icon: Globe, blurb: 'Countries Swift runs in', keywords: 'countries' },
-      { label: 'Zones', href: '/zones', icon: Map, blurb: 'Delivery zones and fares', keywords: 'fares areas' },
-      { label: 'Config', href: '/config', icon: Settings, blurb: 'Platform settings', keywords: 'settings' },
+      { label: 'Zones', href: '/zones', icon: Map, blurb: 'Delivery zones and fares', keywords: 'fares areas', founderOnly: true },
+      { label: 'Config', href: '/config', icon: Settings, blurb: 'Platform settings', keywords: 'settings', founderOnly: true },
       { label: 'Discovery', href: '/discovery', icon: Compass, blurb: 'Categories customers browse by', keywords: 'categories tags' },
-      { label: 'Integrity', href: '/integrity', icon: Fingerprint, blurb: 'The detection algorithms\' decision log, for review', keywords: 'fraud identity trial algorithm detection' },
+      { label: 'Integrity', href: '/integrity', icon: Fingerprint, blurb: 'The detection algorithms\' decision log, for review', keywords: 'fraud identity trial algorithm detection', founderOnly: true },
       { label: 'Ads review', href: '/ads', icon: AdsIcon, blurb: 'Advertisers and creatives (ads are off at launch)', keywords: 'advertising' },
     ],
   },
 ];
 
 export const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
+
+/** [ADMIN-AUDIT S3-2] What this role is shown: a founder page only to a SUPER_ADMIN (and nothing founder-only while
+ *  the role is still being checked). The server refuses the rest either way; this only stops offering them. */
+export function navGroupsFor(role: string | null | undefined): NavGroup[] {
+  return NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((item) => !item.founderOnly || role === 'SUPER_ADMIN') }))
+    .filter((g) => g.items.length > 0);
+}
+export function navItemsFor(role: string | null | undefined): NavItem[] {
+  return navGroupsFor(role).flatMap((g) => g.items);
+}
 
 /** The section a path belongs to (the longest matching href). */
 export function navItemFor(pathname: string): NavItem | null {

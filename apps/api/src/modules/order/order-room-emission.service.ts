@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { resolveRoomAuthority } from '../chat/chat-authority';
 import { cancelledWhileHeld } from './hold-visibility';
 import { storeTeam } from '../notification/store-team';
+import { withVehiclePhotosScanned } from '../../lib/photo-scan-filter';
 
 type Audience = { tenantId: string; users: Set<string>; senderAllowed?: boolean; publisherAllowed?: boolean };
 
@@ -80,7 +81,16 @@ export async function emitToOrderRoom(
     const publisherAllowed = !mover
       || ('riderId' in mover ? order.rider?.id === mover.riderId : order.driver?.id === mover.driverId);
     return { tenantId: order.tenantId, users, publisherAllowed };
-  }, event, payload);
+  }, event, await scannedForOrderRoom(db, payload));
+}
+
+/** [Row 312 · COORD 23 Oct] An order-room event (the customer's ride and delivery cards) carries no photo
+ *  stored under the bypass before its clean rescan (lib/photo-scan-filter.ts). A db without the debt
+ *  table cannot tell: every photo in the payload is withheld (fail closed). */
+async function scannedForOrderRoom(db: object, payload: unknown): Promise<unknown> {
+  // Read lazily: the debt table is touched only when the payload carries a photo field.
+  const lazy = { get uploadScanDebt() { return (db as Partial<Pick<PrismaClient, 'uploadScanDebt'>>).uploadScanDebt ?? ({} as PrismaClient['uploadScanDebt']); } };
+  return withVehiclePhotosScanned(lazy, payload);
 }
 
 /** Chat messages and typing share the order/job authority used by HTTP reads. */

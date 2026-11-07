@@ -1,11 +1,12 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { generateKeyPair, randomBytes, type KeyObject } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { nanoid } from 'nanoid';
-import type { SubscriptionStatus, UserRole } from '@prisma/client';
+import type { Prisma, PrismaClient, SubscriptionStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -14,14 +15,17 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { rateLimitKey } from '../utils/rate-limit-key';
+import { asFastifyTrustProxy } from '../config/trust-proxy';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
+import { providerFeeRoutes } from '../modules/services/provider-fee.routes';
 import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MmgCheckoutService } from '../modules/billing/mmg-checkout.service';
-import { readDunningClock } from '../modules/billing/dunning-clock';
+import { readReopenableMmgCheckout } from '../modules/billing/mmg-checkout-reopen';
+import { readDunningClock, resolveConfirmationInTx } from '../modules/billing/dunning-clock';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import {
   MMG_CHECKOUT_NOTIFY_BODY_LIMIT,
@@ -114,6 +118,7 @@ const echoOf = (row: { merchantTransactionId: string }): Partial<Found> => ({ ec
 
 const userIds: string[] = [];
 const vendorIds: string[] = [];
+const providerIds: string[] = [];
 const subIds: string[] = [];
 const tenantIds: string[] = [];
 let seq = 0;
@@ -214,6 +219,40 @@ async function makeDriver(opts: SubOpts = {}) {
   });
   return mappedUnless({ ...actor, subId, family: 'driver' as const }, opts);
 }
+/** [BILL-PRO PR4 · REVIEW-M #2230 S4-3] An independent pro (a person with a provider profile) and their own
+ *  INDEPENDENT_PRO weekly fee, paid through /api/v1/provider. `coveredBy: 'store'` also gives the same person a live
+ *  Services store fee (one fee, owner B1). */
+async function makePro(opts: SubOpts & { coveredBy?: 'store' } = {}) {
+  const actor = await makeUser(['CUSTOMER'], 'CUSTOMER', opts.tenantId);
+  const subId = await inTenant(opts.tenantId, async () => {
+    const pro = await app.prisma.serviceProvider.create({ data: { userId: actor.userId, trade: 'tutor', isVerified: true } });
+    providerIds.push(pro.id);
+    const sub = await app.prisma.subscription.create({
+      data: { serviceProviderId: pro.id, type: 'INDEPENDENT_PRO', status: opts.status ?? 'ACTIVE', weeklyRate: 2100, ...period(opts), prepaidBalance: { create: { balance: opts.balance ?? 0 } } },
+    });
+    subIds.push(sub.id);
+    return sub.id;
+  });
+  if (opts.coveredBy === 'store') await servicesStoreFeeFor(actor.userId, opts.tenantId);
+  return mappedUnless({ ...actor, subId, family: 'provider' as const }, opts);
+}
+/** A live Services store fee owned by `userId` (it covers their pro fee: one fee). */
+async function servicesStoreFeeFor(userId: string, tenantId?: string) {
+  return inTenant(tenantId, async () => {
+    const ownerRow = await app.prisma.vendorOwner.upsert({ where: { userId }, create: { userId }, update: {} });
+    const vendor = await app.prisma.vendor.create({
+      data: {
+        ownerId: ownerRow.id, name: `Pay Services ${seq}`, slug: `pay-services-${nanoid(6).toLowerCase()}`,
+        vendorType: 'SERVICE', phone: `+${phoneBase + 7000 + seq}`, addressLine1: '1 Pay Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+        latitude: 6.8, longitude: -58.15, status: 'ACTIVE', isVerified: true, ...(tenantId ? { tenantId } : {}),
+      },
+    });
+    vendorIds.push(vendor.id);
+    const sub = await app.prisma.subscription.create({ data: { vendorId: vendor.id, type: 'SERVICE_PROVIDER', status: 'ACTIVE', weeklyRate: 8000, ...period({}) } });
+    subIds.push(sub.id);
+    return sub.id;
+  });
+}
 /** A tenant of another kind. REVIEW is the store-review demo: its requests pass the review gate only while a
  *  review session is live, as review:provision creates one. */
 async function makeTenant(kind: 'REVIEW' | 'CRAWLER') {
@@ -226,7 +265,7 @@ async function makeTenant(kind: 'REVIEW' | 'CRAWLER') {
 /** A request (or read) in its own tenant context. Fastify's inject runs the auth hook in the caller's context,
  *  so without this a request's tenant would carry over to whatever the test creates next. */
 const isolated = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'mmgpr3-test-isolation');
-type Partner = { token: string; userId: string; subId: string; family: 'vendor' | 'rider' | 'driver'; vendorId?: string };
+type Partner = { token: string; userId: string; subId: string; family: 'vendor' | 'rider' | 'driver' | 'provider'; vendorId?: string };
 
 const headersOf = (p: Partner, extra: Record<string, string> = {}) => ({
   authorization: `Bearer ${p.token}`, 'x-client-platform': 'ios', ...(p.vendorId ? { 'x-vendor-id': p.vendorId } : {}), ...extra,
@@ -237,6 +276,16 @@ const start = (p: Partner, extra: Record<string, string> = {}, target = app) =>
   target.inject({ method: 'POST', url: `/api/v1/${p.family}/subscription/mmg-checkout`, headers: { 'content-type': 'application/json', 'idempotency-key': key(), ...headersOf(p, extra) }, payload: {} });
 const follow = (p: Partner, ref: string, target = app) =>
   target.inject({ method: 'GET', url: `/api/v1/${p.family}/subscription/mmg-checkout/${ref}`, headers: headersOf(p) });
+/** [MMG reopen] The Back button's own request: it names the ONE checkout it may hand back. */
+const reopenTap = (p: Partner, ref: string, extra: Record<string, string> = {}, target = app) =>
+  target.inject({ method: 'POST', url: `/api/v1/${p.family}/subscription/mmg-checkout/${ref}/reopen`, headers: { 'content-type': 'application/json', 'idempotency-key': key(), ...headersOf(p, extra) }, payload: {} });
+/** [MMG reopen · F2] The reopen switch's platform-config key (written as text: a missing row is OFF). */
+const REOPEN_SWITCH = 'billing.feeCheckout.reopen.platforms';
+const reopenSwitch = async (value: unknown) => {
+  if (value === null) await app.prisma.platformConfig.deleteMany({ where: { key: REOPEN_SWITCH } });
+  else await app.prisma.platformConfig.upsert({ where: { key: REOPEN_SWITCH }, create: { key: REOPEN_SWITCH, value: value as never }, update: { value: value as never } });
+  resetFeeCheckoutSwitchCache();
+};
 const ret = (outcome: unknown, params: unknown, target = app) =>
   target.inject({ method: 'POST', url: RETURN_URL, headers: { 'content-type': 'application/json' }, payload: { outcome, params } });
 const notify = (payload: string | Record<string, unknown>, contentType = 'application/json', target = app) =>
@@ -264,8 +313,8 @@ const toldOf = (userId: string, status: string) => app.prisma.notification.findM
 const alertsOf = (alert: string) => app.prisma.notification.findMany({ where: { userId: superAdminId, data: { path: ['alert'], equals: alert } }, orderBy: { createdAt: 'asc' } });
 const observationsOf = (intentId: string) => app.prisma.mmgCheckoutObservation.findMany({ where: { intentId }, orderBy: { createdAt: 'asc' } });
 
-async function buildApp(): Promise<FastifyInstance> {
-  const server = Fastify({ logger: false });
+async function buildApp(options: { trustProxy?: ReturnType<typeof asFastifyTrustProxy> } = {}): Promise<FastifyInstance> {
+  const server = Fastify({ logger: false, ...options });
   registerErrorHandler(server);
   registerEmptyJsonBodyParser(server);
   await server.register(rateLimit, { max: 1000, timeWindow: '1 minute', keyGenerator: rateLimitKey((token) => server.jwt.verify(token)) });
@@ -281,6 +330,7 @@ async function buildApp(): Promise<FastifyInstance> {
   await server.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await server.register(riderRoutes, { prefix: '/api/v1/rider' });
   await server.register(driverRoutes, { prefix: '/api/v1/driver' });
+  await server.register(providerFeeRoutes, { prefix: '/api/v1/provider' });
   await server.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
   await server.ready();
   return server;
@@ -326,11 +376,13 @@ afterAll(async () => {
   await isolated(async () => {
     // [#1393] The shared confirmation clock's evidence (holds, notices, transitions, clocks) names the checkouts: it goes first.
     await cleanupBillingClocks(app.prisma, subIds);
+    // A fee return names its checkout (onDelete: Restrict): the 'main pauses' case's return goes before the checkouts.
+    await app.prisma.mmgFeeReversal.deleteMany({ where: { subscriptionId: { in: subIds } } });
     const intents = await app.prisma.mmgCheckoutIntent.findMany({ where: { subscriptionId: { in: subIds } }, select: { id: true } });
     await app.prisma.mmgCheckoutObservation.deleteMany({ where: { OR: [{ intentId: { in: intents.map((i) => i.id) } }, { intentId: null, createdAt: { gte: startedAt } }] } });
     await app.prisma.mmgCheckoutIntent.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.providerPayment.deleteMany({ where: { OR: [{ subscriptionId: { in: subIds } }, { providerTxnId: { endsWith: RUN } }] } });
-    await app.prisma.platformConfig.deleteMany({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } });
+    await app.prisma.platformConfig.deleteMany({ where: { key: { in: [FEE_CHECKOUT_PLATFORMS_KEY, REOPEN_SWITCH] } } });
     await app.prisma.feeReceipt.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.topUpCommand.deleteMany({ where: { subscriptionId: { in: subIds } } });
     await app.prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
@@ -346,6 +398,7 @@ afterAll(async () => {
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
+    await app.prisma.serviceProvider.deleteMany({ where: { id: { in: providerIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -398,17 +451,38 @@ describe('behind the flag: MMG_CHECKOUT_ENABLED unset (the default)', () => {
 describe('live: payActions per the contract (section 3)', () => {
   beforeEach(() => enable(true));
 
-  it('MMG_CHECKOUT is live with the amount due; once the coming week is paid there is no button (one week at a time, owner #62); CARD stays off', async () => {
+  it('MMG_CHECKOUT is live with the amount due and a choice of 1-4 weeks that fit; once four weeks are paid there is no button (owner 6 Nov); CARD stays off', async () => {
     const owing = await makeStore({ balance: 600 });
-    expect((await subscriptionOf(owing)).json().data.payActions).toEqual([{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD' }, { id: 'CARD', state: 'off' }]);
-    const paidUp = await makeStore({ balance: 2100 });
+    expect((await subscriptionOf(owing)).json().data.payActions).toEqual([{ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD', weekOptions: [{ weeks: 1, amountGyd: 1500 }, { weeks: 2, amountGyd: 3600 }, { weeks: 3, amountGyd: 5700 }, { weeks: 4, amountGyd: 7800 }] }, { id: 'CARD', state: 'off' }]);
+    // Two weeks held: two more fit, never a third.
+    const twoHeld = await makeStore({ balance: 4200 });
+    expect((await subscriptionOf(twoHeld)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: [{ weeks: 1, amountGyd: 2100 }, { weeks: 2, amountGyd: 4200 }] });
+    const paidUp = await makeStore({ balance: 4 * 2100 });
     expect((await subscriptionOf(paidUp)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
     const fresh = await makeStore();
-    expect((await subscriptionOf(fresh)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' });
+    expect((await subscriptionOf(fresh)).json().data.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: [{ weeks: 1, amountGyd: 2100 }, { weeks: 2, amountGyd: 4200 }, { weeks: 3, amountGyd: 6300 }, { weeks: 4, amountGyd: 8400 }] });
     const rider = await makeRider({ balance: 1000 });
     expect((await subscriptionOf(rider)).json().data.payActions[0]).toMatchObject({ state: 'live', amountGyd: 5000 });
     const driver = await makeDriver();
     expect((await subscriptionOf(driver)).json().data.payActions[0]).toMatchObject({ state: 'live', amountGyd: 8000 });
+  });
+
+  it('[owner 6 Nov] the start body may name 1-4 weeks: priced on the server, anything else refused before anything is opened', async () => {
+    const startWith = (p: Partner, payload: unknown) => app.inject({ method: 'POST', url: `/api/v1/${p.family}/subscription/mmg-checkout`, headers: { 'content-type': 'application/json', 'idempotency-key': key(), ...headersOf(p) }, payload: payload as Record<string, unknown> });
+    const bad = await makeStore();
+    for (const weeks of [0, 5, '4', 2.5, null]) {
+      const res = await startWith(bad, { weeks });
+      expect(res.statusCode, JSON.stringify(weeks)).toBe(400);
+      expect(res.json().error).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Choose how many weeks to pay: 1 to 4.' });
+    }
+    expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: bad.subId } })).toBe(0);
+    const four = await makeStore();
+    const res = await startWith(four, { weeks: 4 });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data).toMatchObject({ amountGyd: 8400, currencyCode: 'GYD' });
+    // An older app sends no weeks: one week, as before.
+    const old = await makeStore();
+    expect((await start(old)).json().data).toMatchObject({ amountGyd: 2100 });
   });
 
   it('a PAUSED subscription and a waived fee are off (hidden, never teased)', async () => {
@@ -455,7 +529,7 @@ describe('live: payActions per the contract (section 3)', () => {
   });
 
   it('[#1393] never live while a weekly-fee payment is being confirmed, nor before the billing clock covers the subscription', async () => {
-    const LIVE = { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD' };
+    const LIVE = { id: 'MMG_CHECKOUT', state: 'live', amountGyd: 2100, currencyCode: 'GYD', weekOptions: expect.arrayContaining([{ weeks: 1, amountGyd: 2100 }]) };
     const MMG_OFF = { id: 'MMG_CHECKOUT', state: 'off' };
     const mmgOf = async (p: Partner) => (await subscriptionOf(p)).json().data.payActions[0];
 
@@ -493,6 +567,28 @@ describe('live: payActions per the contract (section 3)', () => {
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json().error.code).toBe('PAYMENT_CONFIRMING');
     expect(await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: q.subId } })).toBe(0);
+  });
+});
+
+describe('[owner 5 Nov 2026] while a fee paid in person waits to be recorded', () => {
+  beforeEach(() => enable(true));
+
+  it('the page says so and offers no second payment; when the ask ends, Pay comes back', async () => {
+    const owing = await makeStore({ balance: 600 });
+    const before = (await subscriptionOf(owing)).json().data;
+    expect(before.payActions[0]).toMatchObject({ id: 'MMG_CHECKOUT', state: 'live' });
+    const row = await app.prisma.privilegedApproval.create({ data: {
+      action: 'POST /subscriptions/:id/in-person-payment', cls: 'C4', capability: 'subscription.inperson', entityId: owing.subId,
+      fingerprint: nanoid(16), requestedBy: owing.userId, reason: 'Paid at the counter this morning', status: 'PENDING',
+      bodySnapshot: { params: { id: owing.subId }, body: { method: 'CASH', amount: 1500 }, query: {} }, expiresAt: new Date(Date.now() + 3_600_000),
+    } });
+    const waiting = (await subscriptionOf(owing)).json().data;
+    expect(waiting.inPerson).toEqual({ open: false, waitingGyd: 1500 });
+    expect(waiting.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    await app.prisma.privilegedApproval.delete({ where: { id: row.id } });
+    const after = (await subscriptionOf(owing)).json().data;
+    expect(after.inPerson.waitingGyd).toBeNull();
+    expect(after.payActions[0]).toMatchObject({ id: 'MMG_CHECKOUT', state: 'live' });
   });
 });
 
@@ -1133,5 +1229,485 @@ describe('the web return page contract', () => {
     // The page forwards at most 16 values of at most 4096 characters: the API's own caps.
     expect(src).toContain('value.length > 4096');
     expect(src).toContain('entries.length >= 16');
+  });
+});
+
+
+describe('[MMG reopen] the partner’s own open checkout', () => {
+  // [F2] Reopen has its own switch, OFF when missing: these cases run with it ON everywhere.
+  beforeEach(async () => { enable(true); await reopenSwitch({ ios: true, android: true, web: true }); });
+  afterEach(() => reopenSwitch(null));
+
+  it.each(['vendor', 'rider', 'driver'] as const)('%s relaunch and two devices reopen the SAME checkout with one hold', async (family) => {
+    const p = await (family === 'vendor' ? makeStore() : family === 'rider' ? makeRider() : makeDriver());
+    const first = await started(p);
+    const payload = (await subscriptionOf(p)).json().data;
+    expect(payload.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    expect(payload.reopenableMmgCheckout).toEqual({ ref: first.ref, expiresAt: first.row.expiresAt.toISOString() });
+    expect(Object.keys(payload.reopenableMmgCheckout).sort()).toEqual(['expiresAt', 'ref']);
+    const replies = await Promise.all([isolated(() => start(p)), isolated(() => start(p))]);
+    for (const reply of replies) {
+      expect(reply.statusCode, reply.body).toBe(200);
+      expect(reply.json().data).toMatchObject({ ref: first.ref, status: 'OPEN', checkoutUrl: first.checkoutUrl });
+    }
+    expect(await isolated(() => app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } }))).toBe(1);
+    expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId } }))).toBe(1);
+    expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE', checkoutId: first.ref } }))).toBe(1);
+    const other = await makeStore();
+    expect((await subscriptionOf(other)).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await follow(other, first.ref)).statusCode).toBe(404);
+  });
+
+  it.each(['CONFIRMING', 'HELD', 'EXPIRED', 'NOT_PAID', 'CONFIRMED'] as const)('never reopens %s', async (status) => {
+    const p = await makeStore(); const first = await started(p);
+    if (status === 'CONFIRMED') {
+      const txn = tx('REOPENPAID'); approved(first.row, txn, 2100);
+      expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+    } else await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('does not reopen a timed-out OPEN or an older checkout', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { expiresAt: new Date() } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { expiresAt: new Date(Date.now() + 60_000) } });
+    await app.prisma.mmgCheckoutIntent.create({ data: { ...first.row, id: nanoid(), merchantTransactionId: first.row.merchantTransactionId.slice(0, 9) + '999999999', status: 'NOT_PAID', createdAt: new Date(Date.now() + 1000) } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('requires the sole ACTIVE hold on the current clock and epoch', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const hold = await app.prisma.paymentConfirmationHold.findFirstOrThrow({ where: { checkoutId: first.ref } });
+    for (const data of [{ status: 'SETTLEMENT_APPLY_PENDING' as const }]) {
+      await app.prisma.paymentConfirmationHold.update({ where: { id: hold.id }, data });
+      expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+      await app.prisma.paymentConfirmationHold.update({ where: { id: hold.id }, data: { status: 'ACTIVE', sourceEpoch: hold.sourceEpoch } });
+    }
+    // The database refuses stale source epochs. Also fail closed on a stale or missing read.
+    for (const rows of [[{ ...hold, sourceEpoch: hold.sourceEpoch + 1 }], []]) {
+      const staleDb = { $transaction: (work: (tx: Prisma.TransactionClient) => Promise<unknown>) => app.prisma.$transaction((tx) => work(new Proxy(tx, {
+        get: (target, name) => name === 'paymentConfirmationHold' ? { findMany: async () => rows } : Reflect.get(target, name),
+      }))) } as unknown as PrismaClient;
+      expect(await readReopenableMmgCheckout(staleDb, p.subId, first.ref, new Date())).toBeNull();
+    }
+    await app.prisma.billingDunningClock.update({ where: { id: hold.clockId }, data: { authorityHoldReason: 'TEST_REVIEW' } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it.each(['PENDING', 'UNKNOWN'] as const)('a card %s blocks reopen even before its hold is discovered', async (status) => {
+    const p = await makeStore(); await started(p);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: p.subId, amount: 2100, paymentMethod: 'CARD', status, periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), clientKey: `cardpay:${nanoid()}` } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    await isolated(() => readDunningClock(app.prisma, p.subId));
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('another active confirmation hold blocks reopen', async () => {
+    const p = await makeStore(); await started(p);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: p.subId, amount: 2100, paymentMethod: 'CARD', status: 'UNKNOWN', periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY) } });
+    await isolated(() => readDunningClock(app.prisma, p.subId));
+    expect(await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: 'ACTIVE' } })).toBe(2);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+  });
+
+  it('respects the global and platform kill switches', async () => {
+    const p = await makeStore(); await started(p);
+    enable(false);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    enable(true);
+    await app.prisma.platformConfig.upsert({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY }, create: { key: FEE_CHECKOUT_PLATFORMS_KEY, value: { ios: false } }, update: { value: { ios: false } } });
+    resetFeeCheckoutSwitchCache();
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await subscriptionOf(p, { 'x-client-platform': 'web' })).json().data.reopenableMmgCheckout).toBeTruthy();
+    await app.prisma.platformConfig.delete({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY } }); resetFeeCheckoutSwitchCache();
+  });
+});
+
+
+describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN checkout', () => {
+  beforeEach(async () => { enable(true); await reopenSwitch({ ios: true, android: true, web: true }); });
+  afterEach(() => reopenSwitch(null));
+  const countsOf = (p: Partner) => isolated(async () => ({
+    checkouts: await app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } }),
+    holds: await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId } }),
+    activeHolds: await app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } }),
+    keys: await app.prisma.mmgCheckoutKey.count({ where: { intent: { subscriptionId: p.subId } } }),
+  }));
+
+  it('[F1] Back while OPEN hands back the SAME page (two devices at once): one checkout, one hold, 200 never 201', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const replies = await Promise.all([isolated(() => reopenTap(p, first.ref)), isolated(() => reopenTap(p, first.ref))]);
+    for (const reply of replies) {
+      expect(reply.statusCode, reply.body).toBe(200);
+      expect(reply.json().data).toMatchObject({ ref: first.ref, status: 'OPEN', checkoutUrl: first.checkoutUrl });
+    }
+    expect(await countsOf(p)).toEqual({ checkouts: 1, holds: 1, activeHolds: 1, keys: 3 });
+  });
+
+  it.each(['CONFIRMED', 'NOT_PAID'] as const)('[F1] a stale Back tap after MMG answered %s opens nothing: no new checkout, hold or key', async (outcome) => {
+    const p = await makeStore(); const first = await started(p);
+    // Another device (or this one before its refresh) still holds the grant it read while C1 was OPEN.
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
+    if (outcome === 'CONFIRMED') {
+      const txn = tx(`STALEBACK${seq}`); approved(first.row, txn, 2100);
+      expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+    } else {
+      expect((await ret('error', { token: officialReply(first.row, '6') })).json().data.state).toBe('NOT_PAID');
+    }
+    const before = await countsOf(p);
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: first.ref, status: outcome } });
+    expect(res.body).not.toContain('checkoutUrl');
+    expect(await countsOf(p)).toEqual(before);
+    expect(before.checkouts).toBe(1);
+  });
+
+  it('[F1] a Back tap past the deadline expires the page and opens nothing new', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: first.ref } });
+    expect(await countsOf(p)).toEqual({ checkouts: 1, holds: 1, activeHolds: 1, keys: 1 });
+    expect((await intentOf(first.ref)).status).toBe('EXPIRED');
+  });
+
+  it('[F1] Back names only its own subscription’s latest checkout: another partner’s ref is 404, an older one is refused', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const other = await makeStore();
+    const foreign = await reopenTap(other, first.ref);
+    expect(foreign.statusCode, foreign.body).toBe(404);
+    expect((await reopenTap(p, 'no-such-ref-at-all')).statusCode).toBe(404);
+    await app.prisma.mmgCheckoutIntent.create({ data: { ...first.row, id: nanoid(), merchantTransactionId: first.row.merchantTransactionId.slice(0, 9) + '888888888', status: 'NOT_PAID', createdAt: new Date(Date.now() + 1000) } });
+    const older = await reopenTap(p, first.ref);
+    expect(older.statusCode, older.body).toBe(409);
+    expect(older.json().error.code).toBe('CHECKOUT_NOT_REOPENABLE');
+    expect(await isolated(() => app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: other.subId } }))).toBe(0);
+  });
+
+  it('[F1] the service itself refuses a resolved checkout even when the grant says yes, and binds no key', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const txn = tx(`SVCPAID${seq}`); approved(first.row, txn, 2100);
+    expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
+    const before = await countsOf(p);
+    const service = mmgCheckoutRuntimeOf(app).service;
+    await expect(isolated(() => service.reopenCheckout({ subscriptionId: p.subId, userId: p.userId, ref: first.ref, clientKey: key(), granted: async () => true })))
+      .rejects.toMatchObject({ code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: first.ref, status: 'CONFIRMED' } });
+    expect(await countsOf(p)).toEqual(before);
+  });
+
+  it('[F1] a checkout that leaves OPEN while Back is being answered hands out no page', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const service = mmgCheckoutRuntimeOf(app).service;
+    // MMG's reply lands between the read and the page: the checkout is CONFIRMING when the page would go out.
+    const granted = async () => { await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status: 'CONFIRMING' } }); return true; };
+    await expect(isolated(() => service.reopenCheckout({ subscriptionId: p.subId, userId: p.userId, ref: first.ref, clientKey: key(), granted })))
+      .rejects.toMatchObject({ code: 'CHECKOUT_NOT_REOPENABLE', details: { ref: first.ref, status: 'CONFIRMING' } });
+    expect(await countsOf(p)).toMatchObject({ checkouts: 1, holds: 1 });
+  });
+
+  it.each(['a late card approval held for a person', 'an MMG fee payment being returned'] as const)('[merge · main pauses] Back is refused while %s, exactly as a new payment is', async (pause) => {
+    const p = await makeStore(); const first = await started(p);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
+    if (pause === 'a late card approval held for a person') {
+      await app.prisma.cardSession.create({ data: {
+        subscriptionId: p.subId, userId: p.userId, purpose: 'PAY_NOW', provider: 'simulator', environment: 'sandbox', providerAccount: 'reopen-test',
+        stateHash: 'cd'.repeat(32), expiresAt: new Date(Date.now() - 60_000), status: 'HELD', failureCode: 'LATE_PROVIDER_APPROVAL',
+        amount: 2100, currencyCode: 'GYD', periodStart: (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate,
+      } });
+    } else {
+      await app.prisma.mmgFeeReversal.create({ data: {
+        tenantId: first.row.tenantId, subscriptionId: p.subId, checkoutId: first.ref, providerPaymentId: `rev-${nanoid(8)}`, mmgTransactionId: `rev-${nanoid(8)}`,
+        amount: 2100, currencyCode: 'GYD', state: 'SENT', reason: 'reopen test', requestedBy: 'test', sentAt: new Date(),
+      } });
+    }
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.body).not.toContain('checkoutUrl');
+  });
+
+  it('[F1] Back is refused while a card payment is pending, exactly as the grant is withheld', async () => {
+    const p = await makeStore(); const first = await started(p);
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    await app.prisma.subscriptionPayment.create({ data: { subscriptionId: p.subId, amount: 2100, paymentMethod: 'CARD', status: 'PENDING', periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY), clientKey: `cardpay:${nanoid()}` } });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.body).not.toContain('checkoutUrl');
+  });
+
+  it('[F2] the reopen switch is OFF when its row is missing: no grant, and Back is refused', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await reopenSwitch(null);
+    const payload = (await subscriptionOf(p)).json().data;
+    expect(payload.latestMmgCheckout).toMatchObject({ ref: first.ref, status: 'OPEN' });
+    expect(payload.reopenableMmgCheckout).toBeNull();
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.body).not.toContain('checkoutUrl');
+    expect(await countsOf(p)).toEqual({ checkouts: 1, holds: 1, activeHolds: 1, keys: 1 });
+  });
+
+  it('[F2] the reopen switch is per platform, strict booleans only, and separate from the Pay switch', async () => {
+    const p = await makeStore(); const first = await started(p);
+    await reopenSwitch({ web: true });
+    expect((await subscriptionOf(p, { 'x-client-platform': 'web' })).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await subscriptionOf(p, { 'x-client-platform': 'android' })).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await subscriptionOf(p, { 'x-client-platform': 'unknown-thing' })).json().data.reopenableMmgCheckout).toBeNull();
+    expect((await reopenTap(p, first.ref)).statusCode).toBe(409);
+    expect((await reopenTap(p, first.ref, { 'x-client-platform': 'web' })).statusCode).toBe(200);
+    for (const value of [{ ios: 'true' }, { ios: 1 }, 'on', true, [true]]) {
+      await reopenSwitch(value);
+      expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout, JSON.stringify(value)).toBeNull();
+    }
+    // The Pay switch is untouched by the reopen switch: a fresh partner still sees Pay live.
+    const fresh = await makeStore();
+    expect((await subscriptionOf(fresh)).json().data.payActions[0]).toMatchObject({ id: 'MMG_CHECKOUT', state: 'live' });
+  });
+
+  it.each(['legacy push payment proven to have had no effect', 'earlier expired checkout resolved by finance'] as const)('[F3] resolved history (%s) does not deny the reopen grant', async (history) => {
+    const p = await makeStore();
+    const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
+    if (history === 'legacy push payment proven to have had no effect') {
+      const legacy = await inTenant(undefined, () => app.prisma.subscriptionPayment.create({ data: {
+        subscriptionId: p.subId, amount: 2100, paymentMethod: 'MOBILE_MONEY', status: 'EXPIRED', failureCode: 'PROVIDER_NOT_FOUND',
+        periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
+      } }));
+      await isolated(() => readDunningClock(app.prisma, p.subId));
+      await isolated(() => app.prisma.$transaction((t) => resolveConfirmationInTx(t, p.subId, { paymentId: legacy.id }, 'PROVEN_NO_EFFECT', { actor: 'provider-confirmation', reference: 'PROVIDER_NOT_FOUND' })));
+    } else {
+      const earlier = await started(p);
+      await app.prisma.mmgCheckoutIntent.update({ where: { id: earlier.ref }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      // The next Pay expires the timed-out page (its pause stays: expiry is no proof) and is refused.
+      expect((await start(p)).statusCode).toBe(409);
+      expect((await intentOf(earlier.ref)).status).toBe('EXPIRED');
+      await isolated(() => app.prisma.$transaction((t) => resolveConfirmationInTx(t, p.subId, { checkoutId: earlier.ref }, 'PROVEN_UNPAID', { actor: 'fixture-finance', reference: 'fixture-bank-confirmed-unpaid' })));
+    }
+    expect(await isolated(() => app.prisma.paymentConfirmationHold.count({ where: { subscriptionId: p.subId, status: { in: ['ACTIVE', 'SETTLEMENT_APPLY_PENDING'] } } }))).toBe(0);
+    const current = await started(p);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toEqual({ ref: current.ref, expiresAt: current.row.expiresAt.toISOString() });
+    const res = await reopenTap(p, current.ref);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data).toMatchObject({ ref: current.ref, status: 'OPEN', checkoutUrl: current.checkoutUrl });
+  });
+
+  it('[F4] a failing reopen read never fails the fee page: no grant, the rest of the payload intact', async () => {
+    const p = await makeStore(); const first = await started(p);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
+    const original = app.prisma.$transaction;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation(((input: unknown, options?: { isolationLevel?: string }) =>
+      options?.isolationLevel === 'RepeatableRead'
+        ? Promise.reject(Object.assign(new Error('Transaction API error: Unable to start a transaction in the given time.'), { code: 'P2028' }))
+        : (original as (i: unknown, o?: unknown) => Promise<unknown>).call(app.prisma, input, options)) as never);
+    try {
+      const res = await subscriptionOf(p);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().data).toMatchObject({ reopenableMmgCheckout: null, latestMmgCheckout: { ref: first.ref, status: 'OPEN' }, payActions: [{ id: 'MMG_CHECKOUT', state: 'off' }, expect.anything()] });
+      expect(spy.mock.calls.some(([, options]) => (options as { isolationLevel?: string } | undefined)?.isolationLevel === 'RepeatableRead')).toBe(true);
+    } finally { spy.mockRestore(); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [SEC-DOS F8] Opening a reply is a private-key operation on the API's one
+// event loop, and both public doors take it from anyone. A reply is opened
+// ONCE per request (the route hands the opened reply to the service, which
+// never opens it again), and only from the reply's own field: `token` (the
+// MMG demo's `?token=`, the address-path `token=` the web page forwards as
+// params.token, the 4 Oct notify form), on both doors: MMG's docs do not
+// describe Notify, so it reads the same field and nothing else (COORD, 28 Oct).
+// The private-key work itself is bounded (mmg-reply-gate.ts): one at a time,
+// the loop gets its turn between them, and the wait is bounded per source.
+// Nothing here changes what credits: still only MMG's lookup.
+// ---------------------------------------------------------------------------
+
+describe('[SEC-DOS F8] a reply is opened once, from its token field, and the private-key work is bounded', () => {
+  beforeEach(() => enable(true));
+
+  /** The sandbox, counting every attempt to open a reply with the private key. */
+  function countingProvider(costMs = 0) {
+    const calls = { n: 0 };
+    const provider = new Proxy(sandbox, {
+      get(target, prop) {
+        if (prop === 'decryptCheckoutResult') {
+          return (token: string) => {
+            calls.n += 1;
+            const until = Date.now() + costMs;
+            while (Date.now() < until) { /* a slow private-key operation: the loop is blocked */ }
+            return target.decryptCheckoutResult(token);
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as MmgCheckoutProvider;
+    checkoutProvider = () => provider;
+    return calls;
+  }
+  /** One RSA block under this file's 4096-bit key, as padded base64url: it passes every cheap check and costs a private-key operation. */
+  const garbage = () => randomBytes(512).toString('base64').replace(/\+/g, '-').replace(/\//g, '_');
+  const garbageFields = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`field${i}`, garbage()]));
+
+  it('the return door never opens a value outside the token field', async () => {
+    const calls = countingProvider();
+    const res = await ret('success', garbageFields(16));
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.state).toBe('UNKNOWN');
+    expect(calls.n).toBe(0);
+  });
+
+  it('the return door opens its token field once, whatever else the body carries', async () => {
+    const calls = countingProvider();
+    const res = await ret('success', { ...garbageFields(15), token: garbage() });
+    expect(res.json().data.state).toBe('UNKNOWN');
+    expect(calls.n).toBe(1);
+  });
+
+  it('a genuine reply among other values is opened once and still confirms only through MMG\'s lookup', async () => {
+    const p = await makeStore({ balance: 600 });
+    const { ref, row } = await started(p);
+    const txn = tx('ONCE0');
+    approved(row, txn, 1500, echoOf(row));
+    const calls = countingProvider();
+    const res = await ret('success', { ...garbageFields(15), token: officialReply(row, '0', txn) });
+    expect(res.json().data.state).toBe('CONFIRMED');
+    expect(calls.n).toBe(1);
+    expect(lookedUp).toContain(txn);
+    expect(await creditsOf(p.subId)).toBe(1);
+    expect((await observationsOf(ref)).filter((o) => o.source === 'RETURN')).toHaveLength(1);
+  });
+
+  it('the notify door opens its token field once, and never a value outside it', async () => {
+    let calls = countingProvider();
+    expect((await notify({ ...garbageFields(15), token: garbage() })).json()).toEqual({ success: true });
+    expect(calls.n).toBe(1);
+    calls = countingProvider();
+    expect((await notify(garbageFields(16))).json()).toEqual({ success: true });
+    expect(calls.n).toBe(0);
+  });
+
+  it('a junk flood from many sources through the one forwarding web server never starves the event loop, and a genuine return still completes', async () => {
+    // As production runs it: the web page forwards each partner's own address
+    // from the private network, and the API resolves request.ip through TRUST_PROXY.
+    const forwarded = await buildApp({ trustProxy: asFastifyTrustProxy('loopback, 172.16.0.0/12') });
+    try {
+      const p = await makeStore({ balance: 600 });
+      const { ref, row } = await started(p);
+      const txn = tx('FLOOD0');
+      approved(row, txn, 1500, echoOf(row));
+      const genuine = officialReply(row, '0', txn);
+      // Every private-key open costs 10 ms of the loop here, as a slow server would pay for it.
+      const calls = countingProvider(10);
+      const WEB = '172.20.0.5';
+      const viaWeb = (client: string, params: Record<string, unknown>) => forwarded.inject({
+        method: 'POST', url: RETURN_URL, remoteAddress: WEB,
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': client }, payload: { outcome: 'success', params },
+      });
+      const loop = monitorEventLoopDelay({ resolution: 5 });
+      loop.enable();
+      const flood = Array.from({ length: 10 }, (_, c) => `203.0.113.${c + 1}`)
+        .flatMap((client) => Array.from({ length: 8 }, () => viaWeb(client, { ...garbageFields(15), token: garbage() })));
+      const real = viaWeb('198.51.100.7', { token: genuine });
+      const [answers, mine] = await Promise.all([Promise.all(flood), real]);
+      loop.disable();
+      expect(mine.statusCode, mine.body).toBe(200);
+      expect(mine.json().data.state).toBe('CONFIRMED');
+      expect(await creditsOf(p.subId)).toBe(1);
+      expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
+      // Junk is answered UNKNOWN, or refused as retryable once its sources' share of the wait is full.
+      let refused = 0;
+      for (const a of answers) {
+        if (a.statusCode === 200) expect(a.json().data.state).toBe('UNKNOWN');
+        else {
+          refused += 1;
+          expect(a.statusCode).toBe(503);
+          expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN', details: { retryAfterSeconds: expect.any(Number) } } });
+          expect(Number(a.headers['retry-after'])).toBeGreaterThan(0);
+        }
+      }
+      expect(refused).toBeGreaterThan(0);
+      // At most one open per request, and the loop was never blocked for much more than one of them.
+      expect(calls.n).toBeLessThanOrEqual(flood.length + 1);
+      expect(loop.max / 1e6).toBeLessThan(120);
+    } finally {
+      await forwarded.close();
+    }
+  });
+
+  it('a busy notify is answered as retryable, never dropped as a 200', async () => {
+    countingProvider(30);
+    const flood = Array.from({ length: 30 }, () => app.inject({ method: 'POST', url: NOTIFY_URL, remoteAddress: '10.90.0.1', headers: { 'content-type': 'application/json' }, payload: { token: garbage() } }));
+    const answers = await Promise.all(flood);
+    const busy = answers.filter((a) => a.statusCode === 503);
+    expect(busy.length).toBeGreaterThan(0);
+    for (const a of busy) expect(a.json()).toMatchObject({ success: false, error: { code: 'TRY_AGAIN' } });
+    for (const a of answers.filter((x) => x.statusCode !== 503)) expect(a.json()).toEqual({ success: true });
+  });
+});
+
+describe('[BILL-PRO PR4 · REVIEW-M #2230 S4-3] a pro pays their OWN weekly fee on MMG\'s checkout page (/api/v1/provider)', () => {
+  beforeEach(() => enable(true));
+  const proToldOf = (userId: string) => app.prisma.notification.findMany({
+    where: { userId, data: { path: ['kind'], equals: 'provider_fee_mmg_checkout' } }, select: { title: true, body: true, data: true },
+  });
+
+  it('start -> MMG\'s success answer + lookup -> CONFIRMED, exactly one credit to the pro\'s own fee, told under the pro kind', async () => {
+    const p = await makePro({ balance: 600, status: 'PAST_DUE' });
+    expect((await isolated(() => subscriptionOf(p))).json().data.payActions[0]).toMatchObject({ id: 'MMG_CHECKOUT', state: 'live', amountGyd: 1500, currencyCode: 'GYD', weekOptions: expect.arrayContaining([{ weeks: 1, amountGyd: 1500 }]) });
+    const { ref, row } = await isolated(() => started(p));
+    expect(row).toMatchObject({ subscriptionId: p.subId, amount: expect.anything() });
+    const txn = tx('PRO0');
+    approved(row, txn, 1500, echoOf(row));
+    const res = await isolated(() => ret('success', { token: officialReply(row, '0', txn) }));
+    expect(res.json()).toEqual({ success: true, data: { state: 'CONFIRMED' } });
+    expect((await isolated(() => follow(p, ref))).json().data).toMatchObject({ status: 'CONFIRMED', amountGyd: 1500 });
+    expect(await isolated(() => identitiesOf(txn))).toBe(1);
+    expect(await isolated(() => creditsOf(p.subId))).toBe(1);
+    expect(await isolated(() => walletOf(p.subId))).toBe(600 + 1500 - 2100); // credited, then re-billed at once [I5]
+    const told = await isolated(() => proToldOf(p.userId));
+    expect(told.map((n) => [n.title, (n.data as { status?: string }).status])).toEqual([['Weekly fee paid', 'CONFIRMED']]);
+  });
+
+  it('a pro their Services store\'s fee covers: no pay button, and starting a checkout is refused at the route with nothing written', async () => {
+    const p = await makePro({ balance: 600, status: 'PAST_DUE', coveredBy: 'store' });
+    const view = (await isolated(() => subscriptionOf(p))).json().data;
+    expect(view.payActions[0]).toEqual({ id: 'MMG_CHECKOUT', state: 'off' });
+    const res = await isolated(() => start(p));
+    expect(res.statusCode, res.body).toBe(409);
+    expect(await isolated(() => app.prisma.mmgCheckoutIntent.count({ where: { subscriptionId: p.subId } }))).toBe(0);
+    expect(await isolated(() => creditsOf(p.subId))).toBe(0);
+  });
+
+  it('[REVIEW-G #2230 S4-3] a pro in the store-review fiction: changing how the fee is paid is refused before any step-up', async () => {
+    const review = await makeTenant('REVIEW');
+    const p = await makePro({ tenantId: review });
+    for (const method of ['CASH', 'NONE']) {
+      const res = await isolated(() => app.inject({ method: 'PUT', url: '/api/v1/provider/subscription/billing-method', headers: { ...headersOf(p), 'content-type': 'application/json' }, payload: { method } }));
+      expect([res.statusCode, res.json().error?.code], method).toEqual([403, 'REVIEW_DEMO_NO_MONEY']);
+    }
+    expect((await isolated(() => app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } }))).autoRenew).toBe(true);
+  });
+
+  it('[REVIEW-M #2230 S4-2] a payment confirmed after the store\'s fee went live is kept as credit, and the push says so (never "paid")', async () => {
+    const p = await makePro({ balance: 600, status: 'PAST_DUE' });
+    const { row } = await isolated(() => started(p));
+    await servicesStoreFeeFor(p.userId);
+    const txn = tx('PRO1');
+    approved(row, txn, 1500, echoOf(row));
+    expect((await isolated(() => ret('success', { token: officialReply(row, '0', txn) }))).json().data.state).toBe('CONFIRMED');
+    expect(await isolated(() => creditsOf(p.subId))).toBe(1);
+    // Kept on the pro's own fee, never applied while the store's fee covers them (one fee).
+    expect(await isolated(() => walletOf(p.subId))).toBe(600 + 1500);
+    const told = await isolated(() => proToldOf(p.userId));
+    expect(told).toHaveLength(1);
+    expect(told[0]!.title).toBe('MMG payment kept as credit');
+    expect(told[0]!.body).toContain('kept as credit on your own provider weekly fee, never lost');
+    expect(told[0]!.body).not.toMatch(/paid/i);
   });
 });

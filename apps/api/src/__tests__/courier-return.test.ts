@@ -205,6 +205,20 @@ describe('[E17] courier return-to-sender after custody', () => {
     expect(after.cancelledAt).toBeNull();
   });
 
+  it('[G12] a parcel the recipient was to pay for: the sender is told no fee stays anywhere, through the real door', async () => {
+    const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    const moverUser = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');
+    const rider = await makeRider(moverUser.userId);
+    const order = await makeCourierOrder(sender.userId, rider.id);
+    await app.prisma.order.update({ where: { id: order.id }, data: { courierPayer: 'RECIPIENT' } });
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { currentOrderId: order.id, isAvailable: false } });
+    await postJson(`/api/v1/courier/order/${order.id}/return`, moverUser.token, { reason: 'Recipient refused the parcel' });
+    expect((await postReturnProof(`/api/v1/courier/order/${order.id}/return-proof`, moverUser.token)).statusCode).toBe(200);
+    const told = await app.prisma.notification.findFirstOrThrow({ where: { userId: sender.userId, title: 'Parcel returned' } });
+    expect(told.body).not.toContain('delivery fee');
+    expect(told.body).toContain('There is no return fee.');
+  });
+
   it('the return photo closes the return: RETURNED, rider released, sender notified, no earnings', async () => {
     const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const moverUser = await makeUser(['MOVER', 'CUSTOMER'], 'MOVER');

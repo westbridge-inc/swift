@@ -312,7 +312,7 @@ export class AuthService {
       where: { id: userId },
       // tenant.kind rides the login response: the app's "Demo environment"
       // chip (STA-1 DL-1) reads it, and nothing else about the response differs.
-      include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
+      include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } }, vendorStaffMemberships: { select: { id: true }, take: 1 } },
     });
     if (!user) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
     // [COORD 18 Oct, option S] The signed-in person never gets the live averageRating/totalRatings of their own
@@ -343,7 +343,10 @@ export class AuthService {
       return issued;
     });
 
-    return { user: sanitizeUser(user), tokens };
+    // [BUG-HUNT F03] Branch staff hold no partner role and no vendorOwner: `storeStaff` is how the website knows their
+    // home is the store dashboard. Yes/no only: the membership rows never ride along.
+    const { vendorStaffMemberships, ...person } = user;
+    return { user: sanitizeUser({ ...person, storeStaff: vendorStaffMemberships.length > 0 }), tokens };
   }
 
   /** Once per process: anchor the served terms/privacy texts at LEGAL_VERSION
@@ -672,6 +675,28 @@ export class AuthService {
   /** [MASTER-056] Count a wrong password. A store failure is logged, never a
    *  different answer. When the account-wide ceiling trips, the account holder
    *  gets ONE in-app notice for that pause (no text: that would be a spam lever). */
+  /**
+   * [SEC-TRUST F13] An unknown account, or one without a password, does the same database work a wrong
+   * password does: one transaction that takes the User row lock (on the account when there is one, on
+   * nothing otherwise) and makes the failure write, which here touches no row. The time a refusal takes
+   * then says nothing about whether the account has a password. A failure is swallowed: the answer is the
+   * same refusal either way.
+   */
+  private async mirrorPasswordFailureWork(userId: string | null): Promise<void> {
+    await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      await tx.$queryRaw`
+        SELECT "passwordHash", "failedLoginAttempts", "lockedUntil", "roles", "activeRole", "status"
+        FROM "users"
+        WHERE "id" = ${userId ?? NO_ACCOUNT_ID}
+        FOR UPDATE
+      `;
+      await tx.user.updateMany({ where: { id: NO_ACCOUNT_ID, passwordHash: { not: null } }, data: { failedLoginAttempts: { increment: 1 } } });
+    }).catch((error: unknown) => {
+      this.app.log.warn({ err: error }, '[auth] mirrored password failure work did not complete');
+    });
+  }
+
   private async countPasswordFailure(subject: string, source: string, userId: string | null): Promise<void> {
     let outcome: { accountLocked: boolean };
     try {
@@ -780,6 +805,7 @@ export class AuthService {
     });
     if (locked) throw invalid;
     if (!user || !user.passwordHash) {
+      await this.mirrorPasswordFailureWork(user?.id ?? null);
       await this.countPasswordFailure(subject, source, null);
       throw invalid;
     }
@@ -1298,7 +1324,7 @@ export class AuthService {
     return { ...moverCleanup, outboxId };
   }
 
-  async logoutAll(userId: string) {
+  async logoutAll(userId: string, underLock?: (tx: Prisma.TransactionClient) => Promise<void>) {
     // One invocation can retire more than one auth generation. Keep a stable
     // key outside the transaction callback so any database retry writes the
     // same outbox event instead of inventing a duplicate.
@@ -1313,6 +1339,8 @@ export class AuthService {
       `;
       if (!users[0]) return emptyMoverSessionRevocationCleanup();
 
+      // [BUG-HUNT F22] A change the end of every session must commit with: the person's number.
+      await underLock?.(tx);
       return this.revokeAllLockedSessionsInTransaction(
         tx,
         userId,

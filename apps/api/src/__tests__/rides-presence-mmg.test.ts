@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { walkOrderStatus } from './helpers/order-status-walk';
+import { coarsePoint, PRIVATE_POINT_SNAP_DEG } from '../modules/dispatch/board-privacy';
 
 // ---------------------------------------------------------------------------
 // Presence (5.1/6.2): coarse, capped, hailable-only, jittered — never exact,
@@ -127,6 +128,61 @@ describe('GET /rides/presence', () => {
       headers: { authorization: `Bearer ${c.token}` },
     });
     expect(res2.json().data.cars[0]).toEqual(cars[0]);
+  });
+});
+
+describe('[F17] presence carries nothing a passenger can undo with a driver id', () => {
+  it('every car is a point of the shared coarse grid, and two cars parked together are the same point whoever drives them', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const parked = { lat: 6.8031, lng: -58.1571 };
+    await makeDriver({ at: parked });
+    await makeDriver({ at: parked });
+
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/rides/presence?lat=${GT.lat}&lng=${GT.lng}`,
+      headers: { authorization: `Bearer ${c.token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const cars: { lat: number; lng: number }[] = res.json().data.cars;
+    expect(cars.length).toBeGreaterThanOrEqual(2);
+    const onGrid = (v: number) => Math.abs(v / PRIVATE_POINT_SNAP_DEG - Math.round(v / PRIVATE_POINT_SNAP_DEG)) < 1e-6;
+    for (const car of cars) {
+      expect(onGrid(car.lat) && onGrid(car.lng), `off-grid presence point ${car.lat},${car.lng}`).toBe(true);
+    }
+    // No per-driver component: both parked cars land on the parked spot's own cell.
+    const cell = coarsePoint(parked.lat, parked.lng)!;
+    expect(cars.filter((car) => car.lat === cell.lat && car.lng === cell.lng).length).toBe(2);
+  });
+});
+
+describe('[F17 · REVIEW-M S3-1] the presence radius decides on the cell, never on the true position', () => {
+  it('walking the query point across the radius edge finds the grid cell, not the parked car', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    // Far from every other fixture here, so this lone car is the only one the walk can see.
+    const truth = { lat: 7.41237, lng: -58.98431 };
+    await makeDriver({ at: truth });
+    const cell = coarsePoint(truth.lat, truth.lng)!;
+    const seen = async (lat: number, lng: number) => {
+      const res = await app.inject({ method: 'GET', url: `/api/v1/rides/presence?lat=${lat}&lng=${lng}`, headers: { authorization: `Bearer ${c.token}` } });
+      expect(res.statusCode, res.body).toBe(200);
+      return (res.json().data.cars as unknown[]).length > 0;
+    };
+    // Binary-search the north and south edges of visibility along the cell's own meridian.
+    const edge = async (outward: number) => {
+      let inside = truth.lat;
+      let outside = truth.lat + outward;
+      for (let i = 0; i < 40; i += 1) {
+        const mid = (inside + outside) / 2;
+        if (await seen(mid, cell.lng)) inside = mid; else outside = mid;
+      }
+      return inside;
+    };
+    const recoveredLat = ((await edge(0.2)) + (await edge(-0.2))) / 2;
+    const metres = (dLat: number) => Math.abs(dLat) * 111_195;
+    // The walk recovers the cell (what the map already shows), not the car inside it.
+    expect(metres(recoveredLat - cell.lat)).toBeLessThan(2);
+    expect(metres(cell.lat - truth.lat)).toBeGreaterThan(50); // this fixture's car sits well inside its cell
+    expect(metres(recoveredLat - truth.lat)).toBeGreaterThan(10);
   });
 });
 

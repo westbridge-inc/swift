@@ -10,7 +10,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -104,7 +104,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.ready();
@@ -245,6 +245,8 @@ describe('[#1541] a store awaiting approval whose weekly fee billing holds goes 
     expect(told).toHaveLength(1);
     expect(told[0]!.body).toContain('Pay the weekly fee to open');
     expect(told[0]!.data).toEqual({ vendorId: vendor.id });
+    // [BUG-HUNT F07] Held is not live: never told it is.
+    expect((await notices(owner.id)).map((n) => n.title)).not.toContain('Your store is live');
 
     // The daily belt re-projects it (the same per-owner projection): it stays held, and the owner is not told again.
     await svc.reprojectVendorActivation(owner.id);

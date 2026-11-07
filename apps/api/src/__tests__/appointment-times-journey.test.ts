@@ -13,6 +13,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { vendorResponseSlaMinutes } from '../modules/order/response-sla';
 import { sendBookingReminders } from '../modules/services/services.service';
+import { NotificationService } from '../modules/notification/notification.service';
 import { autoCancelUnresponsiveOrder } from '../jobs/queue';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
@@ -329,11 +330,59 @@ describe('Q12 · B1 — a 10:00 Guyana slot is stored as 14:00Z and returned ide
     expect((await accept(order.id)).statusCode).toBe(200);
     const bookingId = (await bookingOf(order.id)).id;
 
-    const sent: Array<{ userId: string; body: string; data: Record<string, unknown> }> = [];
+    const sent: Array<{ userId: string; title: string; body: string; data: Record<string, unknown> }> = [];
     await sendBookingReminders(app.prisma, async (n) => { sent.push(n); });
-    const mine = sent.filter((n) => n.data['refId'] === bookingId);
+    const mine = sent.filter((n) => n.data['bookingId'] === bookingId);
+    // [REVIEW-F S3-1] The title names the slot's Guyana day against the sweep's (UTC−4, read as UTC fields).
+    const sweepLocal = new Date(Date.now() - 4 * 60 * MINUTE);
+    const sameDay = sweepLocal.toISOString().slice(0, 10) === localClock.toISOString().slice(0, 10);
+    expect(mine.map((n) => n.title)).toEqual([sameDay ? 'Appointment today' : 'Appointment tomorrow', sameDay ? 'Appointment today' : 'Appointment tomorrow']);
     expect(mine.find((n) => n.userId === customer.userId)?.body).toBe(`Q12 Cut at Q12 Barber is booked for ${expectedWhen}.`);
-    expect(mine.find((n) => n.userId === provider.userId)?.body).toBe(`Q12 Cut appointment coming up ${expectedWhen}.`);
+    const [expectedDay, ...expectedTime] = expectedWhen.split(' ');
+    expect(mine.find((n) => n.userId === provider.userId)?.body).toBe(`Q12 Cut appointment on ${expectedDay} at ${expectedTime.join(' ')}.`);
+  });
+
+  // [S4 · BOOK-MEASURE R5] Composed exactly as the booking-reminders worker
+  // composes it (jobs/queue.ts: each reminder spread into NotificationService.send
+  // as ORDER_UPDATE), against real Postgres. The inbox rows are what both the
+  // push tap and the inbox row tap route on.
+  it('[S4] each side gets ONE inbox row naming the booking\'s order and whose copy it is, even from two overlapping sweeps', async () => {
+    // ~8 h out: inside the reminder window, clear of the 3 h (above) and 5 h (B6) slots this file books.
+    const soon = new Date(Math.ceil((Date.now() + 8 * 60 * MINUTE) / (30 * MINUTE)) * 30 * MINUTE);
+    const customer = await makeUser('Rae', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(customer, cutId, soon);
+    expect((await accept(order.id)).statusCode).toBe(200);
+    const bookingId = (await bookingOf(order.id)).id;
+    const notifications = new NotificationService(app.prisma, app.io);
+    const parties = new Set([customer.userId, provider.userId]);
+    const namesThisBooking = (data: Record<string, unknown>) => data['bookingId'] === bookingId || data['refId'] === bookingId;
+    // Two sweeps that both pass the "already reminded?" read before either
+    // delivers — as two overlapping runs of the job would.
+    let looked = 0;
+    let release!: () => void;
+    const bothLooked = new Promise<void>((resolve) => { release = resolve; });
+    const tick = () => sendBookingReminders(app.prisma, async (n) => {
+      if (!parties.has(n.userId) || !namesThisBooking(n.data)) return;
+      if (n.userId === customer.userId) {
+        looked += 1;
+        if (looked === 2) release();
+        await Promise.race([bothLooked, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+      }
+      await notifications.send({ ...n, type: 'ORDER_UPDATE' });
+    });
+    await Promise.all([tick(), tick()]);
+    await tick(); // and a later sweep
+
+    const rows = (await app.prisma.notification.findMany({
+      where: { userId: { in: [...parties] }, title: { in: ['Appointment today', 'Appointment tomorrow'] } },
+      select: { userId: true, data: true },
+    })).filter((row) => namesThisBooking(row.data as Record<string, unknown>));
+    expect(rows.filter((row) => row.userId === customer.userId).map((row) => row.data)).toEqual([
+      { kind: 'appointment_reminder', bookingId, orderId: order.id, audience: 'customer' },
+    ]);
+    expect(rows.filter((row) => row.userId === provider.userId).map((row) => row.data)).toEqual([
+      { kind: 'appointment_reminder', bookingId, orderId: order.id, audience: 'business' },
+    ]);
   });
 });
 
@@ -517,6 +566,9 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     expect(notice.title).toBe('Appointment moved');
     expect(notice.body).toContain(`${weekdayOf(day)} ${dayNum}`);
     expect(notice.body).toMatch(/moved from .*13:00 to .*17:30\.$/);
+    // [BOOK-FU2] The store's copy names the booking's ORDER and is tagged for the business: on builds 9, 11 and 12
+    // it opens that order on the order desk (booking_rescheduled, with no order, opened Schedule there).
+    expect(notice.data).toEqual({ kind: 'appointment_moved', bookingId: moved.json().data.id, orderId: order.id, audience: 'business' });
 
     // The provider can move it back; the customer is told, and every surface follows.
     const back = await call('POST', `/api/v1/vendor/bookings/${moved.json().data.id}/reschedule`, provider.token, { newSlotStart: from.toISOString() });
@@ -527,6 +579,56 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     });
     expect(told.title).toBe('Your appointment moved');
     expect(told.body).toMatch(/moved from .*17:30 to .*13:00\.$/);
+    expect(told.data).toEqual({ kind: 'appointment_moved', bookingId: back.json().data.id, orderId: order.id, audience: 'customer' });
+
+    // [BOOK-FU2] Once per MOVE per person, not once per time: the customer moves it to 17:30 a second time
+    // and the store is told again (a new booking row, a new key), so it holds two notices, one per move.
+    const again = await call('POST', `/api/v1/customer/bookings/${back.json().data.id}/reschedule`, customer.token, { newSlotStart: to.toISOString() });
+    expect(again.statusCode, again.body).toBe(200);
+    const storeNotices = await app.prisma.notification.findMany({
+      where: { userId: provider.userId, data: { path: ['kind'], equals: 'appointment_moved' }, AND: [{ data: { path: ['orderId'], equals: order.id } }] },
+      orderBy: { createdAt: 'asc' },
+      select: { data: true, dedupeKey: true },
+    });
+    expect(storeNotices.map((n) => n.dedupeKey)).toEqual([
+      `appointment-moved:${moved.json().data.id}`,
+      `appointment-moved:${again.json().data.id}`,
+    ]);
+  });
+
+  // [BOOK-P3 · COORD ruling 29 Oct 2026 (b) · Terms s7] With instant booking on, when the BUSINESS moves a confirmed
+  // appointment the customer can cancel it free in the app for 60 minutes after being told, even inside the 2-hour
+  // cut-off. The business's move (the route) stamps the order and says so in the notice; the customer's preview and
+  // cancel read the stamp from the live order row.
+  it('[BOOK-P3] after the business moves it: free to cancel for 60 minutes, even inside the 2-hour cut-off; the notice says until when', async () => {
+    const customer = await makeUser('Maya', ['CUSTOMER'], 'CUSTOMER');
+    const order = await booked(customer, cutId, gy(gyDay(3), 9, 0));
+    expect((await accept(order.id)).statusCode).toBe(200);
+    const bookingId = (await bookingOf(order.id)).id;
+    process.env['INSTANT_BOOKING'] = '1';
+    try {
+      const moved = await call('POST', `/api/v1/vendor/bookings/${bookingId}/reschedule`, provider.token, { newSlotStart: gy(gyDay(3), 10, 0).toISOString() });
+      expect(moved.statusCode, moved.body).toBe(200);
+      const { appointmentMovedAt } = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { appointmentMovedAt: true } });
+      expect(appointmentMovedAt).not.toBeNull();
+      const told = await app.prisma.notification.findFirstOrThrow({ where: { userId: customer.userId, data: { path: ['bookingId'], equals: moved.json().data.id } } });
+      expect(told.body).toMatch(/If the new time doesn\u2019t suit you, you can cancel it free in the app until /);
+      // The appointment is now 90 minutes away, accepted long ago: the 2-hour rule alone refuses; the move's hour allows.
+      const end = new Date(appointmentMovedAt!.getTime() + 60 * MINUTE);
+      await app.prisma.order.update({ where: { id: order.id }, data: { appointmentSlot: new Date(Date.now() + 90 * MINUTE), acceptedAt: new Date(Date.now() - 24 * 60 * MINUTE) } });
+      const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
+      expect(mine.json().data).toMatchObject({ canCancel: true, cancelUnavailable: null, freeCancellationExpiresAt: end.toISOString() });
+      // Control: the same order, its move an hour and a minute ago, is refused (contact the business).
+      await app.prisma.order.update({ where: { id: order.id }, data: { appointmentMovedAt: new Date(Date.now() - 61 * MINUTE) } });
+      const late = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
+      expect([late.statusCode, late.json().error?.code]).toEqual([409, 'CANCEL_WINDOW_CLOSED']);
+      await app.prisma.order.update({ where: { id: order.id }, data: { appointmentMovedAt: new Date(Date.now() - 5 * MINUTE) } });
+      const res = await call('POST', `/api/v1/customer/orders/${order.id}/cancel`, customer.token, {});
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().data).toEqual({ message: 'Booking cancelled — no charge', cancellationFee: 0 });
+    } finally {
+      delete process.env['INSTANT_BOOKING'];
+    }
   });
 
   it('[AX289 F6] a reschedule racing a cancellation of the same order waits on the ORDER first, then loses cleanly — 409 BOOKING_MOVED, never a deadlock or a 500', async () => {

@@ -1,5 +1,7 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
-import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF } from './account-closure';
+import { ACCOUNT_CLOSURE_CONFIRMED, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF, closureMessageFor, type ClosureSurface } from './account-closure';
+import { endClosureFeeHoldsInTx, feeEndingWords, holdStoreFeesForClosureInTx } from '../billing/closure-fee-hold';
+import { ACCOUNT_CLOSURE_CANCELLED, CLOSURE_IN_PROGRESS_REFUSAL, liftClosurePause, pauseStoresForClosure } from './closure-pause';
 import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { eraseUserDevices } from '../../lib/owner-rls';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
@@ -20,6 +22,9 @@ import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { queueStoresPhotoErasure } from '../vendor/store-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import { accountClosedKeptWords, holdForOpenIdentityReviews, investigationHoldSummary } from '../verification/investigation-hold';
+import { identityReviewOpenFor } from '../verification/investigation-hold-core';
+import { refuseVerifiedDeletion } from './verified-deletion-gate';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -43,12 +48,27 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
-export { ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
-/** The server-written record that a closure request was confirmed in the app
- *  (behind the deletion step-up). Anyone can type the subject into a support
- *  ticket; only the confirmed request writes this record, so support completes
- *  only a ticket that carries it. */
-export const ACCOUNT_CLOSURE_CONFIRMED = 'ACCOUNT_CLOSURE_CONFIRMED_IN_APP';
+/** [WEB-DELETE] The live work that stops a deletion: ONE definition, read by the deletion's census (under its
+ *  locks) and by the website's deletion check (no lock), so the list a person is shown is the list Delete refuses on. */
+export function liveWorkWhere(userId: string): { orders: Prisma.OrderWhereInput; serviceJobs: Prisma.ServiceJobWhereInput } {
+  return {
+    orders: { status: { notIn: TERMINAL_ORDER }, OR: [
+      { customerId: userId }, { rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } },
+    ] },
+    serviceJobs: { status: { notIn: TERMINAL_SERVICE_JOB }, OR: [{ customerId: userId }, { provider: { userId } }] },
+  };
+}
+
+/** How many live orders and jobs the deletion check names (the count is always the whole). */
+const DELETION_CHECK_LIST_MAX = 10;
+
+/** [SEC-PII] The exact erasure marker this file writes in place of an erased account's number. Exported so other code
+ *  can RECOGNISE an erased account without spelling the marker (erasure-trigger-exceptions pins the one writer). */
+export function erasedPhoneMarker(userId: string): string {
+  return `deleted:${userId}`;
+}
+
+export { ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_CLOSURE_CONFIRMED } from './account-closure';
 
 /** The server, not a navigation flag or active role, chooses the business
  *  closure flow: anyone who owns a store or belongs to an advertiser closes
@@ -60,7 +80,8 @@ export async function closesByRequest(
 ): Promise<boolean> {
   return roles.includes('VENDOR_OWNER')
     || !!await db.vendorOwner.findUnique({ where: { userId }, select: { id: true } })
-    || !!await db.advertiserMember.findFirst({ where: { userId }, select: { advertiserId: true } });
+    // [ads security] an open, unaccepted team invitation is not a membership
+    || !!await db.advertiserMember.findFirst({ where: { userId, acceptedAt: { not: null } }, select: { advertiserId: true } });
 }
 
 export class AccountService {
@@ -72,12 +93,12 @@ export class AccountService {
     return exportPersonalData(this.app.prisma, userId);
   }
 
-  private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
+  private async closureTicket(tx: Prisma.TransactionClient, userId: string, surface: ClosureSurface) {
     const where = { userId, category: 'ACCOUNT' as const, subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN' as const, 'IN_PROGRESS' as const] } };
     const ticket = await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
       ?? await tx.supportTicket.create({ data: {
         userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
-        message: ACCOUNT_CLOSURE_MESSAGE,
+        message: closureMessageFor(surface),
       } });
     // Same transaction as the request: the confirmation and its ticket commit
     // together. One record per ticket; a repeated request reuses it.
@@ -85,8 +106,13 @@ export class AccountService {
       where: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id }, select: { id: true },
     });
     if (!confirmed) {
-      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id } });
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CONFIRMED, entity: 'SupportTicket', entityId: ticket.id, changes: { surface } } });
     }
+    // [WEB-DELETE · owner rulings 1 + 2 Nov 2026] The request stops the stores' weekly fee and their NEW orders now,
+    // in this same transaction (website and app alike: this is the one closure path). The fee first: the billing lock
+    // order is person, subscription, then store. Orders already placed finish; the team completes.
+    await holdStoreFeesForClosureInTx(tx, userId, ticket.id);
+    await pauseStoresForClosure(tx, userId, ticket.id);
     return ticket;
   }
 
@@ -100,23 +126,137 @@ export class AccountService {
     } catch (error) {
       this.app.log.error({ err: error, ticketId }, 'Closure notification failed; support ticket remains open');
     }
+    // [WEB-DELETE · owner ruling 1 Nov 2026] Said when the request paused a store's new orders (the app shows this).
+    const paused = await this.app.prisma.vendor.count({ where: { owner: { userId }, closurePausedAt: { not: null } } }).catch(() => 0);
     return { deleted: false, status: 'CLOSURE_REQUESTED' as const, ticketId,
-      message: 'Your account closure request is received. Track it in Get help. Keep access while the team resolves listings, campaigns and any outstanding obligations.' };
+      message: `Your account closure request is received. Track it in Get help. Keep access while the team resolves listings, campaigns and any outstanding obligations.${
+        paused > 0 ? ' New orders at your store are paused now and your weekly fee stops; orders already placed still finish.' : ''}` };
   }
 
   /** The existing support queue owns the human business wind-down. */
-  async requestClosure(userId: string) {
+  async requestClosure(userId: string, surface: ClosureSurface = 'app') {
     const ticket = await this.app.prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
       const user = await tx.user.findUnique({ where: { id: userId }, select: { status: true } });
       if (!user || user.status !== 'ACTIVE') throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active.');
-      return this.closureTicket(tx, userId);
+      return this.closureTicket(tx, userId, surface);
     });
     return this.closureReceipt(userId, ticket.id);
   }
 
+  /** [WEB-DELETE · owner ruling 1 Nov 2026] The owner takes their closure request back: the request is resolved and
+   *  its pause on the stores' new orders is lifted (both audited). Order intake stays off until the owner resumes it
+   *  with the usual switch. Under the same person lock as the request, so a request and its cancel never interleave. */
+  async cancelClosure(userId: string) {
+    const done = await this.app.prisma.$transaction(async (tx) => {
+      // [COORD security review #2304] The same person lock support's completion claims the request under
+      // (deleteAccount's preflight): a cancel and a completion never interleave. Once support has the request
+      // (IN_PROGRESS), or the account is already closed, the cancel is refused: completion is irreversible.
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+      // (The erasure's cut-off sets DEACTIVATED with its marker, in one write: the status alone says it.)
+      const person = await tx.user.findUnique({ where: { id: userId }, select: { status: true } });
+      if (!person || person.status !== 'ACTIVE') {
+        throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
+      }
+      const ticket = await tx.supportTicket.findFirst({
+        where: { userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN', 'IN_PROGRESS'] } },
+        orderBy: { createdAt: 'desc' }, select: { id: true, status: true },
+      });
+      if (!ticket) throw new AppError(409, 'NO_CLOSURE_REQUEST', 'There is no open account closure request to cancel.');
+      if (ticket.status !== 'OPEN') throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
+      // Only an OPEN request: a claim that commits first (its row lock) leaves nothing for this write to cancel.
+      const cancelled = await tx.supportTicket.updateMany({
+        where: { id: ticket.id, userId, status: 'OPEN' },
+        data: { status: 'RESOLVED', resolution: 'ANSWERED', resolvedAt: new Date(), adminNote: 'The account holder cancelled this closure request.' },
+      });
+      if (cancelled.count !== 1) throw new AppError(409, 'CLOSURE_IN_PROGRESS', CLOSURE_IN_PROGRESS_REFUSAL);
+      const stores = await liftClosurePause(tx, userId, ticket.id, { kind: 'OWNER_CANCELLED', actorId: userId });
+      // [owner ruling 2 Nov 2026 · REVIEW-M #2304 S3] The weekly fee the request held restarts from now, in this same
+      // transaction (no step left for after the commit, nothing a crash can strand).
+      const fees = await endClosureFeeHoldsInTx(tx, ticket.id, userId);
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_CLOSURE_CANCELLED, entity: 'SupportTicket', entityId: ticket.id, changes: { storesLifted: stores, fees } } });
+      return { ticketId: ticket.id, storesLifted: stores.length, fees };
+    });
+    const feesResumed = done.fees.filter((f) => f.outcome === 'RENEWS_ON_ITS_DATE' || f.outcome === 'RESTARTED_NOW').length;
+    return { cancelled: true as const, ticketId: done.ticketId, storesLifted: done.storesLifted, feesResumed,
+      message: `Your closure request is cancelled.${feeEndingWords(done.fees)}${
+        done.storesLifted > 0 ? ' Your store still takes no new orders until you press Resume orders on the Orders page.' : ''}` };
+  }
+
+  /**
+   * [WEB-DELETE · owner 1 Nov 2026] What Delete would meet for this person now, by the deletion's own rules and
+   * words, so the website can show WHICH live orders and jobs, and which money, must be finished first (before it
+   * asks for a code). It writes nothing and takes no lock: the deletion re-checks all of it under its locks. Each
+   * order is the person's own view of it (their side, its number and status, the store's public name), never
+   * another person's id or contact.
+   */
+  async deletionCheck(userId: string) {
+    return this.app.prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({ where: { id: userId }, select: { roles: true } });
+      if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
+      const live = liveWorkWhere(userId);
+      const [closure, rider, driver, storeOwner, pausedStores] = await Promise.all([
+        closesByRequest(tx, userId, user.roles),
+        tx.rider.findUnique({ where: { userId }, select: { id: true } }),
+        tx.driver.findUnique({ where: { userId }, select: { id: true } }),
+        tx.vendorOwner.findUnique({ where: { userId }, select: { id: true } }),
+        tx.vendor.count({ where: { owner: { userId }, closurePausedAt: { not: null } } }),
+      ]);
+      const [orderCount, orders, jobCount, jobs, obligations, ticket] = await Promise.all([
+        tx.order.count({ where: live.orders }),
+        tx.order.findMany({
+          where: live.orders, orderBy: { createdAt: 'desc' }, take: DELETION_CHECK_LIST_MAX,
+          select: { id: true, orderNumber: true, status: true, orderType: true, createdAt: true, customerId: true, riderId: true, driverId: true, vendor: { select: { name: true } } },
+        }),
+        tx.serviceJob.count({ where: live.serviceJobs }),
+        tx.serviceJob.findMany({
+          where: live.serviceJobs, orderBy: { createdAt: 'desc' }, take: DELETION_CHECK_LIST_MAX,
+          select: { id: true, status: true, scheduledFor: true, createdAt: true, customerId: true },
+        }),
+        partnerObligations(tx, userId),
+        closure
+          ? tx.supportTicket.findFirst({
+            where: { userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT, status: { in: ['OPEN', 'IN_PROGRESS'] } },
+            orderBy: { createdAt: 'desc' }, select: { id: true, status: true, createdAt: true },
+          })
+          : null,
+      ]);
+      // The side is the person's own part in the order, matched in the order's precedence (a store owner who
+      // ordered from their own store sees it as their order).
+      const side = (o: (typeof orders)[number]) => o.customerId === userId ? 'CUSTOMER' as const
+        : rider && o.riderId === rider.id ? 'RIDER' as const
+          : driver && o.driverId === driver.id ? 'DRIVER' as const : 'STORE' as const;
+      const verdict = verdictFor(obligations);
+      return {
+        closure: closure ? 'REQUEST' as const : 'DELETE' as const,
+        // What a closure does to a store is shown only to a person who owns one (an advertiser closes too).
+        ownsStore: user.roles.includes('VENDOR_OWNER') || storeOwner !== null,
+        // ordersPaused: the request holds the stores' new orders (an older request, sent before the pause, may not).
+        closureRequest: ticket ? { ticketId: ticket.id, status: ticket.status, requestedAt: ticket.createdAt, ordersPaused: pausedStores > 0 } : null,
+        openOrders: {
+          count: orderCount,
+          items: orders.map((o) => ({ id: o.id, orderNumber: o.orderNumber, status: o.status, orderType: o.orderType, createdAt: o.createdAt, side: side(o), storeName: o.vendor?.name ?? null })),
+        },
+        openServiceJobs: {
+          count: jobCount,
+          items: jobs.map((j) => ({ id: j.id, status: j.status, scheduledFor: j.scheduledFor, createdAt: j.createdAt, side: j.customerId === userId ? 'CUSTOMER' as const : 'PROVIDER' as const })),
+        },
+        settleFirst: verdict.clear ? null : { blockers: verdict.blockers, message: refusalMessage(verdict.blockers, obligations) },
+      };
+    });
+  }
+
   /** DPA right to erasure. Idempotent guards; crypto-shred is irreversible. */
-  async deleteAccount(userId: string, selfServe = false) {
+  async deleteAccount(
+    userId: string, selfServe = false, surface: ClosureSurface = 'app',
+    opts: {
+      claimClosure?: (tx: Prisma.TransactionClient) => Promise<boolean>;
+      /** Runs once the tombstone is written, past every blocker, in the same transaction: an audit row here shows the effect, and a refusal leaves none. */
+      onCutoff?: (tx: Prisma.TransactionClient) => Promise<void>;
+      /** [BUG-HUNT F20] The founder's door for a verified request from someone who cannot sign in, and no other caller. */
+      verifiedRequest?: boolean;
+    } = {},
+  ) {
     const prisma = this.app.prisma;
     const preflight = await prisma.$transaction(async (tx) => {
       // Service-job creation, provider profile changes and verification events
@@ -129,6 +269,11 @@ export class AccountService {
         FOR UPDATE /* account-deletion-provider-authority */
       `;
       if (!locked[0]) throw new AppError(404, 'NOT_FOUND', 'Account not found');
+      // [COORD security review #2304] Support completing a closure request claims it (IN_PROGRESS) under this lock,
+      // before anything is erased: a request the holder cancelled (cancelClosure takes this same lock) is refused here.
+      if (opts.claimClosure && !(await opts.claimClosure(tx))) {
+        throw new AppError(409, 'CLOSURE_REQUEST_NOT_OPEN', 'This closure request is no longer open: the account holder cancelled it, or it was already resolved. Nothing was erased.');
+      }
       const user = await tx.user.findUniqueOrThrow({
         where: { id: userId },
         select: { id: true, phone: true, roles: true, status: true, avatar: true, tenantId: true },
@@ -186,14 +331,15 @@ export class AccountService {
         await revokeAccessBeforeCleanup();
         return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
-      if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
+      if (opts.verifiedRequest) await refuseVerifiedDeletion(tx, user);
+      else if (user.status !== 'ACTIVE' && user.status !== 'DEACTIVATED') {
         throw new AppError(409, 'ACCOUNT_INACTIVE', 'This account is not active and must be closed through Support.');
       }
 
       // The server, not a navigation flag or active role, chooses the business
       // closure flow. Keep sign-in until the support team resolves obligations.
       if (selfServe && await closesByRequest(tx, userId, user.roles)) {
-        const ticket = await this.closureTicket(tx, userId);
+        const ticket = await this.closureTicket(tx, userId, surface);
         return { closureTicketId: ticket.id, hold: null, avatarOrphanId: null };
       }
 
@@ -204,16 +350,10 @@ export class AccountService {
         WHERE o."userId" = ${userId} ORDER BY v.id FOR UPDATE OF v
       `;
 
+      const live = liveWorkWhere(userId);
       const [inFlightOrders, inFlightServiceJobs] = await Promise.all([
-        tx.order.count({ where: { status: { notIn: TERMINAL_ORDER }, OR: [
-          { customerId: userId }, { rider: { userId } }, { driver: { userId } }, { vendor: { owner: { userId } } },
-        ] } }),
-        tx.serviceJob.count({
-          where: {
-            status: { notIn: TERMINAL_SERVICE_JOB },
-            OR: [{ customerId: userId }, { provider: { userId } }],
-          },
-        }),
+        tx.order.count({ where: live.orders }),
+        tx.serviceJob.count({ where: live.serviceJobs }),
       ]);
       // Read the cash census after the live-work snapshot. If goods return
       // between these reads, their terminal status cannot hide customer cash
@@ -264,14 +404,19 @@ export class AccountService {
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await queuePortfolioBeforePointerClear();
       await queueStorePhotosBeforePointerClear();
-      await revokeAccessBeforeCleanup();
+      // [row 622] The tombstone (the exact erasure marker) BEFORE the cleanup, in this same transaction: the
+      // owner wall's erase actions (devices, notices) refuse any account that does not carry it. Nothing the
+      // cleanup runs reads users.status or users.phone (owner-wall-erase-guard.test.ts pins it), and the
+      // commit is the same either way.
       await tx.user.update({
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
+      await revokeAccessBeforeCleanup();
       // [erasure exceptions] The erasure's own record of its cut-off, committed with the marker. audit_logs is
       // immutable to app logins; the database's erasure exceptions (swift_erased_person) require this row too.
       await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: 'User', entityId: userId } });
+      await opts.onCutoff?.(tx);
       return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);
@@ -345,6 +490,9 @@ export class AccountService {
     // erasure: it stays, due for purge the moment the hold is released (its
     // retention clock is set to now), and the deferral is written to the audit
     // trail — erasure deferred by a legal obligation is recorded, never silent.
+    // [REVIEW-G S3-3] An identity review open on the person's live group, not yet holding them: its hold first, so
+    // what is kept is a real hold with a date (and the closing message can say when).
+    await holdForOpenIdentityReviews(prisma, userId);
     const deferred = await prisma.verificationDocument.updateMany({
       where: { userId, purgedAt: null, legalHoldId: { not: null } },
       data: { retentionExpiresAt: new Date() },
@@ -395,6 +543,8 @@ export class AccountService {
           SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */
         `;
         if (person.length !== 1) return false;
+        // [SEC-PII · COORD] Backstop: an identity review open on the person's live group chain keeps the record.
+        if (await identityReviewOpenFor(tx, userId)) return false;
         const close = await tx.verificationDocument.updateMany({
           where: { id: doc.id, userId, purgedAt: null, legalHoldId: null }, data: { purgedAt: new Date(), fileUrl: '' },
         });
@@ -538,6 +688,8 @@ export class AccountService {
     await prisma.supplyWatch.deleteMany({ where: { customerId: userId } });
     await prisma.cart.deleteMany({ where: { customerId: userId } });
     await prisma.cartMergeReceipt.deleteMany({ where: { userId } });
+    // [O-1] The Swift-bridged calls the person asked for (roles and times; never a number).
+    await prisma.callSession.deleteMany({ where: { callerUserId: userId } });
 
     // 3c. [COORD 18 Oct 23:28Z · owner 19 Oct A/A/A] Rows that stay lose what identifies the person: profiles
     //     (vehicle, plate, location, pay link, bio), the checkout replay copy, fraud marks (phone, address key,
@@ -577,13 +729,17 @@ export class AccountService {
       },
     });
 
+    const { revisitBy } = deferred.count > 0 ? await investigationHoldSummary(prisma, userId) : { revisitBy: null };
     // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
     const heldUploads = uploads.held + liveness.held;
     if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
       return {
         deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads,
         pendingDocuments, pendingAvatarObjects, pendingUploads,
-        message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
+        // [SEC-PII · Privacy §6] Delayed by an open review: why (generically) and when, in the words the app shows.
+        message: revisitBy
+          ? accountClosedKeptWords(revisitBy, deferred.count) // [COORD 10:44Z] every kept document, a person's holds too
+          : 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
     }
 

@@ -2,6 +2,7 @@
 // another client on the same backend, never a second source of truth.
 import { cache } from 'react';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import type { StorefrontBrand } from './brand-card';
 
 // The server-side fetch origin may be overridden (an internal address on the
 // same network); the browser side is the one authority, never a fallback.
@@ -27,6 +28,9 @@ export interface CataloguePriceBand {
   minItems: number;
   tier: 'small' | 'large' | 'department';
   rate: number;
+  /** The free trial, in days, of a NEW store at this step when Swift approves it (7 at the department step, owner
+   *  29 Oct 2026). Absent from a server that predates it: the list's own `trialDays` stands. */
+  trialDays?: number;
 }
 
 export interface CountryPricing {
@@ -48,6 +52,8 @@ export interface CountryPricing {
   /** @deprecated Conflated numbers kept for older clients — never render them:
    *  one figure here can stand for several kinds of partner at once. */
   weekly?: Record<string, number | null>;
+  /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
+  catalogueRetier?: { on?: unknown; noticeDays?: unknown };
 }
 
 /** Public weekly price list — the same numbers the app's signup shows. */
@@ -65,7 +71,8 @@ export async function fetchPricing(country?: string): Promise<CountryPricing | n
   }
 }
 
-export const LEGAL_URL = (doc: 'terms' | 'privacy' | 'vendor-agreement' | 'driver-agreement') => `${API_URL}/legal/${doc}`;
+// The legal texts' address (LEGAL_URL) lives in lib/legal-url: client code imports it from there, never from this
+// server module (its top-level React `cache(...)` read would ride into every console page's first load).
 
 // ── Public storefronts (SEO surface — ACTIVE + verified stores only) ────────
 export interface StorefrontSummary {
@@ -104,10 +111,17 @@ export interface StorefrontSeller {
   payment: { cash: true; storeMmg: boolean };
   refundRule: string | null;
   statutoryRights: string;
+  /** [FOOD-PERMIT] a current food handler's certificate is on file (absent from an older API) */
+  foodHandlerCertificate?: boolean;
 }
 
 export interface StorefrontDetail extends StorefrontSummary {
   addressLine1: string;
+  /** [CHAINS PR3] The brand this store belongs to and its branches a visitor may switch to (absent: none / older API). */
+  brand?: StorefrontBrand;
+  /** [P35 · board 4b] A person approved the store's documents and they are still current (server-computed).
+   *  Absent from an older API: the page then says nothing about verification. */
+  isVerified?: boolean;
   /** Absent from an API older than R3. */
   seller?: StorefrontSeller | null;
   operatingHours: Array<{ dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }>;

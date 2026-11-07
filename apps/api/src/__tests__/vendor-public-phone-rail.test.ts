@@ -271,6 +271,8 @@ describe('discovery publishes the public card, never the account row', () => {
         ...VENDOR_CARD_PUBLIC_FIELDS,
         'distanceKm', 'etaMin', 'deliveryFee', 'isFavorite',
         'displayRating', 'ratingBucket', 'ratingCount', 'topRated',
+        // [CHAINS PR3] One brand card per chain: the brand's name and branch count, or null.
+        'brand',
       ].sort();
 
       const browse = await inject('GET', '/api/v1/customer/vendors?cuisine=priv1-rail-test&limit=50');
@@ -417,5 +419,22 @@ describe('discovery publishes the public card, never the account row', () => {
     } finally {
       await app.prisma.order.delete({ where: { id: order.id } });
     }
+  });
+});
+
+// [P35 · board 4b "Verified seller"] The store page says whether a person approved the store's papers, from the
+// column itself: the detail route resolves a store by direct link even when it is not customer-visible, so the
+// apps never infer it from "I can see this page".
+describe('the store page carries isVerified from the store row', () => {
+  it('a verified store says true; an unverified one reached by its link says false', async () => {
+    const verified = await inject('GET', `/api/v1/customer/vendors/${shop.vendorId}`);
+    expect(verified.statusCode).toBe(200);
+    expect(verified.json().data.isVerified).toBe(true);
+
+    const unverified = await makeStore('Papers Pending Shop', 'ACTIVE');
+    await app.prisma.vendor.update({ where: { id: unverified.vendorId }, data: { isVerified: false } });
+    const res = await inject('GET', `/api/v1/customer/vendors/${unverified.vendorId}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.isVerified).toBe(false);
   });
 });

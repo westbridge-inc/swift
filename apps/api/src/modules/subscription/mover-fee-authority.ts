@@ -7,13 +7,16 @@ import { moverSourceFinancialFingerprint, paidMoverResolutionBlocker } from './m
 import { capabilitiesOf, holdsCapability } from '../admin/admin-authority';
 import { partnerRateFor, subscriptionTiersIn } from '../country/country-config.service';
 import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
+import { liveServicesStoreFeeWhere, ownerOfRow, SUBSCRIPTION_OWNER_SELECT, subscriptionOwnerOf, type SubscriptionOwner } from './subscription-owner';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
 export interface SubscriptionPayer {
   userId: string;
   tenantId: string;
-  kind: 'MOVER' | 'VENDOR';
+  /** A mover shares one fee across their rider and driver profiles; a store
+   *  and a pro (BILL-PRO) each keep their own identity and clock. */
+  kind: 'MOVER' | 'VENDOR' | 'PROVIDER';
 }
 
 export interface MoverFeeResolution {
@@ -32,19 +35,16 @@ const ownershipError = () => new AppError(409, 'MOVER_FEE_OWNERSHIP_INVALID', 'T
 /** Resolve the original owner of a money record without choosing a new payer.
  * Historical provider work must keep this subscription and owner binding. */
 export async function subscriptionPayer(db: Db, subscriptionId: string): Promise<SubscriptionPayer> {
-  const sub = await db.subscription.findUnique({
-    where: { id: subscriptionId },
-    select: {
-      riderId: true, driverId: true, vendorId: true,
-      rider: { select: { user: { select: { id: true, tenantId: true } } } },
-      driver: { select: { user: { select: { id: true, tenantId: true } } } },
-      vendor: { select: { tenantId: true, owner: { select: { user: { select: { id: true, tenantId: true } } } } } },
-    },
-  });
-  if (!sub || [sub.riderId, sub.driverId, sub.vendorId].filter(Boolean).length !== 1) throw ownershipError();
-  const user = sub.rider?.user ?? sub.driver?.user ?? sub.vendor?.owner.user;
-  if (!user) throw ownershipError();
-  return { userId: user.id, tenantId: user.tenantId, kind: sub.vendorId ? 'VENDOR' : 'MOVER' };
+  const payer = payerOfOwner(await subscriptionOwnerOf(db, subscriptionId));
+  if (!payer) throw ownershipError();
+  return payer;
+}
+
+/** subscriptionPayer's rule: exactly one owner, and that owner's user. */
+function payerOfOwner(owner: SubscriptionOwner | null): SubscriptionPayer | null {
+  if (!owner || owner.ownerColumns !== 1) return null;
+  const kind = owner.kind === 'VENDOR' ? 'VENDOR' : owner.kind === 'PROVIDER' ? 'PROVIDER' : 'MOVER';
+  return { userId: owner.userId, tenantId: owner.tenantId, kind };
 }
 
 /** The common lock order for activation, collection, settings and outcomes:
@@ -77,7 +77,7 @@ export async function lockMoverSources(
   return subscriptions;
 }
 
-/** Vendor subscriptions keep their separate business identity. Movers share
+/** Vendor and pro subscriptions keep their separate identity. Movers share
  * their payer lock across both profiles, including historical source rows. */
 export async function lockSubscriptionPayer(
   tx: Prisma.TransactionClient,
@@ -266,11 +266,43 @@ export async function activateMoverFeeType(tx: Prisma.TransactionClient, payer: 
   return persistDecision(tx, { ...current, feeType }, 'MOVER_FEE_ACTIVATED', payer.userId);
 }
 
+/**
+ * [BUG-HUNT F05] A taxi driver support let move to delivery work. The fee becomes a delivery fee, and the existing rule
+ * prices it: a lower card rate applies at once, recorded, future weeks only (no charge issued or paid week is touched;
+ * no money moves). A negotiated or waived fee is left as it is. Runs in the vehicle change's transaction, after the
+ * rider profile carries the new vehicle.
+ */
+export async function moveMoverFeeToDelivery(tx: Prisma.TransactionClient, payer: { userId: string; tenantId: string }, actorUserId: string): Promise<MoverFeeResolution | null> {
+  const authority = await lockMoverFeeAuthority(tx, payer);
+  if (!authority || authority.feeType !== 'TAXI_DRIVER') return authority;
+  const moved = await persistDecision(tx, { ...authority, feeType: 'DELIVERY_RIDER' }, 'MOVER_FEE_ACTIVATED', actorUserId, { planMovedFrom: authority.feeType });
+  const fee = await tx.subscription.findUniqueOrThrow({ where: { id: authority.canonicalSubscriptionId } });
+  if (fee.customRate !== null || fee.feeWaived) return moved;
+  const tariff = await moverFeeTariffSubject(tx, moved);
+  const target = partnerRateFor(await subscriptionTiersIn(tx, tariff.countryCode), tariff.subject).rate;
+  const from = Number(fee.weeklyRate);
+  if (target >= from) return moved;
+  await tx.subscription.update({ where: { id: fee.id }, data: { weeklyRate: target } });
+  const sequence = await tx.billingEvent.count({ where: { subscriptionId: fee.id, type: 'TIER_CHANGE' } }) + 1;
+  await tx.billingEvent.create({ data: {
+    subscriptionId: fee.id, type: 'TIER_CHANGE', amount: target, currencyCode: fee.currencyCode,
+    idempotencyKey: `tier:${fee.id}:${sequence}:${from}->${target}`,
+    note: `Moved from taxi to delivery work: the future weekly rate changes from ${from} to ${target}; issued charges and paid periods retained.`,
+  } });
+  return moved;
+}
+
 /** Decide NEW collection authority; never redirect historical settlement. */
 export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, subscriptionId: string): Promise<{ allowed: boolean; mover: MoverFeeResolution | null }> {
   const payer = await lockSubscriptionPayer(tx, subscriptionId);
   const ready = await billingEffectsReady(tx);
-  if (payer.kind === 'VENDOR') return { allowed: ready, mover: null };
+  // [BILL-PRO · REVIEW-M #2229 S3-1 / G S2-1 · owner B1 "one fee"] A pro's own fee has no NEW collection authority
+  // while the same person's Services store fee is live: never charged, retried or dunned, whatever ran before it in the
+  // job. Read under the payer lock (the person's user row), which the store fee's own collection also takes.
+  if (payer.kind === 'PROVIDER') {
+    return { allowed: ready && (await tx.subscription.count({ where: liveServicesStoreFeeWhere(payer.userId) })) === 0, mover: null };
+  }
+  if (payer.kind !== 'MOVER') return { allowed: ready, mover: null };
   const mover = await lockMoverFeeAuthority(tx, payer);
   return { allowed: ready && !!mover && mover.state === 'ACTIVE' && mover.canonicalSubscriptionId === subscriptionId, mover };
 }
@@ -280,7 +312,9 @@ export async function lockFeeCollectionAuthority(tx: Prisma.TransactionClient, s
 export async function readFeeCollectionAuthority(db: Db, subscriptionId: string): Promise<{ allowed: boolean; canonical: boolean; mover: MoverFeeResolution | null }> {
   try {
     const payer = await subscriptionPayer(db, subscriptionId);
-    if (payer.kind === 'VENDOR') return { allowed: true, canonical: true, mover: null };
+    // [BILL-PRO · owner B1] The read twin of the one-fee rule above: a store-covered pro fee is not collectable.
+    if (payer.kind === 'PROVIDER' && (await db.subscription.count({ where: liveServicesStoreFeeWhere(payer.userId) })) > 0) return NOT_COLLECTABLE;
+    if (payer.kind !== 'MOVER') return { allowed: true, canonical: true, mover: null };
     const mover = await resolveMoverFeeAuthority(db, payer);
     const canonical = !!mover && mover.canonicalSubscriptionId === subscriptionId;
     return { allowed: canonical && mover?.state === 'ACTIVE', canonical, mover };
@@ -295,20 +329,12 @@ export async function readFeeCollectionAuthority(db: Db, subscriptionId: string)
 type FeeCollectionRead = { allowed: boolean; canonical: boolean; mover: MoverFeeResolution | null };
 const NOT_COLLECTABLE: FeeCollectionRead = { allowed: false, canonical: false, mover: null };
 const MOVER_FEE_TYPES: Array<Subscription['type']> = ['TAXI_DRIVER', 'DELIVERY_RIDER', 'COURIER_RIDER'];
-const PAYER_SELECT = {
-  id: true, riderId: true, driverId: true, vendorId: true,
-  rider: { select: { user: { select: { id: true, tenantId: true } } } },
-  driver: { select: { user: { select: { id: true, tenantId: true } } } },
-  vendor: { select: { tenantId: true, owner: { select: { user: { select: { id: true, tenantId: true } } } } } },
-} as const;
+const PAYER_SELECT = { id: true, ...SUBSCRIPTION_OWNER_SELECT } as const;
 type PayerRow = Prisma.SubscriptionGetPayload<{ select: typeof PAYER_SELECT }>;
 
 /** subscriptionPayer's rule on a row already read: exactly one owner, and that owner's user. */
 function payerOfRow(sub: PayerRow): SubscriptionPayer | null {
-  if ([sub.riderId, sub.driverId, sub.vendorId].filter(Boolean).length !== 1) return null;
-  const user = sub.rider?.user ?? sub.driver?.user ?? sub.vendor?.owner.user;
-  if (!user) return null;
-  return { userId: user.id, tenantId: user.tenantId, kind: sub.vendorId ? 'VENDOR' : 'MOVER' };
+  return payerOfOwner(ownerOfRow(sub));
 }
 
 /**
@@ -328,11 +354,23 @@ export async function readFeeCollectionAuthorities(db: PrismaClient, subscriptio
   const rows = await db.subscription.findMany({ where: { id: { in: subscriptionIds } }, select: PAYER_SELECT });
   const byId = new Map(rows.map((row) => [row.id, row]));
   const moverSubs = new Map<string, { payer: SubscriptionPayer; subs: string[] }>();
+  // [BILL-PRO · REVIEW-M #2229 S4-1] The same one-fee rule as readFeeCollectionAuthority: a pro's own fee is not
+  // collectable while that person's Services store fee is live (one count per pro in the batch).
+  const proUserIds = [...new Set(subscriptionIds.flatMap((id) => {
+    const row = byId.get(id);
+    const payer = row ? payerOfRow(row) : null;
+    return payer?.kind === 'PROVIDER' ? [payer.userId] : [];
+  }))];
+  const coveredPros = new Set<string>();
+  for (const userId of proUserIds) {
+    if (await db.subscription.count({ where: liveServicesStoreFeeWhere(userId) })) coveredPros.add(userId);
+  }
   for (const id of subscriptionIds) {
     const row = byId.get(id);
     const payer = row ? payerOfRow(row) : null;
     if (!payer) { out.set(id, { ...NOT_COLLECTABLE }); continue; }
-    if (payer.kind === 'VENDOR') { out.set(id, { allowed: true, canonical: true, mover: null }); continue; }
+    if (payer.kind === 'PROVIDER' && coveredPros.has(payer.userId)) { out.set(id, { ...NOT_COLLECTABLE }); continue; }
+    if (payer.kind !== 'MOVER') { out.set(id, { allowed: true, canonical: true, mover: null }); continue; }
     const group = moverSubs.get(payer.userId) ?? { payer, subs: [] };
     group.subs.push(id);
     moverSubs.set(payer.userId, group);

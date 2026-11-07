@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { formatAmount } from '@/lib/money';
-import { FEE_ASK, FEE_LADDER, feeQuote, feeSteps, feeTermsOf, fetchSignupPricing, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
+import { feeMoney } from '@/lib/fee-status';
+import { FEE_ASK, feeLadderLine, feeQuote, feeSteps, feeTermsOf, fetchSignupPricing, privateCarsOpen, stepTrialLines, trialDaysOf, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
 import styles from '../auth-flow.module.css';
 
 /**
@@ -13,11 +14,15 @@ import styles from '../auth-flow.module.css';
  * the tick is given to exactly the amount and words on screen, so another vehicle or business type,
  * or a price read again, clears it. Loaded only on these steps (weekly-fee-loader.ts).
  */
-export function WeeklyFee({ role, type, onChange }: {
+export function WeeklyFee({ role, type, onChange, privateCar = false, onPrivateCars }: {
   role: FeeChoice['role'];
   /** The business type (a store) or the vehicle (a rider or driver). */
   type: string;
   onChange: (_state: FeeState) => void;
+  /** [CARS-PLATES] A car on a private (P) plate: the delivery rider's fee. */
+  privateCar?: boolean;
+  /** [CARS-PLATES] Told whether the server says private cars deliver (the delivery door then offers a car). */
+  onPrivateCars?: (_open: boolean) => void;
 }) {
   const [pricing, setPricing] = useState<SignupPricing | 'loading' | 'error'>('loading');
   const [attempt, setAttempt] = useState(0);
@@ -31,11 +36,16 @@ export function WeeklyFee({ role, type, onChange }: {
 
   const view = useMemo(() => {
     if (typeof pricing !== 'object') return { state: { ask: pricing === 'loading' ? FEE_ASK.loading : FEE_ASK.error } as FeeState };
-    const choice: FeeChoice = role === 'VENDOR' ? { role, vendorType: type } : { role, vehicleType: type };
+    const choice: FeeChoice = role === 'VENDOR' ? { role, vendorType: type } : { role, vehicleType: type, privateCar };
     const rate = feeQuote(pricing, choice);
     if (rate === null) return { state: { ask: FEE_ASK.missing } as FeeState };
     const terms = feeTermsOf(pricing);
-    const amount = `${formatAmount(rate, pricing.currencySymbol)}/week`;
+    // [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D1)] The free trial first, as the app's price card says it, from the
+    // server's numbers; a list without a trial length shows the amount alone.
+    const trial = trialDaysOf(pricing.trialDays);
+    // [F30] Guyana dollars as every web fee screen writes them (GY$15,000 a week); another currency by its own symbol.
+    const money = pricing.currencyCode === 'GYD' ? feeMoney(rate) : formatAmount(rate, pricing.currencySymbol);
+    const amount = `${trial ? `${trial} days free, then ` : ''}${money} a week`;
     const steps = feeSteps(pricing, choice);
     if (terms === 'invalid') return { amount, steps, state: { ask: FEE_ASK.invalid } as FeeState };
     // An API older than the tick serves no words: the amount is shown, nothing is ticked or sent.
@@ -43,10 +53,11 @@ export function WeeklyFee({ role, type, onChange }: {
     const key = `${terms.version}|${pricing.currencyCode}|${rate}`;
     const state: FeeState = tickedFor === key
       ? { ask: null, ack: { version: terms.version, amount: rate, currencyCode: pricing.currencyCode } }
-      : { ask: FEE_ASK.tick };
+      : { ask: FEE_ASK.tick, tick: true };
     return { amount, steps, terms, key, state };
-  }, [pricing, role, type, tickedFor]);
+  }, [pricing, role, type, privateCar, tickedFor]);
   useEffect(() => { onChange(view.state); }, [onChange, view.state]);
+  useEffect(() => { if (typeof pricing === 'object') onPrivateCars?.(privateCarsOpen(pricing)); }, [pricing, onPrivateCars]);
 
   if (!view.amount) {
     return (
@@ -60,7 +71,8 @@ export function WeeklyFee({ role, type, onChange }: {
   return (
     <section aria-label="Your weekly fee" className={styles.stackTight}>
       <p className={styles.bodyCopy}><strong>Your weekly fee: {view.amount}</strong></p>
-      {view.steps ? <p className={styles.smallCopy}>{FEE_LADDER}</p> : null}
+      {view.steps && typeof pricing === 'object' ? <p className={styles.smallCopy}>{feeLadderLine(pricing)}</p> : null}
+      {typeof pricing === 'object' ? stepTrialLines(pricing, role === 'VENDOR' ? { role, vendorType: type } : { role, vehicleType: type }).map((line) => <p key={line} className={styles.smallCopy}>{line}</p>) : null}
       {terms ? terms.items.map((item) => (
         <p key={item.heading} className={styles.smallCopy}><strong>{item.heading}:</strong> {item.text}</p>
       )) : null}

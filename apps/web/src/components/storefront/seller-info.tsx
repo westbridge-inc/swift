@@ -23,6 +23,8 @@ export function SellerInfo({ seller }: { seller: StorefrontSeller }) {
     ['Business address', seller.address ?? ASK_THE_STORE],
     ['Phone', seller.phone ? <a href={`tel:${seller.phone}`}>{seller.phone}</a> : ASK_THE_STORE],
     ['How payment works', sellerPaymentLine(seller.payment)],
+    // [FOOD-PERMIT · owner 24 Oct 2026] the trust badge: said only when the server says one is on file
+    ...(seller.foodHandlerCertificate === true ? [['Food handler’s certificate', 'On file with Swift'] as [string, ReactNode]] : []),
   ];
   return (
     <section className={styles.seller} aria-labelledby="seller-info">

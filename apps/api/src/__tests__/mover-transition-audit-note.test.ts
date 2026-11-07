@@ -363,8 +363,10 @@ describe('an arrival records the fix the platform already had', () => {
   });
 
   it('leaves the non-arrival rungs unadorned', async () => {
-    // Only the two rungs that ASSERT a position carry a fix. "Started the run"
-    // claims nothing about where the rider is.
+    // Only the rungs that ASSERT a position carry a fix: the two arrivals and
+    // [O-2 · owner 22 Oct 2026] "Picked up" (how far from the store the rider
+    // said they collected it; evidence only). "Started the run" claims nothing
+    // about where the rider is.
     const rider = await makeRider();
     const order = await makeAssignedOrder(await makeCustomer(), rider.riderId);
     await app.prisma.rider.update({
@@ -374,8 +376,9 @@ describe('an arrival records the fix the platform already had', () => {
 
     const logs = await walkTheLeg(rider.token, order.id);
 
-    for (const status of ['RIDER_EN_ROUTE_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY']) {
+    for (const status of ['RIDER_EN_ROUTE_PICKUP', 'EN_ROUTE_DELIVERY']) {
       expect(logs.find((l) => l.status === status)!.note, `${status} makes no position claim`).not.toMatch(/gps:/);
     }
+    expect(logs.find((l) => l.status === 'PICKED_UP')!.note).toMatch(/^Rider confirmed collecting the order — gps:.* m from the pickup, fix \d+s old\)$/);
   });
 });

@@ -50,10 +50,10 @@ describe('the operator, from one constant', () => {
 describe('Terms of Service (Part 4)', () => {
   it.each([
     ['¶1 who the agreement is with, Guyana only, the tick, binding', `<p>These Terms of Service are a binding agreement between you and ${ID} ("<b>Swift</b>", "we", "us"), which operates the Swift app, websites and related services in Guyana (the "<b>Platform</b>"). By creating an account and ticking the acceptance box, you accept these Terms and confirm you have read our Privacy Policy. Your electronic acceptance forms a binding contract. If you do not agree, do not use the Platform.</p>`],
-    ['¶4 P5 ID wording + the 18+ box', 'You must be at least 18 years old and capable of forming a binding contract. By creating an account you confirm that you are 18 or older; where the sign-up shows the "I am 18 or older" box, you confirm it by ticking that box. An account requires a phone number verified by SMS code; higher-value Orders and all taxi rides additionally require a government-issued ID on file, requested in the app when it becomes necessary. A customer never needs a photo.'], // [owner 16 Oct: customers take no photos; 2026-10-17]
-    ['¶5 payments and prices', "<p>Swift is software, not a payment service. You pay for an Order in cash at Handover or, where the Business offers it, directly into the Business's own MMG account under MMG's terms. Swift never holds, collects or transmits Order money, offers no wallet or stored value, and never asks for card numbers. Prices are the Business's own prices. Delivery fees and taxi fares are calculated by Swift and shown in the app before you confirm. Swift charges customers nothing.</p>"],
+    ['¶4 P5 ID wording + the 18+ box', 'You must be at least 18 years old and capable of forming a binding contract. By creating an account you confirm that you are 18 or older; where the sign-up shows the "I am 18 or older" box, you confirm it by ticking that box. An account requires a phone number verified by SMS code. A customer never needs an ID or a photo to use Swift, and Swift does not ask a customer for either.'], // [owner 16 Oct: customers take no photos; 2026-10-17] [owner 24 Oct 2026: no customer ID gate; 2026-10-25] [CHECKLIST-LEGAL · owner 1 Nov 2026 (b): no customer ID at all; 2026-11-01.1]
+    ['¶5 payments and prices', "<p>Swift is software, not a payment service. You pay for an Order in cash at Handover or, where the Business offers it, directly into the Business's own MMG account under MMG's terms. You pay a taxi fare to the driver at drop-off, in cash or, where the driver offers it, directly into the driver's own MMG account under MMG's terms. Swift never holds, collects or transmits Order money, offers no wallet or stored value, and never asks for card numbers. Prices are the Business's own prices. Where a Business is registered for VAT and Swift has approved its details, the price you see includes that Business's VAT. Delivery fees and taxi fares are calculated by Swift and shown in the app before you confirm. Swift charges customers nothing.</p>"],
     ['¶8 problems + statutory rights', "If something goes wrong with a fulfilled Order, report it from the Order screen within 7 days. Swift reviews it with GPS and photo evidence and asks the Business to put it right; any refund of Order money is made by the Business that received it. Nothing in this section affects your rights under the Consumer Affairs Act 2011, including returning goods to, and getting refunds from, the Business.</p>"],
-    ['¶9 (h) the prohibited list, letters or documents, legal services', '(h) order, sell, send or carry anything Swift prohibits: alcohol, tobacco and vapes, medicines and drugs, 18+ items, cooking gas and fuel, weapons and ammunition, fireworks and explosives, pesticides and controlled chemicals, protected wildlife, raw gold and precious minerals, lottery and gambling products, counterfeit goods, currency and payment cards, and letters or documents; or offer legal services.'],
+    ['¶9 (h) the prohibited list, letters or documents, legal services', '(h) order, sell, send or carry anything Swift prohibits: alcohol, tobacco and vapes, medicines and drugs, 18+ items, cooking gas and fuel, weapons and ammunition, fireworks and explosives, agricultural and garden pesticides and controlled chemicals (sealed household insecticide sold by a store is allowed), protected wildlife, raw gold and precious minerals, lottery and gambling products, counterfeit goods, currency and payment cards, and letters or documents; or offer legal services.'],
     ['¶11 SOS is not an emergency service', "These tools support your safety. Swift's safety team is not an emergency service and may not respond immediately; in an emergency call Police 911, Fire 912 or Ambulance 913 first."],
     ['§14 updates', 'The app may update itself to fix problems or improve features.</p>'],
     ['¶17(c) liability floor', "(c) Swift's total liability to you for claims arising from the Platform's own role is limited to the greater of the amounts you paid Swift in the twelve months before the event and GYD 100,000."],
@@ -74,11 +74,14 @@ describe('Terms of Service (Part 4)', () => {
 
 describe('Privacy Policy (Part 4)', () => {
   it.each([
-    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 22 October 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
+    // [EMAIL-HTTPS · 2026-10-27] the "as of" date is LAST_UPDATED: it moves with the new day's version.
+    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 6 November 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
     ['¶2 controller and data protection officer', '<p>Westbridge Inc. (trading as Swift), registration no. 17703, Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana, is the data controller. Our data protection officer is the Data Protection Officer, Westbridge Inc., privacy@swiftgy.com.'],
-    ['¶15 ID checks for safety and fraud prevention', "checking partners' identity and licence documents, and customers' IDs for taxi rides and larger orders, for safety and fraud prevention.</li>"],
+    // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] taxi rides and larger orders no longer need a customer's ID.
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b) — a DELIBERATE change] nor anything else: Swift takes no customer ID.
+    ['¶15 ID checks for safety and fraud prevention', "checking partners' identity and licence documents, for safety and fraud prevention.</li>"],
     ['¶16 legal obligations', '<li><b>To meet legal obligations:</b> keeping tax and accounting records, and responding to lawful demands from authorities.</li>'],
-    ['¶18 police clearances', '<li><b>With your explicit consent:</b> police clearance certificates (optional for drivers and riders; required for service providers who visit homes).</li>'],
+    ['¶18 police clearances', '<li><b>With your explicit consent:</b> police clearance certificates (optional for taxi drivers; required for service providers who visit homes).</li>'], // [ROLE-DOCS · owner 21 Oct 2026]
     ['¶21 MapTiler cookies (B6)', "MapTiler's own servers may set cookies; Swift does not."],
     ['¶21 where the servers are', "Our servers are with DigitalOcean in Atlanta, United States, and several providers process data in the United States. We use each provider's written data-protection terms and send only what each needs.</p>"],
     ['¶21 Cloudflare, WhatsApp, MMG, Google Places named', 'Cloudflare (runs the domain-name service (DNS)'],
@@ -102,22 +105,23 @@ describe('Privacy Policy (Part 4)', () => {
 });
 
 describe('Mover and Business Agreements (Part 4)', () => {
-  const F2 = 'Swift may change the weekly fee. We will tell you in the app at least 14 days before the change. The new fee applies from your first weekly fee due after that date. If you do not accept it, stop your plan before then; you will not pay the new fee.';
+  // [REVIEW-G18 S4-3 · 2026-11-05] F2 names the rise as a rise where the change is first named; the cut is its own sentence.
+  const F2 = 'Swift may change the weekly fee. If it goes up, we will tell you in the app at least 14 days before the change, and the new fee applies from your first weekly fee due after that date. If you do not accept it, stop your plan before then; you will not pay the new fee.';
   it.each([['Mover', DRIVER_AGREEMENT], ['Business', VENDOR_AGREEMENT]])('%s: the seller, the F2 price-change clause, refund timing, the 48-hour grace and reversals', (_n, doc) => {
     expect(doc).toContain(`<p>The weekly subscription is sold by Swift's operator, Westbridge Inc. (registration no. 17703), ${OPERATOR_ADDRESS}.</p>`);
     expect(doc).toContain(F2);
-    expect(doc).toContain('Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from,');
+    expect(doc).toContain('Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from or, if you paid in person, by a way you and Swift agree,');
     expect(doc).toContain('If the weekly fee is still unpaid 48 hours after it falls due,');
-    expect(doc).toContain('If you pay twice or pay too much, Swift may return the whole payment through MMG instead of a manual refund');
+    expect(doc).toContain('If you pay twice or pay too much through MMG, Swift may return the whole payment through MMG instead of a manual refund');
     expect(doc).not.toMatch(/settlement records|settle any amounts|ledger both sides/);
   });
 
   it('Mover: P1 documents, the selfie, courier goods only, confirmation records, insurance and hire licences', () => {
-    expect(DRIVER_AGREEMENT).toContain("(for example: your driver's licence — or, if you ride a bicycle, your national ID or Digital ID card — vehicle registration, and insurance appropriate to carrying passengers where you drive passengers). A police clearance is optional: if you upload one and Swift approves it, your account is recorded as police-cleared; it is never needed to go online.");
+    expect(DRIVER_AGREEMENT).toContain("(for example: your driver's licence — or, if you ride a bicycle, your national ID or Digital ID card — vehicle registration, and insurance appropriate to carrying passengers where you drive passengers). A taxi driver may add a police clearance: if Swift approves it, your account is recorded as police-cleared; it is never needed to go online."); // [ROLE-DOCS · owner 21 Oct 2026]
     expect(DRIVER_AGREEMENT).toContain('You may not let anyone else work under your account; Swift may ask for a selfie, reviewed by a person, to confirm it is you.');
     expect(DRIVER_AGREEMENT).toContain('on courier jobs, carrying goods only — never letters, documents or mail, which in Guyana only the Post Office may carry;');
     expect(DRIVER_AGREEMENT).toContain("The app's confirmation records show what each side has confirmed; Swift does not hold or move this money.");
-    expect(DRIVER_AGREEMENT).toContain("Taxi drivers must hold insurance covering passengers carried for hire. Anyone delivering must hold insurance that permits use for hire or reward. Taxi drivers must hold a current hire-car driver's licence, and the car a current hire-car licence.");
+    expect(DRIVER_AGREEMENT).toContain("Taxi drivers must hold insurance covering passengers carried for hire. Anyone delivering by motor vehicle must hold insurance that permits use for hire or reward. Taxi drivers must hold a current hire-car driver's licence, and the car a current hire-car licence.");
     expect(DRIVER_AGREEMENT).not.toMatch(/in-shift selfie|police clearance\)|profile shows that you are police-cleared/);
     // [R25 · owner 15 Oct · research D13] independence; declining or handing back never costs anything
     expect(DRIVER_AGREEMENT).toContain('You may work with other apps, platforms or customers at the same time; Swift never asks for exclusivity. Swift sets no uniform and no working hours: you choose when, where and how long you work.');
@@ -127,7 +131,7 @@ describe('Mover and Business Agreements (Part 4)', () => {
 
   it('Business: authority, P1 documents + January renewal, storefront facts + statutory rights, F8, own deliveries, invited staff', () => {
     expect(VENDOR_AGREEMENT).toContain('You confirm you are authorised to accept this Agreement for the business.');
-    expect(VENDOR_AGREEMENT).toContain("(for example: the owner's national ID or Digital ID card, business registration, and the food-safety licences and permits your category requires). If you trade under a registered business name, renew it each January.");
+    expect(VENDOR_AGREEMENT).toContain("(for example: the owner's national ID or Digital ID card, business registration (or, if your store's name is your own name, the short declaration you sign in the app), and the food-safety licences and permits your category requires). If you trade under a registered business name, renew it each January.");
     expect(VENDOR_AGREEMENT).toContain("<p>Your storefront must show your legal name, business address and phone. You must honour customers' return and refund rights under the Consumer Affairs Act 2011.</p>");
     expect(VENDOR_AGREEMENT).toContain('If you do not refund within 72 hours after Swift contacts you, Swift may suspend new orders or turn off MMG payment for your store until the refund is made.');
     expect(VENDOR_AGREEMENT).toContain('or, for any order you choose to deliver yourself, by your own staff, for whom you are fully responsible.');
@@ -154,9 +158,11 @@ describe('held until the code does it (a sentence that describes a feature must 
 describe('Child Safety (Part 4)', () => {
 
   it('Child Safety: report + email until every live app has the reason; the authorities named; P5', () => {
-    expect(CHILD_SAFETY).toContain('use the <b>Report</b> action and email <b>childsafety@swiftgy.com</b>.');
+    expect(CHILD_SAFETY).toContain('use the <b>Report</b> action and choose Child safety, or email <b>childsafety@swiftgy.com</b>.');
     expect(CHILD_SAFETY).toContain('we report to the Guyana Police Force and the Childcare and Protection Agency and,');
-    expect(CHILD_SAFETY).toContain('<p>Every account is phone-verified, higher-trust actions (taxi rides and larger orders) need a government ID on file, which our team can withdraw at any time, and partners\' profile photos deter fake partner accounts.'); // [owner 16 Oct: customers take no photos]
+    // [owner 16 Oct: customers take no photos] [owner 24 Oct 2026: no customer ID for taxi rides or larger orders]
+    expect(CHILD_SAFETY).toContain('<p>Every account is phone-verified, and partners\' profile photos deter fake partner accounts.');
+    expect(CHILD_SAFETY).not.toMatch(/government ID on file|taxi rides and larger orders/);
     expect(CHILD_SAFETY).not.toMatch(/live registration selfie|the relevant authorities/);
   });
 });
@@ -165,8 +171,22 @@ describe('one version for the whole batch', () => {
   // The V1b batch shipped as 2026-10-16; the human-only identity + no-customer-photo words follow as 2026-10-17;
   // the customer-ID retention sentence (Privacy s.6) as 2026-10-18; the taxi waiting charge (Terms s.4) and phone
   // crash reports kept 90 days (Privacy) as 2026-10-21 (legal-waiting-crash-2026-10-21.test.ts); the one-minute
-  // cancel window (Terms s.7, owner 22 Oct) as 2026-10-22 (legal-version-binding.test.ts).
-  it('is 2026-10-22', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-22');
+  // cancel window (Terms s.7, owner 22 Oct) as 2026-10-22 (legal-version-binding.test.ts); [ROLE-DOCS · owner 21 Oct
+  // 2026] police clearance optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-22.1; [owner 24 Oct
+  // 2026] no customer ID for taxi rides or larger orders (Terms s.3, Privacy ¶15 in s.3 + s.1, Child Safety) as 2026-10-25;
+  // [O-1 · COORD 25 Oct, material] Swift-bridged calling and Twilio for calls (Privacy s.5 + s.6) as 2026-10-25.1;
+  // [POLICE-CLEARANCE CONSENT · COORD 25 Oct, non-material] what is kept of a police clearance and its withdrawal
+  // (Privacy s.6) as 2026-10-25.2.
+  // [EMAIL-HTTPS · COORD 27 Oct, material] Resend delivers Swift's emails (Privacy s.5) as 2026-10-27.
+  // [BOOK-S7 · owner 28 Oct, non-material pending the owner] appointment rules (Terms s.5-s.7, Privacy s.6, Business
+  // Agreement s.5) as 2026-10-28 (legal-appointment-rules.test.ts).
+  // [BOOK-FU2 · owner B3, material] "Customer didn't come" (Terms s.6, Privacy s.6) as 2026-10-28.1.
+  // [TERMS · owner 29 Oct, non-material] pro appointments booked from a provider's list (Terms s.7) as 2026-10-29.
+  // [BOOK-P3 · COORD (b), non-material] the free cancel after a business's or provider's move (Terms s.7) as 2026-10-29.1.
+  // [BILL-PRO] the Business Agreement covers Providers (s.12), material for Providers only, as 2026-10-29.2.
+  // [EXPRESS-FEE · owner 1 Nov 2026, non-material] the bump for the express Delivery-policy wording, as 2026-11-01.
+  it('is 2026-11-01', () => {
+    // served now under 2026-11-05 (the 5 Nov batch: material)
+    expect(LEGAL_VERSION).toBe('2026-11-06');
   });
 });

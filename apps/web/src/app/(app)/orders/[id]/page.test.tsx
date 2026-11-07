@@ -101,6 +101,37 @@ describe('[W-32] the payment that opens is the payment that was shown', () => {
     expect(screen.queryByText(/store's own rider/)).toBeNull();
   });
 
+  // [O-2 · REVIEW-F S3-3 on #2055] The store's code is off by default: the counter asks for the first name
+  // and order number. [PICKUP · owner 30 Oct 2026: "the code is still there rather than mark as picked up"] With
+  // the code off the customer gets NO code: the name + order-number words and the order number itself. The
+  // server sends none to this page (pickupHandover=v1); a code an older server still sends is not shown either.
+  // An older server that does not say (no pickupCodeRequired) = today's code card.
+  it('a takeaway tells the customer what the counter asks for', async () => {
+    const TAKEAWAY = { ...ORDER, status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP', pickupAddress: '7 Counter Lane, Georgetown', pickupCode: '482193' };
+    for (const pickupCode of [null, '482193']) {
+      vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCode, pickupCodeRequired: false } as never);
+      const view = render(<OrderDetailPage />);
+      expect(await screen.findByText('At the counter, give your first name and order number.')).toBeTruthy();
+      expect(screen.getAllByText('SW-2001').length).toBeGreaterThan(0);
+      expect(screen.queryByText('482193')).toBeNull();
+      expect(screen.queryByText(/code/i)).toBeNull();
+      view.unmount();
+    }
+    // Collected: nothing left to say at the counter.
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, status: 'COMPLETED', pickupCode: null, pickupCodeRequired: false } as never);
+    const done = render(<OrderDetailPage />);
+    expect(await screen.findAllByText(/SW-2001/)).toBeTruthy();
+    expect(screen.queryByText('At the counter, give your first name and order number.')).toBeNull();
+    done.unmount();
+    for (const pickupCodeRequired of [true, undefined]) {
+      vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...TAKEAWAY, pickupCodeRequired } as never);
+      const again = render(<OrderDetailPage />);
+      expect(await screen.findByText('Show this pickup code')).toBeTruthy();
+      expect(screen.queryByText(/give your first name/)).toBeNull();
+      again.unmount();
+    }
+  });
+
   it('says who is paid and how much BEFORE anything opens', async () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText(/sends .* directly to Shanta Kitchen/)).toBeTruthy();
@@ -207,6 +238,8 @@ describe('[Row 117] with web taxi booking on, the trip page carries the ride’s
       driver: { vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleColor: 'White', licensePlate: 'PXX 1234', user: { firstName: 'Dev' } },
     } as never);
     vi.spyOn(rides, 'activeRide').mockResolvedValue({ id: ORDER.id, driver: { currentLat: 6.81, currentLng: -58.16, user: { firstName: 'Dev', phone: '+5920000000' } } } as never);
+    vi.spyOn(rides, 'tripShares').mockResolvedValue([]);
+    vi.spyOn(rides, 'outstandingCheckin').mockResolvedValue(null);
   });
 
   it('shows the ride code, the driver’s position and SOS — and no "open the app" notice', async () => {
@@ -369,7 +402,7 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
   });
 
   it('an order cancelled because it was not marked paid in time says why', async () => {
-    const notice = "Shanta Kitchen didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Shanta Kitchen refunds you directly.";
+    const notice = 'No MMG payment was confirmed within 30 minutes of Shanta Kitchen accepting, so this order was cancelled automatically. If you did send the MMG payment, Shanta Kitchen refunds you directly. If it does not, contact Swift support.';
     vi.spyOn(orders, 'getOrder').mockResolvedValue({
       ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null,
       cancellationReason: 'Cancelled automatically: not marked "Paid by MMG" within 30 minutes of being accepted', cancellationNotice: notice,
@@ -493,9 +526,50 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   const fetchSpy = vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: {} } as never);
   await orders.getOrder('order-9');
   // [O-4] v2: this page renders the pre-accept removal question too (a v1 client is served a legacy line).
-  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2');
+  // [PICKUP · owner 30 Oct 2026] pickupHandover=v1: this page tells the customer the name + order number when the
+  // store's code is off, so the server sends it no code then.
+  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2&pickupHandover=v1');
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
+});
+
+// [WEB-TAXI · TAXI waiting charge · research E4] The live waiting count and the
+// receipt's waiting line, as the phone shows them (WaitingCard, RidePostTripSheet).
+describe('the waiting charge on the trip page', () => {
+  const WAITING = { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', pickupWaitMinutes: 7, waitingMinutes: 13, waitingCharge: 300, running: false, nextChargeAt: null };
+
+  it('shows the live wait the server sends: minutes, the charge so far, the block, cash at the end', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id, waiting: WAITING } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    const card = await screen.findByRole('region', { name: 'Waiting' });
+    expect(card.textContent).toContain('13 min waited');
+    expect(card.textContent).toContain('$300 so far');
+    expect(card.textContent).toContain('$300 per 10 minutes');
+    expect(card.textContent).toContain('At the pickup: 7 min');
+    expect(card.textContent).toContain('Paid in cash with your fare at the end.');
+  });
+
+  it('no waiting object from the server: no card, nothing invented', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    await screen.findByText(/Open the Swift app for your safety PIN and SOS/);
+    expect(screen.queryByText(/min waited/)).toBeNull();
+  });
+
+  it('a finished ride’s receipt itemises trip + waiting = total', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'COMPLETED', subtotalCustomer: 2800, totalAmount: 2800, paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id, fareBreakdown: { routeFare: 2800, waitingMinutes: 13, waitingCharge: 300, total: 3100, currencyCode: 'GYD' } } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Waiting 13 min')).toBeTruthy();
+    expect(screen.getByText('Trip').nextSibling?.textContent).toBe('$2,800');
+    expect(screen.getByText('Waiting 13 min').nextSibling?.textContent).toBe('$300');
+    expect(screen.getByText('Total').nextSibling?.textContent).toBe('$3,100');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -548,5 +622,223 @@ describe('[U14 / U15 / U16] the order page speaks the phone\'s words and has a s
     expect(rule('heroCopy')).toMatch(/flex:\s*1 1 200px;/);
     expect(rule('statusPill')).not.toMatch(/white-space:\s*nowrap|text-transform:\s*capitalize/);
     expect(rule('statusPill')).toMatch(/max-width:\s*100%;/);
+  });
+});
+
+// [PICKUP · owner 30 Oct 2026, testing a takeaway on staging] "Preparing still shows on the customer side, which it
+// should, but it's not green when the restaurant accepts it, and same with Ready." A step is green, with its tick, the
+// moment the server says it is reached (aria-current keeps saying which step the order is at); the next step waits.
+// Never before the server says so: ACCEPTED alone (an MMG order before "Paid by MMG") is still "Placed".
+describe('[PICKUP] the live status rail: a step is green the moment it is reached', () => {
+  const rail = async () => {
+    render(<OrderDetailPage />);
+    const heading = await screen.findByRole('heading', { name: 'From order to handover' });
+    const items = [...(heading.closest('section')?.querySelectorAll('ol > li') ?? [])];
+    return items.map((li) => ({
+      label: li.querySelectorAll('span')[1]?.textContent,
+      dot: li.querySelectorAll('span')[0]?.textContent,
+      reached: li.className.includes('stageReached'),
+      now: li.getAttribute('aria-current') === 'step',
+    }));
+  };
+  const CASH = { ...ORDER, paymentMethod: 'CASH', paymentStatus: 'PENDING', paymentAction: null };
+
+  it('a takeaway the store accepted (Accept = Preparing): Preparing is ticked and green; Ready waits', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'PREPARING', pickupAddress: '7 Counter Lane' } as never);
+    expect(await rail()).toEqual([
+      { label: 'Placed', dot: '✓', reached: true, now: false },
+      { label: 'Preparing', dot: '✓', reached: true, now: true },
+      { label: 'Ready', dot: '3', reached: false, now: false },
+      { label: 'Collected', dot: '4', reached: false, now: false },
+    ]);
+  });
+
+  it('a takeaway marked ready: Ready is ticked and green; Collected waits', async () => {
+    // Marking ready stamps readyAt (and preparingAt when the store skipped Start preparing): vendor.routes.ts.
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane', preparingAt: '2026-10-31T10:01:00.000Z', readyAt: '2026-10-31T10:09:00.000Z' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Ready:✓:true:true', 'Collected:4:false:false']);
+  });
+
+  it('a delivery being prepared: Preparing is ticked and green; On the way waits', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'DELIVERY', status: 'PREPARING', deliveryAddress: '1 Main St' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.now}`))
+      .toEqual(['Placed:✓:false', 'Preparing:✓:true', 'On the way:3:false', 'Delivered:4:false']);
+  });
+
+  it('ACCEPTED but not preparing (an MMG order before "Paid by MMG"): Preparing is not green yet', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, fulfillment: 'PICKUP', status: 'ACCEPTED', pickupAddress: '7 Counter Lane' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}`))
+      .toEqual(['Placed:✓:true', 'Preparing:2:false', 'Ready:3:false', 'Collected:4:false']);
+  });
+
+  // [#2252 REVIEW-F S4-1 · FOLLOWUPS-3] The phone's rule (apps/mobile/src/modules/orders/timeline-states.ts), read by
+  // the website too: Preparing is ticked only on a kitchen fact (PREPARING, its stamp or log row, or the food having
+  // left the store), never because a rider status sits after it; the travel step, while the order is at it, is named
+  // by its status in the one status vocabulary (lib/orderStatus.ts), never a bare "On the way" before the food is.
+  const at = async (order: Record<string, unknown>) => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'DELIVERY', deliveryAddress: '1 Main St', ...order } as never);
+    return (await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`);
+  };
+
+  it('a rider assigned before the kitchen started: the travel step says "Rider on the way to the store"; Preparing is not ticked', async () => {
+    expect(await at({ status: 'RIDER_ASSIGNED', acceptedAt: '2026-10-31T10:00:00.000Z' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:2:false:false', 'Rider on the way to the store:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('a rider heading to the store while the kitchen cooks: Preparing ticked (its stamp), the rider on the way to the store', async () => {
+    expect(await at({ status: 'RIDER_EN_ROUTE_PICKUP', preparingAt: '2026-10-31T10:01:00.000Z' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Rider on the way to the store:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('a log row counts like a stamp: "Rider is at the store" with the kitchen\'s PREPARING row on record', async () => {
+    expect(await at({ status: 'RIDER_ARRIVED_PICKUP', timeline: [{ status: 'PREPARING', timestamp: '2026-10-31T10:01:00.000Z' }] }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'Rider is at the store:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('the rider has the food: Preparing ticked (the food left the store), "On its way to you"', async () => {
+    expect(await at({ status: 'PICKED_UP' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'On its way to you:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('on the way with the food: "On its way to you" is ticked', async () => {
+    expect(await at({ status: 'EN_ROUTE_DELIVERY' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'On its way to you:✓:true:true', 'Delivered:4:false:false']);
+  });
+
+  it('delivered: every step ticked, none current', async () => {
+    expect(await at({ status: 'DELIVERED' }))
+      .toEqual(['Placed:✓:true:false', 'Preparing:✓:true:false', 'On the way:✓:true:false', 'Delivered:✓:true:false']);
+  });
+
+  it('a takeaway "ready" with no kitchen fact on record: Ready ticked, Preparing not (the phone does the same)', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane' } as never);
+    expect((await rail()).map((s) => `${s.label}:${s.dot}:${s.reached}:${s.now}`))
+      .toEqual(['Placed:✓:true:false', 'Preparing:2:false:false', 'Ready:✓:true:true', 'Collected:4:false:false']);
+  });
+
+  it('the stylesheet paints the step the order is at like any reached step, and leaves the leg after it unlit', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const css = readFileSync(join(process.cwd(), 'src/app/(app)/orders/[id]/tracking.module.css'), 'utf8');
+    expect(css).not.toMatch(/li\[aria-current='step'\] \.stageDot/);
+    expect(css).toMatch(/\.statusRail li\[aria-current='step'\]:not\(:last-child\)::after \{ background: var\(--swift-border\); \}/);
+    expect(css).toMatch(/\.stageReached \.stageDot \{\s*border-color: var\(--swift-success\);\s*background: var\(--swift-success\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [FIXES-4] A cash order the business took the money for itself said "Cash status
+// awaiting confirmation" for ever: complete-pickup, complete-appointment and the
+// store's own delivered tap write the status only, the store takes the cash, and
+// Swift records nothing, so nothing could ever confirm it. Those orders now say so.
+// Where something does record the cash (a Swift rider's handover, a ride's outcome),
+// and on every captured order, the words stay as they were.
+// ---------------------------------------------------------------------------
+describe('[FIXES-4] cash the business takes itself is never left "awaiting confirmation"', () => {
+  const CASH = { ...ORDER, paymentMethod: 'CASH', paymentStatus: 'PENDING', paymentAction: null };
+  const showing = async (order: Record<string, unknown>) => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...CASH, ...order } as never);
+    render(<OrderDetailPage />);
+    await screen.findByText('SW-2001', { exact: false });
+    return document.body.textContent ?? '';
+  };
+
+  it.each([
+    ['a collected pickup', { fulfillment: 'PICKUP', status: 'COMPLETED', pickupAddress: '7 Counter Lane' }, 'The collection is complete.'],
+    ['a pickup marked picked up', { fulfillment: 'PICKUP', status: 'PICKED_UP', pickupAddress: '7 Counter Lane' }, 'The collection is complete.'],
+    ['a finished appointment', { fulfillment: 'APPOINTMENT', status: 'COMPLETED', appointmentSlot: '2026-09-24T13:00:00.000Z' }, 'The appointment is complete.'],
+    ['a store’s own delivery', { fulfillment: 'DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Main St', ownRiderNotice: 'This order is delivered by the store’s own rider, not a Swift rider.' }, 'The handover is complete.'],
+  ])('%s says the business handles it, and promises no confirmation', async (_name, order, first) => {
+    const text = await showing(order);
+    expect(screen.getByText('Cash is handled by the business')).toBeTruthy();
+    expect(text).toContain(`${first} Cash goes to the business directly, so Swift has no record of it. Swift did not hold any order money.`);
+    expect(text).not.toContain('awaiting confirmation');
+    expect(text).not.toContain('does not yet show');
+    expect(text).not.toMatch(/Cash paid|Paid in cash|cash received/i);
+  });
+
+  it.each([
+    ['a Swift rider’s delivery', { fulfillment: 'DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Main St', ownRiderNotice: null }, 'The handover is complete, but this order does not yet show confirmed cash receipt.'],
+    ['a ride', { orderType: 'TAXI', status: 'COMPLETED' }, 'The ride is complete, but this order does not yet show confirmed cash receipt.'],
+  ])('%s keeps its words: there the cash is recorded', async (_name, order, words) => {
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    const text = await showing(order);
+    expect(screen.getByText('Cash status awaiting confirmation')).toBeTruthy();
+    expect(text).toContain(words);
+    expect(screen.queryByText('Cash is handled by the business')).toBeNull();
+  });
+
+  it('a captured pickup still says the business confirmed it; one not yet collected still says what is due', async () => {
+    await showing({ fulfillment: 'PICKUP', status: 'COMPLETED', paymentStatus: 'CAPTURED', pickupAddress: '7 Counter Lane' });
+    expect(screen.getByText('Business confirmed cash received')).toBeTruthy();
+    expect(screen.queryByText('Cash is handled by the business')).toBeNull();
+    document.body.innerHTML = '';
+    await showing({ fulfillment: 'PICKUP', status: 'READY_FOR_PICKUP', pickupAddress: '7 Counter Lane' });
+    expect(screen.getByText('Cash due to the business')).toBeTruthy();
+    expect(screen.queryByText('Cash is handled by the business')).toBeNull();
+  });
+});
+
+// [BUG-HUNT-2 G08] A closed order can still owe a refund: the server's words on the customer's order page, and "Did it arrive?".
+describe('[G08] the MMG refund on the order page', () => {
+  const closed = { ...ORDER, status: 'CANCELLED', paymentStatus: 'CLAIMED', paymentAction: null };
+  const asked = { state: 'SENT', amount: '3500.00', line: 'Shanta Kitchen says it sent GY$3,500 by MMG, reference R1. Did it arrive?', sendId: 'snd-1', canAnswer: true };
+
+  it('says who owes what, with no question while nothing was sent', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: { state: 'OWED', amount: '3500.00', line: 'Shanta Kitchen owes you GY$3,500 by MMG.', sendId: null, canAnswer: false } } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Shanta Kitchen owes you GY$3,500 by MMG.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'It arrived' })).toBeNull();
+  });
+
+  it('asks once a refund was sent, sends the answer, and reads the order again', async () => {
+    const read = vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: asked } as never);
+    const answer = vi.spyOn(orders, 'answerMmgRefund').mockResolvedValue();
+    const user = userEvent.setup();
+    render(<OrderDetailPage />);
+    await user.click(await screen.findByRole('button', { name: 'It did not arrive' }));
+    await waitFor(() => expect(answer).toHaveBeenCalledWith('order-1', 'snd-1', false));
+    await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it('a refused answer is shown in the server\'s words', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: asked } as never);
+    vi.spyOn(orders, 'answerMmgRefund').mockRejectedValue(new Error('You already answered this.'));
+    const user = userEvent.setup();
+    render(<OrderDetailPage />);
+    await user.click(await screen.findByRole('button', { name: 'It arrived' }));
+    expect(await screen.findByText('You already answered this.')).toBeTruthy();
+  });
+
+  it('an order with no refund shows nothing', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...closed, mmgRefund: null } as never);
+    render(<OrderDetailPage />);
+    await screen.findByText(/SW-2001/);
+    expect(screen.queryByLabelText('MMG refund')).toBeNull();
+  });
+});
+
+// [BUG-HUNT-2 G04] At the pickup the server decides whether the passenger may cancel: this page cannot see the ride code.
+describe('[G04] a ride at the pickup on the web', () => {
+  const arrived = (over: Record<string, unknown>) => ({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentAction: null, ...over });
+  const stubRide = () => {
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+  };
+
+  it('offers the cancel when the server says so', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(arrived({ canCancel: true, cancellationMessage: 'This ride is very late starting.' }) as never);
+    stubRide();
+    render(<OrderDetailPage />);
+    expect(await screen.findByRole('button', { name: /cancel/i })).toBeTruthy();
+  });
+
+  it('offers nothing when it does not', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(arrived({ canCancel: false }) as never);
+    stubRide();
+    render(<OrderDetailPage />);
+    await screen.findByText(/Open the Swift app for your safety PIN and SOS/);
+    expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull();
   });
 });

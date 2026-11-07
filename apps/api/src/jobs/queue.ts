@@ -1,5 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../modules/order/order-room-emission.service';
-import { Queue, Worker, UnrecoverableError, type Job, type ConnectionOptions } from 'bullmq';
+import { Queue, Worker, UnrecoverableError, type Job, type ConnectionOptions, type RedisOptions } from 'bullmq';
 import type Redis from 'ioredis';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -12,6 +12,7 @@ import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { ownerRlsBindEnabled } from '../lib/owner-rls';
 import { insertTicketFor, orderCaseExists } from '../lib/owner-wall-tickets';
 import { recoveryFor } from './recovery-policy';
+import { removeRetiredSchedules } from './retired-schedules';
 import {
   requireActiveDiscoveryTenant,
   runForActiveDiscoveryTenants,
@@ -78,6 +79,22 @@ export function bullConnectionOpts(redis: Redis): ConnectionOptions {
     ...(o.tls ? { tls: o.tls } : {}),
     ...(o.family ? { family: o.family } : {}),
   };
+}
+
+/**
+ * A producer's connection. BullMQ's default retry reaches 20 s between tries, so after a Redis restart a queue.add sits
+ * that long, and a checkout already committed answers later than the phone waits. A producer retries at most 1 s apart.
+ *
+ * ioredis refuses what is queued every (maxRetriesPerRequest + 1) tries, so a shorter wait alone would refuse an add
+ * after about 18 s instead of about 4 minutes. The limit rises with it: an add waits exactly as long as before, and only
+ * the return is sooner. A job that enqueues mid-outage is not failed by this.
+ *
+ * Workers stay on bullConnectionOpts and BullMQ's own retry, on purpose. Measured: with this retry alone, a job whose
+ * processor finished during a 23 s outage was recorded as FAILED at about 18 s, and it waits with the default. Their
+ * blocking client must have no limit, so the raised one cannot be shared.
+ */
+export function bullProducerOpts(redis: Redis): ConnectionOptions {
+  return { ...(bullConnectionOpts(redis) as RedisOptions), retryStrategy: (times: number) => Math.min(times * 200, 1_000), maxRetriesPerRequest: 240 };
 }
 
 /** Bounded retry with exponential backoff — for the job classes CERTIFIED as
@@ -152,6 +169,10 @@ export function offerWorkerConcurrency(env: Record<string, string | undefined> =
   const value = Number(raw);
   return Number.isSafeInteger(value) && value >= 1 && value <= 50 ? value : 10;
 }
+
+/** [#2250 S4-3] How often the held-order release sweep ticks: the worst-case release tail. 5 s is
+ *  ~8% of the one-minute hold (order/hold-minutes.ts); scheduleRecurringJobs explains the choice. */
+export const HOLD_RELEASE_SWEEP_MS = 5_000;
 
 /** [row 331] The recurring jobs the safety lane runs, and nothing else. */
 export const SAFETY_TIMER_JOBS = ['promote-sos-grace', 'guardian-sweep'] as const;
@@ -254,7 +275,7 @@ export function createQueues(
   redis: Redis,
   log?: Pick<FastifyBaseLogger, 'error'>,
 ): SwiftQueues {
-  const connection = bullConnectionOpts(redis);
+  const connection = bullProducerOpts(redis);
   const defaultJobOptions = DEFAULT_JOB_OPTIONS;
   const created: Queue[] = [];
   const build = (name: string): Queue => {
@@ -326,6 +347,39 @@ export async function runWeeklySettlement(ctx: JobContext) {
 /** One ops page per condition per window [SWIFT-AUD-D7-02]: redis SET NX is
  *  the dedup, so N instances or repeated scans can never spam the admins.
  *  Fire-and-caught — paging must not fail the job that noticed the problem. */
+/**
+ * [BILL-PRO · REVIEW-M #2229 S4-1/S4-2] The pro weekly fee passes of the hourly billing job, each isolated: a pass
+ * that throws is logged and pages the admins once an hour, the next pass still runs, and this never throws, so the
+ * billing cycle after it always runs. (Neither pass is load-bearing for "never charged twice": the charge path refuses a
+ * store-covered pro fee by itself, lockFeeCollectionAuthority.) `page` is the admin page (a seam for its test).
+ */
+export async function runProFeePasses<K extends string>(
+  ctx: Pick<JobContext, 'prisma' | 'io' | 'redis' | 'log'>,
+  passes: Record<K, () => Promise<number>>,
+  page: (name: string) => Promise<unknown> = async (name) => {
+    const { notifyAdmins, NotificationService: Notifications } = await import('../modules/notification/notification.service');
+    return notifyAdmins(ctx.prisma, new Notifications(ctx.prisma, ctx.io), {
+      tenantId: null,
+      title: 'Pro weekly fee pass failed',
+      body: `The hourly ${name} pass for pros' weekly fees failed this cycle. Billing ran on. Check the API logs.`,
+      data: { kind: 'ops_billing_failures', proFeePass: name },
+    });
+  },
+): Promise<Record<K, number | 'failed'>> {
+  const out = {} as Record<K, number | 'failed'>;
+  for (const name of Object.keys(passes) as K[]) {
+    try {
+      out[name] = await passes[name]();
+    } catch (error) {
+      out[name] = 'failed';
+      ctx.log.error({ err: error, pass: name }, '[BILL-PRO] pro fee pass failed; billing continues');
+      await opsPageOnce(ctx, `pro-fee-pass:${name}`, 3600, () => page(name))
+        .catch((pageError: unknown) => ctx.log.error({ err: pageError }, '[BILL-PRO] pro fee pass page failed'));
+    }
+  }
+  return out;
+}
+
 export async function opsPageOnce(
   ctx: Pick<JobContext, 'redis'>,
   key: string,
@@ -558,7 +612,7 @@ export async function expireUnpaidMmgAcceptance(ctx: JobContext, orderId: string
  *  support ticket, not the claim-dispute latch: that latch would keep holding
  *  the order after the store's tap, which the owner's flow does not want. */
 export async function escalateStoreSilentMmgClaim(ctx: JobContext, orderId: string): Promise<boolean> {
-  const { isStoreSilentOnClaimedMmgPayment, MMG_STORE_SILENT_SUBJECT, mmgStoreSilentStorePush, mmgStoreSilentTicketMessage, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
+  const { isStoreSilentOnClaimedMmgPayment, MMG_STORE_SILENT_SUBJECT, mmgStoreSilentCustomerPush, mmgStoreSilentStorePush, mmgStoreSilentTicketMessage, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
   const { bindTenantTransaction } = await import('../plugins/prisma');
   const opened = await ctx.prisma.$transaction(async (tx) => {
     await bindTenantTransaction(tx);
@@ -589,6 +643,11 @@ export async function escalateStoreSilentMmgClaim(ctx: JobContext, orderId: stri
       data: { orderId, kind: 'mmg_customer_says_paid' }, dedupeKey: `mmg-store-silent:${orderId}`,
     }).catch((err: unknown) => ctx.log.warn({ err, orderId }, 'store MMG check push failed after the case opened'));
   }
+  // [BUG-HUNT-2 G14c] The customer's own case: they were told nothing, and two days later nothing had changed on their card.
+  await notifications.send({
+    userId: order.customerId, type: 'ORDER_UPDATE', audience: 'customer', ...mmgStoreSilentCustomerPush(order.orderNumber, mmgOrderNoun(order.fulfillment)),
+    data: { orderId, kind: 'mmg_store_silent' }, dedupeKey: `mmg-store-silent:customer:${orderId}`,
+  }).catch((err: unknown) => ctx.log.warn({ err, orderId }, 'customer MMG check push failed after the case opened'));
   await notifyAdmins(ctx.prisma, notifications, {
     tenantId: order.tenantId ?? null,
     title: 'MMG payment not confirmed by the store',
@@ -629,6 +688,105 @@ export async function expireUnpaidMmgAcceptancesJob(ctx: JobContext, batch = 100
     if (done) cancelled.push(id);
   }
   return cancelled;
+}
+
+/** [BUG-HUNT-2 G08] The refund deadline. An OWED refund past its deadline is marked missed once, under the order lock, and
+ *  its store is told; one platform page stands while any is overdue. A "Refund sent" the customer has not answered in two
+ *  days is asked once more. Record only: it moves no money and closes nothing. */
+export async function mmgRefundDeadlinesJob(ctx: JobContext, batch = 200): Promise<{ missed: number; overdue: number; nudged: number }> {
+  const {
+    MMG_REFUND_NUDGE_AFTER_HOURS, MMG_REFUND_OVERDUE_KEY, MMG_REFUND_OVERDUE_TITLE, MMG_REFUND_OVERDUE_WINDOW_SECONDS,
+    markMmgRefundMissed, refundNudgeCustomerNotice, refundOverdueStoreNotice,
+  } = await import('../modules/order/mmg-refund-rail');
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const { pageOps, resolveOpsPage } = await import('../modules/ops/ops-page');
+  const notifications = new NotificationService(ctx.prisma, ctx.io);
+  const now = new Date();
+  const due = await ctx.prisma.mmgRefundObligation.findMany({
+    where: { status: 'OWED', missedAt: null, dueAt: { lte: now } }, orderBy: { dueAt: 'asc' }, take: batch,
+    select: { id: true, orderId: true, amount: true, order: { select: { orderNumber: true, vendor: { select: { owner: { select: { userId: true } } } } } } },
+  });
+  let missed = 0;
+  for (const row of due) {
+    const marked = await inTenantOf(ctx.prisma, { order: row.orderId }, () => markMmgRefundMissed(ctx.prisma, row.id, now))
+      .catch((err: unknown) => { ctx.log.error({ err, obligationId: row.id }, 'refund deadline failed: the next sweep retries'); return false; });
+    if (!marked) continue;
+    missed += 1;
+    const ownerUserId = row.order.vendor?.owner.userId;
+    if (!ownerUserId) continue;
+    await inTenantOf(ctx.prisma, { order: row.orderId }, () => notifications.send({
+      userId: ownerUserId, type: 'ORDER_UPDATE', audience: 'business', ...refundOverdueStoreNotice(row.order.orderNumber, row.amount),
+      data: { orderId: row.orderId, kind: 'mmg_refund_overdue' }, dedupeKey: `mmg-refund-overdue:${row.id}`,
+    })).catch((err: unknown) => ctx.log.warn({ err, obligationId: row.id }, 'refund overdue notice failed'));
+  }
+  const unanswered = await ctx.prisma.mmgRefundSend.findMany({
+    where: { answer: null, sentAt: { lte: new Date(now.getTime() - MMG_REFUND_NUDGE_AFTER_HOURS * 3_600_000) }, obligations: { some: { status: 'SENT' } } },
+    orderBy: { sentAt: 'asc' }, take: batch,
+    select: { id: true, orderId: true, customerId: true, amount: true, order: { select: { orderNumber: true } } },
+  });
+  for (const send of unanswered) {
+    await inTenantOf(ctx.prisma, { order: send.orderId }, () => notifications.send({
+      userId: send.customerId, type: 'ORDER_UPDATE', audience: 'customer', ...refundNudgeCustomerNotice(send.order.orderNumber, send.amount),
+      data: { orderId: send.orderId, kind: 'mmg_refund_sent' }, dedupeKey: `mmg-refund-nudge:${send.id}`,
+    })).catch((err: unknown) => ctx.log.warn({ err, sendId: send.id }, 'refund nudge failed'));
+  }
+  const overdue = await ctx.prisma.mmgRefundObligation.findMany({
+    where: { status: 'OWED', dueAt: { lte: now } }, orderBy: { dueAt: 'asc' }, take: batch,
+    select: { orderId: true, order: { select: { orderNumber: true } } },
+  });
+  if (overdue.length === 0) {
+    await resolveOpsPage(ctx.prisma, MMG_REFUND_OVERDUE_TITLE, 'no-mmg-refund-overdue');
+    return { missed, overdue: 0, nudged: unanswered.length };
+  }
+  await pageOps({ prisma: ctx.prisma, redis: ctx.redis, notifications }, {
+    key: MMG_REFUND_OVERDUE_KEY,
+    windowSeconds: MMG_REFUND_OVERDUE_WINDOW_SECONDS,
+    title: MMG_REFUND_OVERDUE_TITLE,
+    body: `${overdue.length} MMG refund(s) past the deadline, oldest order ${overdue[0]!.order.orderNumber}. See MMG refunds, then call the store.`,
+    data: { kind: 'ops_mmg_refund_overdue', overdue: overdue.length, orderIds: overdue.slice(0, 10).map((row) => row.orderId) },
+  });
+  return { missed, overdue: overdue.length, nudged: unanswered.length };
+}
+
+/** [BUG-HUNT-2 G20] A ready pickup nobody collected: its store told once at 24 hours (dedupe key per order, in the order's
+ *  tenant), and one platform page for support at 48 hours, closed when none is left. It closes no order. */
+export async function pickupNotCollectedWatchJob(ctx: JobContext, batch = 500): Promise<{ notCollected: number; overTwoDays: number }> {
+  const { PICKUP_NOT_COLLECTED_AFTER_HOURS, isPickupNotCollected, pickupWaitingOver } = await import('../modules/order/cancel-policy');
+  const {
+    PICKUP_SUPPORT_PAGE_AFTER_HOURS, PICKUP_UNCOLLECTED_KEY, PICKUP_UNCOLLECTED_TITLE, PICKUP_UNCOLLECTED_WINDOW_SECONDS,
+    pickupUncollectedStoreNotice, readyPickupsSince,
+  } = await import('../modules/order/pickup-not-collected');
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const { pageOps, resolveOpsPage } = await import('../modules/ops/ops-page');
+  const notifications = new NotificationService(ctx.prisma, ctx.io);
+  const now = new Date();
+  const rows = (await ctx.prisma.order.findMany({
+    where: readyPickupsSince(new Date(now.getTime() - PICKUP_NOT_COLLECTED_AFTER_HOURS * 3_600_000)),
+    select: { id: true, orderNumber: true, orderType: true, fulfillment: true, status: true, readyAt: true, scheduledFor: true, paymentMethod: true, vendor: { select: { owner: { select: { userId: true } } } } },
+    orderBy: { readyAt: 'asc' },
+    take: batch,
+  })).filter((row) => isPickupNotCollected(row, now));
+  for (const row of rows) {
+    const ownerUserId = row.vendor?.owner.userId;
+    if (!ownerUserId) continue;
+    await inTenantOf(ctx.prisma, { order: row.id }, () => notifications.send({
+      userId: ownerUserId, type: 'ORDER_UPDATE', audience: 'business', ...pickupUncollectedStoreNotice(row),
+      data: { orderId: row.id, kind: 'pickup_not_collected' }, dedupeKey: `pickup-not-collected:store:${row.id}`,
+    })).catch((err: unknown) => ctx.log.warn({ err, orderId: row.id }, 'not-collected store notice failed: the next sweep retries'));
+  }
+  const overTwoDays = rows.filter((row) => pickupWaitingOver(row, PICKUP_SUPPORT_PAGE_AFTER_HOURS, now));
+  if (overTwoDays.length === 0) {
+    await resolveOpsPage(ctx.prisma, PICKUP_UNCOLLECTED_TITLE, 'no-pickup-uncollected');
+    return { notCollected: rows.length, overTwoDays: 0 };
+  }
+  await pageOps({ prisma: ctx.prisma, redis: ctx.redis, notifications }, {
+    key: PICKUP_UNCOLLECTED_KEY,
+    windowSeconds: PICKUP_UNCOLLECTED_WINDOW_SECONDS,
+    title: PICKUP_UNCOLLECTED_TITLE,
+    body: `${overTwoDays.length} pickup order(s) ready for over two days and not collected, oldest ${overTwoDays[0]!.orderNumber}. Call the store and the customer, then close it from the order.`,
+    data: { kind: 'ops_pickup_uncollected', count: overTwoDays.length, orderIds: overTwoDays.slice(0, 10).map((row) => row.id) },
+  });
+  return { notCollected: rows.length, overTwoDays: overTwoDays.length };
 }
 
 /**
@@ -706,7 +864,7 @@ export async function runCollusionAffinityScan(ctx: JobContext): Promise<{ flagg
         // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
         tenantId: null,
         title: 'Possible vendor–rider collusion',
-        body: `${pairs.length} vendor–rider pair(s) show an unusual concentration of guarantee claims. Review the claims dashboard before the next settlement.`,
+        body: `${pairs.length} vendor–rider pair(s) show an unusual concentration of unpaid cash orders. Review Unpaid cash orders before the next settlement.`,
         data: { kind: 'ops_collusion_affinity', pairs: pairs.slice(0, 20) },
       }),
     );
@@ -924,7 +1082,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
             tenantId: stuck.tenantId,
             title: 'URGENT: SOS ACTIVE with no ops page delivered',
-            body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
+            body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the Safety page in Mission Control and respond now; the worker keeps retrying.`,
             data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
           }),
         ).catch(() => {});
@@ -933,17 +1091,20 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     // [S-19 · operations] Ops alerts: read receipts become "seen", an alert
     // nobody acknowledged by its deadline escalates (re-push, on-call SMS,
     // platform page), drills run on schedule, and zero-ACK is the gauge.
+    // [SMS-COST] The worker's Redis counts each alert's on-call texts per UTC day (at most 6).
     {
       const { syncOpsAlertReadReceipts, escalateOverdueOpsAlerts, scanOpsAlerts, runOpsAlertDrillIfDue } = await import('../modules/safety/ops-alert');
       const { NotificationService: OpsNS, notifyAdmins: pageOps } = await import('../modules/notification/notification.service');
       const { getChannels } = await import('../providers/notifications/channels');
       const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
       await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
-      const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
-      // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
+      const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms, { smsDay: ctx.redis }).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[], drillsFailed: [] as string[] }));
+      // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's.
+      // [DRILL-STORM] Once per alert, at its first escalation (the ladder re-pages after that); the
+      // per-alert dedupe key keeps a retried tick from paging anyone twice.
       for (const id of esc.platformPage) {
         await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
-          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: 'OVERDUE: An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
+          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: 'OVERDUE: An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Acknowledge it in Mission Control > Ops alerts.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true }, dedupeKey: `ops-alert-overdue:${id}` }),
         ).catch(() => {});
       }
       await scanOpsAlerts(ctx.prisma).catch(() => null);
@@ -1088,6 +1249,18 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
 
       switch (job.name) {
         case 'process-billing': {
+          // [BILL-PRO · owner 30 Oct 00:14Z] Pros due a weekly fee (behind PRO_WEEKLY_FEE) are born first, so one who
+          // ticked before the switch turned on is listed within the hour, with a full 14-day trial from then. Then
+          // [REVIEW-M #2229 S3-1 · owner B1] a pro whose Services store fee is now live has their own fee stopped (one
+          // fee). The charge path refuses a store-covered pro fee by itself (lockFeeCollectionAuthority), so neither
+          // pass is load-bearing for "never charged twice". [M S4-1 · COORD] Each pass is isolated: a failure pages
+          // the admins, and the next pass and the billing cycle always run.
+          const proFees = await runProFeePasses(ctx, {
+            birth: async () => (await (await import('../modules/services/pro-fee')).birthDueProFees(ctx.prisma)).born,
+            'one-fee': async () => (await billing.stopProFeesCoveredByStore()).length,
+            // [REVIEW-M #2229 N2] A pro whose covering store fee ended is told their own fee applies again.
+            'cover-ended': async () => (await billing.notifyProFeesNoLongerCovered()).length,
+          });
           const confirmationReviews = await billing.surfaceConfirmationReviews();
           const result = await billing.runBillingCycle();
           // [E12] A stopped subscription stays ACTIVE until its paid period
@@ -1107,7 +1280,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // paid conversion seamless.
           const { sweepTrialFeeEducation } = await import('../modules/billing/trial-fee-education');
           const edu = await sweepTrialFeeEducation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
-          ctx.log.info({ ...result, confirmationReviews, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
+          ctx.log.info({ ...result, proFees, confirmationReviews, lapsed: lapse.paused, lapseFailed: lapse.failed, reminders, ...swept, billingNotices, trialEdu: edu }, 'Billing cycle complete');
           // SWIFT-AUD-D7-02: billing failures must PAGE, not just log — a
           // broken rail silently suspends paying partners.
           // [DS213 F1-1] A stopped plan that fails to pause counts too.
@@ -1185,7 +1358,8 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // Isolated: a checkout failure never stops the rest of this poll.
           try {
             const { MmgCheckoutService } = await import('../modules/billing/mmg-checkout.service');
-            const checkouts = await new MmgCheckoutService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io)).pollIntents();
+            const { AdCheckoutService } = await import('../modules/ads/checkout.service');
+            const checkouts = await new MmgCheckoutService(ctx.prisma, billing, new NotificationService(ctx.prisma, ctx.io), { adSettlement: () => new AdCheckoutService(ctx.prisma, ctx.io) }).pollIntents();
             if (checkouts.expired + checkouts.checked > 0) ctx.log.info(checkouts, 'MMG checkouts polled');
           } catch (err) {
             ctx.log.error({ err }, '[MMG checkout] poll failed; the next poll retries');
@@ -1413,6 +1587,52 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         if (result.state === 'down') ctx.log.warn({ ...result }, 'malware scanner not answering');
         return;
       }
+      if (job.name === 'mmg-refund-deadlines') {
+        const result = await mmgRefundDeadlinesJob(ctx);
+        if (result.overdue > 0) ctx.log.warn({ ...result }, 'MMG refunds past the deadline');
+        return;
+      }
+      if (job.name === 'ride-overdue-watch') {
+        // [BUG-HUNT-2 G01] A ride still in progress far past its estimate: one platform page, closed when none is left.
+        const { watchOverdueRides } = await import('../modules/rides/ride-overdue-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const result = await watchOverdueRides({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (result.overdue > 0) ctx.log.warn({ ...result }, 'taxi rides open far past their estimate');
+        return;
+      }
+      if (job.name === 'pickup-not-collected-watch') {
+        const result = await pickupNotCollectedWatchJob(ctx);
+        if (result.overTwoDays > 0) ctx.log.warn({ ...result }, 'pickup orders not collected for over two days');
+        return;
+      }
+      if (job.name === 'fee-refund-case-sweep') {
+        // [Row 156] A partner's ask for a weekly-fee payment back: closed only on MMG's proven return; overdue ones page.
+        const { sweepFeeRefundCases } = await import('../modules/billing/fee-refund-case');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const result = await sweepFeeRefundCases({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (result.refunded || result.overdue) ctx.log.info({ ...result }, 'weekly-fee refund cases swept');
+        return;
+      }
+      if (job.name === 'error-rate-watch') {
+        // [FIXES-4] Server errors too few a minute for the spike page, read from the hourly tally:
+        // one platform page a day at most (durable OpsAlert path); an errorless stretch closes it.
+        const { watchErrorRate } = await import('../modules/ops/error-rate-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const result = await watchErrorRate({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (result.outcome === 'delivered' || result.outcome === 'pending') ctx.log.warn({ ...result }, 'server errors keep happening');
+        return;
+      }
+      if (job.name === 'upload-rescan') {
+        // [Row 312 · COORD 21 Oct] Uploads stored unscanned (safety evidence while the scanner was down,
+        // or MALWARE_SCAN_BYPASS=1): scanned once clamd answers; a positive or an unscannable one is
+        // quarantined and paged. Nothing happens while the scanner is down or dark.
+        const { rescanUploadDebt } = await import('../lib/upload-scan-debt');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { getStorageProvider } = await import('../providers/storage/storage-provider');
+        const result = await rescanUploadDebt({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io), storage: getStorageProvider() });
+        if (result.scanned || result.quarantined || result.failed || result.closedWithoutScan) ctx.log.info({ ...result }, 'upload rescan pass');
+        return;
+      }
       if (job.name === 'backup-freshness') {
         // [75] A platform page: durable OpsAlert, SUPER_ADMINs in-app + push,
         // on-call phones texted, escalated until acknowledged.
@@ -1420,6 +1640,18 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { NotificationService } = await import('../modules/notification/notification.service');
         const { result } = await pageBackupFreshness({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
         ctx.log.info({ ...result }, 'backup freshness checked');
+        // [SEC-BACKUP] Shared API storage key or an unsigned dump: a weekly platform page until fixed.
+        const { pageBackupPosture } = await import('../modules/ops/backup-freshness');
+        const posture = await pageBackupPosture({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (posture.result.weak) ctx.log.warn({ ...posture.result }, 'backup posture is weak');
+        return;
+      }
+      if (job.name === 'erasure-ledger-watch') {
+        // [Off-site erasure ledger] An erasure not shipped off-site within 10 minutes pages the platform.
+        const { pageErasureLedgerShipping } = await import('../modules/ops/erasure-ledger-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { result } = await pageErasureLedgerShipping({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        ctx.log.info({ stale: result.stale, unshipped: result.unshipped, oldestMinutes: result.oldestMinutes }, 'erasure ledger shipping checked');
         return;
       }
 
@@ -1480,6 +1712,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // on, still unused) the ordinary deletion pipeline. Its own retention receipt.
         const { inactivitySweep } = await import('../modules/user/inactivity');
         await inactivitySweep({ prisma: ctx.prisma, io: ctx.io, log: ctx.log });
+        // [COORD 4 Nov 2026] Last and on its own: a miss here is retried tomorrow and stops nothing above.
+        const { blankClosedNumberAsks } = await import('../modules/admin/phone-change');
+        await blankClosedNumberAsks(ctx.prisma).catch((err) => ctx.log.warn({ err }, 'closed number asks were not blanked; the next sweep retries'));
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
@@ -1490,22 +1725,17 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
-      if (job.name === 'rlp-sweep' || job.name === 'rlp-reserve-provision') {
-        // [DOC-1 §31.4 · P31-1] Loss protection: the daily SLA/reserve sweep, and the monthly provisioning.
+      if (job.name === 'rlp-sweep') {
+        // [DOC-1 §31.4 · P31-1] The daily sweep: decided cases nobody paid, cases nobody decided.
         const { NotificationService } = await import('../modules/notification/notification.service');
         const { CountryConfigService } = await import('../modules/country/country-config.service');
         const { cashRulesFor } = await import('../modules/cash/cash-rules.service');
-        const { sweepLossProtection, provisionReserveForPreviousMonth } = await import('../modules/cash/rlp');
+        const { sweepLossProtection } = await import('../modules/cash/rlp');
         const countryConfig = new CountryConfigService(ctx.prisma);
         const notifications = new NotificationService(ctx.prisma, ctx.io);
         const rulesFor = (code: string) => cashRulesFor(countryConfig, code);
-        if (job.name === 'rlp-sweep') {
-          const run = await sweepLossProtection(ctx.prisma, { notifications, rulesFor, gateFor: (code) => countryConfig.getIdGateThresholdLocal(code) });
-          ctx.log.info(`Loss protection sweep: ${run.breached.length} past SLA (${run.newlyFlagged} newly flagged), ${run.lowReserve.length} reserve(s) low`);
-        } else {
-          const rows = await provisionReserveForPreviousMonth(ctx.prisma, { notifications, rulesFor });
-          ctx.log.info(`Loss protection reserve: ${rows.filter((r) => r.created).length} provisioned of ${rows.length} countries with revenue`);
-        }
+        const run = await sweepLossProtection(ctx.prisma, { notifications, rulesFor });
+        ctx.log.info(`Loss protection sweep: ${run.breached.length} past the staff deadline (${run.newlyFlagged} newly flagged), ${run.overdue.length} waiting for a person`);
         return;
       }
 
@@ -1610,6 +1840,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         } catch (err) {
           ctx.log.error({ err }, 'unclaimed-upload sweep failed; the reaper still runs');
         }
+        // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] Swift no longer keeps customer IDs: each stored one is withdrawn,
+        // then deleted through the one purge path (shred, delete, probe, receipt); a held one waits for its hold to end.
+        try {
+          const retired = await verification.retireCustomerIds();
+          ctx.log.info(retired, 'customer-ID retirement sweep');
+        } catch (err) {
+          ctx.log.error({ err }, 'customer-ID retirement sweep failed; the reaper still runs');
+        }
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
         try {
@@ -1630,6 +1868,25 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         await verification.hireLicenceSweep();
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
+        // [SEC-PII · COORD ruling] The system's investigation holds end with their investigation or their review date
+        // (never renewed by the system); run first, so the overdue alarm below is about people's holds.
+        const { sweepInvestigationHolds } = await import('../modules/verification/investigation-hold');
+        const { tenantOfUser } = await import('../modules/notification/notification.service');
+        await sweepInvestigationHolds(ctx.prisma, new Date(), undefined, {
+          // a person whose erasure the hold delays is told the renewed date (nobody else is); a hold renewed past
+          // 180 days is an admin task; a freed document's delayed erasure is finished as the person asked, and the
+          // catch-all finishes any delayed request whose documents are unheld (a person's release, a failed run).
+          // (A closed account has no written path left: its email is erased with it. Follow-up logged, COORD 10:24Z.)
+          notifyPerson: (userId, revisitBy, holdId) => verification.notifyRenewalIfDelayed(userId, revisitBy, holdId),
+          escalate: async (hold) => { await notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+            tenantId: await tenantOfUser(ctx.prisma, hold.subjectUserId),
+            title: 'A document hold needs a decision',
+            body: 'A review has kept a person\'s documents for over 180 days. Decide whether to keep holding them or release them.',
+            data: { kind: 'verification_legal_hold_overdue', overdue: 1, holdIds: [hold.id] },
+          }); },
+          onFreed: async (userId, documentIds) => { await verification.completeDeferredErasures(userId, documentIds); },
+          retryDelayedErasures: () => verification.retryDelayedErasures(),
+        });
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
         const { alertOverdueDocLegalHolds } = await import('../modules/verification/legal-hold');
         await alertOverdueDocLegalHolds(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
@@ -1775,9 +2032,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { sendBookingReminders } = await import('../modules/services/services.service');
         const { NotificationService } = await import('../modules/notification/notification.service');
         const notifications = new NotificationService(ctx.prisma, ctx.io);
-        const sent = await sendBookingReminders(ctx.prisma, async (n) => {
-          await notifications.send({ ...n, type: 'ORDER_UPDATE' });
-        });
+        // [REVIEW-G S4-2 on #2188] Counts only reminders newly sent: a dedupe hit (a reminder already sent to that
+        // person, e.g. by an overlapping run) answers false and is not reported as sent.
+        const sent = await sendBookingReminders(ctx.prisma, (n) => notifications.sendIfNew({ ...n, type: 'ORDER_UPDATE' }));
         ctx.log.info(`Booking reminders: ${sent} sent`);
       }
     },
@@ -1888,6 +2145,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           const handovers = await drainHandoverNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
           if (handovers.pending > 0) ctx.log.warn(handovers, 'handover notices remain pending');
           else if (handovers.expired > 0) ctx.log.warn(handovers, 'handover pushes closed unconfirmed; the inbox notices remain');
+        });
+        await drain('delivery-custody-lift', async () => {
+          // [BUG-HUNT F18] The suspension a finished delivery lifts commits with the delivery, at every door;
+          // whatever its post-commit attempt could not finish is finished here.
+          const { drainDeliveryLifts, liftAfterDelivery } = await import('../modules/safety/delivery-lift');
+          const lifts = await drainDeliveryLifts({ prisma: ctx.prisma, lift: liftAfterDelivery(ctx.prisma, ctx.io) });
+          if (lifts.pending > 0) ctx.log.warn(lifts, 'delivery lifts remain owed');
+          else if (lifts.expired > 0) ctx.log.warn(lifts, 'delivery lifts closed unfinished; the cases stay with a person');
         });
         await drain('driver-pickup-notice', async () => {
           // [L07] The passenger's "driver on the way / arrived" notice commits with
@@ -2067,6 +2332,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const { AdsCronService } = await import('../modules/ads/cron.service');
         const res = await new AdsCronService(ctx.prisma, ctx.io).tick();
         if (res.autoCancelled + res.activated + res.completed > 0) ctx.log.info(res, 'ads: lifecycle tick');
+        // [ADS-ON] Ad links are re-checked weekly; the tick walks the ones whose week is up.
+        const links = await new AdsCronService(ctx.prisma, ctx.io).recheckLinks().catch((err: unknown) => { ctx.log.error({ err }, 'ads: link re-check failed'); return { checked: 0, stopped: 0 }; });
+        if (links.checked > 0) ctx.log.info(links, 'ads: link re-check');
+        // [ads security] advertiser team invitations past their days are deleted (they hold a person's id).
+        const { AdvertiserService } = await import('../modules/ads/advertiser.service');
+        const expiredInvites = await new AdvertiserService(ctx.prisma, ctx.io).purgeExpiredTeamInvites();
+        if (expiredInvites > 0) ctx.log.info({ expiredInvites }, 'ads: expired team invitations deleted');
         // §16 "review SLA at risk": reviewable creatives past 75% of the SLA
         // window page ops — once per creative per window (redis once-key),
         // same posture as incident-sla-watch.
@@ -2636,6 +2908,18 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             const p = await scanStrugglingDeliveries(ctx.prisma, notifications);
             if (p > 0) ctx.log.info({ prompted: p }, 'struggling deliveries: options pushed');
           }
+          // [RIDER-SAFE 6] One "riders are short" page per tenant per window,
+          // measured from waiting orders and recent exhausted searches.
+          {
+            const { pageRidersShort } = await import('../modules/dispatch/riders-short');
+            const { notifyAdmins } = await import('../modules/notification/notification.service');
+            const paged = await pageRidersShort({
+              prisma: ctx.prisma,
+              pageOnce: (key, ttl, page) => opsPageOnce(ctx, key, ttl, page),
+              notifyAdmins: (input) => notifyAdmins(ctx.prisma, notifications, input),
+            }).catch((err: unknown) => { ctx.log.warn({ err }, 'riders-short: scan failed'); return [] as string[]; });
+            if (paged.length > 0) ctx.log.warn({ tenants: paged }, 'riders-short: operations paged');
+          }
       }
     },
     { connection, concurrency: 5 },
@@ -2870,11 +3154,61 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 10,
   });
 
+  // [BUG-HUNT-2 G08] Every fifteen minutes: an MMG refund past its deadline.
+  await queues.verificationQueue.add('mmg-refund-deadlines', {}, {
+    repeat: { every: 15 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [BUG-HUNT-2 G01] Every ten minutes: no silent three-day ride.
+  await queues.verificationQueue.add('ride-overdue-watch', {}, {
+    repeat: { every: 10 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [BUG-HUNT-2 G20] Every fifteen minutes: a ready pickup nobody collected.
+  await queues.verificationQueue.add('pickup-not-collected-watch', {}, {
+    repeat: { every: 15 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [Row 156] Weekly-fee refund cases: every fifteen minutes, close the proven ones and page the overdue.
+  await queues.verificationQueue.add('fee-refund-case-sweep', {}, {
+    repeat: { every: 15 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [FIXES-4] Every five minutes: server errors in the last day, too few a minute for the spike page.
+  await queues.verificationQueue.add('error-rate-watch', {}, {
+    repeat: { every: 5 * 60_000 },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [Row 312] Uploads stored unscanned: rescanned every five minutes once the scanner answers.
+  await queues.verificationQueue.add('upload-rescan', {}, {
+    repeat: { pattern: '*/5 * * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
   // Backup freshness: daily at 05:30, before the working day. Reads the
   // heartbeat deploy/backup.sh writes; pages when backups have quietly stopped
   // or are staying on the machine they protect.
   await queues.verificationQueue.add('backup-freshness', {}, {
     repeat: { pattern: '30 5 * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [Off-site erasure ledger] Every five minutes: an erasure the host unit has not shipped off-site
+  // within 10 minutes pages the platform responders.
+  await queues.verificationQueue.add('erasure-ledger-watch', {}, {
+    repeat: { every: 5 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });
@@ -2911,18 +3245,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     removeOnFail: 30,
   });
 
-  // [DOC-1 §31.4 · P31-1] Loss protection: SLA breaches and a low reserve, daily at 03:00; the
-  // reserve line provisioned from the previous month's fee revenue on the 1st at 05:00.
+  // [DOC-1 §31.4 · P31-1] Decided cases nobody paid and cases nobody decided, daily at 03:00.
   await queues.verificationQueue.add('rlp-sweep', {}, {
     repeat: { pattern: '0 3 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });
-  await queues.verificationQueue.add('rlp-reserve-provision', {}, {
-    repeat: { pattern: '0 5 1 * *' },
-    removeOnComplete: 12,
-    removeOnFail: 12,
-  });
+  // [Coordinator ruling, 5 Nov 2026] A registration lives in Redis, not in the code: a job that no longer exists is
+  // removed here, or a deployed server keeps firing it.
+  await removeRetiredSchedules(queues.verificationQueue);
 
   await queues.verificationQueue.add('retention-sweep', {}, {
     repeat: { pattern: '10 4 * * *' },
@@ -3180,14 +3511,25 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // LIFECYCLE_V2 hold release: flip held orders whose cancel window closed to
   // visible + dispatchable. The server clock owns the window — the customer
   // closing the app changes nothing. No-op while the flag is off.
-  // [B18] 10s, not 30s: the sweep interval IS the release tail. At 30s an
-  // order could sit released-but-invisible for up to 29s after its ring hit
-  // 0:00 — a 24% overrun on the old 2-minute hold, and still 10% on the
-  // designed 5. At 10s the worst case is a 3% tail on the 5-minute window.
+  // [B18 · #2250 S4-3] The sweep interval IS the release tail: an order whose
+  // ring hit 0:00 waits for the next tick before the store is alerted and a
+  // rider is sought (the store board already shows it at holdExpiresAt, a
+  // column compare). The hold is ONE minute now (owner 30 Oct 2026, was five):
+  // the old 10s tick was a 3% tail on five minutes but up to ~17% on one, so
+  // the sweep ticks every 5s (worst case ~8%). Its query is the indexed
+  // (status, holdExpiresAt) lookup and almost always returns nothing.
   // (The precise fix — a per-order delayed job at holdExpiresAt — is noted in
   // the Total Audit; the sweep stays either way as the crash-proof backstop.)
+  // A repeatable registration lives in Redis, not in the code: an older
+  // boot's 10s tick would keep running beside this one, so remove any
+  // release-held-orders registration at another cadence first (idempotent).
+  for (const legacy of await queues.dispatchQueue.getRepeatableJobs()) {
+    if (legacy.name === 'release-held-orders' && Number(legacy.every) !== HOLD_RELEASE_SWEEP_MS) {
+      await queues.dispatchQueue.removeRepeatableByKey(legacy.key);
+    }
+  }
   await queues.dispatchQueue.add('release-held-orders', {}, {
-    repeat: { every: 10_000 },
+    repeat: { every: HOLD_RELEASE_SWEEP_MS },
     removeOnComplete: 20,
     removeOnFail: 20,
   });

@@ -49,6 +49,17 @@ describe('[O-4] when the store waits, and when there is nothing to accept', () =
     for (const s of ['PENDING', 'APPROVED', 'REJECTED', 'REFUNDED']) expect(canMarkOutOfStock(waiting(), L(s)), s).toBe(false);
     for (const status of ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'CANCELLED']) expect(canMarkOutOfStock({ status }, L('NONE')), status).toBe(false);
   });
+  it('a booking (APPOINTMENT) has no stock: no "Out of stock" on any line, and so no last-item reject either', () => {
+    const line = L('NONE');
+    const booking = { status: 'PENDING', fulfillment: 'APPOINTMENT', items: [line] };
+    expect(canMarkOutOfStock(booking, line)).toBe(false);
+    expect(lastLineStanding(booking, line)).toBe(false);
+    expect(canMarkOutOfStock({ ...booking, items: [line, L('NONE')] }, line)).toBe(false);
+    for (const fulfillment of ['DELIVERY', 'PICKUP', undefined]) {
+      expect(canMarkOutOfStock({ status: 'PENDING', fulfillment, items: [line] }, line), String(fulfillment)).toBe(true);
+      expect(lastLineStanding({ status: 'PENDING', fulfillment, items: [line] }, line), String(fulfillment)).toBe(true);
+    }
+  });
   it('each line says what happened to it', () => {
     expect(lineStockWords(L('PENDING', null))).toBe(OUT_OF_STOCK_WORDS.removalAsked);
     expect(lineStockWords(L('PENDING', 'Mauby'))).toBe('Asked the customer about a swap: Mauby');

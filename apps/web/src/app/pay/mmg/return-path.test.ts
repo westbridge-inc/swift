@@ -210,10 +210,9 @@ describe('[MMG-RETURN-PATH] the reply in the path', () => {
 
   it('a bare reply with no token= label is never forwarded, in the outcome or anywhere else', async () => {
     const fetcher = stubApi('CONFIRMING');
-    await expectPrivatePage(await serve(`${SITE}/pay/mmg/${ENCODED}`), WORDS.CONFIRMING);
-    const [, init] = fetcher.mock.calls[0]!;
-    expect(forwarded(fetcher)).toEqual({ outcome: 'response', params: {} });
-    expect(init?.body as string).not.toContain(TOKEN.slice(0, 24));
+    // [SEC-DOS F8] With no token field there is nothing the API would open: nothing is relayed at all.
+    await expectPrivatePage(await serve(`${SITE}/pay/mmg/${ENCODED}`), WORDS.UNKNOWN);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('a malformed encoding never reaches the handler or the API', async () => {

@@ -450,7 +450,8 @@ describe('[V5 · ruling 7] TIN and the VAT number', () => {
     expect(get.body).not.toContain('123456789');
     expect(get.body).not.toContain('vatRegistrationNumber');
     if (role === 'MANAGER') {
-      const edit = await app.inject({ method: 'PUT', url: '/api/v1/vendor/profile', headers, payload: { description: 'Synthetic store description' } });
+      // A setting a manager may save (the description is the owner's since WEB-SETTINGS API): the answer still hides the VAT number.
+      const edit = await app.inject({ method: 'PUT', url: '/api/v1/vendor/profile', headers, payload: { requirePickupCode: false } });
       expect(edit.statusCode, edit.body).toBe(200);
       expect(edit.body).not.toContain('123456789');
       expect(edit.body).not.toContain('vatRegistrationNumber');

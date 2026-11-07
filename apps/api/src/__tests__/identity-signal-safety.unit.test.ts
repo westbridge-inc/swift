@@ -8,9 +8,14 @@ describe('identity signal admission policy', () => {
     ['national_id', ' 154-829-063 ', '154829063'],
     ['owner_national_id', 'ab 12-34', 'AB1234'],
     ['passport', ' pa-009 ', 'PA009'],
-    ['identity_l2', ' l2-123 ', 'L2123'],
   ])('admits a declared identity identifier for %s', (docType, raw, expected) => {
     expect(approvedIdentityDocumentNumber(docType, 'APPROVED', raw)).toBe(expected);
+  });
+
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change] Swift takes no customer ID any more, so no
+  // customer-ID number can become an identity key.
+  it('never admits a customer-ID (identity_l2) number', () => {
+    expect(approvedIdentityDocumentNumber('identity_l2', 'APPROVED', ' l2-123 ')).toBeNull();
   });
 
   // [VERIFY-DOCS · coordinator ruling 6 Oct 2026 — a DELIBERATE change, read

@@ -187,13 +187,28 @@ describe('[TAXI multi-stop] the itinerary is frozen at request; progress is not'
     await expect(app.prisma.$executeRaw(Prisma.sql`UPDATE orders SET id = ${`${ride.id}-x`} WHERE id = ${ride.id}`)).rejects.toThrow(/is frozen/);
   });
 
+  // [REVIEW-M S4-1, multi-stop switch-on review] The stop's place and its leg are the evidence the fare was priced
+  // from (one route, priced once at request): frozen like the ride and the order of the stops. No app writer exists.
+  it('refuses a change to the stop\'s place or its priced leg (the fare\'s evidence)', async () => {
+    const ride = await taxiOrder(PRODUCTION);
+    const s = await stop(ride.id, 1);
+    const update = (data: Prisma.TaxiTripStopUncheckedUpdateInput) => system(() => app.prisma.taxiTripStop.update({ where: { id: s.id }, data }));
+    await expect(update({ lat: 6.9 })).rejects.toThrow(/is frozen/);
+    await expect(update({ lng: -58.2 })).rejects.toThrow(/is frozen/);
+    await expect(update({ address: 'Somewhere else' })).rejects.toThrow(/is frozen/);
+    await expect(update({ legMeters: 9_999 })).rejects.toThrow(/is frozen/);
+    await expect(update({ legSeconds: 9_999 })).rejects.toThrow(/is frozen/);
+    const after = await system(() => app.prisma.taxiTripStop.findUniqueOrThrow({ where: { id: s.id } }));
+    expect([after.lat, after.lng, after.address, after.legMeters, after.legSeconds]).toEqual([s.lat, s.lng, s.address, s.legMeters, s.legSeconds]);
+  });
+
   it('lets status, its timestamps, the skip reason, the actor and the evidence move', async () => {
     const ride = await taxiOrder(PRODUCTION);
     const s = await stop(ride.id, 1);
     const at = new Date();
     const moved = await system(() => app.prisma.taxiTripStop.update({
       where: { id: s.id },
-      data: { status: 'ARRIVED', arrivedAt: at, legMeters: 1200, legSeconds: 240, actedBy: ids.prodUser, evidenceNote: 'gps 12 m' },
+      data: { status: 'ARRIVED', arrivedAt: at, arrivalVerified: true, actedBy: ids.prodUser, evidenceNote: 'gps 12 m' },
     }));
     expect([moved.status, moved.arrivedAt?.getTime()]).toEqual(['ARRIVED', at.getTime()]);
     const skipped = await system(() => app.prisma.taxiTripStop.update({

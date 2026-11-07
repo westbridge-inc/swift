@@ -1,9 +1,60 @@
 #!/usr/bin/env bash
-# Restore a local or off-site custom dump into a NEW scratch database only.
-# The live database is never a target. Keep the scratch DB for inspection.
+# Restore a local or off-site custom dump into a NEW scratch database only, in
+# a THROWAWAY Postgres instance. The live database and the live cluster are
+# never a target. Keep the scratch instance for inspection.
 #
-#   ./deploy/restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db]
+#   ./deploy/restore.sh [--compare-source] [--allow-unsigned-legacy] <dump-file|s3://backup-bucket/key|-> [new-scratch-db]
 #   ./deploy/restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg > file
+#   ./deploy/restore.sh --fetch-signature s3://backup-bucket/key.dump.gpg > file   (verified; or the
+#                       line "swift-backup-signature none" when the object has no signature)
+#   ... --signature-b64 <bundle> --signed-object <name> -     (the drill's plain dump on stdin)
+#   ... --keep-for-inspection   keep the throwaway instance afterwards (otherwise it is removed)
+#   ... --ledger-from <dir> [--ledger-accept-fork]   the off-site erasure ledger; a forked one only
+#                       with the owner's explicit flag (PILOT-RUNBOOK section 4)
+#
+# [SEC-BACKUP F2] SIGNED DUMPS ONLY. backup.sh signs every dump on the host
+# (deploy/backup-signature.py) and keeps the signature beside it as
+# <object>.sig. Before anything is created this script verifies it against the
+# allowed-signers file of PUBLIC backup signing keys
+# (BACKUP_SIGNING_ALLOWED_SIGNERS, default /etc/swift/backup-allowed-signers):
+# the signature, the object's name, its size and SHA-256 (for the decrypted
+# dump the drill pipes in, the plain dump's SHA-256 that was signed with the
+# encrypted copy). Whoever can write to the backup bucket cannot plant a dump
+# that passes. A dump with NO signature (made before signing existed) is
+# restored only with --allow-unsigned-legacy, an explicit owner decision that
+# warns loudly; a signature that is present but does not verify is refused
+# whatever the flags.
+#
+# [SEC-BACKUP F2] A THROWAWAY INSTANCE, A NON-SUPERUSER RESTORE. The archive is
+# restored into a new container of the live database's own image (same major
+# version, same extensions) with NO network, its own volume, and nothing of the
+# live stack mounted. Inside it, the restore logs in as a role named like the
+# live database's owner (POSTGRES_USER) that is NOT a superuser: it owns only
+# the scratch database, may bypass row security (to load and read every row, as
+# the source's owner did) and nothing else. The instance's own superuser only
+# prepares it: the roles the dump grants to (no login), and the extensions the
+# dump names, from a fixed allowlist (an untrusted extension such as PostGIS
+# cannot be created by a non-superuser); the archive's extension entries and
+# the rows of extension-owned tables are left to the extension itself. Nothing
+# from the archive ever runs with superuser rights, and nothing from it reaches
+# the live cluster: the live database is only read (the erasure ledger, the
+# --compare-source snapshot) and gets the rehearsal heartbeat.
+#
+# [SEC-BACKUP · REVIEW-M S3-1] THROWN AWAY. The copy holds every person's data,
+# and is erasure-complete only at the moment of the restore: the instance AND
+# its volume are removed when the run ends, whatever the outcome (success, a
+# failed comparison or check, any error). Only --keep-for-inspection keeps it,
+# and says how and by when to remove it (doctor.sh lists every labelled
+# restore volume and FAILS on one older than a day). A disaster-recovery
+# restore exists to keep its copy, so it needs --keep-for-inspection up front.
+#
+# [SEC-BACKUP · REVIEW-G S4-1] --allow-unsigned-legacy is bounded in time: an
+# off-site object is accepted unsigned only when the bucket's own LastModified
+# predates the first signed backup (recorded by backup.sh in
+# /var/backups/swift/.first-signed-backup, BACKUP_FIRST_SIGNED_FILE; or the
+# owner's copy of that stamp, BACKUP_SIGNED_SINCE, on a new host). With no
+# record at all it refuses unless --legacy-without-signing-record is given too.
+# The version whose time is checked is the version downloaded (VersionId/ETag).
 #
 # [BACKUP-ENC] Production dumps are encrypted to the OWNER's key (backup.sh),
 # and this server never decrypts: an encrypted dump (.gpg) given here is
@@ -45,17 +96,46 @@ NO_LIVE_LEDGER=0
 LIVE_IS_GONE=0
 # [#1977] A failed replay drops the copy (it holds people the live database erased) unless kept.
 KEEP_FAILED=0
+# [SEC-BACKUP · REVIEW-M S3-1] Keep the instance after the run (it is removed otherwise).
+KEEP_INSPECT=0
 # [#1977 · copy run #5c] The Compose project that holds the target Postgres, named explicitly: the
 # base file says `name: swift`, so without it a restore on a rehearsal host lands in LIVE's stack.
 PROJECT=""
+# [Off-site erasure ledger] The shipped batches, decrypted by the owner on his own computer, each beside
+# its signature, in a directory only this login can read [BACKUP-FU]. They join the live ledger, or
+# stand alone in a DR restore.
+LEDGER_FROM=""
+# [BACKUP-FU · COORD] Skip listing the bucket for the off-site ledger (only when the bucket is gone).
+LEDGER_NO_BUCKET=0
+# [BACKUP-FU2 · #2207 REVIEW-G S4-1] The operator's explicit acceptance of a FORKED ledger (two hosts
+# shipped to one prefix) whose every batch verifies. Refused by default; never excuses any other break.
+LEDGER_ACCEPT_FORK=0
+# [SEC-BACKUP F2] The signature: the owner's explicit flag for a dump made before signing existed;
+# the drill's verified bundle (base64) and object name for the plain dump it pipes in; and
+# --fetch-signature, which prints an off-site object's verified signature.
+ALLOW_UNSIGNED=0
+# [COORD 12:20Z] With no record of when signing began, the owner must say so explicitly too.
+LEGACY_NO_RECORD=0
+FETCH_SIGNATURE=0
+SIGNATURE_B64=""
+SIGNED_OBJECT=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --allow-unsigned-legacy) ALLOW_UNSIGNED=1 ;;
+    --legacy-without-signing-record) LEGACY_NO_RECORD=1 ;;
+    --fetch-signature) FETCH_SIGNATURE=1 ;;
+    --signature-b64) [ $# -ge 2 ] || die "--signature-b64 needs the signature bundle"; SIGNATURE_B64="$2"; shift ;;
+    --signed-object) [ $# -ge 2 ] || die "--signed-object needs the signed object's name"; SIGNED_OBJECT="$2"; shift ;;
+    --ledger-no-bucket-check) LEDGER_NO_BUCKET=1 ;;
+    --ledger-accept-fork) LEDGER_ACCEPT_FORK=1 ;;
+    --ledger-from) [ $# -ge 2 ] || die "--ledger-from needs the directory of decrypted off-site ledger batches"; LEDGER_FROM="$2"; shift ;;
     --project) [ $# -ge 2 ] || die "--project needs the Compose project name"; PROJECT="$2"; shift ;;
     --compare-source) COMPARE_SOURCE=1 ;;
     --fetch-encrypted) FETCH_ENCRYPTED=1 ;;
     --no-live-ledger) NO_LIVE_LEDGER=1 ;;
     --i-know-live-is-gone) LIVE_IS_GONE=1 ;;
     --keep-failed) KEEP_FAILED=1 ;;
+    --keep-for-inspection) KEEP_INSPECT=1; KEEP_FAILED=1 ;;
     --*) die "unknown option $1" ;;
     *) break ;;
   esac
@@ -66,11 +146,22 @@ if [ "$NO_LIVE_LEDGER" = 1 ] || [ "$LIVE_IS_GONE" = 1 ]; then
     die "the disaster-recovery restore needs BOTH --no-live-ledger and --i-know-live-is-gone: without the live database there is no erasure ledger, and the copy will not be erasure-complete"
   [ "$COMPARE_SOURCE" = 0 ] && [ "$FETCH_ENCRYPTED" = 0 ] ||
     die "--no-live-ledger --i-know-live-is-gone restores without a live database: it cannot be combined with --compare-source or --fetch-encrypted"
+  [ "$KEEP_INSPECT" = 1 ] ||
+    die "a disaster-recovery restore exists to keep its copy, and every copy is removed at the end unless kept: add --keep-for-inspection (nothing was started)"
 fi
+[ "$LEDGER_ACCEPT_FORK" = 0 ] || [ -n "$LEDGER_FROM" ] ||
+  die "--ledger-accept-fork goes with --ledger-from (the off-site ledger it applies to); nothing was started"
 SOURCE="${1:-}"
 SCRATCH="${2:-swift_restore_$(date -u +%Y%m%d%H%M%S)}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 TMP_DIR=""
+# [SEC-BACKUP F2] The throwaway instance: its superuser prepares it, the restore login (named like
+# the live owner, NOT a superuser there) does everything that touches the archive.
+SCRATCH_ADMIN=swift_restore_admin
+SCRATCH_CTR=""
+INSTANCE_UP=0
+# Extensions the throwaway's superuser may create because the archive names them.
+EXTENSION_ALLOWLIST="plpgsql postgis postgis_topology postgis_raster postgis_tiger_geocoder fuzzystrmatch address_standardizer address_standardizer_data_us pg_trgm pgcrypto citext uuid-ossp btree_gin btree_gist unaccent"
 env_value() {
   [ -f "$HERE/.env" ] || return 0
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
@@ -122,18 +213,41 @@ db_psql_ro() {
     'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; export PGOPTIONS="-c default_transaction_read_only=on"; db="$1"; shift; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$db" -v ON_ERROR_STOP=1 "$@"' \
     sh "$database" "$@"
 }
+# [SEC-BACKUP F2] The scratch database lives in the throwaway instance: every call reaches it over
+# the instance's own socket, as the restore login (never a superuser) or, to prepare it, as the
+# instance's superuser. Neither is the live cluster.
+scratch_psql() {
+  local database="$1"; shift
+  docker exec -i "$SCRATCH_CTR" sh -c \
+    "db=\"\$1\"; shift; exec psql -X -h /var/run/postgresql -U $RESTORE_LOGIN -d \"\$db\" -v ON_ERROR_STOP=1 \"\$@\"" \
+    sh "$database" "$@"
+}
+scratch_admin_psql() {
+  local database="$1"; shift
+  docker exec -i "$SCRATCH_CTR" sh -c \
+    "db=\"\$1\"; shift; exec psql -X -h /var/run/postgresql -U $SCRATCH_ADMIN -d \"\$db\" -v ON_ERROR_STOP=1 \"\$@\"" \
+    sh "$database" "$@"
+}
+remove_instance() {
+  [ "$INSTANCE_UP" = 1 ] || return 0
+  docker rm -f "$SCRATCH_CTR" >/dev/null 2>&1 && docker volume rm "$SCRATCH_CTR" >/dev/null 2>&1 || return 1
+  INSTANCE_UP=0
+}
 # [#1977 · REVIEW-F S4-1] Once rows are in the copy, a failure DROPS it: a copy the replay did not
 # finish still holds people the live database has erased. --keep-failed keeps it, quarantined.
 ROWS_IN=0
 die_copy() {
-  [ "$ROWS_IN" = 1 ] || die "$*; scratch database retained (quarantined, empty), not restored"
+  if [ "$ROWS_IN" != 1 ]; then
+    remove_instance || die "$*; removing the EMPTY scratch instance $SCRATCH_CTR failed (docker rm -f $SCRATCH_CTR; docker volume rm $SCRATCH_CTR), not restored"
+    die "$*; the empty scratch instance was removed, not restored"
+  fi
   if [ "$KEEP_FAILED" = 1 ]; then
-    die "$*; scratch database $SCRATCH retained (quarantined) because --keep-failed was given. It may hold people the live database erased: drop it as soon as you are done"
+    die "$*; scratch database $SCRATCH retained (quarantined, in the throwaway instance $SCRATCH_CTR) because --keep-failed was given. It may hold people the live database erased: remove it as soon as you are done (docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR)"
   fi
-  if db_psql postgres -q -c "DROP DATABASE \"$SCRATCH\" WITH (FORCE);"; then
-    die "$*; the scratch database (quarantined until now) was dropped: it held people the live database has erased. Fix and rerun, or pass --keep-failed to inspect it"
+  if remove_instance; then
+    die "$*; the scratch database (quarantined until now) was dropped with its throwaway instance: it held people the live database has erased. Fix and rerun, or pass --keep-failed to inspect it"
   fi
-  die "$*; DROPPING the scratch database $SCRATCH FAILED: drop it by hand now, it holds people the live database has erased"
+  die "$*; DROPPING the scratch database $SCRATCH FAILED: remove its instance by hand now (docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR), it holds people the live database has erased"
 }
 # [#1977 · REVIEW-F S4-2] Which deployment a database belongs to (environment/deploymentId), or none/none.
 deployment_identity_of() {
@@ -142,20 +256,31 @@ deployment_identity_of() {
   if [ "$has" != t ]; then echo "none/none"; return 0; fi
   "$fn" "$1" -tAc "SELECT coalesce(max(environment), 'none') || '/' || coalesce(max(\"deploymentId\"), 'none') FROM deployment_identity;" | tr -d '[:space:]'
 }
-cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
+# Whatever ends the run, an instance nobody asked to keep goes with it (a failure that kept it on
+# purpose, --keep-failed / --keep-for-inspection, already said so).
+cleanup() {
+  [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"
+  if [ "$INSTANCE_UP" = 1 ] && [ "$KEEP_FAILED" = 0 ]; then
+    remove_instance || echo "FATAL: removing the scratch instance $SCRATCH_CTR FAILED: remove it now (docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR), it holds a copy of the database" >&2
+  fi
+}
 trap cleanup EXIT
+# An interrupted restore (Ctrl-C, a stopped unit) still runs the EXIT cleanup above.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 private_tmp() { [ -n "$TMP_DIR" ] || { TMP_DIR="$(mktemp -d)"; chmod 700 "$TMP_DIR"; }; }
 
-# [item 196] Only the operator's own login (and superusers) may connect to the
-# scratch copy: not PUBLIC, not any application login. Checked, not assumed.
+# [item 196] Only the restore login (and the instance's superuser) may connect to the
+# scratch copy: not PUBLIC, not any other login. Checked, not assumed. (The
+# throwaway instance has no network at all; this keeps the rule inside it too.)
 quarantine_scratch() {
-  db_psql postgres -q <<SQL
+  scratch_admin_psql postgres -q <<SQL
 REVOKE ALL ON DATABASE "$SCRATCH" FROM PUBLIC;
 DO \$\$ DECLARE r record; BEGIN
-  FOR r IN SELECT rolname FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname <> current_user LOOP
+  FOR r IN SELECT rolname FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname NOT IN (current_user, '$RESTORE_LOGIN') LOOP
     EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', '$SCRATCH', r.rolname);
   END LOOP;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname <> current_user
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname NOT IN (current_user, '$RESTORE_LOGIN')
              AND has_database_privilege(rolname, '$SCRATCH', 'CONNECT')) THEN
     RAISE EXCEPTION 'the scratch database could not be closed to application logins';
   END IF;
@@ -167,22 +292,304 @@ SQL
 # in one transaction on the copy. Prints the replay's summary line.
 LEDGER_SQL="$HERE/restore-erasure-ledger.sql"
 REPLAY_SQL="$HERE/restore-replay-erasures.sql"
+OFFSITE_SQL="$HERE/restore-offsite-ledger.sql"
+OFFSITE_CSV=""
+OFFSITE_NEWEST=""
+# [Off-site erasure ledger · BACKUP-FU] Check the batches before anything is created. --ledger-from is
+# the DIRECTORY the owner decrypted the off-site batches into: every <batch>.jsonl (readable by this
+# login only) beside the <batch>.jsonl.gpg.sig the shipper uploaded with it. Each signed batch is
+# verified against the trusted backup signing keys (the signature, the batch's name, and the
+# decrypted batch's SHA-256 that was signed with the encrypted copy) before any line is read; one
+# that fails is refused whatever the flags, and a signature whose batch is missing is refused too
+# (the fetch or the decryption was incomplete). [COORD] The signed batches must form ONE CHAIN: each
+# names the batch before it inside its signature (the first says "prev none"), so a batch missing
+# from the start or the middle, or out of order, is refused (CHAIN_BROKEN); and when BACKUP_BUCKET
+# is set, the bucket's erasure-ledger/ prefix is listed (read-only, the backup key) and every batch
+# and signature it holds must be here, so none is missing from the end either (only
+# --ledger-no-bucket-check skips that, for a bucket that is gone; the result then says so).
+# A batch with NO signature:
+#   - whose every entry is also in a verified batch is set aside (a copy whose signature never
+#     reached the bucket: the shipper ships those entries again, signed);
+#   - otherwise is refused, unless the owner passes --allow-unsigned-legacy AND it is from before
+#     signing began (its name stamp and every entry's time before the first signed batch: the
+#     shipper's record BACKUP_FIRST_SIGNED_LEDGER_FILE, the owner's copy BACKUP_LEDGER_SIGNED_SINCE,
+#     and the oldest verified batch here, whichever is earliest). With no record at all it also
+#     needs --legacy-without-signing-record. A local file's time is its own claim (as for a local
+#     dump): the flag is the owner's explicit decision.
+# Every line one entry {id (uuid), kind (a known kind), entry (an object), createdAt}. Converted to
+# CSV (one JSON value per row) in this run's private directory; prints the newest entry's time.
+FIRST_SIGNED_LEDGER_DEFAULT=/var/backups/swift/.first-signed-erasure-ledger
+ledger_signed_since() {
+  local stamp="${BACKUP_LEDGER_SIGNED_SINCE:-$(env_value BACKUP_LEDGER_SIGNED_SINCE)}" file
+  if [ -z "$stamp" ]; then
+    file="${BACKUP_FIRST_SIGNED_LEDGER_FILE:-$(env_value BACKUP_FIRST_SIGNED_LEDGER_FILE)}"
+    file="${file:-$FIRST_SIGNED_LEDGER_DEFAULT}"
+    [ -r "$file" ] && stamp="$(head -1 "$file" | tr -d '[:space:]')"
+  fi
+  [ -z "$stamp" ] && return 0
+  [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "the record of the first signed erasure ledger batch is malformed ($stamp); nothing was created"
+  printf '%s\n' "$stamp"
+}
+read_offsite_ledger() {
+  local inventory kind base rc since bundle
+  [ -d "$LEDGER_FROM" ] ||
+    die "--ledger-from takes the DIRECTORY of the decrypted off-site batches, each <batch>.jsonl beside its <batch>.jsonl.gpg.sig (PILOT-RUNBOOK §4): $LEDGER_FROM is not a directory; nothing was created"
+  private_tmp
+  OFFSITE_CSV="$TMP_DIR/offsite-ledger.csv"
+  inventory="$(python3 -I - "$LEDGER_FROM" <<'PY'
+import os, re, stat, sys
+d = sys.argv[1]
+st = os.stat(d)
+if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+    sys.exit("--ledger-from: the ledger directory is open to others; chmod 700 it")
+batch = re.compile(r"(erasure-ledger-\d{8}T\d{6}Z-[0-9a-f]{8})\.jsonl(\.gpg|\.gpg\.sig)?")
+plain, sigs = set(), set()
+for name in sorted(os.listdir(d)):
+    m = batch.fullmatch(name)
+    if not m:
+        sys.exit(f"--ledger-from: {name} is not an erasure ledger batch (<batch>.jsonl, .jsonl.gpg or .jsonl.gpg.sig)")
+    path = os.path.join(d, name)
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        sys.exit(f"--ledger-from: {name} is not a regular file")
+    if m.group(2) is None:
+        if os.stat(path).st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+            sys.exit(f"--ledger-from: {name} is readable by others; chmod 600 it")
+        plain.add(m.group(1))
+    elif m.group(2) == ".gpg.sig":
+        sigs.add(m.group(1))
+for b in sorted(sigs - plain):
+    sys.exit(f"--ledger-from: {b}.jsonl.gpg.sig is here but its decrypted batch {b}.jsonl is not: fetch and decrypt EVERY batch")
+if not plain:
+    sys.exit("--ledger-from: the ledger directory holds no decrypted batch")
+for b in sorted(plain):
+    print(("signed " if b in sigs else "unsigned ") + b)
+PY
+)" || die "--ledger-from: the off-site ledger was refused (above); nothing was created"
+  : > "$TMP_DIR/ledger-signed"; : > "$TMP_DIR/ledger-unsigned"
+  while read -r kind base; do
+    if [ "$kind" = unsigned ]; then printf '%s\n' "$base" >> "$TMP_DIR/ledger-unsigned"; continue; fi
+    rc=0
+    bundle="$(python3 -I "$HERE/backup-signature.py" verify --allowed-signers "$ALLOWED_SIGNERS" --sig "$LEDGER_FROM/$base.jsonl.gpg.sig" \
+      --name "$base.jsonl.gpg" --plain "$LEDGER_FROM/$base.jsonl" --print)" || rc=$?
+    case "$rc" in
+      0) ;;
+      4) die "the erasure ledger signature cannot be checked: the allowed-signers file is unusable (above); nothing was created" ;;
+      *) die "the signature of the erasure ledger batch $base was REFUSED (above): it was not shipped and signed by a Swift backup host, or it was changed. Nothing was created; --allow-unsigned-legacy does not override a signature that fails" ;;
+    esac
+    # base, created, prev (or "-": no chain line), prev-sha256 (or "-"), this signature file's SHA-256
+    printf '%s %s %s %s %s\n' "$base" "$(sed -n 's/^created \([0-9]\{8\}T[0-9]\{6\}Z\)$/\1/p' <<<"$bundle" | head -1)" \
+      "$(sed -n 's/^prev \([A-Za-z0-9._-]*\)$/\1/p' <<<"$bundle" | head -1 | grep . || echo -)" \
+      "$(sed -n 's/^prev-sha256 \([0-9a-f]\{64\}\)$/\1/p' <<<"$bundle" | head -1 | grep . || echo -)" \
+      "$(python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$LEDGER_FROM/$base.jsonl.gpg.sig")" >> "$TMP_DIR/ledger-signed"
+  done <<<"$inventory"
+  # [BACKUP-FU · COORD] THE CHAIN: every signed batch names the one shipped before it (inside its
+  # signature), the first one says "prev none". A batch missing from the start or the middle, or one
+  # out of order, is refused here, before anything is created. CHAIN_BROKEN.
+  # [BACKUP-FU2 · #2207 REVIEW-G S4-1] A FORK (two batches after the same one: two hosts shipped to
+  # one prefix, which the runbook forbids) is refused too. Only --ledger-accept-fork takes it, and only
+  # when every other check holds (one start, every link present, the exact signature it followed,
+  # older): every branch's entries are then replayed (erasing more is the safe direction), loudly.
+  : > "$TMP_DIR/ledger-forks"
+  python3 -I - "$TMP_DIR/ledger-signed" "$LEDGER_ACCEPT_FORK" "$TMP_DIR/ledger-forks" <<'PY' || die "--ledger-from: CHAIN_BROKEN (above): a signed erasure ledger batch is missing or out of order, so erasures would be skipped; fetch and decrypt EVERY batch. Nothing was created"
+import sys
+accept_fork = sys.argv[2] == "1"
+rows = [l.split() for l in open(sys.argv[1]).read().splitlines() if l.strip()]
+if rows:
+    have = {r[0] + ".jsonl.gpg": r for r in rows}
+    for base, _created, prev, prev_sha, _sha in rows:
+        if prev == "-":
+            sys.exit(f"CHAIN_BROKEN: {base} is signed without a link to the batch before it")
+    anchors = sorted(r[0] for r in rows if r[2] == "none")
+    if len(anchors) != 1:
+        sys.exit(f"CHAIN_BROKEN: {len(anchors)} batches here say they are the first signed batch ({', '.join(anchors) or 'none'}); there is exactly one")
+    if anchors[0] != min(r[0] for r in rows):
+        sys.exit(f"CHAIN_BROKEN: the first signed batch {anchors[0]} is not the oldest signed batch here")
+    # [REVIEW-M S4-2] One line, no fork: no two batches follow the same batch.
+    followers = {}
+    for base, _created, prev, _prev_sha, _sha in rows:
+        if prev != "none":
+            followers.setdefault(prev, []).append(base)
+    forks = [f"{' and '.join(sorted(bases))} both follow {prev}" for prev, bases in sorted(followers.items()) if len(bases) > 1]
+    if forks and not accept_fork:
+        sys.exit(f"CHAIN_BROKEN: {forks[0]}: the chain forks (two hosts shipped to one bucket prefix?). Only if every branch is genuine, the owner may pass --ledger-accept-fork: PILOT-RUNBOOK section 4")
+    for base, _created, prev, prev_sha, _sha in rows:
+        if prev == "none":
+            continue
+        if prev not in have:
+            sys.exit(f"CHAIN_BROKEN: {base} follows {prev}, which is not here: a batch is missing")
+        if have[prev][4] != prev_sha:
+            sys.exit(f"CHAIN_BROKEN: {base} follows {prev}, but the {prev}.sig here is not the one it was signed after")
+        if not have[prev][0] < base:
+            sys.exit(f"CHAIN_BROKEN: {base} follows {prev}, which is not older: the chain is out of order")
+    with open(sys.argv[3], "w") as out:
+        out.write("".join(f + "\n" for f in forks))
+PY
+  LEDGER_CHAIN_NOTE="the signed batches form one unbroken chain"
+  if [ -s "$TMP_DIR/ledger-forks" ]; then
+    while IFS= read -r fork; do
+      echo "WARNING: LEDGER FORK ACCEPTED (--ledger-accept-fork): $fork; every batch on every branch was verified and is replayed (the erasures of all branches are applied). Two hosts shipped to one prefix: keep one shipper per bucket prefix (PILOT-RUNBOOK section 4) and find out why before the next shipment." >&2
+    done < "$TMP_DIR/ledger-forks"
+    LEDGER_CHAIN_NOTE="the signed batches FORK (accepted with --ledger-accept-fork; every branch verified and replayed)"
+  fi
+  # [BACKUP-FU · COORD] THE BUCKET: when it can be listed (read-only, the backup key), every batch it
+  # holds must be here, so no batch is missing from the end either.
+  LEDGER_BUCKET_NOTE="the bucket was NOT listed (--ledger-no-bucket-check or no BACKUP_BUCKET): a batch newer than the newest one here would not be noticed"
+  if [ "$LEDGER_NO_BUCKET" = 1 ]; then
+    echo "WARNING: --ledger-no-bucket-check: the off-site bucket is not listed; a batch missing from the END of the ledger cannot be noticed." >&2
+  else
+    for name in BACKUP_BUCKET BACKUP_PREFIX AWS_S3_ENDPOINT AWS_REGION AWS_CLI_IMAGE; do
+      if [ -z "${!name:-}" ]; then export "$name=$(env_value "$name")"; fi
+    done
+    if [ -z "${BACKUP_BUCKET:-}" ]; then
+      echo "WARNING: no BACKUP_BUCKET: the off-site bucket is not listed; a batch missing from the END of the ledger cannot be noticed." >&2
+    else
+      . "$HERE/secret-env.sh"
+      load_backup_storage_keys || die "--ledger-from: the backup key is needed to list the off-site ledger (or pass --ledger-no-bucket-check); nothing was created"
+      LISTED="$(aws_s3 "$TMP_DIR:/data" s3api list-objects-v2 --bucket "$BACKUP_BUCKET" --prefix "${BACKUP_PREFIX:-db}/erasure-ledger/" --query 'Contents[].Key' --output text)" ||
+        die "--ledger-from: could not list s3://$BACKUP_BUCKET/${BACKUP_PREFIX:-db}/erasure-ledger/ to prove every batch is here (pass --ledger-no-bucket-check only if the bucket is gone); nothing was created"
+      printf '%s\n' "$LISTED" > "$TMP_DIR/ledger-listed"
+      python3 -I - "$LEDGER_FROM" "$TMP_DIR/ledger-listed" <<'PY' || die "--ledger-from: the off-site bucket holds a batch that is not here (above); fetch and decrypt EVERY batch. Nothing was created"
+import os, re, sys
+d, listed = sys.argv[1], sys.argv[2]
+here = set(os.listdir(d))
+keys = open(listed).read().split()
+batch = re.compile(r"(?:.*/)?(erasure-ledger-\d{8}T\d{6}Z-[0-9a-f]{8})\.jsonl\.gpg(\.sig)?")
+for key in keys:
+    m = batch.fullmatch(key)
+    if not m:
+        continue
+    need = m.group(1) + (".jsonl.gpg.sig" if m.group(2) else ".jsonl")
+    if need not in here:
+        sys.exit(f"--ledger-from: the bucket holds {m.group(0).rsplit('/', 1)[-1]}, but {need} is not here")
+PY
+      LEDGER_BUCKET_NOTE="every batch the bucket lists is here"
+      echo "off-site ledger : the bucket lists $(tr '\t ' '\n\n' <<<"$LISTED" | grep -c '\.jsonl\.gpg$' || true) batch(es); every one is here"
+      # [REVIEW-M S4-1] A batch DELETED from the bucket is not listed. With versioning on (#2186), the
+      # versions are listed too: a batch or signature whose newest version is a delete marker, or that
+      # has only old versions, is refused, named. With versioning off (or unreadable), say so.
+      VERSIONING="$(aws_s3 "$TMP_DIR:/data" s3api get-bucket-versioning --bucket "$BACKUP_BUCKET" --query Status --output text 2>/dev/null)" || VERSIONING=unknown
+      if [ "$VERSIONING" = Enabled ]; then
+        aws_s3 "$TMP_DIR:/data" s3api list-object-versions --bucket "$BACKUP_BUCKET" --prefix "${BACKUP_PREFIX:-db}/erasure-ledger/" --output json > "$TMP_DIR/ledger-versions" ||
+          die "--ledger-from: could not list the versions under s3://$BACKUP_BUCKET/${BACKUP_PREFIX:-db}/erasure-ledger/ to prove no batch was deleted (pass --ledger-no-bucket-check only if the bucket is gone); nothing was created"
+        python3 -I - "$TMP_DIR/ledger-versions" <<'PY' || die "--ledger-from: a batch was DELETED from the off-site bucket (above): its erasures would be skipped. Restore its newest version (the bucket keeps old versions), fetch it, and run again. Nothing was created"
+import json, re, sys
+raw = open(sys.argv[1]).read().strip()
+doc = json.loads(raw) if raw else {}
+batch = re.compile(r"(?:.*/)?erasure-ledger-\d{8}T\d{6}Z-[0-9a-f]{8}\.jsonl\.gpg(?:\.sig)?")
+latest = {}
+for kind in ("Versions", "DeleteMarkers"):
+    for v in doc.get(kind) or []:
+        key = v.get("Key", "")
+        if not batch.fullmatch(key):
+            continue
+        latest.setdefault(key, None)
+        if v.get("IsLatest"):
+            latest[key] = kind
+for key, kind in sorted(latest.items()):
+    name = key.rsplit("/", 1)[-1]
+    if kind == "DeleteMarkers":
+        sys.exit(f"--ledger-from: {name} was deleted from the bucket (its newest version is a delete marker)")
+    if kind is None:
+        sys.exit(f"--ledger-from: {name} has only old versions in the bucket (no current one)")
+PY
+        LEDGER_BUCKET_NOTE="every batch the bucket lists is here, and none was deleted (versioning on)"
+        echo "off-site ledger : versioning is on; no batch or signature under erasure-ledger/ was deleted"
+      else
+        LEDGER_BUCKET_NOTE="every batch the bucket lists is here; versioning is not on, so a batch DELETED from the bucket would not be noticed"
+        echo "WARNING: the backup bucket's versioning is ${VERSIONING:-off}: a batch deleted from the bucket together with its signature cannot be noticed (deploy/backup-versioning.sh turns it on)." >&2
+      fi
+    fi
+  fi
+  since="$(ledger_signed_since)"
+  [ ! -s "$TMP_DIR/ledger-unsigned" ] || [ "$ALLOW_UNSIGNED" = 0 ] ||
+    echo "WARNING: --allow-unsigned-legacy: an erasure ledger batch WITHOUT a signature may be replayed onto the copy, only one from before signing began: its origin is NOT proven." >&2
+  OFFSITE_NEWEST="$(umask 077; python3 -I - "$LEDGER_FROM" "$OFFSITE_CSV" "$TMP_DIR/ledger-signed" "$TMP_DIR/ledger-unsigned" "$since" "$ALLOW_UNSIGNED" "$LEGACY_NO_RECORD" <<'PY'
+import csv, json, os, re, sys
+d, dst, signed_file, unsigned_file, record, allow, no_record = sys.argv[1:8]
+kinds = {"receipts", "destroyed_keys", "retired_documents", "shredded_runs", "shredded_fields",
+         "closed_accounts", "deleted_rows", "erased_rating_text", "erased_outbox_text"}
+uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+stamp = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?")
+def entries(base):
+    out = []
+    with open(os.path.join(d, base + ".jsonl")) as f:
+        for no, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                sys.exit(f"--ledger-from: {base}.jsonl line {no} is not JSON")
+            if not (isinstance(e, dict) and isinstance(e.get("id"), str) and uuid.fullmatch(e["id"]) and e.get("kind") in kinds
+                    and isinstance(e.get("entry"), dict) and isinstance(e.get("createdAt"), str) and stamp.fullmatch(e["createdAt"])):
+                sys.exit(f"--ledger-from: {base}.jsonl line {no} is not an erasure ledger entry")
+            out.append(e)
+    return out
+def as_stamp(created_at):
+    return re.sub(r"[-:]", "", created_at.split(".")[0]) + "Z"
+signed = [l.split() for l in open(signed_file).read().splitlines() if l.strip()]
+unsigned = [l.strip() for l in open(unsigned_file).read().splitlines() if l.strip()]
+take, ids = [], set()
+for base, *created in signed:
+    batch = entries(base)
+    take += batch
+    ids |= {e["id"] for e in batch}
+bounds = [b for b in [record] + [c[0] for _, *c in signed if c] if b]
+bound = min(bounds) if bounds else ""
+for base in unsigned:
+    batch = entries(base)
+    if batch and all(e["id"] in ids for e in batch):
+        print(f"off-site ledger : {base} has no signature; every entry in it is also in a verified batch: set aside", file=sys.stderr)
+        continue
+    if allow != "1":
+        sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature. Batches are signed; an unsigned one is refused, because anyone who can write to the backup bucket could have planted it. For a batch shipped before signing existed, the owner may pass --allow-unsigned-legacy")
+    written = base.split("-")[2]
+    if bound:
+        newest = max([written] + [as_stamp(e["createdAt"]) for e in batch])
+        if not newest < bound:
+            sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature and is from after signing began (its time {newest}, the first signed batch {bound}): not a legacy batch. Refused even with --allow-unsigned-legacy")
+        print(f"legacy check: {base} is from {newest}, before the first signed batch ({bound})", file=sys.stderr)
+    elif no_record != "1":
+        sys.exit(f"--ledger-from: the erasure ledger batch {base} has NO signature, and there is no record of the first signed batch (BACKUP_FIRST_SIGNED_LEDGER_FILE) and no signed batch here: its time cannot be checked against when signing began. Set BACKUP_LEDGER_SIGNED_SINCE to the owner's recorded stamp, or, only if no batch was ever signed, add --legacy-without-signing-record as well")
+    else:
+        print(f"WARNING: --legacy-without-signing-record: no record of when erasure ledger signing began; {base} is NOT checked against it.", file=sys.stderr)
+    print(f"WARNING: REPLAYING AN UNSIGNED ERASURE LEDGER BATCH ({base}) because --allow-unsigned-legacy was given. Its origin is NOT proven.", file=sys.stderr)
+    take += batch
+if not take:
+    sys.exit("--ledger-from: the ledger directory holds no entry to replay")
+newest = ""
+with open(dst, "w", newline="") as out:
+    w = csv.writer(out, lineterminator="\n")
+    for e in take:
+        w.writerow([json.dumps(e)])
+        newest = max(newest, e["createdAt"])
+print(newest)
+PY
+)" || die "--ledger-from: the off-site ledger was refused (above); nothing was created"
+  [ -f "$OFFSITE_SQL" ] || die "--ledger-from: restore-offsite-ledger.sql is missing next to restore.sh"
+  echo "off-site ledger : $(grep -c . "$TMP_DIR/ledger-signed") signed batch(es) verified, $(grep -c . "$OFFSITE_CSV") entr(ies), newest $OFFSITE_NEWEST"
+}
 replay_erasure_ledger() {
-  local has names=() selects=() name="" line i script summary live_id copy_id
+  local has=f names=() selects=() name="" line i script summary live_id copy_id
   [ -f "$LEDGER_SQL" ] && [ -f "$REPLAY_SQL" ] ||
     die_copy "the erasure ledger files are missing next to restore.sh; not restored"
-  live_id="$(deployment_identity_of "$LIVE_DB" db_psql_ro)" || die_copy "could not read the deployment identity of $LIVE_DB; not restored"
-  copy_id="$(deployment_identity_of "$SCRATCH" db_psql)" || die_copy "could not read the deployment identity of the restored copy; not restored"
-  echo "live database identity : $live_id"
-  echo "restored copy identity : $copy_id"
-  if [ "${live_id%%/*}" != none ] && [ "${copy_id%%/*}" != none ] && [ "${live_id%%/*}" != "${copy_id%%/*}" ]; then
-    die_copy "the live database ($live_id) and the restored copy ($copy_id) belong to different environments: the live ledger does not describe this copy; not restored"
-  fi
-  has="$(db_psql_ro "$LIVE_DB" -tAc "SELECT to_regclass('public.deletion_receipt') IS NOT NULL;" | tr -d '[:space:]')" ||
-    die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
-  if [ "$has" != t ]; then
-    echo "erasure ledger: $LIVE_DB keeps none (no deletion_receipt table); nothing to replay"
-    return 0
+  copy_id="$(deployment_identity_of "$SCRATCH" scratch_psql)" || die_copy "could not read the deployment identity of the restored copy; not restored"
+  if [ "$NO_LIVE_LEDGER" = 1 ]; then
+    echo "live database identity : gone (disaster recovery: the off-site ledger only)"
+    echo "restored copy identity : $copy_id"
+  else
+    live_id="$(deployment_identity_of "$LIVE_DB" db_psql_ro)" || die_copy "could not read the deployment identity of $LIVE_DB; not restored"
+    echo "live database identity : $live_id"
+    echo "restored copy identity : $copy_id"
+    if [ "${live_id%%/*}" != none ] && [ "${copy_id%%/*}" != none ] && [ "${live_id%%/*}" != "${copy_id%%/*}" ]; then
+      die_copy "the live database ($live_id) and the restored copy ($copy_id) belong to different environments: the live ledger does not describe this copy; not restored"
+    fi
+    has="$(db_psql_ro "$LIVE_DB" -tAc "SELECT to_regclass('public.deletion_receipt') IS NOT NULL;" | tr -d '[:space:]')" ||
+      die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
+    if [ "$has" != t ] && [ -z "$LEDGER_FROM" ]; then
+      echo "erasure ledger: $LIVE_DB keeps none (no deletion_receipt table); nothing to replay"
+      return 0
+    fi
   fi
   while IFS= read -r line; do
     if [[ "$line" =~ ^--\ ledger:\ ([a-z_]+)$ ]]; then name="${BASH_REMATCH[1]}"; continue; fi
@@ -198,26 +605,110 @@ replay_erasure_ledger() {
       for i in "${!names[@]}"; do
         echo "CREATE TEMP TABLE restore_ledger_${names[$i]} ON COMMIT DROP AS ${selects[$i]} WITH NO DATA;"
       done
-      for i in "${!names[@]}"; do
-        echo "COPY restore_ledger_${names[$i]} FROM STDIN WITH (FORMAT csv);"
-        db_psql_ro "$LIVE_DB" -q -c "COPY (${selects[$i]}) TO STDOUT WITH (FORMAT csv);" || exit 1
+      if [ "$has" = t ]; then
+        for i in "${!names[@]}"; do
+          echo "COPY restore_ledger_${names[$i]} FROM STDIN WITH (FORMAT csv);"
+          db_psql_ro "$LIVE_DB" -q -c "COPY (${selects[$i]}) TO STDOUT WITH (FORMAT csv);" || exit 1
+          printf '%s\n' '\.'
+        done
+      fi
+      if [ -n "$LEDGER_FROM" ]; then
+        echo "CREATE TEMP TABLE restore_offsite (line jsonb NOT NULL) ON COMMIT DROP;"
+        echo "COPY restore_offsite (line) FROM STDIN WITH (FORMAT csv);"
+        cat "$OFFSITE_CSV"
         printf '%s\n' '\.'
-      done
+        cat "$OFFSITE_SQL"
+      fi
       cat "$REPLAY_SQL"
       echo 'COMMIT;'
     } > "$script" ) || die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
-  summary="$(db_psql "$SCRATCH" -q -tA < "$script")" ||
+  summary="$(scratch_psql "$SCRATCH" -q -tA < "$script")" ||
     die_copy "the erasure ledger replay failed; not restored"
   rm -f -- "$script"
   printf '%s\n' "$summary" | grep -E '^erasure ledger replayed: ' ||
     die_copy "the erasure ledger replay reported nothing; not restored"
 }
 
-[ -n "$SOURCE" ] || die "usage: restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db], or restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg"
+[ -n "$SOURCE" ] || die "usage: restore.sh [--compare-source] [--allow-unsigned-legacy] <dump-file|s3://backup-bucket/key|-> [new-scratch-db], or restore.sh --fetch-encrypted|--fetch-signature s3://backup-bucket/key.dump.gpg"
+if [ "$FETCH_SIGNATURE" = 1 ]; then
+  [ "$FETCH_ENCRYPTED" = 0 ] || die "--fetch-signature and --fetch-encrypted are separate calls"
+  [[ "$SOURCE" == s3://*.dump.gpg ]] || [[ "$SOURCE" == s3://*.dump ]] || die "--fetch-signature prints the signature of an off-site dump (s3://…/….dump or ….dump.gpg)"
+  [ ! -t 1 ] || die "--fetch-signature writes the verified signature to stdout; redirect or pipe it (deploy/backup-drill.sh does)"
+fi
+if [ -n "$SIGNATURE_B64$SIGNED_OBJECT" ]; then
+  [ "$SOURCE" = - ] || die "--signature-b64 and --signed-object go with the dump on stdin (source -) only; a file or off-site dump is verified from its own .sig"
+  [ -n "$SIGNATURE_B64" ] && [ -n "$SIGNED_OBJECT" ] || die "--signature-b64 and --signed-object go together"
+  [[ "$SIGNED_OBJECT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$ ]] || die "--signed-object must be the signed object's file name"
+  [[ "$SIGNATURE_B64" =~ ^[A-Za-z0-9+/=]+$ ]] && [ "${#SIGNATURE_B64}" -le 24000 ] || die "--signature-b64 must be the base64 of the signature file"
+fi
+if [ "$ALLOW_UNSIGNED" = 1 ]; then
+  echo "WARNING: --allow-unsigned-legacy: a dump WITHOUT a signature will be restored. Use it only for a dump made before backups were signed: an unsigned dump could have been planted by anyone who could write to the backup bucket. A signature that is present must still verify." >&2
+fi
+ALLOWED_SIGNERS="${BACKUP_SIGNING_ALLOWED_SIGNERS:-$(env_value BACKUP_SIGNING_ALLOWED_SIGNERS)}"
+ALLOWED_SIGNERS="${ALLOWED_SIGNERS:-/etc/swift/backup-allowed-signers}"
+# verify_signature SIG NAME [--object FILE] [--plain FILE] [--print]: refuse unless SIG is a valid
+# signature of NAME by a trusted backup signing key (and the bytes match).
+verify_signature() {
+  local sig="$1" name="$2" rc=0
+  shift 2
+  python3 -I "$HERE/backup-signature.py" verify --allowed-signers "$ALLOWED_SIGNERS" --sig "$sig" --name "$name" "$@" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    4) die "the backup signature cannot be checked: the allowed-signers file is unusable (above); nothing was restored" ;;
+    *) die "the backup signature of $name was REFUSED (above): this dump was not made and signed by a Swift backup host, or it was changed. Nothing was restored; --allow-unsigned-legacy does not override a signature that fails" ;;
+  esac
+}
+# [SEC-BACKUP · REVIEW-G S4-1] When signing began here: the owner's stamp, or backup.sh's record.
+signed_since() {
+  local stamp="${BACKUP_SIGNED_SINCE:-$(env_value BACKUP_SIGNED_SINCE)}" file
+  if [ -z "$stamp" ]; then
+    file="${BACKUP_FIRST_SIGNED_FILE:-$(env_value BACKUP_FIRST_SIGNED_FILE)}"
+    file="${file:-/var/backups/swift/.first-signed-backup}"
+    [ -r "$file" ] && stamp="$(head -1 "$file" | tr -d '[:space:]')"
+  fi
+  [ -z "$stamp" ] && return 0
+  [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "the record of the first signed backup is malformed ($stamp); nothing was restored"
+  printf '%s\n' "$stamp"
+}
+# unsigned_or_die WHAT WHY [WRITTEN]: WRITTEN is when the object was written, as UTC
+# YYYYmmddTHHMMSSZ (the bucket's own LastModified, or a local dump's name stamp).
+unsigned_or_die() {
+  local since="" written="${3:-}"
+  [ "$ALLOW_UNSIGNED" = 1 ] ||
+    die "$1 has NO signature ($2). Swift backups are signed; an unsigned dump is refused, because anyone who can write to the backup bucket could have planted it. For a dump made before signing existed, the owner may pass --allow-unsigned-legacy"
+  since="$(signed_since)"
+  if [ -n "$since" ] && [ -n "${4:-}" ]; then
+    { [ -n "$written" ] && [[ "$written" < "$since" ]]; } ||
+      die "$1 has NO signature and was written after the first signed backup (server time ${written:-unknown}, signing began $since): an unsigned object from after that is not a legacy dump. Refused even with --allow-unsigned-legacy; nothing was restored"
+    echo "legacy check: $1 was written at server time $written, before the first signed backup ($since)" >&2
+  elif [ -n "${4:-}" ]; then
+    # A missing record never widens the window: the owner names the cutover, or says twice.
+    [ "$LEGACY_NO_RECORD" = 1 ] ||
+      die "$1 has NO signature, and there is no record of the first signed backup on this host (BACKUP_FIRST_SIGNED_FILE): its time (${written:-unknown}) cannot be checked against when signing began. Set BACKUP_SIGNED_SINCE to the owner's recorded stamp, or, only if this host never signed a backup, add --legacy-without-signing-record as well. Nothing was restored"
+    echo "WARNING: --legacy-without-signing-record: no record of when signing began; the object's time (${written:-unknown}) is NOT checked against it." >&2
+  fi
+  [ "${5:-}" = defer ] || unsigned_warning "$1"
+}
+unsigned_warning() { echo "WARNING: RESTORING AN UNSIGNED DUMP ($1) because --allow-unsigned-legacy was given. Its origin is NOT proven." >&2; }
+# A server or name time as UTC YYYYmmddTHHMMSSZ (empty when it cannot be read).
+utc_stamp() {
+  python3 -I -c 'import datetime, re, sys
+v = sys.argv[1].strip()
+m = re.search(r"(\d{8}T\d{6}Z)", v)
+if m and not re.search(r"\d{4}-\d{2}-\d{2}", v):
+    print(m.group(1)); sys.exit(0)
+try:
+    t = datetime.datetime.fromisoformat(v.replace("Z", "+00:00"))
+except ValueError:
+    sys.exit(0)
+if t.tzinfo is None:
+    t = t.replace(tzinfo=datetime.timezone.utc)
+print(t.astimezone(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ"))' "$1"
+}
 if [ "$FETCH_ENCRYPTED" = 1 ]; then
   [[ "$SOURCE" == s3://*.dump.gpg ]] || die "--fetch-encrypted streams only an encrypted off-site dump (s3://…/….dump.gpg); a plain dump never leaves this way"
   [ ! -t 1 ] || die "--fetch-encrypted writes the encrypted dump to stdout; redirect or pipe it (deploy/backup-drill.sh does)"
-elif [[ "$SOURCE" == *.gpg ]]; then
+elif [ "$FETCH_SIGNATURE" = 0 ] && [[ "$SOURCE" == *.gpg ]]; then
   die "this dump is encrypted to the owner's key and this server never decrypts it: run deploy/backup-drill.sh on the owner's computer (it fetches, decrypts there, and restores through this script)"
 fi
 [[ "$SCRATCH" =~ ^[a-z][a-z0-9_]{0,62}$ ]] || die "scratch database name must be a lowercase SQL identifier"
@@ -235,8 +726,9 @@ if [[ "$SOURCE" == s3://* ]]; then
   for name in BACKUP_BUCKET AWS_S3_ENDPOINT AWS_REGION AWS_CLI_IMAGE; do
     if [ -z "${!name:-}" ]; then export "$name=$(env_value "$name")"; fi
   done
+  # [SEC-BACKUP F1] The backup bucket's own key pair (the API's only as a loud fallback).
   . "$HERE/secret-env.sh"
-  load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
+  load_backup_storage_keys || exit 1
   [ -n "${BACKUP_BUCKET:-}" ] || die "BACKUP_BUCKET is required for off-site restore"
   [[ "$SOURCE" == "s3://$BACKUP_BUCKET/"* ]] || die "off-site source must be in BACKUP_BUCKET"
   [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] ||
@@ -245,8 +737,66 @@ if [[ "$SOURCE" == s3://* ]]; then
   chmod 700 "$TMP_DIR"
   DUMP="$TMP_DIR/restore.dump"
   aws_cli_image >/dev/null || die "off-site restore needs a pinned AWS_CLI_IMAGE"
-  aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE" /data/restore.dump --only-show-errors
-  chmod 600 "$DUMP"
+  # [BACKUP-FU2 · owner 29 Oct] The bucket deletes each hourly dump, and its .sig, a set number of
+  # days after it was made (deploy/backup-versioning.sh, BACKUP_OFFSITE_RETAIN_DAYS). A dump that is
+  # gone is said to be gone: never taken for an UNSIGNED dump, never a bare AWS error.
+  dump_gone() {
+    local days="${BACKUP_OFFSITE_RETAIN_DAYS:-$(env_value BACKUP_OFFSITE_RETAIN_DAYS)}"
+    die "$(basename "$SOURCE") is not in the backup bucket: it was deleted by the bucket's retention rule (hourly dumps are kept ${days:-30} days after they are made), or by someone. Pick a newer dump; with versioning on, its old version stays for BACKUP_VERSION_RETAIN_DAYS more days (s3api list-object-versions). Nothing was restored"
+  }
+  KEY_PATH="${SOURCE#s3://"$BACKUP_BUCKET"/}"
+  # [SEC-BACKUP F2] The signature first: a missing one is told apart from a failed fetch.
+  SIG="$TMP_DIR/restore.sig"
+  HAVE_SIG=1
+  if ! aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE.sig" /data/restore.sig --only-show-errors 2>"$TMP_DIR/sig.err"; then
+    if grep -qE '404|Not Found|NoSuchKey|does not exist' "$TMP_DIR/sig.err"; then HAVE_SIG=0
+    else cat "$TMP_DIR/sig.err" >&2; die "could not fetch the signature $SOURCE.sig; nothing was restored"; fi
+  fi
+  if [ "$HAVE_SIG" = 0 ]; then
+    # No signature: is the dump itself there? Expired together, it is not.
+    if ! aws_s3 "$TMP_DIR:/data" s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" --output text >/dev/null 2>"$TMP_DIR/head.err"; then
+      if grep -qE '404|Not Found|NoSuchKey|does not exist' "$TMP_DIR/head.err"; then dump_gone; fi
+      cat "$TMP_DIR/head.err" >&2; die "could not read the object's details from the bucket; nothing was restored"
+    fi
+  fi
+  if [ "$FETCH_SIGNATURE" = 1 ]; then
+    # No signature is an answer, not an error: the drill decides (--allow-unsigned-legacy).
+    if [ "$HAVE_SIG" = 0 ]; then echo "swift-backup-signature none"; exit 0; fi
+    verify_signature "$SIG" "$(basename "$SOURCE")" --print
+    exit 0
+  fi
+  if [ "$HAVE_SIG" = 1 ]; then
+    # Any version the bucket serves must carry this signature: the bytes are checked against it.
+    if ! aws_s3 "$TMP_DIR:/data" s3 cp "$SOURCE" /data/restore.dump --only-show-errors 2>"$TMP_DIR/get.err"; then
+      # The .sig is uploaded after its dump, so it can outlive the dump by a day.
+      if grep -qE '404|Not Found|NoSuchKey|does not exist' "$TMP_DIR/get.err"; then dump_gone; fi
+      cat "$TMP_DIR/get.err" >&2; die "could not download $(basename "$SOURCE"); nothing was restored"
+    fi
+    chmod 600 "$DUMP"
+    verify_signature "$SIG" "$(basename "$SOURCE")" --object "$DUMP"
+  else
+    [ "$ALLOW_UNSIGNED" = 1 ] || unsigned_or_die "$SOURCE" "no $(basename "$SOURCE").sig beside it in the bucket"
+    # [COORD 12:20Z] The version whose server time is checked is the version downloaded: the
+    # head-object answer pins it (VersionId on a versioned bucket, and its ETag either way).
+    HEAD="$(aws_s3 "$TMP_DIR:/data" s3api head-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" \
+      --query '[LastModified,VersionId,ETag]' --output text 2>/dev/null)" || die "could not read the object's details from the bucket; nothing was restored"
+    IFS=$'\t' read -r WRITTEN VERSION ETAG <<<"$HEAD" || true
+    echo "legacy check: the bucket says $(basename "$SOURCE") was written at server time ${WRITTEN:-unknown}" >&2
+    unsigned_or_die "$SOURCE" "no $(basename "$SOURCE").sig beside it in the bucket" "$(utc_stamp "${WRITTEN:-}")" checked defer
+    [ -n "${ETAG:-}" ] && [ "$ETAG" != None ] || die "the bucket gave no ETag for $(basename "$SOURCE"), so the object checked cannot be pinned; nothing was restored"
+    PIN=()
+    if [ -n "${VERSION:-}" ] && [ "$VERSION" != None ] && [ "$VERSION" != null ]; then PIN=(--version-id "$VERSION"); fi
+    if ! aws_s3 "$TMP_DIR:/data" s3api get-object --bucket "$BACKUP_BUCKET" --key "$KEY_PATH" ${PIN[@]+"${PIN[@]}"} \
+         --if-match "$ETAG" /data/restore.dump >/dev/null 2>"$TMP_DIR/get.err"; then
+      if grep -qE 'PreconditionFailed|\(412\)' "$TMP_DIR/get.err"; then
+        die "$(basename "$SOURCE") changed between the check and the download (its ETag no longer matches); nothing was restored"
+      fi
+      cat "$TMP_DIR/get.err" >&2
+      die "could not download the version of $(basename "$SOURCE") that was checked; nothing was restored"
+    fi
+    chmod 600 "$DUMP"
+    unsigned_warning "$SOURCE"
+  fi
   if [ "$FETCH_ENCRYPTED" = 1 ]; then
     # Only ciphertext: an OpenPGP message, never a plain archive.
     if pg_restore --list "$DUMP" >/dev/null 2>&1; then die "the object is a PLAIN dump, not encrypted; refusing to stream it out"; fi
@@ -276,36 +826,182 @@ elif [ "$SOURCE" = - ]; then
   DUMP="$TMP_DIR/restore.dump"
   (umask 077; cat > "$DUMP")
   [ -s "$DUMP" ] || die "nothing arrived on stdin"
+  # [SEC-BACKUP F2] The drill's bundle: the signature of the encrypted object it decrypted, which
+  # also carries the plain dump's digest. Checked here, on the host, against this host's keys.
+  if [ -n "$SIGNATURE_B64" ]; then
+    (umask 077; printf '%s' "$SIGNATURE_B64" | python3 -I -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read(), validate=True))' > "$TMP_DIR/restore.sig") ||
+      die "--signature-b64 is not valid base64; nothing was restored"
+    verify_signature "$TMP_DIR/restore.sig" "$SIGNED_OBJECT" --plain "$DUMP"
+  else
+    unsigned_or_die "the dump on stdin" "no --signature-b64 bundle was given"
+  fi
 else
   DUMP="$SOURCE"
+  [ -f "$DUMP" ] || die "dump file does not exist"
+  if [ -f "$DUMP.sig" ]; then
+    verify_signature "$DUMP.sig" "$(basename "$DUMP")" --object "$DUMP"
+  else
+    unsigned_or_die "$DUMP" "no $(basename "$DUMP").sig beside it" "$(utc_stamp "$(basename "$DUMP")")" checked
+  fi
 fi
 [ -f "$DUMP" ] || die "dump file does not exist"
 pg_restore --list "$DUMP" >/dev/null 2>&1 || die "pg_restore cannot read this archive"
 
+[ -z "$LEDGER_FROM" ] || read_offsite_ledger
 [ -n "$PROJECT" ] ||
   die "name the Compose project that holds the target Postgres: --project <name> (live is 'swift', a rehearsal copy e.g. 'swift-rehearsal'); restore.sh never guesses"
 [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die "--project must be a Compose project name (lowercase letters, digits, - and _)"
 COMPOSE+=(-p "$PROJECT")
-echo "compose project : $PROJECT (its postgres service)"
+echo "compose project : $PROJECT (its postgres service: read for the ledger and the comparison, never restored into)"
 echo "archive : $(basename "$DUMP")"
 echo "scratch : $SCRATCH"
-EXISTS="$(db_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$SCRATCH';")"
-[ -z "$EXISTS" ] || die "scratch database already exists; choose a new name"
-# [#1977 · copy run #5c gap (a)] Closed from birth: created refusing every connection, then closed
-# to PUBLIC and to each login, and only then opened, for the restore.
-db_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\" WITH ALLOW_CONNECTIONS false;"
-quarantine_scratch || die "the scratch database could not be quarantined; it was created empty and is retained"
-db_psql postgres -q -c "ALTER DATABASE \"$SCRATCH\" WITH ALLOW_CONNECTIONS true;" ||
-  die "the quarantined scratch database could not be opened for the restore; it was created empty and is retained"
+# The restore login has the live owner's NAME (so ownership, grants and default privileges read
+# exactly as in the source) and none of its power: NOT a superuser in the throwaway instance.
+RESTORE_LOGIN="${POSTGRES_USER:-$(env_value POSTGRES_USER)}"
+RESTORE_LOGIN="${RESTORE_LOGIN:-swift}"
+[[ "$RESTORE_LOGIN" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] || die "POSTGRES_USER must be a lowercase SQL identifier"
+[ "$RESTORE_LOGIN" != "$SCRATCH_ADMIN" ] || die "POSTGRES_USER may not be the throwaway instance's own superuser name"
+SCRATCH_CTR="swift-restore-$SCRATCH"
+! docker container inspect "$SCRATCH_CTR" >/dev/null 2>&1 || die "a scratch instance named $SCRATCH_CTR already exists; choose a new scratch name"
+! docker volume inspect "$SCRATCH_CTR" >/dev/null 2>&1 || die "a scratch volume named $SCRATCH_CTR already exists; choose a new scratch name"
+# The live database's own image: the same server version and extension builds as the dump's source.
+LIVE_CTR="$("${COMPOSE[@]}" ps -q postgres 2>/dev/null | head -1 || true)"
+if [ -n "$LIVE_CTR" ]; then
+  SCRATCH_IMAGE="$(docker inspect --format '{{.Image}}' "$LIVE_CTR")" || die "could not read the live database's image"
+else
+  SCRATCH_IMAGE="$("${COMPOSE[@]}" config --format json 2>/dev/null | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["services"]["postgres"]["image"])')" ||
+    die "could not read the postgres image from the Compose file"
+fi
+[ -n "$SCRATCH_IMAGE" ] || die "no postgres image to start the scratch instance from"
+echo "scratch instance : $SCRATCH_CTR (throwaway, no network, its own volume; restore login $RESTORE_LOGIN is NOT a superuser there)"
+docker volume create --label swift.restore=1 "$SCRATCH_CTR" >/dev/null || die "could not create the scratch volume"
+INSTANCE_UP=1
+docker run -d --name "$SCRATCH_CTR" --label swift.restore=1 --network none \
+  -e POSTGRES_USER="$SCRATCH_ADMIN" -e POSTGRES_DB=postgres -e POSTGRES_HOST_AUTH_METHOD=trust \
+  -v "$SCRATCH_CTR:/var/lib/postgresql/data" "$SCRATCH_IMAGE" >/dev/null ||
+  die_copy "the throwaway instance could not be started"
+READY=0
+# [SEC-BACKUP · CI 28 Oct] 180 SECONDS, by the clock: a `sleep` that returns at once must not
+# turn the wait into 180 quick tries.
+READY_BY=$((SECONDS + 180))
+while [ "$SECONDS" -lt "$READY_BY" ]; do
+  INIT_LOG="$(docker logs "$SCRATCH_CTR" 2>&1 || true)"
+  if [[ "$INIT_LOG" == *"PostgreSQL init process complete"* ]] &&
+     docker exec "$SCRATCH_CTR" pg_isready -q -h /var/run/postgresql -U "$SCRATCH_ADMIN" >/dev/null 2>&1; then
+    READY=1; break
+  fi
+  sleep 1
+done
+[ "$READY" = 1 ] || die_copy "the throwaway instance did not become ready"
+# Prepared by its superuser, before any byte of the archive is read into it: the restore login,
+# the scratch database (closed from birth), then the quarantine, then opened for the restore.
+scratch_admin_psql postgres -q -c "CREATE ROLE \"$RESTORE_LOGIN\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;" ||
+  die_copy "the restore login could not be created in the throwaway instance"
+scratch_admin_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\" OWNER \"$RESTORE_LOGIN\" TEMPLATE template0 ALLOW_CONNECTIONS false;" ||
+  die_copy "the scratch database could not be created"
+quarantine_scratch || die_copy "the scratch database could not be quarantined"
+scratch_admin_psql postgres -q -c "ALTER DATABASE \"$SCRATCH\" WITH ALLOW_CONNECTIONS true;" ||
+  die_copy "the quarantined scratch database could not be opened for the restore"
+# What the archive needs that a non-superuser cannot make: the roles it grants to (created without
+# login and without any attribute), and the extensions it names (allowlisted only).
+private_tmp
+TOC="$TMP_DIR/archive.toc"
+docker exec -i "$SCRATCH_CTR" pg_restore --list < "$DUMP" > "$TOC" || die_copy "the throwaway instance's pg_restore cannot read this archive"
+EXTENSIONS="$(sed -n 's/^[0-9]*; [0-9]* [0-9]* EXTENSION - \([^ ]*\) .*$/\1/p; s/^[0-9]*; [0-9]* [0-9]* EXTENSION - \([^ ]*\)$/\1/p' "$TOC" | sort -u)"
+for ext in $EXTENSIONS; do
+  case " $EXTENSION_ALLOWLIST " in *" $ext "*) ;; *) die_copy "the archive needs the extension $ext, which this restore does not create (not in its allowlist)";; esac
+done
+grep -E '^[0-9]+; [0-9]+ [0-9]+ (ACL|POLICY|DEFAULT ACL) ' "$TOC" > "$TMP_DIR/grants.toc" || true
+ROLES=""
+if [ -s "$TMP_DIR/grants.toc" ]; then
+  docker exec -i "$SCRATCH_CTR" sh -c 'umask 077; cat > /tmp/grants.toc' < "$TMP_DIR/grants.toc" || die_copy "could not stage the archive's grant list"
+  ROLES="$(docker exec -i "$SCRATCH_CTR" pg_restore -f - -L /tmp/grants.toc < "$DUMP" | python3 -I -c '
+import re, sys
+ident = r"(?:\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$]*)"
+roles = set()
+def add(listing):
+    for r in re.findall(ident, listing):
+        roles.add(r.strip("\""))
+for line in sys.stdin:
+    m = re.match(r"(?:GRANT|REVOKE) .* (?:TO|FROM) (" + ident + r"(?:, " + ident + r")*)(?: WITH GRANT OPTION| GRANTED BY .*)?;\s*$", line)
+    if m: add(m.group(1))
+    m = re.match(r"CREATE POLICY .* TO (" + ident + r"(?:, " + ident + r")*)(?: USING| WITH CHECK|;|$)", line)
+    if m: add(m.group(1))
+    m = re.match(r"ALTER DEFAULT PRIVILEGES FOR ROLE (" + ident + r")", line)
+    if m: add(m.group(1))
+skip = {"public", "current_user", "session_user", "current_role"}
+for r in sorted(roles):
+    if r.lower() in skip or r.startswith("pg_"):
+        continue
+    if re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", r):
+        print(r)
+')" || die_copy "could not read the roles the archive grants to"
+fi
+for role in $ROLES; do
+  [ "$role" != "$SCRATCH_ADMIN" ] && [ "$role" != "$RESTORE_LOGIN" ] || continue
+  # A fresh instance holds no such role: create it bare, and let the restore login act for it
+  # (ALTER DEFAULT PRIVILEGES FOR ROLE needs that). Never for a role that already exists.
+  scratch_admin_psql postgres -q -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$role') THEN CREATE ROLE \"$role\" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; GRANT \"$role\" TO \"$RESTORE_LOGIN\"; END IF; END \$\$;" ||
+    die_copy "the role $role could not be prepared in the throwaway instance"
+done
+# The extensions are created by a short-lived superuser role and then handed, with everything they
+# made, to the restore login: so the archive's grants on extension objects apply as they do in the
+# source (where the owner created them), and still nothing of the archive runs as a superuser.
+if [ -n "$EXTENSIONS" ]; then
+  { echo "CREATE ROLE swift_restore_ext NOLOGIN SUPERUSER;"
+    echo "SET ROLE swift_restore_ext;"
+    for ext in $EXTENSIONS; do echo "CREATE EXTENSION IF NOT EXISTS \"$ext\" CASCADE;"; done
+    echo "RESET ROLE;"
+    echo "REASSIGN OWNED BY swift_restore_ext TO \"$RESTORE_LOGIN\";"
+    echo "DROP ROLE swift_restore_ext;"
+  } | scratch_admin_psql "$SCRATCH" -q >/dev/null || die_copy "the extensions the archive names could not be created in the throwaway instance"
+fi
+# The restore list: everything in the archive except what the extensions themselves made (their
+# entries and the comments on them, the schemas they created, and the rows of their own tables and
+# sequences: an extension fills those when it is created).
+OWNED="$(scratch_admin_psql "$SCRATCH" -tA -c "SELECT 'rel ' || n.nspname || ' ' || c.relname FROM pg_depend d JOIN pg_class c ON c.oid = d.objid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE d.classid = 'pg_class'::regclass AND d.deptype = 'e' UNION ALL SELECT 'schema ' || nspname FROM pg_namespace WHERE nspname <> 'public' AND nspname !~ '^pg_' AND nspname <> 'information_schema';")" ||
+  die_copy "could not read what the extensions own in the throwaway instance"
+printf '%s\n' "$OWNED" > "$TMP_DIR/owned.txt"
+python3 -I - "$TOC" "$TMP_DIR/owned.txt" > "$TMP_DIR/restore.toc" <<'PY' || die_copy "could not build the restore list"
+import re, sys
+toc, owned_file = sys.argv[1], sys.argv[2]
+rels, schemas = set(), set()
+for line in open(owned_file):
+    parts = line.split()
+    if parts[:1] == ["rel"] and len(parts) == 3: rels.add((parts[1], parts[2]))
+    if parts[:1] == ["schema"] and len(parts) == 2: schemas.add(parts[1])
+entry = re.compile(r"^\d+; \d+ \d+ (.*)$")
+for line in open(toc):
+    m = entry.match(line.rstrip("\n"))
+    if not m:
+        sys.stdout.write(line); continue
+    body = m.group(1)
+    if re.match(r"(EXTENSION|COMMENT) - (EXTENSION )?\S+", body) and ("EXTENSION" in body.split()[:3]):
+        continue
+    t = re.match(r"(TABLE DATA|SEQUENCE SET) (\S+) (\S+) ", body + " ")
+    if t and (t.group(2), t.group(3)) in rels:
+        continue
+    t = re.match(r"SCHEMA - (\S+) ", body + " ")
+    if t and t.group(1) in schemas:
+        continue
+    sys.stdout.write(line)
+PY
+docker exec -i "$SCRATCH_CTR" sh -c 'umask 077; cat > /tmp/restore.toc' < "$TMP_DIR/restore.toc" || die_copy "could not stage the restore list"
+# Proven, not assumed: the login that will read the archive is not a superuser.
+SUPER="$(scratch_psql "$SCRATCH" -tAc "SELECT rolsuper FROM pg_roles WHERE rolname = current_user;" | tr -d '[:space:]')" ||
+  die_copy "could not check the restore login"
+[ "$SUPER" = f ] || die_copy "the restore login is a superuser in the scratch instance; refusing to restore"
 
 STARTED="$(date +%s)"
 ROWS_IN=1
-"${COMPOSE[@]}" exec -T postgres sh -c \
-  'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_restore -h 127.0.0.1 -U "$POSTGRES_USER" --exit-on-error --no-owner --dbname="$1"' \
-  sh "$SCRATCH" < "$DUMP" || die_copy "pg_restore failed; not restored"
+docker exec -i "$SCRATCH_CTR" pg_restore -h /var/run/postgresql -U "$RESTORE_LOGIN" --exit-on-error --no-owner -L /tmp/restore.toc --dbname="$SCRATCH" \
+  < "$DUMP" || die_copy "pg_restore failed; not restored"
 quarantine_scratch || die_copy "the restored scratch database could not be kept quarantined"
-if [ "$NO_LIVE_LEDGER" = 1 ]; then
+if [ "$NO_LIVE_LEDGER" = 1 ] && [ -z "$LEDGER_FROM" ]; then
   echo "DISASTER-RECOVERY MODE: no live erasure ledger was replayed (--no-live-ledger --i-know-live-is-gone)"
+elif [ "$NO_LIVE_LEDGER" = 1 ]; then
+  echo "DISASTER-RECOVERY MODE: replaying the off-site erasure ledger only (the live database is gone)"
+  replay_erasure_ledger
 else
   replay_erasure_ledger
 fi
@@ -313,7 +1009,7 @@ fi
 FAILED=0
 check() {
   local count
-  count="$(db_psql "$SCRATCH" -tAc "$2" | tr -d '[:space:]')" || { echo "$1: ERROR"; FAILED=1; return; }
+  count="$(scratch_psql "$SCRATCH" -tAc "$2" | tr -d '[:space:]')" || { echo "$1: ERROR"; FAILED=1; return; }
   [[ "$count" =~ ^[0-9]+$ ]] || { echo "$1: invalid count"; FAILED=1; return; }
   if [ "$count" -lt "$3" ]; then echo "$1: $count (below $3)"; FAILED=1
   else echo "$1: $count (ok)"; fi
@@ -331,7 +1027,11 @@ check() {
 #              and a checksum of its body;
 #   view       view or materialized view: kind, options (security_invoker,
 #              security_barrier, check_option) and a checksum of its definition;
-#   grant      table, sequence, function and schema privileges, default privileges;
+#   grant      table, sequence, function and schema privileges, default privileges
+#              (the object's owner reads OWNER and an explicit ACL equal to the
+#              default reads as the default, on both sides: the scratch copy is
+#              restored by a login of its own, and extension objects there are
+#              created by the throwaway instance);
 #   sequence   sequence: last value;   extension  extension: version.
 # Sorted, so two equal databases give byte-equal snapshots. The session pins
 # its time zone, date and interval style and float digits, so a row's text
@@ -346,7 +1046,7 @@ SELECT line FROM (
     'SELECT count(*) AS c, md5(coalesce(string_agg(md5(r::text), '','' ORDER BY md5(r::text) COLLATE \"C\"), '''')) AS h FROM %I.%I r %s',
     t.table_schema, t.table_name,
     CASE WHEN t.table_schema = 'public' AND t.table_name = 'platform_config'
-      THEN 'WHERE r.key NOT IN (''last_backup_at'', ''last_backup_offsite'', ''last_restore_rehearsal_at'', ''last_restore_rehearsal_seconds'')'
+      THEN 'WHERE r.key NOT IN (''last_backup_at'', ''last_backup_offsite'', ''last_backup_signed'', ''last_backup_storage_key'', ''last_restore_rehearsal_at'', ''last_restore_rehearsal_seconds'')'
       ELSE '' END), false, true, '') AS x
   WHERE t.table_schema IN ('public', 'swift_qr') AND t.table_type = 'BASE TABLE'
   UNION ALL
@@ -384,14 +1084,23 @@ SELECT line FROM (
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('v', 'm')
   UNION ALL
-  SELECT format('grant|relation|%s.%s|%s', n.nspname, c.relname, coalesce(c.relacl::text, ''))
+  SELECT format('grant|relation|%s.%s|%s', n.nspname, c.relname, CASE WHEN c.relacl IS NULL OR c.relacl = acldefault((CASE WHEN c.relkind = 'S' THEN 's' ELSE 'r' END)::\"char\", c.relowner) THEN '' ELSE coalesce((SELECT string_agg(format('%s>%s:%s%s',
+      CASE WHEN a.grantor = c.relowner THEN 'OWNER' ELSE pg_get_userbyid(a.grantor) END,
+      CASE WHEN a.grantee = 0 THEN 'PUBLIC' WHEN a.grantee = c.relowner THEN 'OWNER' ELSE pg_get_userbyid(a.grantee) END,
+      a.privilege_type, CASE WHEN a.is_grantable THEN '*' ELSE '' END), ',' ORDER BY 1) FROM aclexplode(c.relacl) a), '{}') END)
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname IN ('public', 'swift_qr') AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
   UNION ALL
-  SELECT format('grant|function|%s.%s(%s)|%s', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), coalesce(p.proacl::text, ''))
+  SELECT format('grant|function|%s.%s(%s)|%s', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), CASE WHEN p.proacl IS NULL OR p.proacl = acldefault('f'::\"char\", p.proowner) THEN '' ELSE coalesce((SELECT string_agg(format('%s>%s:%s%s',
+      CASE WHEN a.grantor = p.proowner THEN 'OWNER' ELSE pg_get_userbyid(a.grantor) END,
+      CASE WHEN a.grantee = 0 THEN 'PUBLIC' WHEN a.grantee = p.proowner THEN 'OWNER' ELSE pg_get_userbyid(a.grantee) END,
+      a.privilege_type, CASE WHEN a.is_grantable THEN '*' ELSE '' END), ',' ORDER BY 1) FROM aclexplode(p.proacl) a), '{}') END)
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('public', 'swift_qr')
   UNION ALL
-  SELECT format('grant|schema|%s|%s', n.nspname, coalesce(n.nspacl::text, ''))
+  SELECT format('grant|schema|%s|%s', n.nspname, CASE WHEN n.nspacl IS NULL OR n.nspacl = acldefault('n'::\"char\", n.nspowner) THEN '' ELSE coalesce((SELECT string_agg(format('%s>%s:%s%s',
+      CASE WHEN a.grantor = n.nspowner THEN 'OWNER' ELSE pg_get_userbyid(a.grantor) END,
+      CASE WHEN a.grantee = 0 THEN 'PUBLIC' WHEN a.grantee = n.nspowner THEN 'OWNER' ELSE pg_get_userbyid(a.grantee) END,
+      a.privilege_type, CASE WHEN a.is_grantable THEN '*' ELSE '' END), ',' ORDER BY 1) FROM aclexplode(n.nspacl) a), '{}') END)
   FROM pg_namespace n WHERE n.nspname IN ('public', 'swift_qr')
   UNION ALL
   SELECT format('grant|default|%s|%s|%s', coalesce(n.nspname, ''), d.defaclobjtype, d.defaclacl::text)
@@ -402,11 +1111,137 @@ SELECT line FROM (
   UNION ALL
   SELECT format('extension|%s|%s', e.extname, e.extversion) FROM pg_extension e
 ) s ORDER BY line COLLATE \"C\";"
+# [BACKUP-FU] PostgreSQL does not always print a definition back the way it read it: after ANY dump
+# and restore, a CHECK with an IN list on a varchar column, or a trigger WHEN with a row-wise
+# IS DISTINCT FROM, reads back in other words with the same meaning. Text is never loosened
+# (no whitespace or cast rules). Instead, for a CHECK constraint or a trigger present on both
+# sides under the same name (and, for a trigger, the same enabled state) whose definitions differ,
+# the SOURCE's own definition is read again by the scratch instance's server, on the restored
+# table, exactly as the restore read the dump: inside one transaction that is rolled back, as the
+# restore login. Only when what that server prints is byte-identical to the restored definition
+# are the two the same; anything else (a different expression, timing, NOT VALID, an error) stays
+# a mismatch.
+# (read -d '', not $(cat <<...): bash 3.2 misparses a here-document inside $( ).
+REPRINT_PY=""
+IFS= read -r -d '' REPRINT_PY <<'PY' || true
+import sys
+
+def split(line):
+    """(kind, relation, name, enabled) and the definition, for a CHECK or a trigger line."""
+    kind = line.split("|", 1)[0]
+    if kind == "constraint":
+        p = line.split("|", 3)
+        if len(p) == 4 and p[3].startswith("CHECK ("):
+            return ("constraint", p[1], p[2], ""), p[3]
+    if kind == "trigger":
+        p = line.split("|", 4)
+        if len(p) == 5 and p[4].startswith(("CREATE TRIGGER ", "CREATE CONSTRAINT TRIGGER ")):
+            return ("trigger", p[1], p[2], p[3]), p[4]
+    return None, None
+
+def literal(s):
+    return "'" + s.replace("'", "''") + "'"
+
+def pairs(live, scratch):
+    """Lines that differ, paired by kind, relation, name (and enabled state): one on each side."""
+    lc, sc = {}, {}
+    for l in live: lc[l] = lc.get(l, 0) + 1
+    for l in scratch: sc[l] = sc.get(l, 0) + 1
+    def index(lines):
+        out = {}
+        for l in lines:
+            key, d = split(l)
+            if key: out.setdefault(key, []).append((l, d))
+        return out
+    a = index([l for l in lc if lc[l] > sc.get(l, 0)])
+    b = index([l for l in sc if sc[l] > lc.get(l, 0)])
+    found = []
+    for key in sorted(a):
+        if len(a[key]) == 1 and len(b.get(key, [])) == 1 and lc[a[key][0][0]] == 1 and sc[b[key][0][0]] == 1:
+            found.append((key, a[key][0], b[key][0]))
+    return found
+
+REREAD = """CREATE FUNCTION pg_temp.swift_reread(n int, kind text, rel text, name text, def text) RETURNS text LANGUAGE plpgsql AS $reread$
+DECLARE r regclass; tmp text := 'swift_reread_' || n; head text; was text; tmp_head text; printed text;
+BEGIN
+  r := rel::regclass;
+  IF kind = 'constraint' THEN
+    -- NOT VALID: the restored table is not scanned; the suffix is the only change it makes to the text.
+    EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I %s', r, tmp, CASE WHEN def LIKE '% NOT VALID' THEN def ELSE def || ' NOT VALID' END);
+    SELECT pg_get_constraintdef(c.oid) INTO printed FROM pg_constraint c WHERE c.conrelid = r AND c.conname = tmp;
+    IF def NOT LIKE '% NOT VALID' THEN
+      IF right(printed, 10) <> ' NOT VALID' THEN RETURN NULL; END IF;
+      printed := left(printed, -10);
+    END IF;
+    RETURN printed;
+  END IF;
+  FOREACH head IN ARRAY ARRAY['CREATE TRIGGER ', 'CREATE CONSTRAINT TRIGGER '] LOOP
+    was := head || quote_ident(name) || ' ';
+    tmp_head := head || quote_ident(tmp) || ' ';
+    IF left(def, length(was)) = was THEN
+      EXECUTE tmp_head || substr(def, length(was) + 1);
+      SELECT pg_get_triggerdef(t.oid) INTO printed FROM pg_trigger t WHERE t.tgrelid = r AND t.tgname = tmp;
+      IF left(printed, length(tmp_head)) <> tmp_head THEN RETURN NULL; END IF;
+      RETURN was || substr(printed, length(tmp_head) + 1);
+    END IF;
+  END LOOP;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END $reread$;"""
+
+mode, live_file, scratch_file = sys.argv[1:4]
+live = open(live_file).read().splitlines()
+scratch = open(scratch_file).read().splitlines()
+found = pairs(live, scratch)
+if mode == "sql":
+    if found:
+        rows = ",\n".join("(%d, %s, %s, %s, %s)" % (i, literal(k[0]), literal(k[1]), literal(k[2]), literal(src[1]))
+                          for i, (k, src, _) in enumerate(found))
+        print("SET standard_conforming_strings = on;")
+        print("BEGIN;")
+        print(REREAD)
+        print("SELECT n || '|' || coalesce(pg_temp.swift_reread(n, kind, rel, name, def), '') FROM (VALUES\n" + rows + "\n) v(n, kind, rel, name, def) ORDER BY n;")
+        print("ROLLBACK;")
+elif mode == "apply":
+    reread = {}
+    for line in open(sys.argv[4]).read().splitlines():
+        n, _, printed = line.partition("|")
+        if n.isdigit(): reread[int(n)] = printed
+    swap, names = {}, []
+    for i, (key, src, dst) in enumerate(found):
+        if reread.get(i) and reread[i] == dst[1]:
+            swap[src[0]] = dst[0]
+            names.append("%s %s.%s" % (key[0], key[1], key[2]))
+    with open(sys.argv[5], "w") as out:
+        out.write("".join(swap.get(l, l) + "\n" for l in live))
+    print("\n".join(names))
+else:
+    sys.exit("unknown mode")
+PY
 compare_with_source() {
-  local live_snapshot scratch_snapshot
-  live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die "could not read the source database $LIVE_DB; scratch database retained"
-  scratch_snapshot="$(db_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die "could not read the scratch database; scratch database retained"
-  grep -q '^rows|' <<<"$live_snapshot" || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
+  local live_snapshot scratch_snapshot reprinted
+  live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die_copy "could not read the source database $LIVE_DB"
+  scratch_snapshot="$(scratch_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die_copy "could not read the scratch database"
+  grep -q '^rows|' <<<"$live_snapshot" || die_copy "the source database $LIVE_DB has no tables to compare"
+  if [ "$live_snapshot" != "$scratch_snapshot" ]; then
+    private_tmp
+    printf '%s\n' "$live_snapshot" > "$TMP_DIR/live.snapshot"
+    printf '%s\n' "$scratch_snapshot" > "$TMP_DIR/scratch.snapshot"
+    python3 -I -c "$REPRINT_PY" sql "$TMP_DIR/live.snapshot" "$TMP_DIR/scratch.snapshot" > "$TMP_DIR/reread.sql" ||
+      die_copy "could not list the definitions to read again"
+    if [ -s "$TMP_DIR/reread.sql" ]; then
+      # A failure here leaves every difference standing (it is reported below as a mismatch).
+      scratch_psql "$SCRATCH" -q -tA < "$TMP_DIR/reread.sql" > "$TMP_DIR/reread.out" || : > "$TMP_DIR/reread.out"
+      reprinted="$(python3 -I -c "$REPRINT_PY" apply "$TMP_DIR/live.snapshot" "$TMP_DIR/scratch.snapshot" "$TMP_DIR/reread.out" "$TMP_DIR/live.reprinted")" ||
+        die_copy "could not apply the definitions read again"
+      if [ -n "$reprinted" ]; then
+        live_snapshot="$(LC_ALL=C sort "$TMP_DIR/live.reprinted")"
+        scratch_snapshot="$(LC_ALL=C sort "$TMP_DIR/scratch.snapshot")"
+        echo "compare-source: $(grep -c . <<<"$reprinted") definitions differ only in how PostgreSQL prints them after a restore (the source's own definition, read again by the scratch instance's server in a transaction that was rolled back, prints byte-identical to the restored one): $(paste -sd ';' - <<<"$reprinted" | sed 's/;/; /g')"
+      fi
+    fi
+  fi
   summarize() {
     printf '%s\n' "$1" | awk -F'|' -v who="$2" '
       $1 == "rows" { tables++; rows += $3 }
@@ -428,7 +1263,7 @@ compare_with_source() {
   if [ "$live_snapshot" != "$scratch_snapshot" ]; then
     echo "MISMATCH between the source and the scratch restore (first differences; < source, > scratch):"
     diff <(printf '%s\n' "$live_snapshot") <(printf '%s\n' "$scratch_snapshot") | grep -E '^[<>]' | cut -c1-240 | head -40 || true
-    die "the restore does not match its source; scratch database retained"
+    die_copy "the restore does not match its source"
   fi
   echo "compare-source: in schemas public and swift_qr the scratch restore equals its source in every table's row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, view definitions and options, grants and sequence positions"
 }
@@ -439,21 +1274,32 @@ else
   check users "SELECT count(*) FROM users;" 1
   check vendors "SELECT count(*) FROM vendors;" 0
   check orders "SELECT count(*) FROM orders;" 0
-  [ "$FAILED" -eq 0 ] || die "restore failed sanity checks; scratch database retained"
+  [ "$FAILED" -eq 0 ] || die_copy "restore failed sanity checks"
 fi
 
 SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
+# [#1984 COORD ruling 14:11Z] The replay covers documents, keys, receipts, tombstones, the closure's
+# rows and rating text; it does not yet re-run the app's own erasure passes, so the de-identifications
+# #1905 and #1945 add (updates, not deletes) are not replayed. Every restore says so until it does.
+echo "NOT erasure-complete for #1905/#1945 de-identifications: re-apply them to this copy (the app's erasure passes, for every closed account) before anything from it is used"
+echo "NOT erasure-complete for #1905/#1945 de-identifications: re-apply them to this copy (the app's erasure passes, for every closed account) before anything from it is used" >&2
 if [ "$NO_LIVE_LEDGER" = 1 ]; then
   # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
-  echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
-  echo "NOT erasure-complete: replay the off-site ledger before use"
-  echo "NOT erasure-complete: replay the off-site ledger before use" >&2
-  echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
-  echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database retained, quarantined, NOT for use"
+  echo "quarantine: $SCRATCH lives in the throwaway instance $SCRATCH_CTR (no network); only the restore login (and the instance's superuser) can connect; no application login can"
+  if [ -n "$LEDGER_FROM" ]; then
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger; $LEDGER_CHAIN_NOTE; $LEDGER_BUCKET_NOTE)"
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger; $LEDGER_CHAIN_NOTE; $LEDGER_BUCKET_NOTE)" >&2
+    echo "Anything erased after $OFFSITE_NEWEST never reached the off-site ledger and is still whole in this copy: check the erasure receipts and the ops pages for an unshipped ledger before anything from it is used. Keep it quarantined until then."
+  else
+    echo "NOT erasure-complete: replay the off-site ledger before use"
+    echo "NOT erasure-complete: replay the off-site ledger before use" >&2
+    echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
+  fi
+  echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database kept in $SCRATCH_CTR (--keep-for-inspection), quarantined, NOT for use (remove: docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR)"
   exit 3
 fi
-echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
-echo "RESTORE OK — ${SECONDS_TAKEN}s; scratch database retained for inspection"
+echo "quarantine: $SCRATCH lives in the throwaway instance $SCRATCH_CTR (no network); only the restore login (and the instance's superuser) can connect; no application login can"
+echo "RESTORE OK — ${SECONDS_TAKEN}s (in the throwaway instance $SCRATCH_CTR)"
 # A failed rehearsal heartbeat cannot turn a verified scratch restore into a
 # failure, but doctor.sh will keep warning until a successful record exists.
 db_psql "$LIVE_DB" -q <<SQL >/dev/null 2>&1 || echo "note: rehearsal heartbeat write failed" >&2
@@ -464,6 +1310,13 @@ INSERT INTO platform_config (id, key, value, "updatedAt")
 VALUES (md5(random()::text || clock_timestamp()::text), 'last_restore_rehearsal_seconds', to_jsonb($SECONDS_TAKEN), now())
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now();
 SQL
-echo "The quarantine covers the logins that exist now: re-run the quarantine before use (a login created later is not covered), and drop the copy after use (psql inside the Postgres container)."
 echo "Document objects and MASTER_KEK require separate recovery proof."
-echo "Before anything from this copy is used, replay the erasure ledger again against the live database of that day."
+if [ "$KEEP_INSPECT" = 1 ]; then
+  echo "KEPT (--keep-for-inspection): $SCRATCH_CTR holds a full copy of the database. Inspect it: docker exec -it $SCRATCH_CTR psql -h /var/run/postgresql -U $RESTORE_LOGIN -d $SCRATCH. The quarantine covers the logins that exist now: re-run the quarantine before use (a login created later is not covered)."
+  echo "Remove it within 24 hours (doctor.sh fails after that), and drop the copy after use: docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR"
+  echo "Before anything from this copy is used, replay the erasure ledger again against the live database of that day."
+else
+  remove_instance ||
+    die "the restore passed but removing the scratch instance $SCRATCH_CTR FAILED: remove it now (docker rm -f $SCRATCH_CTR && docker volume rm $SCRATCH_CTR), it holds a copy of the database"
+  echo "the scratch instance $SCRATCH_CTR was removed with its volume (pass --keep-for-inspection to keep a copy)"
+fi

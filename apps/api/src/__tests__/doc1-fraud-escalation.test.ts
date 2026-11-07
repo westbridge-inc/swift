@@ -118,7 +118,7 @@ describe('[DOC-1 P24] fraud escalation: suspicion → second review → confirma
   let a = ''; let b = ''; let s = '';
   let docId = ''; let caseId = '';
 
-  it('the first reviewer’s fraud-class verdict escalates: the case goes to SECOND_REVIEW unassigned at raised priority, an ESCALATE decision is recorded, the document stays PENDING — no hold, no case, no enforcement yet', async () => {
+  it('the first reviewer’s fraud-class verdict escalates: the case goes to SECOND_REVIEW unassigned at raised priority, an ESCALATE decision is recorded, the document stays PENDING — only the system investigation hold, no fraud case, no enforcement yet', async () => {
     a = await admin(1); b = await admin(2); s = await subject(3);
     const { doc, kase } = await pendingCase(s);
     docId = doc.id; caseId = kase.id;
@@ -130,7 +130,11 @@ describe('[DOC-1 P24] fraud escalation: suspicion → second review → confirma
     expect(c.decisions.map((d) => [d.outcome, d.reasonCode, d.actorFacingCategory, d.reviewerId])).toEqual([['ESCALATE', 'SUSPECTED_TAMPERING', 'UNVERIFIABLE', a]]);
     expect(await system(() => app.prisma.auditLog.count({ where: { action: 'ESCALATE_VERIFICATION_DOC', entityId: docId } }))).toBe(1);
     expect(await system(() => app.prisma.fraudCase.count({ where: { subjectUserId: s } }))).toBe(0);
-    expect((await docRow(docId)).legalHoldId).toBeNull();
+    // [SEC-PII · COORD ruling 28 Oct] No person's hold and no fraud hold yet: the only hold is the system's own
+    // investigation hold, which keeps the document from erasure until this second review ends.
+    const docHold = await system(() => app.prisma.docLegalHold.findMany({ where: { subjectUserId: s, releasedAt: null } }));
+    expect(docHold.map((h) => [h.placedBy, h.reason])).toEqual([['system:investigation-hold', `INVESTIGATION_OPEN second-review:${docId}`]]);
+    expect((await docRow(docId)).legalHoldId).toBe(docHold[0]!.id);
     expect((await hasActiveHold(app.prisma, s)).held).toBe(false);
   });
 

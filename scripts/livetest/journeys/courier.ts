@@ -1,5 +1,5 @@
 // Courier journeys [TASK-057]: COUR-01 and COUR-02. A courier job is always
-// held for the 5-minute window and dispatched within ~10 s of release, so the
+// held for the hold window (1 minute) and dispatched within ~5 s of release, so the
 // orders are placed in `prepare` and claimed in `release` (an offer nobody
 // answers excludes that rider from the job for an hour).
 

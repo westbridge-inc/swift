@@ -9,7 +9,7 @@
  * rather than defaulted into the production tenant.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
@@ -17,7 +17,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin, TENANT_MODEL_NAMES } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
-import { TENANT_TABLES, TENANT_LINEAGE_TABLES, allRlsDdl, appRoleDdl, tenantLineageDdl, rlsDdlFor, lineageBackfillSql } from '../lib/tenant-rls';
+import { TENANT_TABLES, TENANT_LINEAGE_TABLES, allRlsDdl, appRoleDdl, tenantLineageDdl, rlsDdlFor, lineageBackfillSql, PRO_OWNER_TENANT_BRANCH } from '../lib/tenant-rls';
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { wordFreeTag } from './helpers/fixture-ids';
@@ -31,13 +31,33 @@ const PRODUCTION = 'swift-default';
 const PROBE = 'swift_rls_probe';
 const TABLES = ['return_requests', 'content_reports', 'collection_contacts'] as const;
 const MODELS = ['returnRequest', 'contentReport', 'collectionContact'] as const;
-const MIGRATION = readFileSync(join(__dirname, '..', '..', 'prisma', 'migrations', '20261013221500_db05_pending_expand_tenant', 'migration.sql'), 'utf8');
+const MIGRATIONS_DIR = join(__dirname, '..', '..', 'prisma', 'migrations');
+const MIGRATION = readFileSync(join(MIGRATIONS_DIR, '20261013221500_db05_pending_expand_tenant', 'migration.sql'), 'utf8');
+/** The newest migration whose text defines `marker` (it is what a migrated database runs). */
+const newestMigrationDefining = (marker: string): string => {
+  for (const dir of readdirSync(MIGRATIONS_DIR).filter((d) => /^\d{14}_/.test(d)).sort().reverse()) {
+    const file = join(MIGRATIONS_DIR, dir, 'migration.sql');
+    const sql = existsSync(file) ? readFileSync(file, 'utf8') : '';
+    if (sql.includes(marker)) return sql;
+  }
+  return '';
+};
 let app: FastifyInstance;
 const ids = {
   reviewUser: '', prodUser: '', reviewOrder: '', prodOrder: '',
-  reviewVendor: '', reviewOwnerUser: '', reviewSub: '', splitSub: '', prodRider: '',
+  reviewVendor: '', reviewOwnerUser: '', reviewSub: '', splitSub: '', splitVendor: '', prodRider: '',
 };
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'db05-expand-test');
+/** [BILL-PRO PR1 · DB-07] A legacy subscription with owners in two tenants, as the backfill met
+ *  them. The database refuses a second owner since migration 20261029030000, so the row is built
+ *  inside the caller's transaction, which always rolls back (the constraint and triggers with it). */
+async function legacySplitSubscription(tx: Prisma.TransactionClient) {
+  await tx.$executeRawUnsafe('ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_at_most_one_owner');
+  await tx.$executeRawUnsafe('ALTER TABLE subscriptions DISABLE TRIGGER USER');
+  await tx.$executeRaw`INSERT INTO subscriptions (id, "vendorId", "riderId", type, "weeklyRate", "currentPeriodStart", "currentPeriodEnd", "nextBillingDate", "updatedAt")
+    VALUES (${ids.splitSub}, ${ids.splitVendor}, ${ids.prodRider}, 'RESTAURANT', 2100, now(), now() + interval '7 days', now(), now())`;
+  await tx.$executeRawUnsafe('ALTER TABLE subscriptions ENABLE TRIGGER USER');
+}
 // One return per order is the API contract and, since return_order_unique, a
 // unique index: every return row a case writes gets an order of its own.
 const freshOrders: string[] = [];
@@ -88,7 +108,8 @@ beforeAll(async () => {
       currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000), ...data,
     } as never });
     ids.reviewSub = (await sub({ vendorId: ids.reviewVendor })).id;
-    // Owners in two tenants (the database does not yet hold exactly-one owner — DB-07).
+    // Owners in two tenants. [BILL-PRO PR1 · DB-07] The database now refuses a subscription with two
+    // owners, so the legacy split row is rebuilt only inside the backfill case's rolled-back transaction.
     const riderUser = await app.prisma.user.create({ data: { phone: `+59275${NUM}5`, firstName: 'R', lastName: 'P', activeRole: 'RIDER', tenantId: PRODUCTION } });
     ids.prodRider = (await app.prisma.rider.create({ data: { userId: riderUser.id, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } })).id;
     const vo2 = await app.prisma.vendorOwner.create({ data: { userId: (await app.prisma.user.create({ data: { phone: `+59275${NUM}6`, firstName: 'O', lastName: 'X', activeRole: 'VENDOR_OWNER', roles: ['VENDOR_OWNER'], tenantId: REVIEW, isSynthetic: true } })).id } });
@@ -96,7 +117,8 @@ beforeAll(async () => {
       tenantId: REVIEW, isSynthetic: true, ownerId: vo2.id, name: `D5b ${RUN}`, slug: `d5b-${RUN.toLowerCase()}`, vendorType: 'RESTAURANT', phone: `+59275${NUM}7`,
       addressLine1: '6 Lineage Way', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
     } });
-    ids.splitSub = (await sub({ vendorId: v2.id, riderId: ids.prodRider })).id;
+    ids.splitVendor = v2.id;
+    ids.splitSub = `d5-split-${RUN}`;
   });
 });
 
@@ -139,10 +161,16 @@ describe('[DB-05] the three tables are walled on the row', () => {
   it('the migration carries the code’s own text: the backfill derivation, the wall and the lineage triggers', () => {
     const lineage = tenantLineageDdl();
     for (const t of TABLES) {
-      expect(MIGRATION).toContain(lineageBackfillSql(t));
+      // [BILL-PRO PR1] collection_contacts' owner derivation later gained the pro owner
+      // (PRO_OWNER_TENANT_BRANCH, migration 20261029030000). This migration's backfill ran
+      // before any pro could own a subscription, so it carries the derivation without it.
+      const shipped = (sql: string) => (t === 'collection_contacts' ? sql.split(PRO_OWNER_TENANT_BRANCH.replace(/NEW\./g, 'lineage_row.')).join('') : sql);
+      expect(MIGRATION).toContain(shipped(lineageBackfillSql(t)));
       for (const s of rlsDdlFor(t)) expect(MIGRATION).toContain(s);
+      // The lineage trigger text is the code's own in the NEWEST migration that defines it.
       const i = TENANT_LINEAGE_TABLES.findIndex((r) => r.table === t);
-      for (const s of lineage.slice(i * 3, i * 3 + 3)) expect(MIGRATION).toContain(s);
+      const carrier = newestMigrationDefining(`FUNCTION ${TENANT_LINEAGE_TABLES[i]!.trigger}()`);
+      for (const s of lineage.slice(i * 3, i * 3 + 3)) expect(carrier).toContain(s);
     }
     // never a silent default into the production tenant
     expect(MIGRATION).not.toMatch(/"tenantId" TEXT NOT NULL DEFAULT/);
@@ -180,7 +208,18 @@ describe('[DB-05] a new row takes its tenant from its owners, or is refused', ()
   it('CollectionContact: derived from the subscription’s owner; owners in two tenants or a missing subscription are refused', async () => {
     const c = await system(() => app.prisma.collectionContact.create({ data: contact(ids.reviewSub) }));
     expect(c.tenantId).toBe(REVIEW);
-    await expect(system(() => app.prisma.collectionContact.create({ data: contact(ids.splitSub) }))).rejects.toThrow(/STA-1 lineage/);
+    // [BILL-PRO PR1 · DB-07] Owners in two tenants cannot arise: a second owner is refused at the source.
+    await expect(system(() => app.prisma.subscription.create({ data: {
+      vendorId: ids.splitVendor, riderId: ids.prodRider, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 2100, billingMethod: 'CASH',
+      currentPeriodStart: new Date(), currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000),
+    } }))).rejects.toThrow(/exactly one owner|subscriptions_at_most_one_owner/);
+    // ...and a legacy split row's contact is still refused (the row exists only inside this rolled-back transaction).
+    class RolledBack extends Error {}
+    await expect(system(() => app.prisma.$transaction(async (tx) => {
+      await legacySplitSubscription(tx);
+      await tx.collectionContact.create({ data: contact(ids.splitSub) });
+      throw new RolledBack();
+    }, { timeout: 30_000 }))).rejects.toThrow(/STA-1 lineage/);
     await expect(system(() => app.prisma.collectionContact.create({ data: contact(`missing-${RUN}`) }))).rejects.toThrow(/STA-1 lineage/);
   });
 
@@ -200,6 +239,7 @@ describe('[DB-05] the backfill: true where the owners agree, quarantined (NULL) 
     const splitOrder = await freshOrder('review');
     try {
       await system(() => app.prisma.$transaction(async (tx) => {
+        await legacySplitSubscription(tx);
         for (const t of TABLES) await tx.$executeRawUnsafe(`ALTER TABLE ${t} DISABLE TRIGGER USER`);
         const ins = (sql: Prisma.Sql) => tx.$executeRaw(sql);
         await ins(Prisma.sql`INSERT INTO return_requests (id, "orderId", "customerId", reason) VALUES ('bf-rr-good', ${goodOrder}, ${ids.reviewUser}, 'x'), ('bf-rr-split', ${splitOrder}, ${ids.prodUser}, 'x'), ('bf-rr-orphan', ${`gone-${RUN}`}, ${ids.reviewUser}, 'x')`);

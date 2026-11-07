@@ -1,0 +1,421 @@
+import { describe, it, expect } from 'vitest';
+import { TwilioVoiceProvider } from '../providers/voice/twilio-voice';
+import { twilioSignature } from '../modules/notification/sms-inbound.routes';
+import {
+  assertCallRelayConfig,
+  CALL_RELAY_DEFAULT_MAX_ATTEMPTS,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_CUSTOMER_PER_DAY,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_PARTNER_PER_DAY,
+  CALL_RELAY_DEFAULT_MAX_CALL_MINUTES,
+  CALL_RING_SECONDS,
+  CALL_TIME_LIMIT_SECONDS,
+  readCallRelayConfig,
+} from '../modules/calls/call-relay-switch';
+import { CALL_WORDS, handleVoiceStep, pairAllowed, roleWords } from '../modules/calls/call-bridge';
+import { assertSafeBootConfig } from '../utils/boot-config';
+import { SECRET_FILE_NAMES } from '../utils/secret-files';
+import { PROCESSOR_REGISTER } from '../modules/legal/processor-register';
+import { testPhone } from './helpers/fixture-ids';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import type { CallStep } from '../providers/voice/call-provider';
+import { GY_DIALABLE, dialableNumber } from '../providers/voice/dialable';
+import { SERVICE_DAY_KEY } from '../modules/calls/call-bridge';
+import { redisServiceDayLedger } from '../modules/calls/calls.routes';
+
+/** fetch's own init type (the DOM name is not a lint global here). */
+type FetchInit = NonNullable<Parameters<typeof fetch>[1]>;
+
+// ---------------------------------------------------------------------------
+// [O-1] The call bridge's pure parts: the documents Twilio runs, the request
+// that places a call, the signature, the settings, the boot guard, and which
+// party may call which. The routes and the database are in call-bridge.test.ts.
+// ---------------------------------------------------------------------------
+
+const TOKEN = 'unit-test-webhook-token';
+const SID = `AC${'a'.repeat(32)}`;
+const KEY = `SK${'b'.repeat(32)}`;
+const twilio = (http?: typeof fetch) => new TwilioVoiceProvider({ accountSid: SID, apiKeySid: KEY, apiKeySecret: 'unit-secret', authToken: TOKEN }, http);
+const CALLER_ID = '+15005550006';
+/** [REVIEW-M17 S1-1] A complete Guyana mobile number in shape (never dialled: fetch is stubbed). The +5920 test
+ *  range is refused by the dial guard, so anything that must reach the provider uses this shape. */
+const GY = (n: number) => `+5926990${String(n).padStart(3, '0')}`;
+const BASE = 'https://api.example.test/api/v1/calls/voice';
+const full = (over: Record<string, string | undefined> = {}) => ({
+  CALL_RELAY: '1', CALL_RELAY_CALLER_ID: CALLER_ID, CALL_RELAY_WEBHOOK_BASE: BASE,
+  TWILIO_ACCOUNT_SID: SID, TWILIO_API_KEY_SID: KEY, TWILIO_API_KEY_SECRET: 'unit-secret', TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN, ...over,
+});
+
+describe('[O-1] the documents Twilio runs', () => {
+  it('the dial pins Swift\'s caller ID, never records, caps the call at 30 minutes and screens the called phone', () => {
+    const to = GY(1);
+    const out = twilio().render({ verb: 'dial', say: CALL_WORDS.connecting, to, callerId: CALLER_ID, screen: `${BASE}/screen?s=c1`, done: `${BASE}/dial-done?s=c1`, ringSeconds: CALL_RING_SECONDS, limitSeconds: CALL_TIME_LIMIT_SECONDS });
+    expect(out.contentType).toBe('text/xml');
+    const dial = out.body.match(/<Dial [^>]*>/)![0];
+    expect(dial).toContain(`callerId="${CALLER_ID}"`);
+    expect(dial).toContain('record="do-not-record"');
+    expect(dial).toContain('timeLimit="1800"');
+    expect(dial).toContain('timeout="25"');
+    expect(dial).toContain(`action="${BASE}/dial-done?s=c1"`);
+    expect(out.body).toContain(`<Number url="${BASE}/screen?s=c1" method="POST">${to}</Number>`);
+    // the number appears once, as the dialled number, and nowhere it could be read aloud
+    expect(out.body.split(to).length - 1).toBe(1);
+    expect(CALL_TIME_LIMIT_SECONDS).toBe(1800);
+  });
+
+  it('"Press 1" is a one-key touch-tone gather; silence or another key ends the call', () => {
+    const out = twilio().render({ verb: 'confirm', prompt: CALL_WORDS.calleePrompt, next: `${BASE}/screen-gather?s=c1`, noInput: CALL_WORDS.noKey });
+    expect(out.body).toMatch(/<Gather input="dtmf" numDigits="1" timeout="8" action="[^"]+screen-gather\?s=c1" method="POST"><Say>Swift call about your order\. Press 1 to connect\.<\/Say><\/Gather>/);
+    expect(out.body).toMatch(/<\/Gather><Say>No key was pressed\. Goodbye\.<\/Say><Hangup\/><\/Response>$/);
+  });
+
+  it('connecting is an empty document (the screen ends, Twilio connects); a hang-up says its words first', () => {
+    expect(twilio().render({ verb: 'connect' }).body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    expect(twilio().render({ verb: 'hangup', say: CALL_WORDS.notReached }).body).toContain("<Say>We couldn't reach them. Try again, or message them in chat.</Say><Hangup/>");
+    expect(twilio().render({ verb: 'hangup' }).body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+  });
+
+  it('escapes what it writes into the document', () => {
+    const out = twilio().render({ verb: 'confirm', prompt: 'a < b & "c"', next: `${BASE}/x?s=1&t=2`, noInput: 'bye' });
+    expect(out.body).toContain('<Say>a &lt; b &amp; &quot;c&quot;</Say>');
+    expect(out.body).toContain('action="https://api.example.test/api/v1/calls/voice/x?s=1&amp;t=2"');
+  });
+
+  it('the owner\'s words are what people hear', () => {
+    expect(CALL_WORDS.calleePrompt).toBe('Swift call about your order. Press 1 to connect.');
+    // [REVIEW-F S4-1] the parcel recipient did not place the order
+    expect(CALL_WORDS.recipientPrompt).toBe('Swift call about a delivery for you. Press 1 to connect.');
+    // [REVIEW-F #2133 S4-1] the recipient has no chat; the rider can message the sender
+    expect(CALL_WORDS.recipientNotReached).toBe("We couldn't reach the recipient. Try again, or message the sender in chat.");
+    expect(CALL_WORDS.callerPrompt).toMatch(/Press 1 to continue\.$/);
+  });
+});
+
+describe('[O-1] placing a call', () => {
+  it('posts To, From, the answer and status URLs, the ring and time limits, and Record=false; returns the call id', async () => {
+    const seen: Array<{ url: string; init: FetchInit }> = [];
+    const http = (async (url: string, init: FetchInit) => {
+      seen.push({ url, init });
+      return new Response(JSON.stringify({ sid: `CA${'c'.repeat(32)}` }), { status: 201 });
+    }) as unknown as typeof fetch;
+    const to = GY(2);
+    const out = await twilio(http).placeCall({ to, callerId: CALLER_ID, answerUrl: `${BASE}/leg1?s=c1`, statusUrl: `${BASE}/status?s=c1`, ringSeconds: 25, limitSeconds: 1800 });
+    expect(out.providerCallId).toBe(`CA${'c'.repeat(32)}`);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.url).toBe(`https://api.twilio.com/2010-04-01/Accounts/${SID}/Calls.json`);
+    const form = new URLSearchParams(String(seen[0]!.init.body));
+    expect(form.get('To')).toBe(to);
+    expect(form.get('From')).toBe(CALLER_ID);
+    expect(form.get('Url')).toBe(`${BASE}/leg1?s=c1`);
+    expect(form.get('StatusCallback')).toBe(`${BASE}/status?s=c1`);
+    expect(form.getAll('StatusCallbackEvent')).toEqual(['answered', 'completed']);
+    expect(form.get('Timeout')).toBe('25');
+    expect(form.get('TimeLimit')).toBe('1800');
+    expect(form.get('Record')).toBe('false');
+    expect((seen[0]!.init.headers as Record<string, string>)['Authorization']).toBe(`Basic ${Buffer.from(`${KEY}:unit-secret`).toString('base64')}`);
+  });
+
+  it('a refusal or a malformed answer is an error that carries no provider text', async () => {
+    const to = GY(3);
+    const refuse = (async () => new Response(`bad number ${to}`, { status: 400 })) as unknown as typeof fetch;
+    await expect(twilio(refuse).placeCall({ to, callerId: CALLER_ID, answerUrl: 'https://x', statusUrl: 'https://y', ringSeconds: 25, limitSeconds: 1800 }))
+      .rejects.toThrow(/^Twilio call failed \(400\)$/);
+    const junk = (async () => new Response(JSON.stringify({ sid: 'nope' }), { status: 201 })) as unknown as typeof fetch;
+    await expect(twilio(junk).placeCall({ to, callerId: CALLER_ID, answerUrl: 'https://x', statusUrl: 'https://y', ringSeconds: 25, limitSeconds: 1800 }))
+      .rejects.toThrow('Twilio call response invalid');
+    const down = (async () => { throw new Error(`socket closed for ${to}`); }) as unknown as typeof fetch;
+    const err = await twilio(down).placeCall({ to, callerId: CALLER_ID, answerUrl: 'https://x', statusUrl: 'https://y', ringSeconds: 25, limitSeconds: 1800 }).catch((e: Error) => e);
+    expect((err as Error).message).toBe('Twilio call request failed');
+  });
+});
+
+describe('[O-1] the webhook signature', () => {
+  const url = `${BASE}/leg1-gather?s=c1`;
+  const fields = { Digits: ['1'], CallSid: [`CA${'d'.repeat(32)}`] };
+  it('accepts exactly what Twilio signs: the full URL and the form', () => {
+    expect(twilio().verify({ url, fields, signature: twilioSignature(TOKEN, url, fields) })).toBe(true);
+  });
+  it('refuses a missing signature, another token, another URL, or a changed field', () => {
+    expect(twilio().verify({ url, fields, signature: undefined })).toBe(false);
+    expect(twilio().verify({ url, fields, signature: '' })).toBe(false);
+    expect(twilio().verify({ url, fields, signature: twilioSignature('other-token', url, fields) })).toBe(false);
+    expect(twilio().verify({ url: `${BASE}/leg1-gather?s=c2`, fields, signature: twilioSignature(TOKEN, url, fields) })).toBe(false);
+    expect(twilio().verify({ url, fields: { ...fields, Digits: ['2'] }, signature: twilioSignature(TOKEN, url, fields) })).toBe(false);
+  });
+  it('reads the key pressed, the call status, the seconds and the call id', () => {
+    expect(twilio().read({ Digits: ['1'], CallStatus: ['Completed'], DialCallDuration: ['42'], CallSid: [`CA${'e'.repeat(32)}`] }))
+      .toEqual({ digits: '1', callStatus: 'completed', dialStatus: null, durationSeconds: 42, providerCallId: `CA${'e'.repeat(32)}` });
+    expect(twilio().read({ DialCallStatus: ['no-answer'], CallSid: ['junk'] })).toMatchObject({ dialStatus: 'no-answer', providerCallId: null, durationSeconds: null });
+  });
+});
+
+describe('[O-1] the settings and the boot guard', () => {
+  it('a full configuration reads, with the default attempt cap', () => {
+    const read = readCallRelayConfig(full());
+    expect(read.ok).toBe(true);
+    if (read.ok) expect(read.config).toMatchObject({ callerId: CALLER_ID, webhookBase: BASE, maxAttemptsPerOrder: CALL_RELAY_DEFAULT_MAX_ATTEMPTS });
+    // [REVIEW-M17 S2-2 · owner 6 Nov] Launch defaults: 4 attempts per order, 10 minutes per call.
+    expect(CALL_RELAY_DEFAULT_MAX_ATTEMPTS).toBe(4);
+  });
+
+  it('names what is missing or malformed, never a value', () => {
+    const bad = readCallRelayConfig(full({ CALL_RELAY_CALLER_ID: '0712345', CALL_RELAY_WEBHOOK_BASE: 'http://api.example.test/x/', CALL_RELAY_MAX_ATTEMPTS_PER_ORDER: '99', TWILIO_WEBHOOK_AUTH_TOKEN: ' ' }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) {
+      expect(bad.problems.join(' ')).toMatch(/CALL_RELAY_CALLER_ID/);
+      expect(bad.problems.join(' ')).toMatch(/CALL_RELAY_WEBHOOK_BASE/);
+      expect(bad.problems.join(' ')).toMatch(/CALL_RELAY_MAX_ATTEMPTS_PER_ORDER/);
+      expect(bad.problems.join(' ')).toMatch(/TWILIO_WEBHOOK_AUTH_TOKEN/);
+      expect(bad.problems.join(' ')).not.toContain('0712345');
+    }
+    for (const base of [`${BASE}/`, `${BASE}?a=1`, 'ftp://x', '']) {
+      expect(readCallRelayConfig(full({ CALL_RELAY_WEBHOOK_BASE: base })).ok, base).toBe(false);
+    }
+    expect(readCallRelayConfig(full({ CALL_RELAY_CALLER_ID: '+5926001234' })).ok, 'a Guyana verified caller ID').toBe(true);
+  });
+
+  // [CALL-RELAY-ON · 6 Nov 2026] Swift pays ~US$0.75 a minute for every bridged call (two Guyana legs), and the
+  // per-order cap alone does not bound a day: many orders x 6 attempts. One account-wide cap per 24 hours.
+  // [owner 6 Nov ~11:10Z] Service-wide 100 a day.
+  it('the daily cap: 100 calls in any 24 hours by default (owner 6 Nov), a whole number from 1 to 10000, named never echoed', () => {
+    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY).toBe(100);
+    const unset = readCallRelayConfig(full());
+    expect(unset.ok && unset.config.maxCallsPerDay).toBe(100);
+    for (const [raw, want] of [['1', 1], ['250', 250], [' 40 ', 40], ['10000', 10000], ['', 100]] as const) {
+      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_DAY: raw }));
+      expect(read.ok && read.config.maxCallsPerDay, JSON.stringify(raw)).toBe(want);
+    }
+    for (const raw of ['0', '10001', '-5', '1.5', '1e3', 'abc', '100000']) {
+      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_DAY: raw }));
+      expect(read.ok, JSON.stringify(raw)).toBe(false);
+      if (!read.ok) {
+        expect(read.problems.join(' ')).toMatch(/CALL_RELAY_MAX_CALLS_PER_DAY must be a whole number from 1 to 10000/);
+        expect(read.problems.join(' ')).not.toContain(`'${raw}'`);
+      }
+    }
+    // A bad cap with CALL_RELAY=1 refuses to start, like every other bridge setting.
+    expect(() => assertCallRelayConfig(full({ CALL_RELAY_MAX_CALLS_PER_DAY: '0' }))).toThrow(/CALL_RELAY_MAX_CALLS_PER_DAY/);
+    expect(() => assertCallRelayConfig({ CALL_RELAY_MAX_CALLS_PER_DAY: '0' }), 'off: nothing is checked').not.toThrow();
+  });
+
+  // [CALL-RELAY-ON · security review · owner 6 Nov ~11:10Z] One person must not use up everyone's day: a per-person cap,
+  // by the caller's role ON THE ORDER: 5 a day as a customer, 20 a day as a partner (rider, driver, store).
+  it('the per-person daily caps: customers 5, partners 20 by default, each a whole number from 1 to 200', () => {
+    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_CUSTOMER_PER_DAY).toBe(5);
+    expect(CALL_RELAY_DEFAULT_MAX_CALLS_PER_PARTNER_PER_DAY).toBe(20);
+    const unset = readCallRelayConfig(full());
+    expect(unset.ok && unset.config.maxCallsPerCustomerPerDay).toBe(5);
+    expect(unset.ok && unset.config.maxCallsPerPartnerPerDay).toBe(20);
+    for (const [name, field, dflt] of [['CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY', 'maxCallsPerCustomerPerDay', 5], ['CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY', 'maxCallsPerPartnerPerDay', 20]] as const) {
+      for (const [raw, want] of [['1', 1], ['25', 25], [' 3 ', 3], ['200', 200], ['', dflt]] as const) {
+        const read = readCallRelayConfig(full({ [name]: raw }));
+        expect(read.ok && read.config[field], `${name}=${JSON.stringify(raw)}`).toBe(want);
+      }
+      for (const raw of ['0', '201', '-1', '2.5', 'ten', '1000']) {
+        const read = readCallRelayConfig(full({ [name]: raw }));
+        expect(read.ok, `${name}=${JSON.stringify(raw)}`).toBe(false);
+        if (!read.ok) expect(read.problems.join(' ')).toContain(`${name} must be a whole number from 1 to 200`);
+      }
+      expect(() => assertCallRelayConfig(full({ [name]: '0' }))).toThrow(new RegExp(name));
+    }
+  });
+
+  // [REVIEW-G23 S3-3] The service list fails closed: a MULTI that resolves with a command error is a failure, not a count.
+  it('the Redis service list: add trims, adds and sets the expiry in one MULTI, and any command error in it rejects', async () => {
+    const seen: unknown[][] = [];
+    let execResult: unknown = [[null, 0], [null, 1], [null, 1]];
+    const multi = { zremrangebyscore: (...a: unknown[]) => { seen.push(['zremrangebyscore', ...a]); return multi; }, zadd: (...a: unknown[]) => { seen.push(['zadd', ...a]); return multi; }, pexpire: (...a: unknown[]) => { seen.push(['pexpire', ...a]); return multi; }, exec: async () => execResult };
+    const redis = { multi: () => multi } as never;
+    const ledger = redisServiceDayLedger(redis);
+    await ledger.add('c1', 1_000_000_000);
+    expect(seen.map((c) => c[0])).toEqual(['zremrangebyscore', 'zadd', 'pexpire']);
+    expect(seen[0]).toEqual(['zremrangebyscore', SERVICE_DAY_KEY, '-inf', `(${1_000_000_000 - 86_400_000}`]);
+    expect(seen[2]).toEqual(['pexpire', SERVICE_DAY_KEY, 25 * 3600_000]);
+    execResult = [[null, 0], [new Error('OOM command not allowed'), null], [null, 1]];
+    await expect(ledger.add('c2', 1_000_000_001)).rejects.toThrow('call day list write failed');
+    execResult = null;
+    await expect(ledger.add('c3', 1_000_000_002)).rejects.toThrow('call day list write failed');
+  });
+
+  // [REVIEW-M17 S2-2] The per-call time limit is a setting (the owner may shorten it), applied to BOTH legs.
+  // [owner 6 Nov 2026 ~09:30Z] The longest Swift call is 10 minutes (was 30, owner 22 Oct); the setting may go 2-30.
+  it('the per-call time limit: 10 minutes by default (owner 6 Nov), a whole number of minutes from 2 to 30', () => {
+    expect(CALL_RELAY_DEFAULT_MAX_CALL_MINUTES).toBe(10);
+    const unset = readCallRelayConfig(full());
+    expect(unset.ok && unset.config.maxCallSeconds).toBe(600);
+    for (const [raw, want] of [['2', 120], ['10', 600], [' 30 ', 1800], ['', 600]] as const) {
+      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALL_MINUTES: raw }));
+      expect(read.ok && read.config.maxCallSeconds, JSON.stringify(raw)).toBe(want);
+    }
+    for (const raw of ['1', '31', '0', '60', '2.5', 'ten']) {
+      const read = readCallRelayConfig(full({ CALL_RELAY_MAX_CALL_MINUTES: raw }));
+      expect(read.ok, JSON.stringify(raw)).toBe(false);
+      if (!read.ok) expect(read.problems.join(' ')).toMatch(/CALL_RELAY_MAX_CALL_MINUTES must be a whole number from 2 to 30/);
+    }
+  });
+
+  it('both env examples document the daily cap next to the per-order cap', () => {
+    const apiExample = readFileSync(join(__dirname, '..', '..', '.env.example'), 'utf8');
+    const deployExample = readFileSync(join(__dirname, '..', '..', '..', '..', 'deploy', '.env.deploy.example'), 'utf8');
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_DAY=/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_DAY=100$/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_ATTEMPTS_PER_ORDER=4$/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALL_MINUTES=10$/m);
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALL_MINUTES=.*default 10 = owner ruling 6 Nov/m);
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALL_MINUTES=/m);
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY=/m);
+    expect(apiExample).toMatch(/^CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY=/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY=5$/m);
+    expect(deployExample).toMatch(/^# CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY=20$/m);
+    expect(apiExample + deployExample, 'the retired one-size setting is gone').not.toMatch(/CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY/);
+  });
+
+  it('CALL_RELAY=1 half-configured refuses to start in every mode; off, nothing is checked', () => {
+    expect(() => assertCallRelayConfig(full({ CALL_RELAY_CALLER_ID: undefined }))).toThrow(/^FATAL: CALL_RELAY=1 but the call bridge is not configured: CALL_RELAY_CALLER_ID/);
+    expect(() => assertCallRelayConfig(full())).not.toThrow();
+    expect(() => assertCallRelayConfig({ CALL_RELAY: '0' })).not.toThrow();
+    expect(() => assertCallRelayConfig({})).not.toThrow();
+    // wired into the one boot check (development mode, where it runs before the production gate)
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...full({ TWILIO_API_KEY_SID: undefined }) })).toThrow(/CALL_RELAY=1 but the call bridge is not configured/);
+  });
+
+  it('Swift\'s caller ID can come from the secret store, and Twilio is the registered voice processor', () => {
+    expect(SECRET_FILE_NAMES).toContain('CALL_RELAY_CALLER_ID');
+    const entry = PROCESSOR_REGISTER.find((p) => p.ref === 'TWILIO');
+    expect(entry?.providerDirs).toContain('voice');
+    expect(entry?.service).toMatch(/voice calls/);
+  });
+});
+
+describe('[O-1] who may ask Swift to call whom', () => {
+  it('a taxi: only the passenger and the driver, each the other', () => {
+    expect(pairAllowed('customer', 'driver', 'TAXI')).toBe(true);
+    expect(pairAllowed('driver', 'customer', 'TAXI')).toBe(true);
+    for (const [c, t] of [['customer', 'rider'], ['customer', 'store'], ['driver', 'store'], ['driver', 'recipient'], ['customer', 'customer']] as const) {
+      expect(pairAllowed(c, t, 'TAXI'), `${c} -> ${t}`).toBe(false);
+    }
+  });
+  it('a store order: customer, rider and store reach each other; no driver', () => {
+    for (const [c, t] of [['customer', 'rider'], ['customer', 'store'], ['rider', 'customer'], ['rider', 'store'], ['store', 'rider'], ['store', 'customer']] as const) {
+      expect(pairAllowed(c, t, 'FOOD_DELIVERY'), `${c} -> ${t}`).toBe(true);
+    }
+    expect(pairAllowed('customer', 'driver', 'FOOD_DELIVERY')).toBe(false);
+    expect(pairAllowed('store', 'store', 'FOOD_DELIVERY')).toBe(false);
+  });
+  it('the parcel recipient is called only by the courier rider', () => {
+    expect(pairAllowed('rider', 'recipient', 'COURIER')).toBe(true);
+    expect(pairAllowed('customer', 'recipient', 'COURIER')).toBe(false);
+    expect(pairAllowed('rider', 'recipient', 'FOOD_DELIVERY')).toBe(false);
+  });
+  it('role words only', () => {
+    expect(roleWords('customer', 'TAXI')).toBe('your passenger');
+    expect(roleWords('customer', 'FOOD_DELIVERY')).toBe('your customer');
+    expect(roleWords('rider', 'COURIER')).toBe('your rider');
+    expect(roleWords('store', 'FOOD_DELIVERY')).toBe('the store');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [O-1 · owner ruling] A Swift call is NEVER recorded. Not an option, not a
+// setting: no code path can ask the provider to record, store or transcribe.
+// ---------------------------------------------------------------------------
+describe('[O-1] calls are never recorded', () => {
+  const RECORDING = /record-from|record="(?!do-not-record")|<Record\b|<Conference\b|recordingStatusCallback|RecordingStatusCallback|transcribe|<Stream\b|<Siprec\b/i;
+  const steps: CallStep[] = [
+    { verb: 'confirm', prompt: CALL_WORDS.callerPrompt, next: `${BASE}/leg1-gather?s=c1`, noInput: CALL_WORDS.noKey },
+    { verb: 'dial', say: CALL_WORDS.connecting, to: GY(5), callerId: CALLER_ID, screen: `${BASE}/screen?s=c1`, done: `${BASE}/dial-done?s=c1`, ringSeconds: CALL_RING_SECONDS, limitSeconds: CALL_TIME_LIMIT_SECONDS },
+    { verb: 'connect' },
+    { verb: 'hangup', say: CALL_WORDS.notReached },
+  ];
+
+  it('every document Swift can answer with: the one <Dial> says record="do-not-record", and nothing else records', () => {
+    for (const step of steps) {
+      const body = twilio().render(step).body;
+      expect(body, step.verb).not.toMatch(RECORDING);
+      const records = [...body.matchAll(/\brecord="([^"]*)"/g)].map((m) => m[1]);
+      expect(records, step.verb).toEqual(step.verb === 'dial' ? ['do-not-record'] : []);
+    }
+  });
+
+  it('placing a call says Record=false and asks for no recording callback', async () => {
+    let form = new URLSearchParams();
+    const http = (async (_url: string, init: FetchInit) => {
+      form = new URLSearchParams(String(init.body));
+      return new Response(JSON.stringify({ sid: `CA${'f'.repeat(32)}` }), { status: 201 });
+    }) as unknown as typeof fetch;
+    await twilio(http).placeCall({ to: GY(4), callerId: CALLER_ID, answerUrl: `${BASE}/leg1?s=c1`, statusUrl: `${BASE}/status?s=c1`, ringSeconds: 25, limitSeconds: 1800 });
+    expect(form.getAll('Record')).toEqual(['false']);
+    for (const key of form.keys()) expect(key, key).not.toMatch(/^Recording|Transcri/);
+  });
+
+  it('the source: no recording verb, attribute, option or callback anywhere in the bridge, and no record field on a step', () => {
+    const src = (dir: string) => readdirSync(join(__dirname, '..', dir)).filter((f) => f.endsWith('.ts')).map((f) => readFileSync(join(__dirname, '..', dir, f), 'utf8'));
+    const code = [...src('providers/voice'), ...src('modules/calls')].join('\n');
+    expect(code.length).toBeGreaterThan(5000);
+    expect(code).not.toMatch(RECORDING);
+    // exactly one record attribute in the whole bridge, and it is the literal do-not-record
+    expect([...code.matchAll(/\brecord="/g)]).toHaveLength(1);
+    expect(code).toContain('record="do-not-record"');
+    // Record on the Calls API is the literal 'false', never a variable
+    expect([...code.matchAll(/\bRecord: /g)].map((m) => code.slice(m.index!, m.index! + 15))).toEqual(["Record: 'false'"]);
+    const provider = readFileSync(join(__dirname, '..', 'providers/voice/call-provider.ts'), 'utf8');
+    expect(provider).not.toMatch(/\brecord\??:/i);
+  });
+});
+
+// [REVIEW-M S4-3] The status callback reads the call, then writes. If the callee's 1 lands in between, the
+// write must not turn a connected call into NOT_CONNECTED: the status is in the WHERE, not only in the read.
+describe('[O-1] a terminal status callback racing the callee\'s 1', () => {
+  it('every write that marks NOT_CONNECTED is conditioned on the call not being CONNECTED', async () => {
+    const writes: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
+    const stale = { id: 'ckstaleread000000000000000', status: 'CALLER_CONFIRMED', endedAt: null, orderId: 'o1', callerRole: 'customer', calleeRole: 'rider' };
+    const prisma = {
+      callSession: {
+        findUnique: async () => stale,
+        updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => { writes.push(args); return { count: 0 }; },
+      },
+    } as never;
+    const read = readCallRelayConfig(full());
+    if (!read.ok) throw new Error('the test configuration is incomplete');
+    const deps = { prisma, provider: twilio(), config: read.config, notifications: { send: async () => '' } };
+    await handleVoiceStep(deps, 'status', stale.id, { fields: { CallStatus: ['completed'], CallDuration: ['40'] } }, true);
+    const marks = writes.filter((w) => w.data['status'] === 'NOT_CONNECTED');
+    expect(marks.length).toBeGreaterThan(0);
+    for (const w of marks) expect(w.where['status'], JSON.stringify(w.where)).toEqual({ not: 'CONNECTED' });
+  });
+});
+
+// [REVIEW-M17 S1-1 · toll fraud] Swift pays for every number it dials, and two of them are free text a person typed
+// (a store's account line, a parcel recipient's number). One guard, used by both legs and by the provider itself:
+// only a complete Guyana subscriber number, +592 then 7 digits starting 2-7 (2-5 the regional fixed lines, 6-7
+// mobile; the same rule as a store's published number), never Swift's own caller ID.
+describe('[REVIEW-M17 S1-1] the dial guard', () => {
+  it('a complete Guyana line dials, in any spacing; landlines too', () => {
+    expect(GY_DIALABLE.source).toBe('^\\+592[2-7]\\d{6}$');
+    for (const [raw, want] of [['+5926001234', '+5926001234'], ['+592 600 1234', '+5926001234'], ['+592-711-2345', '+5927112345'], ['+5922251234', '+5922251234'], ['+5925551234', '+5925551234']] as const) {
+      expect(dialableNumber(raw, CALLER_ID), raw).toBe(want);
+    }
+  });
+  it('refuses international, premium, service, short, test-range, malformed and Swift\'s own number', () => {
+    for (const raw of ['+447700900123', '+882161234567', '+18005550123', '+5929123456', '+5928123456', testPhone(), '+5921123456', '911', '6001234', '5926001234', '+59260012345', '+592600123', '', '  ', 'tel:+5926001234', '+5926001234;ext=1']) {
+      expect(dialableNumber(raw, CALLER_ID), JSON.stringify(raw)).toBeNull();
+    }
+    expect(dialableNumber(null, CALLER_ID)).toBeNull();
+    expect(dialableNumber(undefined, CALLER_ID)).toBeNull();
+    expect(dialableNumber('+592 600 1234', '+5926001234'), "Swift's own caller ID").toBeNull();
+  });
+  it('the provider refuses too: placeCall never reaches Twilio for a number the guard refuses, and a dial step becomes a hang-up', async () => {
+    let calls = 0;
+    const http = (async () => { calls += 1; return new Response(JSON.stringify({ sid: `CA${'d'.repeat(32)}` }), { status: 201 }); }) as unknown as typeof fetch;
+    for (const to of ['+447700900123', testPhone(), CALLER_ID]) {
+      await expect(twilio(http).placeCall({ to, callerId: CALLER_ID, answerUrl: 'https://x', statusUrl: 'https://y', ringSeconds: 25, limitSeconds: 1800 }), to)
+        .rejects.toThrow('Twilio call refused: not a dialable number');
+    }
+    expect(calls).toBe(0);
+    const out = twilio().render({ verb: 'dial', say: CALL_WORDS.connecting, to: '+882161234567', callerId: CALLER_ID, screen: `${BASE}/screen?s=c1`, done: `${BASE}/dial-done?s=c1`, ringSeconds: 25, limitSeconds: 1800 });
+    expect(out.body).not.toContain('<Dial');
+    expect(out.body).not.toContain('882161234567');
+    expect(out.body).toContain('<Hangup/>');
+  });
+});

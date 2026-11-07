@@ -14,6 +14,7 @@ import {
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { MMG_REACTIVATED_PREFIX } from '../modules/billing/mmg-pause';
 
 // ---------------------------------------------------------------------------
 // [F2 · GUARDRAILS §7 standing rule 2 · Mover and Business Agreements F2] A
@@ -294,6 +295,121 @@ describe('[F2] a held weekly-fee rise is told 14 days ahead and applies only fro
     expect(await heldOf(rider.subId)).toBeNull();
   });
 
+  it('[owner 6 Nov · four weeks ahead] every whole week held at the old fee keeps it: the rise waits until all of them are used', async () => {
+    const t = new Date();
+    const due = new Date(t.getTime() + 3 * DAY);
+    // Four weeks paid before the rise was held or told.
+    const rider = await makeRider({ weeklyRate: 6000, due, prepaid: 4 * 6000 });
+    await hold(rider.subId, 6000, 8000, t);
+    await billing.sweepFeeRises(t);
+    const firstNewFee = new Date(due.getTime() + 2 * WEEK);
+    expect((await heldOf(rider.subId))?.appliesFrom).toBe(firstNewFee.toISOString());
+    expect(await bill(rider.subId, new Date(due.getTime() + 60_000))).toBe('succeeded');
+    expect(await bill(rider.subId, new Date(due.getTime() + WEEK + 60_000))).toBe('succeeded');
+    // Two whole weeks are still held at the old fee when the rise would apply: it moves past both, once.
+    expect(await rate(rider.subId)).toBe(6000);
+    expect(await heldOf(rider.subId)).toMatchObject({ deferredOnce: true, appliesFrom: new Date(firstNewFee.getTime() + 2 * WEEK).toISOString() });
+    expect((await audits(rider.subId, 'BILLING_FEE_RISE_DEFERRED')).map((a) => a.changes)).toEqual([
+      expect.objectContaining({ paidAtOldPrice: 12_000, weeksKeepOldPrice: 2, weekKeepsOldPrice: firstNewFee.toISOString() }),
+    ]);
+    // Each of the four paid weeks is charged the old fee ...
+    for (const week of [2, 3]) {
+      const start = new Date(due.getTime() + week * WEEK);
+      expect(await bill(rider.subId, new Date(start.getTime() + 60_000))).toBe('succeeded');
+      expect(Number((await capturedFor(rider.subId, start))!.amount)).toBe(6000);
+    }
+    for (const week of [0, 1]) expect(Number((await capturedFor(rider.subId, new Date(due.getTime() + week * WEEK)))!.amount)).toBe(6000);
+    // ... and the rise moves in only after them, with nothing paid at the old fee left over.
+    expect(await rate(rider.subId)).toBe(8000);
+    expect(await heldOf(rider.subId)).toBeNull();
+    expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: rider.subId } })).balance)).toBe(0);
+  });
+
+  // [REVIEW-M16 S2-1] The old-fee weeks are counted in weeks, not turned into one date: a stop and resume (the resume
+  // sets the next fee to now, dunning-clock.ts resumeVoluntaryObligationInTx) or a fee pause (the first fee after it
+  // runs through the reactivation, mmg-pause.ts mmgReactivationPeriodEnd) moves the next fee date past any date, while
+  // weeks paid at the old fee are still held. Each of them is still charged the old fee.
+  async function fourPaidThenDeferred() {
+    const t = new Date();
+    const due = new Date(t.getTime() + 3 * DAY);
+    const rider = await makeRider({ weeklyRate: 6000, due, prepaid: 4 * 6000 });
+    await hold(rider.subId, 6000, 8000, t);
+    await billing.sweepFeeRises(t);
+    expect(await bill(rider.subId, new Date(due.getTime() + 60_000))).toBe('succeeded');
+    expect(await bill(rider.subId, new Date(due.getTime() + WEEK + 60_000))).toBe('succeeded');
+    // Deferred with two old-fee weeks held, the date set two weeks on.
+    const later = new Date(due.getTime() + 4 * WEEK);
+    expect(await heldOf(rider.subId)).toMatchObject({ deferredOnce: true, appliesFrom: later.toISOString() });
+    return { rider, due, later };
+  }
+  const creditOf = async (subId: string) => Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } })).balance);
+
+  it('[REVIEW-M16 S2-1] stopped, then resumed after the date: the weeks still paid at the old fee keep it, counted as weeks', async () => {
+    const { rider, later } = await fourPaidThenDeferred();
+    // Stopped at the end of the running week, resumed three weeks after the date: the resume makes the next fee due
+    // then (dunning-clock.ts resumeVoluntaryObligationInTx, nextBillingDate: now), with nothing charged in between.
+    const resumed = new Date(later.getTime() + 3 * WEEK);
+    await app.prisma.subscription.update({ where: { id: rider.subId }, data: { nextBillingDate: resumed } });
+    await billing.sweepFeeRises(new Date(resumed.getTime() + 60_000));
+    // The two weeks paid at the old fee are still held: the rise waits past both, from the resume, never in at once.
+    expect(await rate(rider.subId)).toBe(6000);
+    expect(await heldOf(rider.subId)).toMatchObject({ deferredOnce: true, oldWeeksLeft: 2, appliesFrom: new Date(resumed.getTime() + 2 * WEEK).toISOString() });
+    expect((await audits(rider.subId, 'BILLING_FEE_RISE_DEFERRED')).map((a) => (a.changes as Record<string, unknown>)['weeksKeepOldPrice'])).toEqual([2, 2]);
+    // Asked again with nothing charged, the count does not grow.
+    await billing.sweepFeeRises(new Date(resumed.getTime() + 2 * WEEK + 60_000));
+    expect(await heldOf(rider.subId)).toMatchObject({ oldWeeksLeft: 2 });
+  });
+
+  it('[REVIEW-M16 S2-1] a fee pause that carries the next fee past the date: the old-fee week left is still charged the old fee', async () => {
+    const { rider, due } = await fourPaidThenDeferred();
+    // A way to pay came back three weeks on: the next fee runs through it, past the date.
+    const third = new Date(due.getTime() + 2 * WEEK);
+    await app.prisma.platformConfig.create({ data: { key: `${MMG_REACTIVATED_PREFIX}${rider.subId}`, value: new Date(third.getTime() + 2 * WEEK + DAY).toISOString() } });
+    try {
+      expect(await bill(rider.subId, new Date(third.getTime() + 60_000))).toBe('succeeded');
+      expect(Number((await capturedFor(rider.subId, third))!.amount)).toBe(6000);
+      const next = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: rider.subId } })).nextBillingDate;
+      expect(next.getTime()).toBeGreaterThan(due.getTime() + 4 * WEEK);
+      expect(await rate(rider.subId)).toBe(6000);
+      expect(await heldOf(rider.subId)).toMatchObject({ oldWeeksLeft: 1 });
+      expect(await bill(rider.subId, new Date(next.getTime() + 60_000))).toBe('succeeded');
+      expect(Number((await capturedFor(rider.subId, next))!.amount)).toBe(6000);
+      expect(await creditOf(rider.subId)).toBe(0);
+      expect(await rate(rider.subId)).toBe(8000);
+    } finally {
+      await app.prisma.platformConfig.deleteMany({ where: { key: `${MMG_REACTIVATED_PREFIX}${rider.subId}` } });
+    }
+  });
+
+  it('[REVIEW-M16 S2-1] the count only falls: money that arrives after the deferral never stretches it', async () => {
+    const { rider, due, later } = await fourPaidThenDeferred();
+    // Doorless money (it was not refused) lands: four more weeks' worth in the credit.
+    await topUp(rider.subId, 6 * 6000);
+    for (const week of [2, 3]) {
+      const start = new Date(due.getTime() + week * WEEK);
+      expect(await bill(rider.subId, new Date(start.getTime() + 60_000))).toBe('succeeded');
+      expect(Number((await capturedFor(rider.subId, start))!.amount)).toBe(6000);
+    }
+    // At the date the two counted weeks are used: the rise moves in, whatever else the credit holds.
+    expect(await rate(rider.subId)).toBe(8000);
+    expect(await heldOf(rider.subId)).toBeNull();
+    expect(await bill(rider.subId, new Date(later.getTime() + 60_000))).toBe('succeeded');
+    expect(Number((await capturedFor(rider.subId, later))!.amount)).toBe(8000);
+  });
+
+  it('[owner 6 Nov] once a rise is told, a new payment reaches only weeks that start before its date', async () => {
+    const t = new Date();
+    const due = new Date(t.getTime() + 3 * DAY);
+    const rider = await makeRider({ weeklyRate: 6000, due });
+    expect(await readPayAhead(app.prisma, rider.subId, t)).toMatchObject({ openWeeks: 4, room: 4 * 6000, riseFrom: null });
+    await hold(rider.subId, 6000, 8000, t);
+    // Held but not told: it applies to nothing, and limits nothing.
+    expect(await readPayAhead(app.prisma, rider.subId, t)).toMatchObject({ openWeeks: 4, room: 4 * 6000 });
+    await billing.sweepFeeRises(t);
+    const told = new Date((await heldOf(rider.subId))!.appliesFrom!);
+    expect(await readPayAhead(app.prisma, rider.subId, t)).toMatchObject({ openWeeks: 2, room: 2 * 6000, riseFrom: told });
+  });
+
   it('a told rise that no longer matches is dropped and the partner is told it will not happen; an untold one is dropped silently', async () => {
     const t = new Date();
     const due = new Date(t.getTime() + 3 * DAY);
@@ -318,6 +434,42 @@ describe('[F2] a held weekly-fee rise is told 14 days ahead and applies only fro
     expect(await notices(moved.userId)).toHaveLength(0);
     expect((await audits(moved.subId, 'BILLING_FEE_RISE_DROPPED')).map((a) => a.changes)).toEqual([expect.objectContaining({ why: 'RATE_MOVED', told: false, rateNow: 5500 })]);
     expect(await rate(moved.subId)).toBe(5500);
+  });
+
+  // [COORD ruling R4 on REVIEW-M #2021 S4-1] A waiver given AFTER the partner was told is not a reason to drop the
+  // told rise: nothing is charged for the waived week, the told fee applies from the date it was told for (14 days'
+  // notice), and nothing is ever charged back for the waived week. (A waiver in place BEFORE the notice drops it:
+  // nothing is told for a waived fee.)
+  it('a waiver after the notice: the waived week costs nothing, the told fee still applies from its date, never backdated', async () => {
+    const t = new Date();
+    const due = new Date(t.getTime() + 3 * DAY);
+    const rider = await makeRider({ weeklyRate: 6000, due, prepaid: 6000 });
+    await hold(rider.subId, 6000, 8000, t);
+    await billing.sweepFeeRises(t);
+    const firstNewFee = new Date(due.getTime() + 2 * WEEK);
+    expect(await heldOf(rider.subId)).toMatchObject({ appliesFrom: firstNewFee.toISOString() });
+    expect(await bill(rider.subId, new Date(due.getTime() + 60_000))).toBe('succeeded');
+    expect(Number((await capturedFor(rider.subId, due))!.amount)).toBe(6000);
+    // An admin waives the next week, after the partner was told of the rise.
+    await app.prisma.subscription.update({ where: { id: rider.subId }, data: { feeWaived: true, feeWaivedBy: 'test-admin', feeWaivedReason: 'test waiver' } });
+    await billing.sweepFeeRises(new Date(due.getTime() + DAY));
+    const lastOld = new Date(due.getTime() + WEEK);
+    expect(await bill(rider.subId, new Date(lastOld.getTime() + 60_000))).toBe('succeeded');
+    // The waived week: nothing charged.
+    expect(Number((await capturedFor(rider.subId, lastOld))!.amount)).toBe(0);
+    // The told rise was not dropped: it moved in with that week, for the date it was told for.
+    expect(await rate(rider.subId)).toBe(8000);
+    expect(await heldOf(rider.subId)).toBeNull();
+    expect(await audits(rider.subId, 'BILLING_FEE_RISE_DROPPED')).toHaveLength(0);
+    expect((await audits(rider.subId, 'BILLING_FEE_RISE_APPLIED')).map((a) => a.changes)).toEqual([expect.objectContaining({ from: 6000, to: 8000, firstFeeAtNewRate: firstNewFee.toISOString() })]);
+    expect((await notices(rider.userId)).map((n) => n.title)).toEqual(['Your weekly fee is changing']);
+    // The waiver covered that one week; the told fee is charged from its date.
+    await topUp(rider.subId, 8000);
+    expect(await bill(rider.subId, new Date(firstNewFee.getTime() + 60_000))).toBe('succeeded');
+    expect(Number((await capturedFor(rider.subId, firstNewFee))!.amount)).toBe(8000);
+    // Never backdated: the waived week still has its one record, for nothing.
+    const waivedWeek = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: rider.subId, periodStart: lastOld } });
+    expect(waivedWeek.map((p) => [p.status, Number(p.amount)])).toEqual([['CAPTURED', 0]]);
   });
 
   it('nothing is held for a negotiated or waived fee, nor for a change that is not a rise', async () => {

@@ -1,5 +1,5 @@
 import type { VehicleType } from '@prisma/client';
-import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isVehicleOffered, moverRoleFor, type MoverFeeBand, type MoverRole } from '../../config/vehicle-classes';
+import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isPassengerVehicle, isVehicleOffered, moverRoleFor, type MoverFeeBand, type MoverRole } from '../../config/vehicle-classes';
 import {
   catalogueStepsFor,
   partnerRateFor,
@@ -8,6 +8,7 @@ import {
   type SubscriptionTiers,
   type VendorRateReason,
 } from './country-config.service';
+import { trialDaysForTier } from '../subscription/trial-length';
 
 /** One vehicle a mover can register, priced for the role it provisions. */
 export interface MoverQuote {
@@ -28,6 +29,10 @@ export interface CatalogueBand {
   minItems: number;
   tier: Exclude<VendorRateReason, 'service'>;
   rate: number;
+  /** [DEPT-PRICE · owner 29 Oct 2026] The free trial, in days, of a NEW store whose own catalogue is at this step when
+   *  Swift approves it: 7 at the department step, else 14 (subscription/trial-length.ts). Additive: an app that predates
+   *  it reads the list's one `trialDays`, the 14 days every new store starts on. */
+  trialDays: number;
 }
 
 /**
@@ -101,7 +106,7 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
   // through the biller, so a quoted step is a billed step.
   const catalogue = catalogueStepsFor(tiers).map(({ minItems }): CatalogueBand => {
     const { rate, tier } = vendorAt(false, minItems);
-    return { minItems, tier: tier as CatalogueBand['tier'], rate };
+    return { minItems, tier: tier as CatalogueBand['tier'], rate, trialDays: trialDaysForTier(tier) };
   });
   const service = vendorAt(true, 0).rate;
 
@@ -130,4 +135,25 @@ export function partnerPriceList(rawTiers: unknown): PartnerPriceList {
       departmentVendor: catalogue.find((band) => band.tier === 'department')?.rate ?? null,
     },
   };
+}
+
+/**
+ * [CARS-PLATES · owner 6 Nov 2026] A private (P) plate car delivers only, and pays the delivery rider's weekly fee
+ * (owner, 04:30Z): the same `partnerRateFor` the bill uses, as a RIDER on that car. `on` says whether cars take
+ * deliveries today (the CAR_DELIVERIES switch); while it is off there are no quotes, and the apps keep today's
+ * car = taxi words. Additive: an app that predates it reads `movers` as before (a car quoted as a taxi).
+ */
+export interface PrivateCarPrices { on: boolean; quotes: MoverQuote[] }
+
+export function privateCarPrices(rawTiers: unknown, on: boolean): PrivateCarPrices {
+  if (!on) return { on: false, quotes: [] };
+  if (rawTiers == null || typeof rawTiers !== 'object' || Array.isArray(rawTiers)) throw new PricingConfigError('subscriptionTiers');
+  const tiers = rawTiers as SubscriptionTiers;
+  const quotes = VEHICLE_TYPES_IN_ORDER
+    .filter((vehicleType) => isPassengerVehicle(vehicleType) && isVehicleOffered(vehicleType))
+    .map((vehicleType): MoverQuote => {
+      const { rate, tier } = partnerRateFor(tiers, { kind: 'RIDER', vehicleType });
+      return { vehicleType, label: VEHICLE_CLASSES[vehicleType].label, role: 'RIDER', band: feeBandFor(vehicleType), tier: tier as MoverTier, rate, offered: true };
+    });
+  return { on: true, quotes };
 }

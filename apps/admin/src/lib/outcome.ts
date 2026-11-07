@@ -95,13 +95,6 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
         next: `${NOTHING_CHANGED} Open the owner's documents in the Review Center and decide each one that is still waiting.`,
         link: { label: 'Open in Review Center', href: reviewCenterHref(ctx.applicantId) },
       };
-    case 'VENDOR_TIER_NO_PROMOTION':
-      return {
-        tone: 'refused',
-        title: "This store can't be featured yet",
-        next: `${NOTHING_CHANGED} Featuring opens once a business registration is approved for the owner.`,
-        link: { label: 'Open in Review Center', href: reviewCenterHref(ctx.applicantId) },
-      };
     case 'DISCLOSURE_INCOMPLETE':
       return {
         tone: 'refused',
@@ -112,7 +105,7 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
       return {
         tone: 'refused',
         title: 'This store is held by its weekly fee',
-        next: `${NOTHING_CHANGED} Its weekly fee is unpaid or its billing is stopped. The fee must be paid through the MMG checkout page first. Billing suspensions lift automatically after confirmed payment; admin suspensions still need Reinstate. The console cannot lift a fee hold.`,
+        next: `${NOTHING_CHANGED} Its weekly fee is unpaid or its billing is stopped. The fee must be paid first, on the MMG checkout page or in person. Billing suspensions lift automatically after confirmed payment; admin suspensions still need Reinstate. The console cannot lift a fee hold.`,
       };
     case 'OWNER_ACCOUNT_RESTRICTED':
       return { tone: 'refused', title: 'The owner’s account is banned or suspended', next: `${NOTHING_CHANGED} The owner's account must be reinstated first. Then refresh this store's checklist.` };

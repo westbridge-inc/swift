@@ -171,8 +171,17 @@ describe('[V3] the grant is explicit-only: `*`, a wildcard or a role default nev
     expect(authority.capabilitiesOf({ role: 'ADMIN', permissions: ['support.read', GRANT] })).toEqual(['support.read', GRANT]);
   });
 
-  it('the four document doors demand the grant on top of their own capability; nothing else does', () => {
-    const doors = ['GET /verification/:id/document-url', 'PUT /verification/:id/approve', 'PUT /verification/:id/reject', 'PUT /verification/:id/revoke'];
+  it('the four document doors, the review queue, and the store-VAT certificate decisions, demand the grant on top of their own capability; nothing else does', () => {
+    // [STORE-VAT · owner O-5] A store's VAT decision approves or rejects its GRA VAT certificate in the SAME transaction as
+    // the document decision (store-vat-decisions.ts), and a withdrawal undoes one: only a document reviewer makes them.
+    const doors = [
+      'GET /verification/:id/document-url', 'PUT /verification/:id/approve', 'PUT /verification/:id/reject', 'PUT /verification/:id/revoke',
+      // [DOC-SECURITY G3] The queue lists people's identity papers by name: the same reviewers read it.
+      'GET /verification/queue',
+      'POST /store-vat/:vendorId/approve', 'POST /store-vat/:vendorId/reject', 'POST /store-vat/:vendorId/revoke',
+      // [VAT-DOCS · owner ruling 31 Oct 2026] An approved store's change of price choice: the same VAT reviewers.
+      'POST /store-vat/:vendorId/mode',
+    ];
     for (const door of doors) expect((authority.ADMIN_ROUTE_AUTHORITY[door] as { requires?: string } | undefined)?.requires, door).toBe(GRANT);
     const others = Object.entries(authority.ADMIN_ROUTE_AUTHORITY).filter(([k, a]) => !doors.includes(k) && (a as { requires?: string }).requires);
     // [GUARDRAILS §8 · Opus S3-9] The other explicit-only doors: showing a held catalogue item, and (owner 14 Oct) a

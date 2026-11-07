@@ -1,6 +1,7 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { requireIdentityAuthority, IdentityReviewRequiredError, lockIdentityAuthority } from '../integrity/identity-review';
 import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
+import { lockVendorActivationBilling } from '../billing/billing-access';
 import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
 import { type Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
@@ -9,17 +10,25 @@ import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { activateMoverFeeType, lockFeeCollectionAuthority, lockMoverFeeAuthority, lockMoverSources, moverFeeTariffSubject, resolveMoverFeeAuthority } from './mover-fee-authority';
 import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
+import { previewTrial } from '../integrity/enforcement';
+import { TRIAL_DAYS, trialDaysFor } from './trial-length';
+import { noTrialBeforeOrderingDay, partnerApprovalsOpen } from '../verification/approval-brake';
+import { assertStoreFeeTicked, chargedFor, storeFeeQuote } from '../partner/store-fee';
 import { log } from '../../utils/logger';
 
 // ---------------------------------------------------------------------------
-// SubscriptionService — a subscription is BORN as a 14-day free trial the
-// moment a participant goes live (mover documents verified / vendor approved).
+// SubscriptionService — a subscription is BORN as a free trial (14 days; a NEW
+// department-store signup 7, trial-length.ts) the moment a participant goes
+// live (mover documents verified / vendor approved).
 // That is the only entry point into billing (BillingService just charges what
 // exists). Per-entity, idempotent. Cash-first: trials bill from the prepaid
 // balance; a missed payment flows through the normal grace → suspend path.
 // ---------------------------------------------------------------------------
 
-export const TRIAL_DAYS = 14;
+/** Re-exported for the readers that predate trial-length.ts: every partner's trial, in days. */
+export { TRIAL_DAYS };
+/** The trial ledger tenant every store's trial grant is written under (withActivation -> createRow). */
+export const STORE_TRIAL_TENANT = 'swift-default';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const VENDOR_SUB_TYPE: Record<VendorType, SubscriptionType> = {
@@ -31,14 +40,21 @@ const VENDOR_SUB_TYPE: Record<VendorType, SubscriptionType> = {
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-/** The partner an activation path is about to make live. */
-export type ActivationEntity = { riderId: string } | { driverId: string } | { vendorId: string };
+/** The partner an activation path is about to make live. [BILL-PRO PR3] A pro (an independent service provider)
+ *  is activated by services/pro-fee.ts ensureProFeeBorn only, behind PRO_WEEKLY_FEE. */
+export type ActivationEntity = { riderId: string } | { driverId: string } | { vendorId: string } | { serviceProviderId: string };
 
 /** What activating a partner would price: the subscription they already
- *  hold (nothing to price), or the type, market and rate a new trial is born on. */
+ *  hold (nothing to price), or the type, market, rate and trial length a new
+ *  trial is born on. */
 type ActivationPricing =
   | { existing: Subscription }
-  | { existing: null; type: SubscriptionType; priced: PartnerRate; currencyCode: string };
+  | {
+    existing: null; type: SubscriptionType; priced: PartnerRate; currencyCode: string; trialDays: number;
+    /** [RETIER PR-A] A store: the first-step amount every sign-up was quoted; a fee born above it needs the owner's
+     *  tick at exactly that amount (partner/store-fee.ts). */
+    storeSignupAmount?: number;
+  };
 
 export class SubscriptionService {
   private countryConfig: CountryConfigService;
@@ -72,7 +88,7 @@ export class SubscriptionService {
     // A rider's fee follows the VEHICLE, not the service: a canter doing
     // deliveries bills heavy delivery exactly like a canter doing courier work.
     const priced = partnerRateFor(tiers, { kind: 'RIDER', vehicleType: rider.vehicleType });
-    return { existing: null, type, priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
+    return { existing: null, type, priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db), trialDays: TRIAL_DAYS };
   }
 
   private async driverActivation(driverId: string, db: Db): Promise<ActivationPricing> {
@@ -100,7 +116,7 @@ export class SubscriptionService {
     // A minibus driver is a taxi driver: where the market prices taxis apart
     // the role decides the fee, car or bus; otherwise the vehicle band does.
     const priced = partnerRateFor(tiers, { kind: 'DRIVER', vehicleType: driver.vehicleType });
-    return { existing: null, type: 'TAXI_DRIVER', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
+    return { existing: null, type: 'TAXI_DRIVER', priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db), trialDays: TRIAL_DAYS };
   }
 
   private async vendorActivation(vendorId: string, db: Db): Promise<ActivationPricing> {
@@ -108,6 +124,7 @@ export class SubscriptionService {
       where: { id: vendorId },
       select: {
         vendorType: true,
+        createdAt: true,
         subscription: true,
         owner: {
           select: {
@@ -119,23 +136,51 @@ export class SubscriptionService {
     if (!vendor) throw new NotFoundError('Vendor', vendorId);
     if (vendor.subscription) return { existing: vendor.subscription };
 
-    const countryCode = vendor.owner.user.countryCode;
-    const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
-    // A brand-new store has no catalogue yet, so it is born on the small tier
-    // and the weekly re-tier moves it up once its listings are counted. Each
-    // store is its own account with its own tier: how many other stores its
-    // owner has never changes its price (owner, 13 Oct 2026).
-    const priced = partnerRateFor(tiers, {
-      kind: 'VENDOR',
-      isService: vendor.vendorType === 'SERVICE',
-      activeListings: 0,
+    // [RETIER PR-A · owner 30 Oct 2026] The fee is born on the step the store's OWN catalogue reaches now, when Swift
+    // approves it (partner/store-fee.ts storeFeeQuote), and so is the trial ([DEPT-PRICE · owner 29 Oct 2026]: a NEW
+    // department-store signup gets 7 days, everyone else 14, trial-length.ts). One count for both, the same rule as the
+    // weekly re-tier's (store-fee.ts catalogueCountWhere == billing.service weekCatalogueWhere): items on sale, items
+    // taken off sale or changed in the last 7 days, and items removed in the last 7 days, so hiding or removing
+    // listings just before approval does not count them out. A service business has no catalogue: the services rate.
+    // Each store is its own account with its own tier: how many other stores its owner has never changes its price
+    // (owner, 13 Oct 2026). A fee above the first step is born only on its owner's tick at exactly that amount
+    // (createRow re-checks it under the activation locks).
+    const quote = await storeFeeQuote(db, vendorId);
+    const priced: PartnerRate = { rate: quote.cardRate, tier: quote.tier };
+    return {
+      existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: quote.currencyCode,
+      trialDays: trialDaysFor({ tier: quote.catalogueTier, storeCreatedAt: vendor.createdAt }), storeSignupAmount: quote.signupAmount,
+    };
+  }
+
+  /** [BILL-PRO PR3] A pro is priced like a Services store: the flat services rate (serviceVendor), never re-tiered.
+   *  Re-read in the activation transaction: the fee is due only while the switch is on, the pro's documents are
+   *  approved, they accepted the Business Agreement that covers Providers, they ticked "I understand the weekly fee" at
+   *  exactly the rate written here, and no Services store fee of theirs is live (one fee, owner B1). Otherwise
+   *  PRO_FEE_NOT_DUE and nothing is written. */
+  private async proActivation(serviceProviderId: string, db: Db): Promise<ActivationPricing> {
+    const pro = await db.serviceProvider.findUnique({
+      where: { id: serviceProviderId },
+      select: { userId: true, subscription: true, user: { select: { countryCode: true } } },
     });
-    return { existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
+    if (!pro) throw new NotFoundError('ServiceProvider', serviceProviderId);
+    if (pro.subscription) return { existing: pro.subscription };
+    const { assertProFeeDue, proFeeSwitchedOn } = await import('../services/pro-fee-due');
+    proFeeSwitchedOn();
+    const countryCode = pro.user.countryCode;
+    const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
+    const priced = partnerRateFor(tiers, { kind: 'VENDOR', isService: true, activeListings: 0 });
+    const currencyCode = await this.countryConfig.getCurrencyCode(countryCode, db);
+    // [REVIEW-G #2230 S3-1] Due only when the pro's latest fee tick was given to exactly this rate and currency.
+    await assertProFeeDue(db, pro.userId, { amount: priced.rate, currencyCode });
+    // A pro's trial is always the full TRIAL_DAYS (the department-store 7-day rule is a store tier's; owner 30 Oct 00:14Z).
+    return { existing: null, type: 'INDEPENDENT_PRO', priced, currencyCode, trialDays: TRIAL_DAYS };
   }
 
   private activation(entity: ActivationEntity, db: Db): Promise<ActivationPricing> {
     if ('riderId' in entity) return this.riderActivation(entity.riderId, db);
     if ('driverId' in entity) return this.driverActivation(entity.driverId, db);
+    if ('serviceProviderId' in entity) return this.proActivation(entity.serviceProviderId, db);
     return this.vendorActivation(entity.vendorId, db);
   }
 
@@ -168,7 +213,7 @@ export class SubscriptionService {
       await lockIdentityAuthority(tx);
       // [#1393] One weekly fee per mover payer: the payer and every one of its
       // sources are locked (and ownership re-read) before the activation is read.
-      const payer = 'vendorId' in entity ? null : await this.lockMoverPayer(entity, tx);
+      const payer = 'vendorId' in entity || 'serviceProviderId' in entity ? null : await this.lockMoverPayer(entity, tx);
       // [#1879 S3-3 · REVIEW-G R1] No activation write for an erased account. The person's users row is locked
       // here (a mover's already is, by lockMoverPayer), so an erasure either commits its cut-off first and this
       // refuses, or waits behind this transaction and its wind-down then cancels what was written.
@@ -176,9 +221,12 @@ export class SubscriptionService {
         throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been deleted. Nothing can be activated for it.');
       }
       const activation = await this.activation(entity, tx);
-      const sub = payer && !('vendorId' in entity)
+      const sub = payer && ('riderId' in entity || 'driverId' in entity)
         ? await this.moverRow(entity, payer, activation, tx)
-        : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, 'swift-default');
+        : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx,
+          // [BILL-PRO] A pro's trial is decided in their own user's tenant (stores keep STORE_TRIAL_TENANT, as before).
+          'serviceProviderId' in entity ? (await this.humanTenant(entity, tx)) : STORE_TRIAL_TENANT, activation.trialDays,
+          activation.existing ? undefined : activation.storeSignupAmount);
       return apply(tx, sub);
     };
     return '$transaction' in db ? db.$transaction(run) : run(db);
@@ -187,6 +235,8 @@ export class SubscriptionService {
   async startTrialForRider(riderId: string, db?: Db) { return this.start({ riderId }, db); }
   async startTrialForDriver(driverId: string, db?: Db) { return this.start({ driverId }, db); }
   async startTrialForVendor(vendorId: string, db?: Db) { return this.start({ vendorId }, db); }
+  /** [BILL-PRO PR3] Only services/pro-fee.ts ensureProFeeBorn calls this (behind PRO_WEEKLY_FEE). */
+  async startTrialForServiceProvider(serviceProviderId: string, db?: Db) { return this.start({ serviceProviderId }, db); }
 
   private async start(entity: ActivationEntity, db: Db = this.prisma) {
     const sub = await this.withActivation(entity, async (_tx, row) => row, db);
@@ -232,7 +282,9 @@ export class SubscriptionService {
     activation: ActivationPricing, tx: Prisma.TransactionClient,
   ): Promise<Subscription> {
     if (activation.existing) {
-      const authority = await activateMoverFeeType(tx, payer, 'driverId' in entity ? 'TAXI_DRIVER' : activation.existing.type);
+      // [BUG-HUNT F05] The row keeps the type it was born with; the authority holds the truth. A rider profile reads it
+      // and never raises it, or a fee support moved to delivery work would turn back into a taxi fee.
+      const authority = 'driverId' in entity ? await activateMoverFeeType(tx, payer, 'TAXI_DRIVER') : await lockMoverFeeAuthority(tx, payer);
       let sub = activation.existing;
       if (authority?.feeType === 'TAXI_DRIVER' && sub.customRate === null && !sub.feeWaived) {
         const tariff = await moverFeeTariffSubject(tx, authority);
@@ -268,14 +320,19 @@ export class SubscriptionService {
       }
       return sub;
     }
-    const sub = await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, payer.tenantId);
+    const sub = await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, payer.tenantId, activation.trialDays);
     await lockMoverFeeAuthority(tx, payer);
     return sub;
   }
 
   /** The human behind the entity + their trial-law role (§3: the trial
    *  belongs to the human, not the account or the entity). */
-  private async humanFor(entity: { riderId?: string; driverId?: string; vendorId?: string }, db: Db = this.prisma): Promise<{ userId: string; role: string }> {
+  private async humanTenant(entity: { serviceProviderId: string }, db: Db): Promise<string> {
+    const pro = await db.serviceProvider.findUniqueOrThrow({ where: { id: entity.serviceProviderId }, select: { user: { select: { tenantId: true } } } });
+    return pro.user.tenantId;
+  }
+
+  private async humanFor(entity: { riderId?: string; driverId?: string; vendorId?: string; serviceProviderId?: string }, db: Db = this.prisma): Promise<{ userId: string; role: string }> {
     if (entity.riderId) {
       const r = await db.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { userId: true } });
       return { userId: r.userId, role: 'RIDER' };
@@ -283,6 +340,11 @@ export class SubscriptionService {
     if (entity.driverId) {
       const d = await db.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { userId: true } });
       return { userId: d.userId, role: 'DRIVER' };
+    }
+    if (entity.serviceProviderId) {
+      // [BILL-PRO · owner A2] The trial law's own role for a pro: one trial per person as a pro, apart from a store's.
+      const p = await db.serviceProvider.findUniqueOrThrow({ where: { id: entity.serviceProviderId }, select: { userId: true } });
+      return { userId: p.userId, role: 'SERVICE_PROVIDER' };
     }
     const v = await db.vendor.findUniqueOrThrow({
       where: { id: entity.vendorId! },
@@ -293,12 +355,14 @@ export class SubscriptionService {
 
   private async createRow(
     entity: ActivationEntity, type: SubscriptionType, weeklyRate: number, currencyCode: string,
-    tx: Prisma.TransactionClient, tenantId: string,
+    tx: Prisma.TransactionClient, tenantId: string, trialDays: number, storeSignupAmount?: number,
   ) {
     const human = await this.humanFor(entity, tx);
     // [REVIEW-PARTNER · DL-5] No weekly fee is ever born for the store-review fiction: it has no
     // money rail, so a subscription would only be a bill nobody can or should pay.
     if (await this.isFiction(entity, tx)) throw new ReviewDemoMoneyRefusedError();
+    // [BUG-HUNT F23] The one place a weekly fee row is born: no door starts a trial before ordering day.
+    if (!partnerApprovalsOpen()) throw noTrialBeforeOrderingDay();
     await requireIdentityAuthority(tx, human.userId);
     // decide also records explainable denials. Every read and write uses the
     // same locked transaction, so quarantine cannot race a punishment or grant.
@@ -306,27 +370,72 @@ export class SubscriptionService {
     const decision = await law.decide(human.userId, human.role, tenantId);
     if (!decision.grant && decision.reason === 'REVIEW_REQUIRED') throw new IdentityReviewRequiredError();
     const now = new Date();
-    const end = decision.grant ? new Date(now.getTime() + TRIAL_DAYS * DAY_MS) : now;
-    if (!decision.grant && (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE')) {
+    // [CHAINS · owner 29 Oct 2026] A store whose owner ALREADY holds a running store trial of their own (ordinary
+    // or a founder exception's) is a branch of that owner: it shares the running trial (same end day) while another
+    // of the owner's stores is in it, and is billed from approval after. Never a fresh trial, never a second
+    // grant (REVIEW-M #2211 S3-2: a second exception grant for the same account collides with the first). Only an
+    // account with no running trial of its own may be granted one (FIRST_TRIAL, or a founder exception).
+    // FIRST_TRIAL means the cluster holds no store trial at all, so there is no own trial to share.
+    const vendorTrialOpen = 'vendorId' in entity && (decision.reason === 'EXCEPTION_GRANT' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE');
+    const ownGrant = vendorTrialOpen ? await ownRunningStoreTrial(tx, human.userId, tenantId, now) : null;
+    const branchOf = ownGrant && 'vendorId' in entity ? await tx.vendor.findUnique({ where: { id: entity.vendorId }, select: { ownerId: true } }) : null;
+    const shared = ownGrant && branchOf && 'vendorId' in entity
+      ? await sharedChainTrialEnd(tx, { ownerId: branchOf.ownerId, exceptVendorId: entity.vendorId, grantEndsAt: ownGrant.endsAt, now })
+      : null;
+    // [REVIEW-M #2211 S3-2 residue] An exception gives a store trial only to an account that holds no ACTIVE store
+    // trial grant of its own. A grant row stays ACTIVE past its end (nothing flips it), so an owner whose own trial
+    // ENDED would otherwise be granted again: a second VENDOR:EX row collides with the first (the branch could never
+    // be approved), and an ordinary ended trial would turn into a fresh 14 days. Branches added after the owner's
+    // trial pay from approval. [REVIEW-G/M #2211 S4-1] A grant spent by churn (CONSUMED) is not counted: a live
+    // founder exception may still give a returning owner a trial, exactly as before this change.
+    const ownEver = vendorTrialOpen && decision.reason === 'EXCEPTION_GRANT' && !ownGrant
+      ? await tx.trialGrant.findFirst({
+        where: { tenantId, accountId: human.userId, role: { in: ['VENDOR', `VENDOR:EX:${human.userId}`] }, status: 'ACTIVE' },
+        select: { id: true },
+      })
+      : null;
+    const fresh = decision.grant && !ownGrant && !ownEver;
+    const trial = fresh || shared !== null;
+    // [DEPT-PRICE · owner 29 Oct 2026] A fresh trial is `trialDays` long (7 for a NEW department-store signup, else 14:
+    // trial-length.ts); a branch sharing its owner's running trial keeps the owner's end day, whatever its own size.
+    const end = fresh ? new Date(now.getTime() + trialDays * DAY_MS) : shared ?? now;
+    if (!trial && !decision.grant && (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE')) {
       await tx.enforcementAction.create({ data: {
         accountId: human.userId, clusterId: decision.clusterId, level: 'DENY_TRIAL', reasonCode: decision.reason,
         signalsFired: [{ note: 'trial law at activation', role: human.role }] as never, decidedBy: 'SYSTEM',
       } });
     }
+    // [CHAINS] The owner's chain deal, when it is not above this store's own fee (it never raises a fee). Read under
+    // the settlement locks a deal is written under (setChainDeal), so a branch activated while a deal is being set
+    // is born on it or waits for it (REVIEW-M #2211 S4-4).
+    if ('vendorId' in entity) await lockVendorActivationBilling(tx, human.userId);
+    const deal = 'vendorId' in entity ? await chainDealFor(tx, entity.vendorId, weeklyRate, currencyCode) : null;
+    // [RETIER PR-A] The birth re-checks the owner's tick for the amount it is about to charge (the lower of the deal
+    // and the step, read under the locks above): above the first step, exactly that amount and currency, or nothing.
+    if ('vendorId' in entity && storeSignupAmount !== undefined) {
+      await assertStoreFeeTicked(tx, { vendorId: entity.vendorId, ownerUserId: human.userId, amount: chargedFor(weeklyRate, deal), currencyCode, signupAmount: storeSignupAmount });
+    }
     const sub = await tx.subscription.create({ data: {
       ...entity, type, weeklyRate, currencyCode, billingMethod: 'CASH', currentPeriodStart: now,
-      status: decision.grant ? 'TRIAL' : 'ACTIVE', isTrialActive: decision.grant,
+      status: trial ? 'TRIAL' : 'ACTIVE', isTrialActive: trial,
       trialEndDate: end, currentPeriodEnd: end, nextBillingDate: end,
+      ...(deal !== null ? { customRate: deal } : {}),
     } });
-    if (decision.grant) await law.recordGrant(tx, {
+    // [REVIEW-M #2211 S4-3] A branch born on its owner's chain deal says so in its fee history.
+    if (deal !== null && deal < weeklyRate) await tx.billingEvent.create({ data: {
+      subscriptionId: sub.id, type: 'TIER_CHANGE', amount: deal, currencyCode,
+      idempotencyKey: `chaindeal:${sub.id}:born:${weeklyRate}->${deal}`,
+      note: `Chain deal: this store starts on its owner's negotiated weekly fee ${deal} (its own fee is ${weeklyRate}).`,
+    } });
+    if (fresh) await law.recordGrant(tx, {
       accountId: human.userId, clusterId: decision.clusterId, role: human.role,
-      tenantId, trialDays: TRIAL_DAYS, exception: decision.reason === 'EXCEPTION_GRANT',
+      tenantId, trialDays, exception: decision.reason === 'EXCEPTION_GRANT',
     });
     return sub;
   }
 
   /**
-   * Day-15 conversion: a trial whose 14 days have elapsed becomes ACTIVE and
+   * Trial conversion: a trial whose days have elapsed becomes ACTIVE and
    * immediately due, so the hourly billing cycle charges it next run. Returns
    * the number converted. Idempotent (only TRIAL rows past their end match).
    */
@@ -351,4 +460,68 @@ export class SubscriptionService {
     }
     return count;
   }
+}
+
+/** [CHAINS] The trial grant this account is running for its stores, if any: its own ordinary VENDOR grant or a founder
+ *  exception's (`VENDOR:EX:<account>`), ACTIVE and not past its end. Any cluster: a merge can move it. */
+export async function ownRunningStoreTrial(
+  db: Prisma.TransactionClient | PrismaClient, userId: string, tenantId: string, now: Date,
+): Promise<{ endsAt: Date } | null> {
+  return db.trialGrant.findFirst({
+    where: { tenantId, accountId: userId, role: { in: ['VENDOR', `VENDOR:EX:${userId}`] }, status: 'ACTIVE', endsAt: { gt: now } },
+    orderBy: { endsAt: 'asc' },
+    select: { endsAt: true },
+  });
+}
+
+/**
+ * [CHAINS · owner 29 Oct 2026: "shared chain trial"] A store added to a chain while the owner's free trial runs shares
+ * that trial: it ends when the trial does. The caller has found the owner's OWN running store trial (ownRunningStoreTrial);
+ * this finds another store of the SAME owner in a live trial now, and answers the earlier of that store's trial end and
+ * the grant's own end (a branch never outlives the trial), or null (no store is in the trial: billed from approval).
+ */
+export async function sharedChainTrialEnd(
+  tx: Prisma.TransactionClient | PrismaClient,
+  input: { ownerId: string; exceptVendorId?: string; grantEndsAt: Date; now: Date },
+): Promise<Date | null> {
+  const sibling = await tx.subscription.findFirst({
+    where: {
+      vendor: { ownerId: input.ownerId }, ...(input.exceptVendorId ? { vendorId: { not: input.exceptVendorId } } : {}),
+      status: 'TRIAL', isTrialActive: true, trialEndDate: { gt: input.now },
+    },
+    orderBy: { trialEndDate: 'asc' },
+    select: { trialEndDate: true },
+  });
+  if (!sibling?.trialEndDate) return null;
+  return sibling.trialEndDate < input.grantEndsAt ? sibling.trialEndDate : input.grantEndsAt;
+}
+
+/** [CHAINS] The owner's chain deal for a store about to be priced: the deal when it is in the same currency, else null.
+ *  It is the store's custom rate, which is never charged above the store's own tier rate (weeklyFeeFor). */
+export async function chainDealFor(
+  db: Prisma.TransactionClient | PrismaClient, vendorId: string, weeklyRate: number, currencyCode: string,
+): Promise<number | null> {
+  const store = await db.vendor.findUnique({ where: { id: vendorId }, select: { owner: { select: { dealWeeklyRate: true, dealCurrencyCode: true } } } });
+  const deal = store?.owner.dealWeeklyRate;
+  if (deal === null || deal === undefined || store?.owner.dealCurrencyCode !== currencyCode) return null;
+  // A standing rule (REVIEW-G/M #2211 S3-1): the branch is born on the deal even when its own tier fee is lower today;
+  // the biller charges the lower of the two (weeklyFeeFor), so it never pays more than either.
+  const rate = Number(deal);
+  return rate > 0 ? rate : null;
+}
+
+/**
+ * [CHAINS] The told-before read for the add-a-branch screen: the day a branch approved NOW would end its shared
+ * trial, or null when it would be billed from approval. Reads only. The same conditions as sharedChainTrialEnd, read
+ * through the trial law's own preview (a held or owing cluster shares nothing); activation decides again.
+ */
+export async function chainTrialPreview(prisma: PrismaClient, userId: string, now: Date): Promise<Date | null> {
+  const owner = await prisma.vendorOwner.findUnique({ where: { userId }, select: { id: true } });
+  if (!owner) return null;
+  // Store trials live in the default tenant's trial ledger: withActivation creates every store's row there.
+  const law = await previewTrial(prisma, userId, 'VENDOR', STORE_TRIAL_TENANT);
+  if (law.reason !== 'TRIAL_ACTIVE_ELSEWHERE' && law.reason !== 'EXCEPTION_GRANT') return null;
+  const own = await ownRunningStoreTrial(prisma, userId, STORE_TRIAL_TENANT, now);
+  if (!own) return null;
+  return sharedChainTrialEnd(prisma, { ownerId: owner.id, grantEndsAt: own.endsAt, now });
 }

@@ -50,6 +50,8 @@ export interface VelocityVerdict {
   controlUnavailable?: boolean;
 }
 
+export const ORDER_PLACE_ACTION = 'order.place';
+
 /** Safety actions are never throttled — a person reaching for help is not a burst. */
 export function isSafetyAction(action: string): boolean {
   return action.startsWith('safety.') || action.startsWith('sos');
@@ -158,6 +160,101 @@ export async function assertVelocity(app: FastifyInstance, request: FastifyReque
   if (!verdict.allowed) {
     throw new AppError(429, 'VELOCITY_LIMIT', `Too many tries — wait ${Math.ceil(verdict.retryAfterS / 60)} minute${verdict.retryAfterS > 90 ? 's' : ''} and try again.`);
   }
+}
+
+/**
+ * [FULL-LAUNCH · owner ruling 5 Nov 2026] The limit on placing orders: store orders and parcels (a ride is held to one
+ * active ride). The person and their identity cluster, never the IP or the device: Guyana's carriers put many customers
+ * behind one address, so assertVelocity's IP count would throttle strangers. Redis down fails open like every surface
+ * outside MONEY_SURFACE_PREFIXES.
+ *
+ * It counts orders, not attempts. The reservation is all-or-nothing across both keys, so a refused attempt spends
+ * nothing and a shared cluster budget is never touched by one person's refused taps; the caller gives a reservation
+ * back when the order was CONFIRMED rolled back, and never when its outcome is unknown or after it committed.
+ */
+export interface OrderPlacementBudget {
+  limit: VelocityLimit;
+  userId: string;
+  clusterId: string | null;
+}
+
+/** The two keys of this hour, as checkVelocity names them. */
+export interface OrderPlacementReservation {
+  keys: string[];
+  orders: number;
+}
+
+/** Reserve ARGV[2] from every key, or none: each key's ceiling is ARGV[3..]. Returns 0, or the first key that is full. */
+export const ORDER_RESERVE_LUA = `
+local n = tonumber(ARGV[2])
+for i, key in ipairs(KEYS) do
+  if (tonumber(redis.call('GET', key)) or 0) + n > tonumber(ARGV[2 + i]) then return i end
+end
+for _, key in ipairs(KEYS) do
+  if redis.call('INCRBY', key, n) == n then redis.call('EXPIRE', key, ARGV[1]) end
+end
+return 0
+`;
+
+/** Give a reservation back. A key the window already took stays gone, and no count goes below zero. */
+export const ORDER_REFUND_LUA = `
+for _, key in ipairs(KEYS) do
+  if (tonumber(redis.call('GET', key)) or 0) >= tonumber(ARGV[1]) then redis.call('DECRBY', key, ARGV[1]) end
+end
+return 0
+`;
+
+/** The database reads a reservation needs. Apart from it, so a caller can reserve inside its transaction: on the
+ *  tenant wall a read of a non-tenant model must not run inside a caller's transaction. Null: no limit configured. */
+export async function readOrderPlacementBudget(deps: { prisma: PrismaClient }, userId: string): Promise<OrderPlacementBudget | null> {
+  let configured: Record<string, VelocityLimit> | null = null;
+  try { configured = (await algoValue(deps.prisma, 'velocity.limits')) as Record<string, VelocityLimit>; } catch { configured = null; }
+  const limit = resolveLimit(ORDER_PLACE_ACTION, configured);
+  if (!limit) return null;
+  const authority = await identityAuthority(deps.prisma, userId);
+  return { limit, userId, clusterId: authority.status === 'RESOLVED' ? authority.clusterId : null };
+}
+
+/** Redis only. Null: nothing was reserved, because no limit is set or Redis is down (fail open). */
+export async function reserveOrderPlacement(
+  redis: Redis,
+  budget: OrderPlacementBudget | null,
+  orders = 1,
+  now = new Date(),
+): Promise<OrderPlacementReservation | null> {
+  if (!budget) return null;
+  const { limit, userId, clusterId } = budget;
+  const seconds = Math.floor(now.getTime() / 1000);
+  const windowStart = Math.floor(seconds / limit.perSeconds) * limit.perSeconds;
+  const ttl = Math.max(1, windowStart + limit.perSeconds - seconds);
+  const keys = [velocityKey('actor', userId, ORDER_PLACE_ACTION, windowStart)];
+  const ceilings = [limit.max];
+  if (clusterId) {
+    keys.push(velocityKey('cluster', clusterId, ORDER_PLACE_ACTION, windowStart));
+    ceilings.push(limit.clusterMax ?? limit.max);
+  }
+  let full: number;
+  try {
+    full = Number(await redis.eval(ORDER_RESERVE_LUA, keys.length, ...keys, String(ttl), String(orders), ...ceilings.map(String)));
+  } catch (err) {
+    velocityCounter.labels('fail_open').inc();
+    log().warn({ err, action: ORDER_PLACE_ACTION }, 'velocity: redis unavailable — failing open');
+    return null;
+  }
+  if (full > 0) {
+    velocityCounter.labels('limited').inc();
+    const minutes = Math.ceil(ttl / 60);
+    throw new AppError(429, 'VELOCITY_LIMIT', `Too many orders in a short time — wait ${minutes} minute${minutes === 1 ? '' : 's'} and try again.`);
+  }
+  velocityCounter.labels('allowed').inc();
+  return { keys, orders };
+}
+
+/** The order was confirmed rolled back: its reservation comes back. A failed refund leaves the spend, logged. */
+export async function refundOrderPlacement(redis: Redis, reservation: OrderPlacementReservation | null): Promise<void> {
+  if (!reservation) return;
+  await redis.eval(ORDER_REFUND_LUA, reservation.keys.length, ...reservation.keys, String(reservation.orders))
+    .catch((err: unknown) => log().warn({ err, action: ORDER_PLACE_ACTION }, 'velocity: an order reservation could not be given back'));
 }
 
 export function velocityGuard(app: FastifyInstance, action: string) {

@@ -1,7 +1,9 @@
+import { cashInHandWindows } from '../dispatch/cash-in-hand';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -10,16 +12,20 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { carriesGoods, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, carriesGoods, carriesParcels, isPassengerVehicle, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveryLivePreview, hasTaxiTwin, isCarDeliveryProfile, isTaxiTwin, lockCarDeliveryAuthority, syncCarDeliveryProfile } from '../driver/car-deliveries';
+import { isHirePlate, PRIVATE_CAR_H_PLATE, PRIVATE_CAR_H_PLATE_COPY } from '../verification/hire-plate';
+import { normalizeRegistrationMark } from '../verification/subjects';
+import { returnToTaxiAndDeliveries } from '../driver/car-deliveries-return';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
 import { noteLiveEta } from '../eta/promise';
 import { z } from '../../lib/zod';
-import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
+import { Prisma, RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { riderDispatchableStatusesFor, riderDispatchReadinessFilter, withheldAwaitingReadiness, dispatchHoldExpired } from '../dispatch/dispatch-trigger';
-import { earningsWindow } from '../order/earnings-window';
+import { earningsWindow, jobsIn } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
@@ -27,10 +33,10 @@ import { CashRulesService, customerTrustSummaries, gpsEvidence } from '../cash/c
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
-import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
+import { makeDispatchService, vehicleCanCarry, vehicleCanCarryParcel } from '../dispatch/dispatch.service';
 import { FloatService, riderFloatForOrder, floatAdvice } from '../dispatch/float.service';
 import { explainEarning } from '../../utils/explain-earning';
-import { passengersOnlyRefusal, riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
+import { carNoParcelsClaim, passengersOnlyRefusal, riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
@@ -50,7 +56,7 @@ import { handoverAuthorityFor } from '../order/handover-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { haversineDistance } from '../../utils/distance';
-import { estimateLoad, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { offerEstLoad, offerLoadFields, requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError, ConflictError, ValidationError } from '../../utils/errors';
@@ -67,6 +73,7 @@ import {
   assertMoverRoleAuthority,
   assertActiveMoverAccount,
   lockAndRetireDriverSupply,
+  completeUserRoleAuthorityTransition,
   lockUserRoleAuthority,
   staleMoverAuthorityError,
 } from '../mover-authority';
@@ -78,7 +85,10 @@ import {
   RIDER_PICKUP_FROM,
 } from '../order/order-status';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
-import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
+import { ReviewDemoMoneyRefusedError, weeklyFeeMissingRowPolicy } from '../review/demo-policy';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
+import { kickWaitingOrdersNear, type KickEnqueue } from '../dispatch/supply-kick';
+import { orderStageRefusal, STEP_GONE } from '../order/order-status-words';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -221,6 +231,14 @@ const ARRIVAL_TARGET: Record<string, 'pickup' | 'dropoff'> = {
   arrived: 'dropoff',
 };
 
+/** [O-2 · owner 22 Oct 2026] The rungs whose status-log note records the rider's fix and distance:
+ *  the two arrivals, and "Picked up" (how far from the store the rider said they collected it).
+ *  EVIDENCE ONLY, like the arrivals: nothing is refused, a rider without a fix is never stranded. */
+const POSITION_EVIDENCE_TARGET: Record<string, 'pickup' | 'dropoff'> = {
+  ...ARRIVAL_TARGET,
+  'picked-up': 'pickup',
+};
+
 /** How old a fix may be and still describe where someone is standing. Beyond
  *  this the age is recorded instead of a distance — an hour-old ping turned
  *  into "12 m from the door" is a fabricated measurement, and a fabricated one
@@ -249,7 +267,7 @@ type ArrivalRider = { currentLat: number | null; currentLng: number | null; last
  * lacks a distance is indistinguishable from one written before this existed.
  */
 function arrivalEvidence(slug: string, order: ArrivalOrder, rider: ArrivalRider, now = new Date()): string | null {
-  const target = ARRIVAL_TARGET[slug];
+  const target = POSITION_EVIDENCE_TARGET[slug];
   if (!target) return null;
 
   // Pickup point: the order's own coordinates, falling back to the vendor's.
@@ -297,6 +315,14 @@ export async function riderRoutes(app: FastifyInstance) {
     getKycProvider(),
   );
   const dispatch = makeDispatchService(app);
+  // [RIDER-SAFE 3] A rider who comes online or hands over a bag is offered the
+  // oldest waiting order near them first: dispatch runs again for those orders
+  // now instead of at the next sweep (dispatch/supply-kick.ts).
+  const kickEnqueue: KickEnqueue = async (orderId, { jobId, priority }) => {
+    if (!app.dispatchQueue) return;
+    await app.dispatchQueue.add('dispatch-order', { orderId }, { jobId, priority, removeOnComplete: 100, removeOnFail: 50 });
+  };
+  const kickWaiting = (riderId: string) => kickWaitingOrdersNear({ prisma: app.prisma, redis: app.redis, enqueue: kickEnqueue }, riderId);
   const cashRules = new CashRulesService(
     app.prisma,
     new NotificationService(app.prisma, app.io),
@@ -511,13 +537,14 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
     const { url } = await getStorageProvider().upload({
       buffer,
       filename: file.filename,
       mimeType: file.mimetype,
       folder: `vehicles/${rider.id}`,
     });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'vehicle-photo', fileKey: url, buffer, storage: getStorageProvider() });
 
     const updated = await app.prisma.rider.update({
       where: { id: rider.id },
@@ -537,6 +564,17 @@ export async function riderRoutes(app: FastifyInstance) {
     // and re-verifies. This route edits the details of the vehicle the rider already has.
     if (body.vehicleType !== undefined && body.vehicleType !== rider.vehicleType) {
       throw new AppError(409, 'USE_VEHICLE_CHANGE', 'Change your vehicle from the vehicle screen — a new vehicle needs its own documents.');
+    }
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car takes food and shop orders only: it never signs up for courier parcels.
+    if (body.riderType !== undefined && body.riderType !== 'DELIVERY' && isPassengerVehicle(rider.vehicleType)) throw carNoParcelsClaim();
+    // [CARS-PLATES · REVIEW-G22 S2-1] A delivery car never takes an H (hire) plate of its own: an H plate is a taxi car's,
+    // so only the taxi car's own twin (the account's taxi profile on that very plate) carries one. Refused before step-up.
+    if (body.licensePlate !== undefined && isPassengerVehicle(rider.vehicleType) && isHirePlate(body.licensePlate)
+      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(rider.licensePlate ?? '')) {
+      const taxi = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { vehicleType: true, licensePlate: true } });
+      if (!isTaxiTwin({ vehicleType: rider.vehicleType, licensePlate: body.licensePlate }, taxi)) {
+        throw new AppError(400, PRIVATE_CAR_H_PLATE, PRIVATE_CAR_H_PLATE_COPY);
+      }
     }
     // [High #9 · DS109] Changing the plate, make, model, year or colour re-identifies the vehicle the rider operates.
     // Step-up first (the same proof as a money surface), the old vehicle links close so
@@ -629,6 +667,12 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!isVehicleOffered(rider.vehicleType)) {
       throw new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Change your vehicle to go online.');
     }
+    // [CARS-DELIVER] A car's delivery profile goes online only while CAR_DELIVERIES is on (the kill switch).
+    // [CARS-PLATES · owner 6 Nov] The taxi car's twin goes online only as its owner's verified taxi car; a private
+    // (P) plate car on its own delivery papers, like any rider.
+    const carDelivery = isCarDeliveryProfile(rider.vehicleType);
+    if (carDelivery && !carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    const taxiTwin = carDelivery && await hasTaxiTwin(app.prisma, request.user.userId);
     if (!locationSessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
@@ -650,20 +694,28 @@ export async function riderRoutes(app: FastifyInstance) {
     // legacy flag; known invalid evidence also refuses an unchanged legacy profile.
     // Fast-fail preview for honest copy — the AUTHORITATIVE check re-runs
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
-    const verified = await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
+    // [CARS-DELIVER] A taxi car previews the taxi verdict on the car its taxi profile names today (the
+    // delivery profile is re-synced to that car under the locks below).
+    const verified = taxiTwin
+      ? await carDeliveryLivePreview(app.prisma, request.user.userId)
+      : await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
       throw goOnlineRefusal('DOCUMENTS', 'RIDER');
     }
 
-    // THE canOperate rule (operate-gate.ts, G-BILL-03) — a missing row is
-    // grandfathered (legacy accounts pre-dating birth-on-verification); the
-    // verdict maps onto this route's historical codes.
+    // THE canOperate rule (operate-gate.ts, G-BILL-03); the verdict maps onto this route's historical codes. A fee this
+    // rider is owed is born first. A missing row after that operates only for what the clause exists for: the legacy
+    // `documentsVerified` grant (accounts pre-dating birth-on-verification; since then the flag is written only with a
+    // fee, admin verify-documents) and the store-review fiction. Anyone else does not work without a fee.
+    if (request.tenantKind !== 'REVIEW') await verification.settleMoverFeeAtGo(request.user.userId, 'RIDER');
     const feePayer = await moverFeePayer(app.prisma, request.user.userId);
-    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: 'GRANDFATHER' });
+    const missingRow = weeklyFeeMissingRowPolicy(request.tenantKind, rider.documentsVerified ? 'GRANDFATHER' : 'BLOCK');
+    const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow });
     if (!operability.operable) {
       if (operability.why === 'GRACE_LAPSED') {
         throw goOnlineRefusal('FEE_GRACE_LAPSED', 'RIDER');
       }
+      if (operability.why === 'MISSING') throw goOnlineRefusal('FEE_MISSING', 'RIDER');
       // [NO-DEAD-ENDS] Never "top up": the fee is paid under Weekly fee (go-online-refusals.ts).
       throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
     }
@@ -694,7 +746,7 @@ export async function riderRoutes(app: FastifyInstance) {
       assertActiveMoverAccount(authority.status);
       assertMoverRoleAuthority(authority.activeRole, 'RIDER');
       await lockMoverSources(tx, feePayer);
-      if (!(await moverFeeOperability(tx, feePayer, { missingRow: 'GRANDFATHER' })).operable) {
+      if (!(await moverFeeOperability(tx, feePayer, { missingRow })).operable) {
         throw goOnlineRefusal('FEE_INACTIVE', 'RIDER');
       }
 
@@ -730,16 +782,36 @@ export async function riderRoutes(app: FastifyInstance) {
       // revocation committing after the preview above can no longer slip a
       // stale "verified" through to the online write. The legacy flag comes
       // from the LOCKED profile snapshot, not the preview.
+      // [CARS-DELIVER] The delivery profile goes online as the car the taxi profile names now (Rider -> Driver).
+      // [CARS-PLATES] Only the twin mirrors (sync refuses if it stopped being one); a private car is its own car.
+      if (taxiTwin) await syncCarDeliveryProfile(tx, request.user.userId);
       const liveDocuments = await lockMoverDocuments(tx, request.user.userId, 'RIDER');
       assertMoverDocuments(liveDocuments);
+      const carDocuments = carDelivery ? await lockCarDeliveryAuthority(tx, request.user.userId) : null;
+      if (carDocuments) assertMoverDocuments(carDocuments);
+      // [REVIEW-G #2138 NOTE] Identity locks are per profile (liveness.service): delivery GO on the taxi's car also
+      // refuses while the TAXI profile is identity-locked or safety-suspended (its row is locked just above), so
+      // switching to the same car's deliveries never gets around a lock. Selfie-check freshness stays this
+      // profile's own (assertShiftLiveness above): a check passed on one profile never refreshes the other.
+      if (carDelivery) {
+        const taxi = await tx.driver.findUnique({
+          where: { userId: request.user.userId },
+          select: { lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
+        });
+        if (taxi?.livenessLockedAt) assertShiftLiveness(taxi);
+        if (taxi) assertNotSafetySuspended(taxi);
+      }
       const retiredDriverId = await lockAndRetireDriverSupply(tx, request.user.userId);
       const available = (await riderLiveLegCount(tx, rider.id)) < (await riderStackingCapacity(app.prisma));
       const activated = await tx.$queryRaw<Array<{ isOnline: boolean; isAvailable: boolean }>>`
         UPDATE riders SET "isOnline" = true, "isAvailable" = ${available},
           "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
           "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
+          -- [CARS-DELIVER PR4] Deliveries the mover chose themselves never send them back to taxi work.
+          "returnsToTaxi" = false,
           "updatedAt" = clock_timestamp()
         WHERE id = ${rider.id} AND ${documentDeadlineSql(liveDocuments)}
+          AND ${carDocuments ? documentDeadlineSql(carDocuments) : Prisma.sql`TRUE`}
         RETURNING "isOnline", "isAvailable"`;
       if (!activated[0]) throw expiredDocumentAuthority();
       await tx.user.update({
@@ -764,6 +836,8 @@ export async function riderRoutes(app: FastifyInstance) {
         .releaseHeldOffer(retiredDriverId)
         .catch((error) => request.log.warn({ err: error, driverId: retiredDriverId }, 'rider GO sibling driver offer cleanup failed'));
     }
+
+    if (updated.isAvailable) await kickWaiting(rider.id);
 
     return { success: true, data: { isOnline: updated.isOnline, isAvailable: updated.isAvailable } };
   });
@@ -821,6 +895,26 @@ export async function riderRoutes(app: FastifyInstance) {
 
     if (!rider.isOnline && !rider.currentOrderId) {
       return { success: true, data: { accepted: false, reason: 'OFFLINE' } };
+    }
+
+    // [CARS-DELIVER PR4 · COORD 26 Oct] A delivery taken from "taxi + deliveries" is done: the first heartbeat
+    // after its last leg returns the account to taxi work (car-deliveries-return.ts). The phone is told, so it
+    // refetches and its location stream follows the taxi profile.
+    if (rider.returnsToTaxi && rider.isOnline && !rider.currentOrderId) {
+      const back = await returnToTaxiAndDeliveries(app.prisma, request.user.userId, locationSessionId, { latitude, longitude });
+      if (back) {
+        await completeUserRoleAuthorityTransition(app, {
+          userId: request.user.userId, riderId: rider.id, driverId: null, activeRole: 'DRIVER', lastMoverRole: 'DRIVER',
+        }).catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'return to taxi cleanup failed'));
+        if (back === 'RETURNED') {
+          const driverRow = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+          if (driverRow) {
+            await app.redis.set(`driver:location_db_ts:${driverRow.id}`, Date.now().toString())
+              .catch((error) => request.log.warn({ err: error, driverId: driverRow.id }, 'return to taxi Redis bookkeeping failed'));
+          }
+        }
+        return { success: true, data: { accepted: false, reason: 'RETURNED_TO_TAXI' } };
+      }
     }
 
     // Migration compatibility is first-writer-wins for a legacy null owner;
@@ -1141,11 +1235,13 @@ export async function riderRoutes(app: FastifyInstance) {
 
     // [owner #20 · G1] The board shows only work this rider's vehicle can
     // carry — the same size rule dispatch and the grab enforce (a parcel's
-    // declared size; a goods order's bulk, a bulky line needing a car or van).
+    // declared size; a goods order's total bulk, banded by utils/load).
     // [Owner ruling 15 Oct 2026] …and a taxi car sees no goods work at all while car deliveries are off
     // (vehicleCanCarry reads the switch; an unsized order is asked too).
     const carriable = candidates.filter((order) => {
       const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
+      // [CARS-PLATES · owner 6 Nov 2026] a car's board never shows a courier parcel (food and shop orders only).
+      if (order.orderType === 'COURIER') return vehicleCanCarryParcel(rider.vehicleType, requiredSize);
       return vehicleCanCarry(rider.vehicleType, requiredSize);
     });
     const orders = await safeBoardOrders(app.prisma, carriable, request.user.userId, 'RIDER');
@@ -1194,7 +1290,9 @@ export async function riderRoutes(app: FastifyInstance) {
           status: order.status,
           vendor: order.vendor,
           itemCount: order.items.reduce((s, i) => s + i.quantity, 0),
-          estLoad: estimateLoad(order.items.reduce((s, i) => s + i.quantity, 0)),
+          estLoad: offerEstLoad(order),
+          // [owner 31 Oct] estLoad counts bulk too; the real size class beside it, as on the offer card.
+          ...offerLoadFields(order),
           deliveryFee: Number(order.deliveryFee),
           tipAmount: Number(order.tipAmount),
           totalEarning: Number(order.deliveryFee) + Number(order.tipAmount),
@@ -1226,12 +1324,14 @@ export async function riderRoutes(app: FastifyInstance) {
   const ACTIVE_ORDER_INCLUDE = {
     vendor: {
       select: {
-        id: true, name: true, logoUrl: true, phone: true,
+        // [O-1] Not `phone`: that is the store's account/OTP line, and no build read it.
+        id: true, name: true, logoUrl: true,
         latitude: true, longitude: true,
         addressLine1: true, city: true,
       },
     },
-    // [COORD 17 Oct] The rider calls the customer (no masked calling yet): first name + phone, never the last name.
+    // [COORD 17 Oct] The rider calls the customer: first name + phone, never the last name.
+    // [O-1] The phone goes only to an installed store build (withCounterpartPhones on the way out).
     customer: {
       select: {
         id: true,
@@ -1268,6 +1368,7 @@ export async function riderRoutes(app: FastifyInstance) {
     const order = await app.prisma.order.findUnique({
       where: { id: rider.currentOrderId, riderId: rider.id },
       // [F-0011] The response spreads this row wholesale — omit at the source.
+      // [O-1] The parcel recipient's number is gated below (withCounterpartPhones).
       omit: HANDOVER_SECRETS_OMIT,
       include: ACTIVE_ORDER_INCLUDE,
     });
@@ -1280,7 +1381,7 @@ export async function riderRoutes(app: FastifyInstance) {
       return { success: true, data: null };
     }
 
-    return { success: true, data: activeOrderView(order) };
+    return { success: true, data: withCounterpartPhones(request, activeOrderView(order)) };
   });
 
   /** GET /orders/active-legs — [B6] EVERY live leg, not only the pointer's.
@@ -1297,7 +1398,7 @@ export async function riderRoutes(app: FastifyInstance) {
       omit: HANDOVER_SECRETS_OMIT,
       include: ACTIVE_ORDER_INCLUDE,
     });
-    const legs = rows.map((o) => ({ ...activeOrderView(o), isPrimary: o.id === rider.currentOrderId }));
+    const legs = rows.map((o) => ({ ...withCounterpartPhones(request, activeOrderView(o)), isPrimary: o.id === rider.currentOrderId }));
     const first = legs[0];
     const run = legs.length >= 2 && first
       ? {
@@ -1378,12 +1479,14 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!dispatchHoldExpired(order)) throw new AppError(409, 'ORDER_HELD', 'The customer cancellation window is still open');
     const acceptableStatuses: OrderStatus[] = riderDispatchableStatusesFor(order.orderType);
     if (!acceptableStatuses.includes(order.status)) {
-      throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, 'it cannot be accepted'));
     }
 
     // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] A taxi car takes no goods work while the
     // CAR_DELIVERIES switch is off, said in its own words before any size rule (the claim refuses it too).
     if (!carriesGoods(rider.vehicleType)) throw passengersOnlyRefusal();
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car takes food and shop orders only: never a courier parcel.
+    if (order.orderType === 'COURIER' && !carriesParcels(rider.vehicleType)) throw carNoParcelsClaim();
 
     // SWIFT-062: the board-grab entrance must respect vehicle capability too — a
     // parcel can't be grabbed by a mover whose vehicle can't carry it (the offer
@@ -1393,8 +1496,8 @@ export async function riderRoutes(app: FastifyInstance) {
     }
 
     // [owner #20 · G1 ENFORCED] The same gate for food and grocery: an order
-    // the rider's vehicle cannot carry — a bulky line needs a car or van; a
-    // big ordinary load is banded — is refused here exactly as dispatch never
+    // the rider's vehicle cannot carry — its total bulk, banded (utils/load),
+    // capped at a motorbike's while cars carry no goods — is refused as dispatch never
     // offers it. (A parcel was refused just above by its declared size.)
     if (order.orderType !== 'COURIER') {
       const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
@@ -1521,7 +1624,7 @@ export async function riderRoutes(app: FastifyInstance) {
         throw new AppError(
           400,
           'INVALID_TRANSITION',
-          `Cannot transition from ${order.status} to ${to}. Expected current status: ${from.join(' or ')}.`,
+          orderStageRefusal(order.status, STEP_GONE),
         );
       }
 
@@ -1545,6 +1648,8 @@ export async function riderRoutes(app: FastifyInstance) {
       // has not set one. What it does is WRITE DOWN what the platform already
       // knew at that moment, so the radius can eventually be chosen from a
       // measured distribution instead of guessed.
+      // [O-2 · owner 22 Oct 2026] "Picked up" records the same evidence (the
+      // distance to the store), and is never refused for it either.
       //
       // The fix is the one already on the rider row — the same persisted fix
       // dispatch reads — so no client sends anything and no rider is stranded
@@ -1645,6 +1750,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // a row for the reviewer — never a penalty, never a word to the rider.
     if (!replayed) {
       await assessCompletion({ prisma: app.prisma, redis: app.redis }, { riderId: rider.id, orderId: id, completedAt: new Date() });
+      // [RIDER-SAFE 3] Hands free: the oldest waiting order near them goes first.
+      await kickWaiting(rider.id);
     }
     return { success: true, data, replayed };
   });
@@ -1715,15 +1822,11 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** GET /earnings — Paginated earnings, filterable by date range and type. */
-  /** [DOC-1 §31.4 · P31-1] The rider's guarantee claims: status, the evidence bundle as filed, the pay-out SLA, and whether their protection is suspended. */
+  /** [DOC-1 §31.4 · P31-1] The rider's unpaid cash orders: status, the evidence bundle as filed, and any suspension. */
   app.get('/claims', { preHandler: [app.authenticate] }, async (request) => {
     const rider = await getRider(app, request.user.userId);
     const { moverClaims } = await import('../cash/rlp');
-    const { cashRulesFor } = await import('../cash/cash-rules.service');
-    const { CountryConfigService } = await import('../country/country-config.service');
-    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: request.user.userId }, select: { countryCode: true } });
-    const rules = await cashRulesFor(new CountryConfigService(app.prisma), user.countryCode);
-    return { success: true, data: await moverClaims(app.prisma, { riderId: rider.id, driverId: null }, rules) };
+    return { success: true, data: await moverClaims(app.prisma, { riderId: rider.id, driverId: null }) };
   });
 
   app.get('/earnings', { preHandler: [app.authenticate] }, async (request) => {
@@ -1880,22 +1983,18 @@ export async function riderRoutes(app: FastifyInstance) {
       app.prisma.earning.aggregate({
         where: { riderId: rider.id, createdAt: { gte: todayStart } },
         _sum: { amount: true },
-        _count: true,
       }),
       app.prisma.earning.aggregate({
         where: { riderId: rider.id, createdAt: { gte: weekStart } },
         _sum: { amount: true },
-        _count: true,
       }),
       app.prisma.earning.aggregate({
         where: { riderId: rider.id, createdAt: { gte: monthStart } },
         _sum: { amount: true },
-        _count: true,
       }),
       app.prisma.earning.aggregate({
         where: { riderId: rider.id },
         _sum: { amount: true },
-        _count: true,
       }),
       app.prisma.earning.aggregate({
         where: { riderId: rider.id, status: 'AVAILABLE' },
@@ -1903,15 +2002,23 @@ export async function riderRoutes(app: FastifyInstance) {
       }),
     ]);
 
+    const mine = { riderId: rider.id };
+    const [todayJobs, weekJobs, monthJobs, allJobs] = await Promise.all([
+      jobsIn(app.prisma, { ...mine, createdAt: { gte: todayStart } }), jobsIn(app.prisma, { ...mine, createdAt: { gte: weekStart } }),
+      jobsIn(app.prisma, { ...mine, createdAt: { gte: monthStart } }), jobsIn(app.prisma, mine),
+    ]);
+
     return {
       success: true,
       data: {
         // SWIFT-080: { total, count } per window via the shared earningsWindow
         // helper — the single source the driver route now also uses.
-        today: earningsWindow(today),
-        thisWeek: earningsWindow(week),
-        thisMonth: earningsWindow(month),
-        allTime: earningsWindow(allTime),
+        today: earningsWindow(today, todayJobs),
+        thisWeek: earningsWindow(week, weekJobs),
+        thisMonth: earningsWindow(month, monthJobs),
+        allTime: earningsWindow(allTime, allJobs),
+        // [board 13a] Cash kept from completed CASH jobs, per window (dispatch/cash-in-hand.ts). Additive.
+        cashInHand: await cashInHandWindows(app.prisma, { riderId: rider.id }),
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
       },
     };
@@ -1963,7 +2070,7 @@ export async function riderRoutes(app: FastifyInstance) {
           { recovery: { action: 'REPORT_PROBLEM', path: `/api/v1/rider/orders/${id}/recovery` } });
       }
       if (!PRE_CUSTODY.includes(order.status)) {
-        throw new AppError(409, 'INVALID_STATUS', `This order can no longer be handed back (${order.status}).`);
+        throw new AppError(409, 'INVALID_STATUS', orderStageRefusal(order.status, 'it can no longer be handed back'));
       }
 
       const reopenStatus = await reopenPreCustodyLeg(tx, order, request.user.userId, `Rider handback: ${reason}`);
@@ -2227,6 +2334,8 @@ export async function riderRoutes(app: FastifyInstance) {
 
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
+    const { feeStatusFor } = await import('../billing/fee-status');
+    const fee = await payInfo(app.prisma, sub);
     return {
       success: true,
       data: {
@@ -2235,7 +2344,9 @@ export async function riderRoutes(app: FastifyInstance) {
         // "My Swift Number" + Pay-screen block [san spec 2.4/6.1] — SAN,
         // wallet balance, amount due, channel-honest activation copy.
         ...(await sanDisplay(app.prisma, sub)),
-        ...(await payInfo(app.prisma, sub)),
+        ...fee,
+        // [FEE-STATUS] Where the fee stands, in the server's words: never a passed date as a next bill.
+        feeStatus: await feeStatusFor(app.prisma, sub, fee, now),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
         ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
         // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).

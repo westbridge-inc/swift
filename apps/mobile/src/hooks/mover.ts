@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tansta
 import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
 import { currentDevicePosition } from '../services/devicePosition';
 import { TAXI_STOPS_CAPABILITY, maxStopsFrom, rideStops } from '../lib/taxiItinerary';
+import { DELIVERY_CARDS_CAPABILITY, isCarDeliveryProfile, serverKnowsTaxiAndDeliveries } from '../lib/deliveriesToo';
 import { skippedStopsKey } from '../lib/routeLine';
 import { track } from '../lib/analytics';
 import {
@@ -64,6 +65,15 @@ import { boardPaused } from '../lib/moverBoard';
 async function serverOffersTaxiStops(session: AuthSessionSnapshot): Promise<boolean> {
   try {
     return maxStopsFrom(await unwrap(rideApi.capabilities(session))) > 0;
+  } catch {
+    return false;
+  }
+}
+/** [CARS-DELIVER PR4 · REVIEW-F #2139 S2-2] Does the server know "taxi + deliveries" (its GET /driver/deliveries answers
+ *  takesDeliveries)? Any other answer (an older server's 404, a #2128-only answer, an error) is no. */
+async function serverKnowsDeliveryCards(): Promise<boolean> {
+  try {
+    return serverKnowsTaxiAndDeliveries(await unwrap(driverApi.carDeliveries()));
   } catch {
     return false;
   }
@@ -153,6 +163,8 @@ export function useMoverKind() {
       refetching: false,
       error: null,
       ambiguous: false,
+      dual: false,
+      carDeliveryProfile: false,
       refetch: async () => {},
     };
   }
@@ -173,6 +185,10 @@ export function useMoverKind() {
     loading,
     refetching: driver.isFetching || rider.isFetching,
     error,
+    // [CARS-DELIVER] The account holds both a taxi and a delivery profile (it can switch work modes).
+    dual: !!driver.data && !!rider.data,
+    // [CARS-DELIVER PR4 · REVIEW-F #2139 delta S3-1] A taxi profile AND a car delivery profile ("Deliveries too").
+    carDeliveryProfile: !!driver.data && isCarDeliveryProfile(rider.data),
     refetch: async () => {
       await Promise.all([driver.refetch(), rider.refetch()]);
     },
@@ -217,25 +233,23 @@ export function useEarningsToday(kind: MoverKind | null) {
   });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS_TODAY) : q;
 }
+/** [SPEED 30 Oct] The Earnings screen's first reads, shared by its hooks and the Home prefetch
+ *  (hooks/earnerPrefetch): the same key, the same call, the same shape. */
+export const moverRead = {
+  earningsSummary: <T = any>(kind: MoverKind | null) => ({ queryKey: ['mover', 'earnings-summary', kind], queryFn: () => unwrap<T>(svc(kind as MoverKind).earningsSummary()) }),
+  earningsHistory: <T = any>(kind: MoverKind | null) => ({ queryKey: ['mover', 'earnings-history', kind], queryFn: () => unwrap<T>(svc(kind as MoverKind).earnings()) }),
+};
 export function useEarningsSummary<T = any>(kind: MoverKind | null) {
   const pv = usePreview();
-  const q = useQuery<T>({
-    queryKey: ['mover', 'earnings-summary', kind],
-    queryFn: () => unwrap<T>(svc(kind as MoverKind).earningsSummary()),
-    enabled: !!kind && !pv,
-  });
+  const q = useQuery<T>({ ...moverRead.earningsSummary<T>(kind), enabled: !!kind && !pv });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS_SUMMARY) : q;
 }
 export function useEarnings<T = any>(kind: MoverKind | null) {
   const pv = usePreview();
-  const q = useQuery<T>({
-    queryKey: ['mover', 'earnings-history', kind],
-    queryFn: () => unwrap<T>(svc(kind as MoverKind).earnings()),
-    enabled: !!kind && !pv,
-  });
+  const q = useQuery<T>({ ...moverRead.earningsHistory<T>(kind), enabled: !!kind && !pv });
   return pv ? PV.previewQuery(PV.PREVIEW_EARNINGS) : q;
 }
-/** [DOC-1 §31.4] The mover's guarantee claims — status, the evidence bundle as filed, the pay-out SLA, suspension. */
+/** [DOC-1 §31.4] The mover's unpaid cash orders — status, the evidence bundle as filed, any suspension. */
 export function useMoverClaims<T = any>(kind: MoverKind | null) {
   const pv = usePreview();
   const q = useQuery<T>({
@@ -389,7 +403,16 @@ export function useGoOnline(kind: MoverKind) {
       // [TAXI multi-stop] A driver declares the stop capability only to a
       // server that has advertised rides with stops; any other answer (an older
       // server's 404, 0, an error) sends exactly today's go-online body.
-      const capabilities = kind === 'DRIVER' && await serverOffersTaxiStops(current) ? [TAXI_STOPS_CAPABILITY] : null;
+      // [CARS-DELIVER PR4] Likewise delivery cards, only to a server that knows "taxi + deliveries": this app shows a
+      // delivery card in taxi mode, so the server may offer it deliveries from taxi work. [REVIEW-F #2139 delta S4-5]
+      // Asked only by an account that holds a car delivery profile, and alongside the stops read (never a second
+      // round trip in a row); every other account makes exactly today's requests.
+      const carDeliveries = kind === 'DRIVER' && isCarDeliveryProfile(qc.getQueryData(['mover', 'riderProfile']));
+      const [stops, cards] = kind === 'DRIVER'
+        ? await Promise.all([serverOffersTaxiStops(current), carDeliveries ? serverKnowsDeliveryCards() : false])
+        : [false, false];
+      const declared = [...(stops ? [TAXI_STOPS_CAPABILITY] : []), ...(cards ? [DELIVERY_CARDS_CAPABILITY] : [])];
+      const capabilities = declared.length > 0 ? declared : null;
       if (capabilities) current = requireAuthSessionForPrincipal(owner);
       const result = await unwrap(capabilities
         ? driverApi.goOnline(latitude, longitude, current, capabilities)
@@ -458,6 +481,47 @@ export function refreshAfterJobStep(qc: QueryClient): Promise<void> {
   void qc.invalidateQueries({ queryKey: ['mover'], predicate: (query) => query.queryKey[1] !== 'active' });
   return qc.invalidateQueries({ queryKey: ['mover', 'active'] });
 }
+
+/**
+ * [TAP-AUDIT 27 Oct · owner: "every single button tap"] The job's next status, from the step's OWN answer (the
+ * server has already moved the job: a rider step answers `{ orderId, status }`, a driver step the updated ride),
+ * written into the active job at once — the single job and a stacked rider's legs. The job screen draws the next
+ * step from that status, so the button is free at the answer instead of after a second round trip (the re-read of
+ * the active job, ~0.6 s more on a mobile link, on every one of the ~6 steps of a delivery). A poll already on its
+ * way (it left with the old status) is cancelled by the re-read that follows (refreshAfterJobStep's refetch cancels
+ * one in flight), and a cancelled read falls back to this written state. False when the answer names no status or
+ * the job is not on screen: the caller then waits for the re-read, as before.
+ */
+export function writeJobStatus(qc: QueryClient, jobId: string | undefined, answer: unknown): boolean {
+  const a = answer as { status?: unknown; ridePinVerified?: unknown } | null | undefined;
+  if (!jobId || typeof a?.status !== 'string' || !a.status) return false;
+  const fields = { status: a.status, ...(typeof a.ridePinVerified === 'boolean' ? { ridePinVerified: a.ridePinVerified } : {}) };
+  let wrote = false;
+  qc.setQueriesData({ queryKey: ['mover', 'active'] }, (data: unknown) => {
+    const one = data as { id?: unknown; legs?: unknown } | null | undefined;
+    if (one && one.id === jobId) { wrote = true; return { ...one, ...fields }; }
+    if (one && Array.isArray(one.legs) && one.legs.some((l: { id?: unknown } | null) => l?.id === jobId)) {
+      wrote = true;
+      return { ...one, legs: one.legs.map((l: { id?: unknown } | null) => (l?.id === jobId ? { ...l, ...fields } : l)) };
+    }
+    return data;
+  });
+  return wrote;
+}
+
+/** [TAP-AUDIT] The steps whose answer moves the job along without ending it: their button is free at the answer. The
+ *  steps that end or hand back a job (delivered, the door's handover, a fare outcome, a handback) still wait for the
+ *  re-read: the screen's completion flow follows the job leaving the active read. */
+const STEPS_SHOWN_AT_THE_ANSWER: ReadonlySet<string> = new Set([
+  'en-route-pickup', 'arrived-pickup', 'picked-up', 'en-route-delivery', 'arrived', 'en-route', 'verify-pin', 'start',
+]);
+function afterStep(qc: QueryClient, jobId: string | undefined, action: string, answer: unknown): Promise<void> | undefined {
+  if (STEPS_SHOWN_AT_THE_ANSWER.has(action) && writeJobStatus(qc, jobId, answer)) {
+    void refreshAfterJobStep(qc); // everything else (and the job's other fields) still refreshes, in the background
+    return undefined;
+  }
+  return refreshAfterJobStep(qc);
+}
 export function useAcceptJob(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
@@ -502,6 +566,9 @@ export function useDeclineOffer(kind: MoverKind) {
   return pv ? PV.previewMutation() : m;
 }
 export type FareOutcome = 'paid' | 'refused' | 'no_show';
+/** [L02 · row 34/56] The rider's door adds "the customer can't pay in full"
+ *  (no hand-over; the order goes back to the store). Rides never send it. */
+export type RiderDoorOutcome = FareOutcome | 'short_payment';
 export type DriverAction = 'en-route' | 'arrived' | 'verify-pin' | 'start' | 'handover' | 'handback';
 export type DriverActionInput =
   | { id: string; action: Exclude<DriverAction, 'handover' | 'handback'>; pin?: string }
@@ -570,7 +637,7 @@ export function useDriverAction() {
         void qc.invalidateQueries({ queryKey: ['mover'] });
         return;
       }
-      return refreshAfterJobStep(qc);
+      return afterStep(qc, input.id, input.action, _data);
     },
   });
   return pv ? PV.previewMutation() : m;
@@ -583,11 +650,11 @@ export function useRiderAction() {
   const pv = usePreview();
   const qc = useQueryClient();
   const m = useMutation({
-    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin, photoUrl, authSession }: {
+    mutationFn: async ({ id, action, reason, outcome, handoverVersion, pin, photoUrl, authSession, collectedAmount, cashReturned, handedOverShort }: {
       id: string;
       action: RiderAction;
       reason?: string;
-      outcome?: FareOutcome;
+      outcome?: RiderDoorOutcome;
       photoUrl?: string;
       authSession?: AuthSessionSnapshot;
       handoverVersion?: string;
@@ -595,6 +662,12 @@ export function useRiderAction() {
        *  Omitted when empty so the server answers MISSING_PIN rather than a
        *  schema refusal; never sent for the failed outcomes (no_show/refused). */
       pin?: string;
+      /** [L02 · row 56] The cash the rider states at the door (lib/doorCash
+       *  builds these; the server decides what they mean). Absent = the
+       *  older, unstated door. */
+      collectedAmount?: number;
+      cashReturned?: boolean;
+      handedOverShort?: boolean;
     }) => {
       switch (action) {
         case 'en-route-pickup': return unwrap(riderApi.enRoutePickup(id));
@@ -615,13 +688,21 @@ export function useRiderAction() {
           // default; [M-29] 'refused' / 'no_show' are the failed outcomes the
           // unpaid sheet sends explicitly.
           const { gps, current } = await evidenceFix(owner);
-          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}) }, current));
+          // [L02 · row 56] The stated door cash and the door's version travel
+          // only when the screen supplies them; a field it leaves out is never sent.
+          const doorCash = {
+            ...(collectedAmount !== undefined ? { collectedAmount } : {}),
+            ...(cashReturned !== undefined ? { cashReturned } : {}),
+            ...(handedOverShort ? { handedOverShort: true as const } : {}),
+            ...(handoverVersion ? { handoverVersion } : {}),
+          };
+          const result = await unwrap(riderApi.handover(id, { outcome: outcome ?? 'paid', gps, ...(photoUrl ? { photoUrl } : {}), ...(pin ? { ridePin: pin } : {}), ...doorCash }, current));
           requireAuthSessionForPrincipal(owner);
           return result;
         }
       }
     },
-    onSuccess: () => refreshAfterJobStep(qc),
+    onSuccess: (data, input) => afterStep(qc, input.id, input.action, data),
   });
   return pv ? PV.previewMutation() : m;
 }

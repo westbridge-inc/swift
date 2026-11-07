@@ -5,13 +5,16 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchRevenue,
   fetchCashSettlements,
+  closeCashSettlement,
   fetchPaymentMix,
   fetchSettlements,
   processSettlement,
   type CashSettlementRow,
 } from '@/lib/api';
+import { InPersonPayments } from '@/components/finance/InPersonPayments';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { gyCalendarDay, gyDate } from '@/lib/dates';
 
 /**
  * `Number(n || 0)` rendered a MISSING amount as `$0` — and on a finance page a
@@ -42,10 +45,8 @@ const gyd = (n: unknown) => {
  * Anything that is not a `YYYY-MM-DD` renders as an em-dash: a wrong date is a
  * lie, a missing one is only missing.
  */
-const gyDay = (ymd: unknown) =>
-  typeof ymd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ymd)
-    ? new Date(`${ymd}T00:00:00Z`).toLocaleDateString(undefined, { timeZone: 'UTC' })
-    : '—';
+// [ADMIN-AUDIT S3-4] lib/dates gyCalendarDay: the same UTC anchor, now day first with the month in words.
+const gyDay = (ymd: unknown) => gyCalendarDay(ymd);
 
 const METHOD_LABELS: Record<string, string> = {
   CASH: 'Cash',
@@ -56,10 +57,10 @@ const METHOD_LABELS: Record<string, string> = {
 };
 
 const LEDGER_STATUS: Record<CashSettlementRow['status'], { label: string; cls: string }> = {
-  OWED: { label: 'Owed', cls: 'bg-amber-500/15 text-amber-400' },
-  RIDER_CONFIRMED: { label: 'Rider confirmed', cls: 'bg-sky-500/15 text-sky-400' },
-  STORE_CONFIRMED: { label: 'Store confirmed', cls: 'bg-sky-500/15 text-sky-400' },
-  SETTLED: { label: 'Settled', cls: 'bg-emerald-500/15 text-emerald-400' },
+  OWED: { label: 'Owed', cls: 'bg-[var(--mc-warn-soft)] mc-text-warn' },
+  RIDER_CONFIRMED: { label: 'Rider confirmed', cls: 'bg-[var(--mc-info-soft)] mc-text-info' },
+  STORE_CONFIRMED: { label: 'Store confirmed', cls: 'bg-[var(--mc-info-soft)] mc-text-info' },
+  SETTLED: { label: 'Settled', cls: 'bg-[var(--mc-good-soft)] mc-text-good' },
 };
 
 const LEDGER_FILTERS = ['ALL', 'OWED', 'RIDER_CONFIRMED', 'STORE_CONFIRMED', 'SETTLED'] as const;
@@ -67,11 +68,24 @@ const LEDGER_FILTERS = ['ALL', 'OWED', 'RIDER_CONFIRMED', 'STORE_CONFIRMED', 'SE
 /** MMG-vs-cash mix + the store⇄rider delivery-fee cash ledger. Visibility
  *  only — Swift records these debts, it never moves the money. */
 function MmgSection() {
+  const qc = useQueryClient();
+  const actions = useActionRunner(() => qc.invalidateQueries({ queryKey: ['cash-settlements'] }));
   const [filter, setFilter] = useState<(typeof LEDGER_FILTERS)[number]>('ALL');
   const mixQ = useQuery({ queryKey: ['payment-mix'], queryFn: fetchPaymentMix });
   const ledgerQ = useQuery({
     queryKey: ['cash-settlements', filter],
     queryFn: () => fetchCashSettlements(filter === 'ALL' ? 'limit=50' : `limit=50&status=${filter}`),
+  });
+
+  /** A record neither side can close: a store that never confirms, or has left Swift. */
+  const closeRecord = (r: CashSettlementRow) => void actions.run({
+    title: 'Close this delivery pay record?',
+    body: <p>Use this when the store cannot confirm the handover. The record keeps what it says, and it stops blocking either person. Both sides are told. Swift moves no money.</p>,
+    confirmLabel: 'Close record',
+    dismissLabel: 'Keep it open',
+    reason: { hint: 'Kept on the permanent record, not shown to either side. A second admin must agree.' },
+    submit: ({ reason }) => closeCashSettlement(r.id, reason),
+    success: () => 'The record is closed and both sides are told.',
   });
 
   const mix = mixQ.data?.data;
@@ -85,8 +99,8 @@ function MmgSection() {
   return (
     <>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">Payment mix (30d, completed)</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">Payment mix (30d, completed)</p>
           {mixQ.isLoading ? (
             <p className="text-3xl font-bold mt-1">—</p>
           ) : mixQ.isError ? (
@@ -95,33 +109,33 @@ function MmgSection() {
             <div className="mt-2 space-y-1">
               {(mix?.byMethod ?? []).map((m) => (
                 <div key={m.method} className="flex items-center justify-between text-sm">
-                  <span className="text-[var(--muted)]">{METHOD_LABELS[m.method] ?? m.method}</span>
+                  <span className="mc-muted">{METHOD_LABELS[m.method] ?? m.method}</span>
                   <span>
                     {m.count.toLocaleString()} orders · {gyd(m.total)}
                   </span>
                 </div>
               ))}
-              {(mix?.byMethod ?? []).length === 0 && <p className="text-sm text-[var(--muted)]">No completed orders yet.</p>}
+              {(mix?.byMethod ?? []).length === 0 && <p className="text-sm mc-muted">No completed orders yet.</p>}
             </div>
           )}
         </div>
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">Store → rider fees outstanding</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">Store → rider fees outstanding</p>
           <p className="text-3xl font-bold mt-1">{ledgerQ.isLoading || ledgerQ.isError ? '—' : gyd(outstanding.total)}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">
+          <p className="mc-muted text-xs mt-1">
             {ledgerQ.isError ? 'Not loaded — see the ledger below' : `${ledgerQ.isLoading ? '—' : outstanding.count} unsettled handovers (MMG orders)`}
           </p>
         </div>
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">MMG deliveries unconfirmed</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">MMG deliveries unconfirmed</p>
           <p className="text-3xl font-bold mt-1">{mixQ.isLoading || mixQ.isError ? '—' : Number(mix?.mmgUnconfirmed ?? 0).toLocaleString()}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">delivered, vendor never marked the payment received</p>
+          <p className="mc-muted text-xs mt-1">delivered, vendor never marked the payment received</p>
         </div>
       </div>
 
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 mb-6">
+      <div className="mc-card mb-5">
         <div className="flex items-center justify-between mb-1">
-          <h2 className="text-lg font-semibold">MMG cash ledger (store ⇄ rider)</h2>
+          <h2 className="mc-section-title mb-0">MMG cash ledger (store ⇄ rider)</h2>
           <div className="flex gap-1">
             {LEDGER_FILTERS.map((f) => (
               <button
@@ -129,38 +143,39 @@ function MmgSection() {
                 type="button"
                 onClick={() => setFilter(f)}
                 aria-pressed={filter === f}
-                className={`px-2.5 py-1 rounded-lg text-xs ${
-                  filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
-                }`}
+                className="mc-tab"
               >
                 {f === 'ALL' ? 'All' : LEDGER_STATUS[f].label}
               </button>
             ))}
           </div>
         </div>
-        <p className="text-[var(--muted)] text-xs mb-4">
+        <p className="mc-muted text-xs mb-4">
           On MMG orders the customer pays the store (fee included), so the store hands the rider their
           delivery fee in cash. Swift tracks the debt until both sides confirm — it never moves the money.
         </p>
+        {actions.banner}
         {ledgerQ.isLoading ? (
-          <p className="text-[var(--muted)] text-sm">Loading…</p>
+          <p className="mc-muted text-sm">Loading…</p>
         ) : ledgerQ.isError ? (
           <QueryFailed error={ledgerQ.error} what="the MMG cash ledger" onRetry={() => void ledgerQ.refetch()} retrying={ledgerQ.isFetching} />
         ) : rows.length === 0 ? (
-          <p className="text-[var(--muted)] text-sm">Nothing here — no {filter === 'ALL' ? '' : `${LEDGER_STATUS[filter as CashSettlementRow['status']].label.toLowerCase()} `}entries.</p>
+          <p className="mc-muted text-sm">Nothing here — no {filter === 'ALL' ? '' : `${LEDGER_STATUS[filter as CashSettlementRow['status']].label.toLowerCase()} `}entries.</p>
         ) : (
           <div className="space-y-2">
             {rows.map((r) => (
-              <div key={r.id} className="flex items-center justify-between gap-3 p-2 rounded-lg bg-white/5 text-sm">
-                <span className="text-[var(--muted)] w-28 shrink-0">{r.orderNumber ? `#${r.orderNumber}` : r.orderId.slice(0, 8)}</span>
+              <div key={r.id} className="flex items-center justify-between gap-3 p-2 rounded-lg bg-[var(--mc-surface)] text-sm">
+                <span className="mc-muted w-28 shrink-0">{r.orderNumber ? `#${r.orderNumber}` : r.orderId.slice(0, 8)}</span>
                 <span className="flex-1 truncate">
-                  {r.vendor?.name ?? 'Store'} <span className="text-[var(--muted)]">owes</span> {r.rider?.name ?? 'rider'}
+                  {r.vendor?.name ?? 'Store'} <span className="mc-muted">owes</span> {r.rider?.name ?? 'rider'}
                 </span>
                 <span className="font-medium shrink-0">{gyd(r.amount)}</span>
                 <span className={`px-2 py-0.5 rounded-full text-xs shrink-0 ${LEDGER_STATUS[r.status].cls}`}>
                   {LEDGER_STATUS[r.status].label}
                 </span>
-                <span className="text-[var(--muted)] text-xs shrink-0">{new Date(r.createdAt).toLocaleDateString()}</span>
+                <span className="mc-muted text-xs shrink-0">{gyDate(r.createdAt)}</span>
+                {r.closedAt ? <span className="mc-badge shrink-0">Closed by Swift</span> : null}
+                {!r.closedAt && r.status !== 'SETTLED' ? <button type="button" className="mc-btn shrink-0" onClick={() => closeRecord(r)}>Close record…</button> : null}
               </div>
             ))}
           </div>
@@ -193,31 +208,31 @@ function SettlementsSection() {
   if (!isLoading && !isError && rows.length === 0) return null;
 
   return (
-    <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 mb-6">
+    <div className="mc-card mb-5">
       <h2 className="text-lg font-semibold mb-1">Vendor sales digests to review</h2>
-      <p className="text-[var(--muted)] text-xs mb-4">
+      <p className="mc-muted text-xs mb-4">
         Each vendor’s own completed sales for the week. Swift takes no cut and pays nothing out — acknowledge a digest once you have reviewed it.
       </p>
       {actions.banner}
       {isLoading ? (
-        <p className="text-sm text-[var(--muted)]">Loading…</p>
+        <p className="text-sm mc-muted">Loading…</p>
       ) : isError ? (
         <QueryFailed error={error} what="the sales digests" onRetry={() => void refetch()} retrying={isFetching} />
       ) : (
         <div className="space-y-2">
           {rows.map((s: any) => (
-            <div key={s.id} className="flex items-center gap-3 p-3 rounded-lg bg-white/5 text-sm">
+            <div key={s.id} className="flex items-center gap-3 p-3 rounded-lg bg-[var(--mc-surface)] text-sm">
               <span className="font-medium">{s.vendor?.name ?? 'Vendor'}</span>
-              <span className="text-xs text-[var(--muted)]">
-                {s.periodStart ? new Date(s.periodStart).toLocaleDateString() : ''} –{' '}
-                {s.periodEnd ? new Date(s.periodEnd).toLocaleDateString() : ''}
+              <span className="mc-muted text-xs">
+                {s.periodStart ? gyDate(s.periodStart) : ''} –{' '}
+                {s.periodEnd ? gyDate(s.periodEnd) : ''}
               </span>
               <span className="ml-auto font-semibold">{gyd(s.netSales ?? s.totalBase ?? s.amount)}</span>
               <button
                 type="button"
                 onClick={() => acknowledge(s)}
                 disabled={queuedRows[s.id] === true}
-                className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+                className="px-3 py-1 rounded-lg text-xs bg-[var(--mc-accent)] disabled:opacity-50"
               >
                 {queuedRows[s.id] ? 'Waiting for approval' : 'Acknowledge'}
               </button>
@@ -235,10 +250,9 @@ export default function FinancePage() {
   const daily = data?.data?.dailyRevenue ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">Finance</h1>
-      <p className="text-[var(--muted)] text-sm mb-6">
-        Platform revenue is <span className="text-white">weekly subscriptions only</span> — no
+    <div className="mc-page">
+      <p className="mc-muted text-sm mb-6">
+        Platform revenue is <span className="font-semibold text-[var(--mc-ink)]">weekly subscriptions only</span> — no
         commission, no markup, no customer fees.
       </p>
 
@@ -246,20 +260,20 @@ export default function FinancePage() {
         <QueryFailed error={error} what="the revenue figures" onRetry={() => void refetch()} retrying={isFetching} className="mb-6" />
       ) : (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">Weekly Subscription Revenue</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">Weekly Subscription Revenue</p>
           <p className="text-3xl font-bold mt-1">{isLoading ? '—' : gyd(summary?.weeklySubscriptionRevenue)}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">GYD / week</p>
+          <p className="mc-muted text-xs mt-1">GYD / week</p>
         </div>
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">Monthly Subscription Revenue</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">Monthly Subscription Revenue</p>
           <p className="text-3xl font-bold mt-1">{isLoading ? '—' : gyd(summary?.monthlySubscriptionRevenue)}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">GYD / month (approx.)</p>
+          <p className="mc-muted text-xs mt-1">GYD / month (approx.)</p>
         </div>
-        <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-          <p className="text-[var(--muted)] text-sm">Active Subscriptions</p>
+        <div className="mc-card">
+          <p className="mc-muted text-sm">Active Subscriptions</p>
           <p className="text-3xl font-bold mt-1">{isLoading ? '—' : Number(summary?.activeSubscriptions || 0).toLocaleString()}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">paying participants</p>
+          <p className="mc-muted text-xs mt-1">paying participants</p>
         </div>
       </div>
       )}
@@ -267,39 +281,42 @@ export default function FinancePage() {
       {/* Manual vendor payouts awaiting a transfer reference */}
       <SettlementsSection />
 
+      {/* Weekly fees paid directly to Westbridge Inc., apart from MMG */}
+      <InPersonPayments />
+
       {/* MMG visibility — payment mix + the store⇄rider fee ledger */}
       <MmgSection />
 
       {/* Context only — money that flows to movers, NOT platform revenue. */}
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 mb-6">
+      <div className="mc-card mb-5">
         <h2 className="text-lg font-semibold mb-1">Delivery volume (context)</h2>
-        <p className="text-[var(--muted)] text-xs mb-4">
+        <p className="mc-muted text-xs mb-4">
           Last 30 days. Delivery fees are collected by movers in cash — shown for operational context,
           not counted as platform revenue.
         </p>
-        <div className="flex items-center justify-between p-3 rounded-lg bg-white/5">
+        <div className="flex items-center justify-between rounded-[var(--mc-radius-sm)] bg-[var(--mc-surface)] p-3">
           <span className="text-sm">Delivery fees (mover earnings, 30d)</span>
           <span className="text-sm font-semibold">{isLoading || isError ? '—' : `${gyd(summary?.thirtyDayDeliveryFees)} GYD`}</span>
         </div>
       </div>
 
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6">
+      <div className="mc-card">
         <h2 className="text-lg font-semibold mb-1">Daily completed orders (30 days)</h2>
-        <p className="text-[var(--muted)] text-xs mb-4">
-          Each row is a <span className="text-white">Guyana day</span> (midnight to midnight,
+        <p className="mc-muted text-xs mb-4">
+          Each row is a <span className="font-semibold text-[var(--mc-ink)]">Guyana day</span> (midnight to midnight,
           UTC-4) — not the day your browser is in.
         </p>
         {isLoading ? (
-          <p className="text-[var(--muted)] text-sm">Loading…</p>
+          <p className="mc-muted text-sm">Loading…</p>
         ) : isError ? (
-          <p className="text-[var(--muted)] text-sm">Not loaded — the revenue read failed (see above).</p>
+          <p className="mc-muted text-sm">Not loaded — the revenue read failed (see above).</p>
         ) : daily.length === 0 ? (
-          <p className="text-[var(--muted)] text-sm">No completed orders in the last 30 days.</p>
+          <p className="mc-muted text-sm">No completed orders in the last 30 days.</p>
         ) : (
           <div className="space-y-2">
             {daily.map((row: { date: string; order_count: number; delivery_fees: number }) => (
-              <div key={row.date} className="flex items-center justify-between p-2 rounded-lg bg-white/5 text-sm">
-                <span className="text-[var(--muted)]">{gyDay(row.date)}</span>
+              <div key={row.date} className="flex items-center justify-between p-2 rounded-lg bg-[var(--mc-surface)] text-sm">
+                <span className="mc-muted">{gyDay(row.date)}</span>
                 <span>{Number(row.order_count || 0).toLocaleString()} orders</span>
                 <span className="font-medium">{gyd(row.delivery_fees)} GYD fees</span>
               </div>

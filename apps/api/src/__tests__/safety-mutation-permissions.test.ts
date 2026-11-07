@@ -203,6 +203,7 @@ const CALLER_ONLY: Record<string, string> = {
   [`POST ${S}/sos`]: 'raises the caller\'s own alert; a context id attaches only for a participant (proved below)',
   [`POST ${S}/emergency-contacts`]: 'adds a contact to the caller\'s own list (emergency-contacts.test.ts)',
   [`POST ${S}/guardian/checkin`]: 'the session is resolved from the caller alone (safety-guardian-ladder.test.ts)',
+  [`POST ${S}/public/checkin`]: 'no caller: the one-time secret of ONE waiting ask answers only that check-in; every miss is one 404 (safety-guardian-web-rider.test.ts)',
   [`POST ${S}/guardian/driver-confirm`]: 'the caller\'s own hard-check cycle and its one-time nonce (safety-guardian-cycle-bound.test.ts)',
   [`POST ${S}/liveness-check`]: 'the caller\'s own selfie for their own shift (safety-liveness.test.ts)',
   [`PUT ${S}/monitoring-preference`]: 'the caller\'s own row only (proved below)',

@@ -165,7 +165,7 @@ export const VEND_02: Journey<Ctx> = {
     const acc = await PUT(`/vendor/orders/${A}/accept`, { estimatedPrepTime: 15 }, R2.session.token);
     rec.expect('the store accepts', acc, 200, undefined, `status=${acc.json?.data?.status}`);
     const bare = await PUT(`/vendor/orders/${B1}/reject`, {}, R2.session.token);
-    rec.check('a reject without a reason (E10: the API makes the reason optional)', bare.ok || bare.status === 400, `→ ${brief(bare)}${bare.ok ? ' — accepted with the default reason; the mobile app requires one (E10 open)' : ''}`);
+    rec.deny('a reject needs a reason', bare, [400], ['VALIDATION_ERROR']);
     const reasoned = await PUT(`/vendor/orders/${B2}/reject`, { reason: 'Kitchen closed early today' }, R2.session.token);
     rec.expect('the store rejects with a reason', reasoned, 200);
   },
@@ -175,7 +175,17 @@ export const VEND_02: Journey<Ctx> = {
     const C1 = ctx.roster.customers.C1!.session, C3 = ctx.roster.customers.C3!.session;
     rec.deny('another store cannot touch this order', await PUT(`/vendor/orders/${A}/preparing`, {}, R1.session.token), [404]);
     rec.expect('prepare', await PUT(`/vendor/orders/${A}/preparing`, {}, R2.session.token), 200);
-    rec.deny('ready cannot be skipped back to accept', await PUT(`/vendor/orders/${A}/accept`, {}, R2.session.token), [400], ['INVALID_STATUS']);
+    // [BUG-HUNT F12, #2334] Accept is double-tap safe: on a live order a repeat answers 200 with the
+    // order as it stands and moves nothing. A finished order is still refused ('a cancelled order
+    // cannot be accepted', below).
+    const beforeRepeat = await customerOrder(C1, A);
+    const repeat = await PUT(`/vendor/orders/${A}/accept`, {}, R2.session.token);
+    rec.expect('a repeat accept answers with the order', repeat, 200, undefined, `status=${repeat.json?.data?.status}`);
+    const afterRepeat = await customerOrder(C1, A);
+    const stepsOf = (x: any) => (x?.timeline ?? []).map((t: any) => t.status).join('>');
+    rec.check('a repeat accept changes nothing: still PREPARING, same timeline',
+      beforeRepeat?.status === 'PREPARING' && repeat.json?.data?.status === 'PREPARING' && afterRepeat?.status === 'PREPARING' && !!stepsOf(beforeRepeat) && stepsOf(afterRepeat) === stepsOf(beforeRepeat),
+      `before=${beforeRepeat?.status} reply=${repeat.json?.data?.status} after=${afterRepeat?.status} timeline ${stepsOf(beforeRepeat)} then ${stepsOf(afterRepeat)}`);
     rec.expect('ready', await PUT(`/vendor/orders/${A}/ready`, {}, R2.session.token), 200);
     const o = await customerOrder(C1, A);
     rec.check('the customer timeline records accept → preparing → ready', ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].every((s) => (o?.timeline ?? []).some((t: any) => t.status === s)),

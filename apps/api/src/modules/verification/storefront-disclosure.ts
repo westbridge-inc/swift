@@ -1,12 +1,13 @@
 import { readFeePause } from '../billing/mmg-pause';
+import { validExpiryOr } from './document-validity';
 /**
  * [DOC-1 Part XIX · DOC-INV-27 · P19] The storefront disclosure compiler.
  *
  * The ECT Act supplier-information block is a COMPILED artifact, never hand-written
  * prose: every legally required element is sourced from a VALID document record (its
  * submission's extracted fields), or from a fallback the spec names and LABELS
- * (PROPRIETOR = the verified proprietor's name "trading as …" for an unregistered
- * business; SELF_DECLARED = the address the vendor typed; ACCOUNT = the verified account
+ * (PROPRIETOR = the verified proprietor's name "trading as …" for a business with no
+ * registered business name, such as a trader under their own name; SELF_DECLARED = the address the vendor typed; ACCOUNT = the verified account
  * contact; PLATFORM = the operator block from the ONE OPERATOR constant). A required element with no
  * source leaves the block INCOMPLETE — it never falls back to self-reported text for a
  * legal fact. Nothing is stored: the block is derived on every read, so a lapsed licence
@@ -153,7 +154,7 @@ async function compileDisclosure(db: Db, vendor: DisclosureVendor, purpose: Disc
   const missing: string[] = [];
   const accountId = vendor.owner.userId;
   const records = (await db.documentRecord.findMany({
-    where: { tenantId: vendor.tenantId, accountId, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }],
+    where: { tenantId: vendor.tenantId, accountId, status: 'VALID', OR: validExpiryOr('expiresOn', now),
       submission: { userId: accountId, purgedAt: null } },
     select: { id: true, tenantId: true, accountId: true, subjectId: true, docType: true, submissionId: true, updatedAt: true,
       submission: { select: { docType: true, subjectId: true } } },

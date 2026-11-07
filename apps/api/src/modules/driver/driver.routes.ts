@@ -1,7 +1,10 @@
+import { cashInHandWindows } from '../dispatch/cash-in-hand';
+import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
 import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { shownRatingFor, shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
@@ -9,14 +12,18 @@ import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lo
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesStatus, declaresDeliveryCards, enableCarDeliveries, followTaxiCar, isTaxiTwin, notARideOffer, setTaxiAndDeliveries } from './car-deliveries';
+import { poolForOrder } from '../dispatch/dispatch-generation-keys';
+import { passengersOnlyRefusal, riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { explainEarning } from '../../utils/explain-earning';
 import { z } from '../../lib/zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
+import type { PrismaClient, VehicleType } from '@prisma/client';
 import { OrderService } from '../order/order.service';
-import { earningsWindow } from '../order/earnings-window';
+import { earningsWindow, jobsIn } from '../order/earnings-window';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { NotificationService } from '../notification/notification.service';
 import { VerificationService } from '../verification/verification.service';
@@ -31,6 +38,7 @@ import { moveTaxiStop, type TaxiStopAction } from '../rides/taxi-stop-progress';
 import { chatContentReason } from '../chat/content-filter';
 import { decorateRideWaiting, readFareBreakdown, type TaxiFareBreakdown } from '../rides/taxi-waiting';
 import { freshRidePinReset } from '../rides/ride-pin';
+import { PASSENGER_NO_SHOW_REASON, PASSENGER_NO_SHOW_TAP, passengerNoShowNote, passengerNoShowNotice, passengerNoShowRefusal } from '../rides/passenger-no-show';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { assertShiftLiveness } from '../safety/liveness.service';
 import { assertNotSafetySuspended } from '../safety/incident.service';
@@ -69,7 +77,7 @@ import {
 import { assertDriverMmgPayLinkWritable, driverMmgPayLinkEnabled, mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
 import { assertVelocity } from '../integrity/velocity';
-import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
+import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink, nextMoneySurfaceHoldHours } from '../integrity/money-surface';
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
 import { DRIVER_PRE_CUSTODY_STATUSES, TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
@@ -77,6 +85,8 @@ import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { assertHirePlateChange } from '../verification/hire-plate';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
+import { orderStageRefusal, STEP_GONE } from '../order/order-status-words';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -146,6 +156,12 @@ function driverLinkView(link: { mmgPayUrl: string | null; mmgPayUrlPending: stri
     mmgPayUrlPending: enabled ? safeMmgPayUrl(link.mmgPayUrlPending) : null,
     mmgPayUrlApplyAt: enabled ? link.mmgPayUrlApplyAt : null,
   };
+}
+
+/** [owner 30 Oct 2026] How many hours a pay link set NOW would wait: the configured cool-off (the 1-hour first
+ *  hold is for a store's MMG number only; money-surface.ts). Null while the driver pay link is switched off. */
+async function driverLinkHold(prisma: PrismaClient, driverId: string): Promise<{ mmgPayUrlHoldHours: number | null }> {
+  return { mmgPayUrlHoldHours: driverMmgPayLinkEnabled() ? await nextMoneySurfaceHoldHours(prisma, 'DRIVER', driverId, 'LINK') : null };
 }
 
 /** §6.3 `stopWait` on the wire: ISO times, or null. */
@@ -222,7 +238,7 @@ export async function driverRoutes(app: FastifyInstance) {
     return {
       success: true,
       // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
-      data: driver ? { ...driver, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, ...driverLinkView(driver) } : driver,
+      data: driver ? { ...driver, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, ...driverLinkView(driver), ...(await driverLinkHold(app.prisma, driver.id)) } : driver,
     };
   });
 
@@ -262,10 +278,20 @@ export async function driverRoutes(app: FastifyInstance) {
 
     const driver = await app.prisma.$transaction(async (tx) => {
       await lockUserRoleAuthority(tx, request.user.userId);
+      // [CARS-PLATES] The global lock order (User, then Rider, then Driver): the car's delivery twin, if any, follows a
+      // changed car below, so its row is locked first.
+      const twinRows = identityChanged
+        ? await tx.$queryRaw<Array<{ id: string; vehicleType: VehicleType; licensePlate: string | null; currentOrderId: string | null }>>`
+            SELECT "id", "vehicleType", "licensePlate", "currentOrderId" FROM riders WHERE "userId" = ${request.user.userId} FOR UPDATE`
+        : [];
       const profiles = await tx.$queryRaw<Array<{ updatedAt: Date }>>`
         SELECT "updatedAt" FROM drivers WHERE id = ${me.id} FOR UPDATE`;
       if (!profiles[0] || profiles[0].updatedAt.getTime() !== me.updatedAt.getTime()) throw staleMoverAuthorityError();
       if (identityChanged && me.currentRideId) throw new AppError(409, 'ACTIVE_WORK', 'Finish your active ride before changing your vehicle.');
+      const twin = twinRows[0] && isTaxiTwin(twinRows[0], me) ? twinRows[0] : null;
+      if (twin && (twin.currentOrderId || (await riderLiveLegCount(tx, twin.id)) > 0)) {
+        throw new AppError(409, 'ACTIVE_WORK', 'Finish your active delivery before changing your vehicle.');
+      }
       const driver = await tx.driver.update({
         where: { userId: request.user.userId },
         data: {
@@ -307,6 +333,9 @@ export async function driverRoutes(app: FastifyInstance) {
       if (identityChanged) {
         await requireFreshVehicleReview(tx, request.user.userId, me.licensePlate, { ...driver, kind: 'DRIVER' });
       }
+      // [CARS-PLATES] The taxi car's delivery twin names the changed car too, offline with the cleared grant, so it is
+      // never left on the old plate (where it would read as a separate private car).
+      if (twin) await followTaxiCar(tx, twin.id, driver.id, { isOnline: false, isAvailable: false, locationSessionId: null });
 
       return driver;
     });
@@ -322,7 +351,7 @@ export async function driverRoutes(app: FastifyInstance) {
       : await app.prisma.driver.findUniqueOrThrow({ where: { id: me.id }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true } });
     return {
       success: true,
-      data: { ...driver, ...driverLinkView(link), ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)) },
+      data: { ...driver, ...driverLinkView(link), ...(await driverLinkHold(app.prisma, me.id)), ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)) },
     };
   });
 
@@ -336,6 +365,32 @@ export async function driverRoutes(app: FastifyInstance) {
       actor: 'DRIVER', entityId: me.id, userId: request.user.userId, keepSessionId: request.authSessionId,
     });
     return { success: true, data };
+  });
+
+  /** [CARS-DELIVER] GET /deliveries — "Deliveries too": can this taxi car take store deliveries as well, and
+   *  is it set up? While CAR_DELIVERIES is off the answer is { available: false, reason: 'SWITCH_OFF' } and
+   *  the phone shows nothing (taxi cars carry passengers only until counsel verifies goods carriage). */
+  app.get('/deliveries', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId);
+    return { success: true, data: await carDeliveriesStatus(app.prisma, request.user.userId) };
+  });
+
+  /** [CARS-DELIVER] POST /deliveries — set up "Deliveries too": a delivery profile on this verified taxi car
+   *  (car-deliveries.ts). Refused while CAR_DELIVERIES is off, before anything is read or written. */
+  app.post('/deliveries', { preHandler: [app.authenticate] }, async (request) => {
+    if (!carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    await getDriver(request.user.userId);
+    return { success: true, data: await enableCarDeliveries(app.prisma, request.user.userId) };
+  });
+
+  /** [CARS-DELIVER PR4] PUT /deliveries/mode { takesDeliveries } — "taxi + deliveries": store delivery offers also
+   *  come while this taxi is online and free (car-deliveries.ts). Turning it ON is refused while CAR_DELIVERIES is
+   *  off, before anything is read or written; turning it off is always allowed. */
+  app.put('/deliveries/mode', { preHandler: [app.authenticate] }, async (request) => {
+    await getDriver(request.user.userId); // authz before validation
+    const { takesDeliveries } = z.object({ takesDeliveries: z.boolean() }).parse(request.body ?? {});
+    if (takesDeliveries && !carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    return { success: true, data: await setTaxiAndDeliveries(app.prisma, request.user.userId, takesDeliveries) };
   });
 
   /** POST /vehicle-photo — the PUBLIC exterior car photo riders see on
@@ -354,13 +409,14 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
     const { url } = await getStorageProvider().upload({
       buffer,
       filename: file.filename,
       mimeType: file.mimetype,
       folder: `vehicles/${driver.id}`,
     });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'vehicle-photo', fileKey: url, buffer, storage: getStorageProvider() });
 
     const updated = await app.prisma.driver.update({
       where: { id: driver.id },
@@ -410,7 +466,8 @@ export async function driverRoutes(app: FastifyInstance) {
     // THE canOperate rule (operate-gate.ts, G-BILL-03) — drivers require a
     // subscription row; the verdict maps onto this route's historical codes.
     // [REVIEW-PARTNER] Except in the store-review fiction, which has no money
-    // rail and therefore never holds one (review/demo-policy.ts).
+    // rail and therefore never holds one (review/demo-policy.ts). A fee this driver is owed is born first.
+    if (request.tenantKind !== 'REVIEW') await verification.settleMoverFeeAtGo(request.user.userId, 'DRIVER');
     const feePayer = await moverFeePayer(app.prisma, request.user.userId);
     const operability = await moverFeeOperability(app.prisma, feePayer, { missingRow: weeklyFeeMissingRowPolicy(request.tenantKind, 'BLOCK') });
     if (!operability.operable) {
@@ -429,7 +486,11 @@ export async function driverRoutes(app: FastifyInstance) {
     const location = driverGoOnlineSchema.parse(request.body ?? {});
     // [TAXI multi-stop 4/8] Set on EVERY go-online from what this app declares:
     // an older app going online after a newer one clears it again.
-    const taxiStopsCapable = declaresTaxiStops(driverCapabilitiesSchema.parse(request.body ?? {}).capabilities);
+    const declared = driverCapabilitiesSchema.parse(request.body ?? {}).capabilities;
+    const taxiStopsCapable = declaresTaxiStops(declared);
+    // [CARS-DELIVER PR4 · REVIEW-F #2139 S2-2] Likewise whether this app can show a delivery card: only then is it
+    // offered deliveries from taxi work ("taxi + deliveries"). Set on every GO, so an older app clears it again.
+    const deliveryCardsCapable = declaresDeliveryCards(declared);
 
     // Serialize GO against role switching and compare the profile generation
     // captured before the slower verification gates. If an accept/offline/
@@ -485,6 +546,7 @@ export async function driverRoutes(app: FastifyInstance) {
           "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
           "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
           "taxiStopsCapable" = ${taxiStopsCapable},
+          "deliveryCardsCapable" = ${deliveryCardsCapable},
           "updatedAt" = clock_timestamp()
         WHERE id = ${driver.id} AND ${documentDeadlineSql(liveGate)}
         RETURNING "isOnline", "isAvailable"`;
@@ -869,7 +931,8 @@ export async function driverRoutes(app: FastifyInstance) {
       // [F-0011] Polled continuously by the driver app — the PIN must never ride along.
       omit: HANDOVER_SECRETS_OMIT,
       include: {
-        // [COORD 17 Oct] The driver calls the passenger (no masked calling yet): first name + phone, never the last name.
+        // [COORD 17 Oct] The driver calls the passenger: first name + phone, never the last name.
+        // [O-1] The phone goes only to an installed store build (withCounterpartPhones below).
         customer: { select: { id: true, firstName: true, phone: true } },
         statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 },
       },
@@ -890,6 +953,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] From the arrival on, the live wait: what the driver
     // collects on top of the route fare, the same number the freeze will take.
     const waiting = order ? await decorateRideWaiting(app.prisma, order, itinerary?.stops ?? null) : {};
+    if (order) withCounterpartPhones(request, order);
     return { success: true, data: order && (itinerary || waiting.waiting) ? { ...order, ...itinerary, ...stopWait, ...waiting } : order };
   });
 
@@ -1037,8 +1101,9 @@ export async function driverRoutes(app: FastifyInstance) {
           id: driver.id,
           firstName: driver.user.firstName,
           lastName: driver.user.lastName,
-          phone: driver.user.phone,
-          avatar: driver.user.avatar,
+          // [O-1] Never the driver's number here: no build ever read it, and the order room is not a directory.
+          // [DOC-SECURITY G2] A loadable link, never the stored key.
+          avatar: await resolveAvatarUrl(driver.user.avatar),
           vehicleMake: driver.vehicleMake,
           vehicleModel: driver.vehicleModel,
           vehicleColor: driver.vehicleColor,
@@ -1087,6 +1152,10 @@ export async function driverRoutes(app: FastifyInstance) {
       fare: zMoneyWhole.optional(),
       offerAttemptId: z.string().min(1).max(64).optional(), // [F-014-04]
     }).parse(request.body);
+    // [CARS-DELIVER PR4 · REVIEW-G #2138 S2-2 (b)] acceptOffer takes the pool from the ORDER, so this route would claim
+    // a store delivery for an older taxi app that showed it as a ride. Refused before anything is consumed.
+    const kind = await app.prisma.order.findUnique({ where: { id: orderId }, select: { orderType: true } });
+    if (kind && poolForOrder(kind) !== 'DRIVER') throw notARideOffer();
     const order = await dispatch.acceptOffer(orderId, request.user.userId, undefined, offerAttemptId);
     return { success: true, data: { orderId: order.id, status: order.status, orderNumber: order.orderNumber } };
   });
@@ -1151,12 +1220,49 @@ export async function driverRoutes(app: FastifyInstance) {
     const { reason } = driverCancelSchema.parse(request.body ?? {});
     const order = await getDriverRide(driver.id, id);
 
+    // [BUG-HUNT-2 G03] "Passenger did not arrive" is not a hand-back: the driver waited, so the ride ends with a true record
+    // and nobody is marked down or sent. A second tap after a lost reply gets the answer it lost.
+    if (reason === PASSENGER_NO_SHOW_TAP) {
+      const noShowAnswer = { success: true, data: { orderId: id, status: 'CANCELLED', reDispatched: false } };
+      if (order.status === 'CANCELLED' && order.cancellationReason === PASSENGER_NO_SHOW_REASON) return noShowAnswer;
+      if (DRIVER_PRE_CUSTODY_STATUSES.includes(order.status) && !hasTaxiPassengerCustody(order)) {
+        const now = new Date();
+        const fix = { lat: driver.currentLat, lng: driver.currentLng, at: driver.lastLocationUpdate };
+        const refusal = passengerNoShowRefusal(order, fix, now);
+        if (refusal) throw refusal;
+        await orderService.transitionOrderAtomically({
+          orderId: id,
+          target: 'CANCELLED',
+          allowedFrom: ['DRIVER_ARRIVED'],
+          expectedDriverId: driver.id,
+          changedBy: request.user.userId,
+          note: passengerNoShowNote(order, fix, now),
+          cancellation: { by: request.user.userId, reason: PASSENGER_NO_SHOW_REASON },
+          // Judged again on the locked row: a code verified or a cancel that committed first wins.
+          withinTransaction: async (_tx, lockedSource) => {
+            const lockedRefusal = passengerNoShowRefusal(lockedSource, fix, new Date());
+            if (lockedRefusal) throw lockedRefusal;
+          },
+          invalidStatus: () => new AppError(409, 'INVALID_STATUS', 'This ride can no longer be closed. Refresh your current ride.'),
+        });
+        await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED', reason: 'passenger_no_show' });
+        await notifications.send({
+          userId: order.customerId,
+          type: 'ORDER_UPDATE',
+          ...passengerNoShowNotice(order.orderNumber),
+          dedupeKey: `passenger-no-show:${id}`,
+          data: taxiNotificationData(id, { status: 'CANCELLED' }),
+        });
+        return noShowAnswer;
+      }
+    }
+
     const cancellable = DRIVER_PRE_CUSTODY_STATUSES;
     if (!cancellable.includes(order.status) || hasTaxiPassengerCustody(order)) {
       throw new AppError(400, 'INVALID_STATUS',
         hasTaxiPassengerCustody(order)
           ? 'You cannot cancel once the trip has started — end the trip instead.'
-          : `Cannot cancel a ride in ${order.status} status`);
+          : orderStageRefusal(order.status, 'it cannot be cancelled', 'ride'));
     }
 
     // Controlled release, atomic: CAS the ride back to PENDING (unassigned) and
@@ -1241,7 +1347,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await getDriverRide(driver.id, id);
 
     if (order.status !== 'DRIVER_ASSIGNED') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot mark en-route from status ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, STEP_GONE, 'ride'));
     }
 
     // Compute ETA to pickup
@@ -1272,7 +1378,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await getDriverRide(driver.id, id);
 
     if (order.status !== 'DRIVER_EN_ROUTE') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot mark arrived from status ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, STEP_GONE, 'ride'));
     }
 
     const arrivedAt = new Date();
@@ -1315,7 +1421,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const updatedOrder = await advanceDriverPickup(app.prisma, {
       orderId: id, driverId: driver.id, assignmentVersion: order.driverAssignmentVersion,
       changedBy: request.user.userId, from: 'DRIVER_EN_ROUTE', target: 'DRIVER_ARRIVED',
-      note: gate.note, arrivedAt,
+      note: gate.note, arrivedAt, gpsVerified: gate.allowed,
     });
     try {
       await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'DRIVER_ARRIVED' });
@@ -1360,7 +1466,8 @@ export async function driverRoutes(app: FastifyInstance) {
       // HND-004: the SAME lockout rule the pickup code uses (one handover engine).
       const { locked, remaining } = handoverAttemptState(current.ridePinAttempts);
       if (locked) {
-        throw new AppError(400, 'MAX_ATTEMPTS', 'Maximum PIN verification attempts exceeded. Please contact support.');
+        // [BUG-HUNT-2 G05] Support can do what this says: the order page has a door for a new code.
+        throw new AppError(400, 'MAX_ATTEMPTS', 'Too many wrong codes. Ask Swift support for a new ride code: the passenger sees it in their app.');
       }
       // [Row 207] Constant time, through the one handover-code comparison.
       if (!handoverCodeMatches(current.ridePin, pin)) {
@@ -1407,7 +1514,7 @@ export async function driverRoutes(app: FastifyInstance) {
       });
       if (!current) throw new NotFoundError('Ride', id);
       if (current.status !== 'DRIVER_ARRIVED') {
-        throw new AppError(400, 'INVALID_STATUS', `Cannot start ride from status ${current.status}`);
+        throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(current.status, STEP_GONE, 'ride'));
       }
       if (!hasTaxiPassengerCustody(current)) {
         throw new AppError(400, 'PIN_REQUIRED', 'Ride PIN must be verified before starting the ride');
@@ -1551,7 +1658,7 @@ export async function driverRoutes(app: FastifyInstance) {
     const order = await getDriverRide(driver.id, id);
 
     if (order.status !== 'RIDE_IN_PROGRESS') {
-      throw new AppError(400, 'INVALID_STATUS', `Cannot complete ride from status ${order.status}`);
+      throw new AppError(400, 'INVALID_STATUS', orderStageRefusal(order.status, STEP_GONE, 'ride'));
     }
     // [M-29] A cash fare is earned when the money is recorded, never on this
     // tap: the fare outcome (paid / refused / left without paying) is the step
@@ -1578,7 +1685,7 @@ export async function driverRoutes(app: FastifyInstance) {
       note: 'Ride completed',
       terminalMetadata: { actualDeliveryTime: actualDuration },
       decayDriverCancellationRate: true,
-      invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', `Cannot complete ride from status ${current}`),
+      invalidStatus: (current) => new AppError(409, 'INVALID_STATUS', orderStageRefusal(current, STEP_GONE, 'ride')),
     });
 
     const finished = await finishedFare(order, 'DELIVERED', request.log);
@@ -1665,15 +1772,11 @@ export async function driverRoutes(app: FastifyInstance) {
 
   // ─── Earnings ──────────────────────────────────────────────────────────
 
-  /** [DOC-1 §31.4 · P31-1] The driver's guarantee claims — same view as the rider's. */
+  /** [DOC-1 §31.4 · P31-1] The driver's unpaid cash orders — same view as the rider's. */
   app.get('/claims', { preHandler: [app.authenticate] }, async (request) => {
     const driver = await getDriver(request.user.userId);
     const { moverClaims } = await import('../cash/rlp');
-    const { cashRulesFor } = await import('../cash/cash-rules.service');
-    const { CountryConfigService } = await import('../country/country-config.service');
-    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: request.user.userId }, select: { countryCode: true } });
-    const rules = await cashRulesFor(new CountryConfigService(app.prisma), user.countryCode);
-    return { success: true, data: await moverClaims(app.prisma, { riderId: null, driverId: driver.id }, rules) };
+    return { success: true, data: await moverClaims(app.prisma, { riderId: null, driverId: driver.id }) };
   });
 
   app.get('/earnings', { preHandler: [app.authenticate] }, async (request) => {
@@ -1825,22 +1928,18 @@ export async function driverRoutes(app: FastifyInstance) {
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: today } },
           _sum: { amount: true },
-          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: weekStart } },
           _sum: { amount: true },
-          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, createdAt: { gte: monthStart } },
           _sum: { amount: true },
-          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id },
           _sum: { amount: true },
-          _count: true,
         }),
         app.prisma.earning.aggregate({
           where: { driverId: driver.id, status: 'AVAILABLE' },
@@ -1854,16 +1953,24 @@ export async function driverRoutes(app: FastifyInstance) {
         }),
       ]);
 
+    const mine = { driverId: driver.id };
+    const [todayJobs, weekJobs, monthJobs, allJobs] = await Promise.all([
+      jobsIn(app.prisma, { ...mine, createdAt: { gte: today } }), jobsIn(app.prisma, { ...mine, createdAt: { gte: weekStart } }),
+      jobsIn(app.prisma, { ...mine, createdAt: { gte: monthStart } }), jobsIn(app.prisma, mine),
+    ]);
+
     return {
       success: true,
       data: {
         // SWIFT-080: each window is { total, count } — the SAME shape the rider
         // route returns and the mover EarningsScreen/MoverAccountScreen read.
         // Was a bare Number(), so a driver's tiles silently showed $0.
-        today: earningsWindow(todayEarnings),
-        thisWeek: earningsWindow(weekEarnings),
-        thisMonth: earningsWindow(monthEarnings),
-        allTime: earningsWindow(allTimeEarnings),
+        today: earningsWindow(todayEarnings, todayJobs),
+        thisWeek: earningsWindow(weekEarnings, weekJobs),
+        thisMonth: earningsWindow(monthEarnings, monthJobs),
+        allTime: earningsWindow(allTimeEarnings, allJobs),
+        // [board 13a] Cash kept from completed CASH jobs, per window (dispatch/cash-in-hand.ts). Additive.
+        cashInHand: await cashInHandWindows(app.prisma, { driverId: driver.id }),
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
         todayRides,
         totalRides,
@@ -1908,6 +2015,8 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!sub) return { success: true, data: null };
     const { sanDisplay } = await import('../billing/san.service');
     const { payInfo } = await import('../billing/agent-cash.service');
+    const { feeStatusFor } = await import('../billing/fee-status');
+    const fee = await payInfo(app.prisma, sub);
     // "My Swift Number" + Pay-screen block [san spec 2.4/6.1], then
     // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
     return {
@@ -1916,7 +2025,9 @@ export async function driverRoutes(app: FastifyInstance) {
         ...sub,
         moverFee: await moverFeeSourceSummary(app.prisma, feePayer),
         ...(await sanDisplay(app.prisma, sub)),
-        ...(await payInfo(app.prisma, sub)),
+        ...fee,
+        // [FEE-STATUS] Where the fee stands, in the server's words: never a passed date as a next bill.
+        feeStatus: await feeStatusFor(app.prisma, sub, fee),
         ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers), await cardRail.subscriptionFields(sub, request)),
         // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
         feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, sub.id),

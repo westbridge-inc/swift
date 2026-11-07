@@ -135,6 +135,14 @@ describe('[R10] the year ahead from today\'s partners', () => {
     expect(t.expectedNext12Months).toBe(52 * 6000 + 52 * 5000 + 50 * 6000);
     expect(t.expectedFrom).toEqual({ subscriptions: 3, weeklyFees: 17000 });
   });
+
+  it('[CHAINS] a custom rate above the tier rate is never counted: the fee charged is the lower (the biller\'s rule)', async () => {
+    const tenantId = await newTenant();
+    await rider(tenantId, { weeklyRate: 4000, customRate: 5000 }); // a deal branch that moved down a tier: charged 4,000
+    const t = await sys(() => vatTracker(app.prisma, tenantId, NOW));
+    expect(t.expectedNext12Months).toBe(52 * 4000);
+    expect(t.expectedFrom).toEqual({ subscriptions: 1, weeklyFees: 4000 });
+  });
 });
 
 describe('[R10] the admin alert names the threshold and the 15-day deadline', () => {

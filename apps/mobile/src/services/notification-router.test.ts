@@ -68,6 +68,17 @@ describe('destinationFor — the tap table', () => {
 // S0: PUSHES THAT OPENED THE APP AND DID NOTHING
 // ───────────────────────────────────────────────────────────────────────────
 
+describe('[G06] a ride that is over opens the ride', () => {
+  const ride = { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer' };
+  it.each(['DELIVERED', 'COMPLETED', 'CANCELLED', 'FAILED'])('%s opens its screen, not an empty booking form', (status) => {
+    expect(destinationFor({ ...ride, status })).toEqual({ screen: 'RideDetail', params: { rideId: 'r1' } });
+  });
+  it('a live ride still opens the taxi screen, and a driver still goes home', () => {
+    expect(destinationFor({ ...ride, status: 'DRIVER_EN_ROUTE' })).toEqual({ screen: 'Taxi' });
+    expect(destinationFor({ ...ride, status: 'DELIVERED', audience: 'earner' })).toEqual({ screen: 'Main' });
+  });
+});
+
 describe('a push never lands on a route its recipient cannot reach [S0]', () => {
   // THE SHAPE OF THIS WHOLE CLASS OF BUG. `Delivery` is the CUSTOMER order
   // screen. It is mounted by CustomerStack and by nothing else — so a push
@@ -102,7 +113,7 @@ describe('a push never lands on a route its recipient cannot reach [S0]', () => 
     expect(destinationFor({ kind: 'incident_interim_suspension', orderId: 'o1', caseNumber: 'INC-1' }))
       .toEqual({ screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } });
     expect(destinationFor({ kind: 'claim_over_gate', orderId: 'o1' }))
-      .toEqual({ screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } });
+      .toEqual({ screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Unpaid cash order', orderId: 'o1' } });
   });
 
   it('none of the three still falls through to the customer Delivery screen', () => {
@@ -188,6 +199,80 @@ describe('booking + service-job pushes land on the job [S0]', () => {
     // Untagged legacy rows are nobody-placeable: opening the app normally is
     // the safe answer, never a dead navigate into a vendor-only screen.
     expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1' })).toBeNull();
+  });
+});
+
+describe('[S4] a store appointment reminder opens the booking, for the person it is about', () => {
+  // The STORE appointment's reminder used to be booking_reminder with the
+  // Booking id as refId, and the booking_ prefix opened ServiceJobs: a jobs
+  // list that never shows a store booking, for the customer and the store.
+  // These are the copies the API sends now (services.service.ts).
+  it('the customer opens the booking\'s order screen, the store its order desk — never the jobs list', () => {
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1', audience: 'customer' }))
+      .toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1', audience: 'business' }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1' } });
+  });
+
+  it('a booking with no order on file still opens where it is listed: the customer\'s orders, the store\'s Schedule', () => {
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', audience: 'customer' })).toEqual({ screen: 'OrdersHistory' });
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', audience: 'business' })).toEqual({ screen: 'Schedule' });
+  });
+
+  it('an untagged copy cannot say whose it is, so it opens the app normally — never the other side\'s stack', () => {
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1' })).toBeNull();
+    expect(destinationFor({ kind: 'appointment_reminder', bookingId: 'b1' })).toBeNull();
+  });
+
+  it('is not in the booking_ family: no copy of it ever opens ServiceJobs', () => {
+    for (const audience of ['customer', 'business', undefined]) {
+      for (const orderId of ['o1', undefined]) {
+        const dest = destinationFor({ kind: 'appointment_reminder', bookingId: 'b1', ...(orderId ? { orderId } : {}), ...(audience ? { audience } : {}) });
+        expect(dest?.screen, `${String(audience)} / ${String(orderId)}`).not.toBe('ServiceJobs');
+      }
+    }
+  });
+});
+
+describe('[BOOK-FU2] a moved store appointment opens the booking, for the person it is about', () => {
+  // The move notice used to be booking_rescheduled. These are the copies the
+  // API sends now (booking/appointment-moved.ts): the customer moved it and the
+  // business is told, or the business moved it and the customer is told. Each
+  // names the NEW booking row the move wrote and the booking's order.
+  it('the customer opens the booking\'s order screen, the store its order desk — never the jobs list', () => {
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1', audience: 'customer' }))
+      .toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1', audience: 'business' }))
+      .toEqual({ screen: 'VendorOrderDetail', params: { orderId: 'o1' } });
+  });
+
+  it('a booking with no order on file still opens where it is listed: the customer\'s orders, the store\'s Schedule', () => {
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', audience: 'customer' })).toEqual({ screen: 'OrdersHistory' });
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', audience: 'business' })).toEqual({ screen: 'Schedule' });
+  });
+
+  it('an untagged copy cannot say whose it is, so it opens the app normally — never the other side\'s stack', () => {
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1' })).toBeNull();
+    expect(destinationFor({ kind: 'appointment_moved', bookingId: 'b2' })).toBeNull();
+  });
+
+  it('is not in the booking_ family: no copy of it ever opens ServiceJobs, whichever app is open', () => {
+    for (const audience of ['customer', 'business', undefined]) {
+      for (const orderId of ['o1', undefined]) {
+        for (const intent of [undefined, 'customer', 'vendor', 'mover'] as const) {
+          const dest = destinationFor(
+            { kind: 'appointment_moved', bookingId: 'b2', ...(orderId ? { orderId } : {}), ...(audience ? { audience } : {}) },
+            intent ? () => intent : undefined,
+          );
+          expect(dest?.screen, `${String(audience)} / ${String(orderId)} / ${String(intent)}`).not.toBe('ServiceJobs');
+        }
+      }
+    }
+  });
+
+  it('a row sent before the change (booking_rescheduled) still opens where it did', () => {
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1', audience: 'business' })).toEqual({ screen: 'Schedule' });
+    expect(destinationFor({ kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' })).toEqual({ screen: 'OrdersHistory' });
   });
 });
 
@@ -294,11 +379,22 @@ const CENSUS: Case[] = [
   { k: 'vendor_order_alert', d: { ...O, orderNumber: 'SW-1', status: 'PENDING', audience: 'business', respondBy: '2026-09-24T20:10:00.000Z' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1' } }, why: 'store — THE new-order alert [fixed here]. [Q10] It carries the auto-cancel deadline its push rings until, and the business audience' },
   { k: 'mmg_unattested_cancellation', d: { ...O, audience: 'business' }, to: { screen: 'Main' }, why: 'store — a cancelled order may still hold an MMG payment; their Main is the dashboard' },
   { k: 'vendor_customer_answered', d: { ...O, orderNumber: 'SW-1', audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store team — [O-4] the customer answered an out-of-stock question asked before acceptance; the order desk holds Accept [audience rule]' },
+  { k: 'mmg_store_silent', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [G14c] the store has not confirmed the payment they reported; their order screen says support is checking' },
+  { k: 'mmg_dispute_hold', d: { ...O, audience: 'earner' }, to: { screen: 'ActiveJob' }, why: 'RIDER — [G22] the customer disputes the payment at the door; the job screen holds the hold and support. Was no notice at all' },
+  { k: 'mmg_refund_sent', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [G08] the store says it sent a refund; the order screen asks whether it arrived' },
+  { k: 'mmg_refund_owed', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [G22] a paid order came back; the order screen says who owes what' },
+  { k: 'mmg_refund_checking', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [G22] a paid order came back with no figure known; support is checking' },
+  { k: 'mmg_refund_owed_store', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G22] a paid order came back; the order desk holds Refund sent [audience rule]' },
+  { k: 'mmg_refund_confirmed', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] the customer confirmed the refund arrived [audience rule]' },
+  { k: 'mmg_refund_disputed', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] the customer says the refund did not arrive [audience rule]' },
+  { k: 'mmg_refund_overdue', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] a refund is past its deadline; the order desk holds Refund sent [audience rule]' },
+  { k: 'mmg_refund_resolved', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [G08] support found or voided a refund; the customer copy opens their order [audience rule]' },
+  { k: 'pickup_not_collected', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store owner — [G20] a pickup has been ready for a day and nobody came; the order desk holds Not collected [audience rule]' },
   { k: 'mmg_customer_says_paid', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store owner — [owner 18 Oct] the customer says they paid and the store has not tapped Paid by MMG 30 minutes after accepting; the order desk holds the Paid by MMG button [audience rule]' },
   // `d` must mirror what the API actually SENDS. The drift check compares only
   // `kind` strings, so a payload that grows a field goes unnoticed here and the
   // case then grades a shape nothing produces.
-  { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts' },
+  { k: 'claim_over_gate', d: O, to: { screen: 'GetHelp', params: { category: 'PAYMENT', subject: 'Unpaid cash order', orderId: 'o1' } }, why: 'rider — the body says "support will follow up"; this is the door for someone who would rather not wait. GetHelp is mounted in every navigator. Was Delivery, which MoverStack never mounts', scan: false },
   { k: 'guardian_checkin', d: { ...O, sessionId: 's1', level: 'SOFT' }, to: { screen: 'Taxi' }, why: 'passenger mid-RIDE — the check-in card lives on Taxi, which asks the server whether one is outstanding. Was Delivery, a screen a ride never renders on, so the person being asked if they are safe could not answer' },
   { k: 'guardian_driver_confirm', d: { ...O, sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z' }, to: { screen: 'GuardianDriverConfirm', params: { sessionId: 's1', cycleId: 'cy1', nonce: 'n1', respondBy: '2026-09-03T12:00:00.000Z', orderId: 'o1' } }, why: '[TST-001] the DRIVER, on a screen MoverStack mounts. This used to route to Delivery — which MoverStack never mounts — and this census asserted that dead end as passing, on a SAFETY path, while POST /safety/guardian/driver-confirm sat with no caller. It carries the cycle and the nonce so the screen answers THAT check' },
   { k: 'guardian_deescalation', d: { ...O, sessionId: 's1', cycleId: 'cy1' }, to: DELIVERY('o1'), why: 'admins — [S-04] a passenger never answered a hard check and the driver de-escalated; the review is an ops surface, not mobile' },
@@ -309,9 +405,11 @@ const CENSUS: Case[] = [
   { k: 'not_my_driver_discrepancy', d: { missingCase: [], missingDispatch: [], repaired: [] }, to: null, why: 'admins — [S-13] a not-my-driver decision lacked its case or its dispatch command; an ops surface' },
   { k: 'trip_share_rotated', d: { ...O }, to: { screen: 'Taxi' }, why: 'sharer — [S-16 · PUSH-ROUTING] their share link was reset and the body says to share the trip again; only the Taxi screen shares a trip. It routed by orderId to Delivery, a screen a ride never renders on (the guardian_checkin lesson)' },
   { k: 'trip_share_ended', d: { outcome: 'STOPPED_BY_RIDER' }, to: HOME, why: 'HOME: guardian — [L10 §2] the trip someone shared with them ended (stopped, completed, cancelled, or contact lost); they follow a trip, they own no order, so the notice is the whole message' },
-  { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: null, why: 'admins — [S-19] an ops page nobody acknowledged by its deadline; the alert list is an ops surface' },
-  { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: null, why: 'admins — [S-19] a scheduled or manual drill of the paging path; an ops surface' },
-  { k: 'csae_report', d: { opsAlertId: 'a1', contentReportId: 'r1', targetType: 'USER' }, to: null, why: 'admins — [R19] a child-safety report pages operations; the moderation queue is an ops surface' },
+  { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [S-19 · DRILL-STORM] a page nobody acknowledged: it opens on the Ops alerts screen, where it is acknowledged (it used to open nothing, so it could only be stopped from a computer)' },
+  { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [S-19 · DRILL-STORM] the paging drill is acknowledged where a real page is' },
+  { k: 'ops_checkin_link_flood', d: { opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [COORD R1] the texted check-in link got a flood of wrong answers from one address: a platform page, acknowledged on Ops alerts like every page (its push carries the opsAlertId)' },
+  { k: 'ops_alert_drill_failed', d: { opsAlertId: 'a1', opsAlertIds: ['a1'], count: 1 }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [DRILL-STORM] a drill nobody acknowledged within its window was closed as FAILED; the notice opens Ops alerts, where its failed drill is named and the next drill is acknowledged' },
+  { k: 'csae_report', d: { opsAlertId: 'a1', contentReportId: 'r1', targetType: 'USER' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [R19 · DRILL-STORM] a child-safety report is an ops page: acknowledged on Ops alerts (the moderation queue stays on the console)' },
   { k: 'safety_sweep_slo', d: { workType: 'guardian.open', stalled: true, passAgeSeconds: 1200 }, to: null, why: 'admins — [S-05] a safety sweep whose pass stalled past the SLO or whose rows keep failing; an ops surface, not mobile' },
   { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } }, why: 'suspended mover — the body says "contact Swift support to respond", and support is the ONLY way back. Same destination as liveness_locked, for the same reason. Was Delivery, which MoverStack never mounts' },
   { k: 'support_ticket', d: { ...O, ticketId: 't1' }, to: DELIVERY('o1'), why: 'admins — ops queue lives on the web console' },
@@ -321,11 +419,13 @@ const CENSUS: Case[] = [
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
   { k: 'ops_rider_no_show', d: { ...O, riderId: 'r1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] a rider accepted and never picked up; the order went back to dispatch' },
   { k: 'ops_rider_waiting', d: { ...O, riderId: 'r1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] a rider is waiting at a store that has not marked the order ready' },
-  { k: 'ops_rider_waiting_long', d: { ...O, riderId: 'r1', waitedMinutes: 61, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] the loud ops-alert page: a rider has waited 3 release windows at a store that is not ready; a person decides' },
+  { k: 'ops_rider_waiting_long', d: { ...O, riderId: 'r1', waitedMinutes: 61, opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [OF-33 · DRILL-STORM] the loud ops-alert page: a rider has waited 3 release windows at a store that is not ready; a person decides — the page is acknowledged on Ops alerts (the order screen was the CUSTOMER tracking screen)' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
+  { k: 'ops_mmg_refund_overdue', d: { overdue: 1, orderIds: ['o1'] }, to: null, why: 'admins' },
+  { k: 'ops_pickup_uncollected', d: { count: 1, orderIds: ['o1'] }, to: null, why: 'admins' },
   { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
   { k: 'ops_cash_door_short', d: { ...O, due: 3500, collected: 2800, shortfall: 700 }, to: DELIVERY('o1'), why: 'admins — [L02 row 34] a cash order was handed over for less than due; the mismatch is held for review' },
-  { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — partial cash could not be handed back and remains with the rider for operations' },
+  { k: 'ops_cash_return_held', d: { ...O, amount: 2000, opsAlertId: 'a1' }, to: { screen: 'OpsAlerts', params: { opsAlertId: 'a1' } }, why: 'responders — [DRILL-STORM] partial cash could not be handed back and remains with the rider; it is an ops page, acknowledged on Ops alerts' },
   { k: 'RATING_REMINDER', d: O, to: DELIVERY('o1'), why: 'customer — rate a finished order (the one SHOUTY kind)', scan: false },
   { k: 'ops_mover_session_ended:o1', d: O, to: DELIVERY('o1'), why: 'admins — kind is built with the orderId appended', scan: false },
 
@@ -351,8 +451,11 @@ const CENSUS: Case[] = [
   { k: 'booking_started', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider asserted commencement at the agreed time' },
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
-  { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },
-  { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28: the business copy is tagged audience, the customer copy opens normally]' },
+  { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both sides of a service JOB, 24h out (a store appointment has its own kind since S4, below)' },
+  { k: 'booking_moved', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — [BOOK-P2] a time booked from a pro\'s menu moved; the jobs list shows the new time (builds 9-12 route the booking_ prefix there)' },
+  { k: 'appointment_reminder', d: { bookingId: 'b1', orderId: 'o1', audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [S4] their store appointment is within 24h: the booking\'s own order screen. The store copy (audience business) opens its order desk; both are tabled below' },
+  { k: 'booking_rescheduled', d: { bookingId: 'b1', audience: 'business' }, to: { screen: 'Schedule' }, why: 'store — the moved slot on their agenda [E28]. [BOOK-FU2] No longer sent (appointment_moved, below): kept for inbox rows sent before it', scan: false },
+  { k: 'appointment_moved', d: { bookingId: 'b2', orderId: 'o1', audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [BOOK-FU2] the business moved their store appointment: the booking\'s own order screen. The store copy (audience business, the customer moved it) opens its order desk; both are tabled below' },
 
   // ── [PUSH-ROUTING] The weekly fee: every notice about a partner’s subscription opens the fee screen.
   { k: 'billing_mmg_checkout', d: { subscriptionId: 's1', ref: 'checkout-1', status: 'CONFIRMED' }, to: { screen: 'WeeklyFee', params: { ref: 'checkout-1', subscriptionId: 's1', vendorId: undefined } }, why: 'MMG-CHECKOUT-API 628c8206: server state is fetched on the weekly-fee screen' },
@@ -375,14 +478,14 @@ const CENSUS: Case[] = [
   { k: 'claim_update', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — same screen' },
 
   // ── Verification / liveness / safety of the person receiving it [PUSH-ROUTING: no row opens nothing].
-  { k: 'verification_approved', d: { docId: 'd1', audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — [PUSH-ROUTING] the documents screen of the role the document belongs to: earner -> MoverDocuments, customer -> IdentityVerification, business -> the store’s Account tab (its Documents section). Untagged rows follow the app that is open (table below)' },
-  { k: 'verification_rejected', to: { screen: 'IdentityVerification' }, why: 'document owner — they must re-upload. notifyRejection sends no audience, so the open app decides (table below); with no app context, the customer ID screen' },
+  { k: 'verification_approved', d: { docId: 'd1', audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — [PUSH-ROUTING] the documents screen of the role the document belongs to: earner -> MoverDocuments, customer -> home ([CHECKLIST-LEGAL] no customer ID screen any more), business -> the store’s Account tab (its Documents section). Untagged rows follow the app that is open (table below)' },
+  { k: 'verification_rejected', to: HOME, why: 'document owner — they must re-upload. notifyRejection sends no audience, so the open app decides (table below); with no app context, home ([CHECKLIST-LEGAL] no customer ID screen any more)' },
   { k: 'verification_expired', d: { docId: 'd1', audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — renew it on the documents screen of its role' },
   { k: 'verification_expiry_reminder', d: { docId: 'd1', daysLeft: 3, audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — an approved document re-opens for upload in its renewal window, on that screen' },
   { k: 'verification_application_abandoned', d: { audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'applicant — [Row 249] their unfinished application documents will be deleted in 14 days; finishing it happens on the documents screen of its role' },
   { k: 'verification_forced_offline', d: { audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'mover — taken offline because a required document lapsed; renewing it is the way back online' },
   { k: 'verification_vehicle_lapsed', d: { docId: 'd1', subjectId: 's1', suspended: 3, audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'mover who owns the vehicle — a vehicle document lapsed and its drivers cannot take jobs; it is renewed on the mover documents checklist' },
-  { k: 'verification_l2', d: { audience: 'customer' }, to: { screen: 'IdentityVerification' }, why: 'customer — their ID is on file; the ID screen shows it' },
+  { k: 'verification_l2', d: { audience: 'customer' }, to: HOME, why: 'customer — "your ID is on file". [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] No longer sent (Swift keeps no customer ID): an inbox row sent before opens the app normally', scan: false },
   { k: 'trust_l3', to: HOME, why: 'HOME: customer — trusted status earned; no screen shows the trust tier, so the notice is the whole message' },
   { k: 'liveness_midshift_prompt', d: { respondBy: '2026-01-01T00:00:00.000Z', profile: 'DRIVER' }, to: { screen: 'LivenessCheck', params: { profile: 'DRIVER', respondBy: '2026-01-01T00:00:00.000Z' } }, why: 'E12: the timed selfie check, deadline riding along' },
   { k: 'liveness_midshift_missed', to: { screen: 'LivenessCheck', params: { profile: 'DRIVER' } }, why: 'E12: a fresh PASS is the only way back online' },
@@ -394,6 +497,9 @@ const CENSUS: Case[] = [
   { k: 'incident_shadow_restricted', d: { caseNumber: 'INC-1', category: 'HARASSMENT' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account under review' } }, why: 'the subject — the body says contact support to respond; GetHelp is mounted in every navigator, as for incident_interim_suspension' },
   { k: 'compliance_review_failed', d: { audience: 'earner', caseId: 'c1' }, to: { screen: 'MoverDocuments' }, why: 'mover — offline until their documents are re-verified; the body says re-submit them in the app' },
 
+  // [O-1] "Swift is calling you about your order", just before a Swift-bridged call rings this person.
+  // One row (the customer copy); the store and mover copies are tabled below and graded too.
+  { k: 'call_incoming', d: { callOrderId: 'o1', orderType: 'FOOD_DELIVERY', from: 'rider', leg: 2, audience: 'customer' }, to: DELIVERY('o1'), why: '[O-1] the customer — Swift is about to ring them for a call about this order; their tracking screen. The payload says callOrderId, never orderId, so builds 9-12 (no case for it) open the app instead of a screen that cannot show a mover\'s or a store\'s job' },
   // ── Store surfaces, then the advertiser kinds (ADS OFF at launch).
   { k: 'low_stock', d: { itemId: 'i1', remaining: 2 }, to: VENDOR_TAB('Menu'), why: 'store owner — the catalogue tab, where stock and availability are set. The payload names the item, not the store: it opens on the selected store' },
   { k: 'staff_added', d: { vendorId: 'v1' }, to: { screen: 'VendorRoot' }, why: 'the person ADDED to a store team — the store’s own screen, selected by its vendorId; it is reached in Business mode, which the body tells them to choose' },
@@ -408,7 +514,9 @@ const CENSUS: Case[] = [
   { k: 'ad_campaign_live', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_completed', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_paused', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
+  { k: 'ad_team_invite', d: { advertiserId: 'a1' }, to: null, why: 'ADS OFF: the invited person — invitations are answered on the website (owner, 3 Nov), and the notice names where; until a new app build the notice is the whole message' },
   { k: 'ad_campaign_resumed', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
+  { k: 'ad_mmg_checkout', d: { ref: 'r1', status: 'HELD', campaignId: 'c1' }, to: null, why: 'ADS OFF: advertiser — ad invoices are paid on the website, so an MMG result opens nothing in the app' },
   { k: 'ad_campaign_cancelled', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_killed', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
   { k: 'ad_campaign_auto_cancelled', d: { campaignId: 'c1' }, to: null, why: 'ADS OFF: same' },
@@ -420,14 +528,24 @@ const CENSUS: Case[] = [
 
   // ── Admin / ops pages. null is CORRECT: there is no mobile admin app.
   { k: 'ops_error_spike', to: null, why: 'admins' },
+  { k: 'ops_fee_refund_overdue', to: null, why: 'admins' },
+  { k: 'ops_error_sustained', to: null, why: 'admins' },
+  { k: 'ops_ride_overdue', to: null, why: 'admins' },
   { k: 'ops_collusion_affinity', to: null, why: 'admins' },
   { k: 'ops_billing_failures', to: null, why: 'admins' },
   { k: 'ops_pool_saturation', to: null, why: 'admins' },
+  { k: 'ops_riders_short', to: null, why: 'admins — [RIDER-SAFE 6] one page when riders run short; the console holds the pause switch' },
   // Backups are stale, or are running but never leaving the machine they
   // protect. Admin-only and acted on from the server, not the phone.
   { k: 'ops_backup_stale', to: null, why: 'admins' },
   // The upload malware scanner (clamd) stopped answering: uploads are refused until it is back.
   { k: 'ops_malware_scanner_down', d: { failures: 2, reason: 'x' }, to: null, why: 'admins — ops page, acted on from the server (row 312)' },
+  // Uploads stored before a clean scan (row 312 follow-up): the emergency bypass is on, evidence is
+  // held for its scan, or a stored upload was quarantined. Admin-only, acted on from the server.
+  { k: 'ops_malware_scan_bypass', d: { unscannedOpen: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_evidence_unscanned', d: { open: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_evidence_held', d: { held: 1 }, to: null, why: 'admins — ops page (row 312)' },
+  { k: 'ops_upload_quarantined', d: { surface: 'vehicle-photo', reason: 'bypass', debtId: 'd1', signature: 'x' }, to: null, why: 'admins — ops page (row 312)' },
   { k: 'ops_reaper_stale', d: { ageHours: 50 }, to: null, why: 'admins — the document reaper is behind by two cycles (DOC-1 §9.2)' },
   { k: 'ops_reaper_failed', d: { error: 'x' }, to: null, why: 'admins — the document reaper threw (DOC-1 §9.2)' },
   { k: 'ops_image_policy_failed', d: { error: 'boom' }, to: null, why: 'admins — ops page, admin only' },
@@ -437,11 +555,14 @@ const CENSUS: Case[] = [
   { k: 'rlp_suspended', d: {}, to: { screen: 'Claims' }, why: 'rider — the claims screen shows the suspension and the help route' },
   { k: 'rlp_reinstated', d: {}, to: { screen: 'Claims' }, why: 'rider — same screen' },
   { k: 'rlp_sla_breached', d: { breached: 2, date: '2026-09-06' }, to: null, why: 'admins — approved payouts past the SLA' },
-  { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'admins — the reserve line is below its floor' },
-  { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'admins — the monthly provisioning notice' },
-  { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6)' },
+  { k: 'rlp_review_overdue', d: { overdue: 2, date: '2026-09-06' }, to: null, why: 'admins — a case still open at 7 days' },
+  { k: 'rlp_reserve_low', d: { countries: ['GY'], date: '2026-09-06' }, to: null, why: 'admins — an older notice: no sum has to be held any more', scan: false },
+  { k: 'rlp_reserve_provisioned', d: { countryCode: 'GY', periodKey: '2026-08' }, to: null, why: 'admins — the monthly provisioning notice', scan: false },
+  { k: 'vendor_tier_promoted', d: { vendorId: 'v1' }, to: { screen: 'VendorTier' }, why: 'vendor owner — the seller-status screen (DOC-1 §3.6). [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No longer sent (the self-declared tier is removed): kept for inbox rows sent before', scan: false },
   { k: 'vendor_needs_public_phone', d: { vendorId: 'v1' }, to: { screen: 'Main' }, why: 'vendor owner — [owner #51] documents done, the store goes live once it publishes a number customers can call; the waiting store\'s own screen asks for it' },
-  { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps' },
+  { k: 'vendor_needs_food_handler_tick', d: { vendorId: 'v1' }, to: { screen: 'VendorRoot', params: { screen: 'Account' } }, why: 'vendor owner — [FOOD-PERMIT · owner 24 Oct] a registered restaurant ticks that everyone who handles its food holds a current certificate; the store\'s Documents (on Account) show the tick' },
+  { k: 'vendor_needs_weekly_fee_tick', d: { vendorId: 'v1', weeklyFee: 45000, currencyCode: 'GYD' }, to: { screen: 'VendorRoot', params: { screen: 'Account' } }, why: 'vendor owner — [RETIER PR-A · owner 30 Oct] a store whose fee follows its catalogue above the first step goes live once its owner ticks that exact fee; the store\'s go-live steps (on Account) show it' },
+  { k: 'vendor_tier_nudge', d: { vendorId: 'v1', ordersToday: 18, grossThisWeek: 90000 }, to: { screen: 'VendorTier' }, why: 'vendor owner — same screen; it shows the usage against the caps. [CHECKLIST-LEGAL] No longer sent: kept for inbox rows sent before', scan: false },
   // Its sibling from the same heartbeat: a background job exhausted its retries
   // (N4/WS-8.1). Admin-only, and the surface that acts on it is the ADMIN web
   // console's Background jobs page — there is no mobile admin surface, so the
@@ -477,6 +598,7 @@ const CENSUS: Case[] = [
   { k: 'mmg_number_change_staged', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the OLD contact point — the owner, on every device — sees the pending number and can cancel it' },
   { k: 'mmg_number_change_applied', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the cool-off passed; the new number is live where it is managed' },
   { k: 'mmg_number_change_cancelled', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'the owner cancelled; other devices were signed out' },
+  { k: 'mmg_number_pending_removed', d: { actor: 'VENDOR' }, to: { screen: 'Account' }, why: 'a number WAITING to go live was removed; the owner lands where the MMG number card shows it' },
   { k: 'store_pin_moved', d: { vendorId: 'v1', audience: 'business' }, to: { screen: 'Account' }, why: 'the store OWNER — [Q8 · DS269 F1] a manager moved the map pin riders and customers are sent to; Account holds the Store location card that shows it and moves it back' },
   { k: 'incident_new', d: { caseId: 'c1', caseNumber: 'INC-1' }, to: null, why: 'admins' },
   { k: 'incident_sla_breach', d: { caseId: 'c1' }, to: null, why: 'admins' },
@@ -489,6 +611,8 @@ const CENSUS: Case[] = [
   { k: 'verification_sla_breach', d: { slaHours: 24 }, to: null, why: 'admins' },
   { k: 'audit_chain_broken', d: { breakAt: '12', reason: 'HASH' }, to: null, why: 'admins — the tamper-evident audit chain failed verification (DOC-1 §20.1)' },
   { k: 'audit_chain_anchor', d: { headSeq: '12', headHash: 'ab', verified: true }, to: null, why: 'admins — the daily audit-chain head to keep outside Swift' },
+  { k: 'erasure_delayed', d: { revisitBy: '2027-01-27T00:00:00.000Z' }, to: HOME, why: 'HOME: the person — [SEC-PII · Privacy s6] their deletion request waits for a review; the notice says why and when and is the whole message (builds 9-12, which do not know the kind, open the app normally: never a crash)' },
+  { k: 'erasure_completed', to: HOME, why: 'HOME: the person — [SEC-PII · Privacy s6] the delayed deletion is done; the notice is the whole message (builds 9-12 open the app normally for a kind they do not know)' },
   { k: 'verification_legal_hold_overdue', d: { overdue: 1, holdIds: ['h1'] }, to: null, why: 'admins — a document legal hold past its review date (DOC-1 §9.4)' },
   { k: 'integrity_appeal', d: { enforcementId: 'e1' }, to: null, why: 'admins' },
   { k: 'dup_doc', d: { sha256: 'x' }, to: null, why: 'admins' },
@@ -496,9 +620,32 @@ const CENSUS: Case[] = [
   { k: 'advertiser_application', d: { advertiserId: 'a1' }, to: null, why: 'admins' },
   { k: 'ad_review_sla_risk', d: { creativeId: 'c1' }, to: null, why: 'admins' },
   { k: 'ad_campaign_killed_ops', d: { campaignId: 'c1' }, to: null, why: 'admins' },
+  { k: 'ad_house_link_off', d: { houseAdId: 'h1' }, to: null, why: 'admins' },
+  { k: 'call_daily_cap', to: null, why: 'admins — Swift-wide daily call cap reached (calls.routes.ts), once per UTC day' },
   { k: 'ad_refund_payout_task', d: { campaignId: 'c1' }, to: null, why: 'admins' },
   { k: 'ad_campaign_paid', d: { campaignId: 'c1', invoiceNumber: 'INV-1' }, to: null, why: 'admins' },
   { k: 'sos_marked_safe', d: { sosAlertId: 'a1' }, to: null, why: 'admins' },
+  // [BILL-PRO PR4/PR5] A pro's weekly-fee notices (API notification/provider-fee-kinds.ts, audience 'provider') open
+  // the pro fee screen (the store and mover fee screens cannot load a pro's fee). Builds 9-12 do not know these kinds
+  // and open the app where it was.
+  { k: 'provider_fee_mmg_checkout', d: { subscriptionId: 's1', ref: 'checkout-1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: { ref: 'checkout-1' } }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_mmg_pending', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_success', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_failed', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_final_warning', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_suspended', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_suspended_nudge', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_reminder', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_banked', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_churned', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_topup', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_card_action_required', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_trial', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_fx_change', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_rate_change', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_usd_migration', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
+  { k: 'provider_fee_cover_ended', d: { subscriptionId: 's1', audience: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'the store fee that covered a pro ended: their own fee applies again (REVIEW-M #2229 N2), on the pro fee screen' },
+  { k: 'provider_fee_notice', d: { subscriptionId: 's1', audience: 'provider', feeFamily: 'provider' }, to: { screen: 'ProviderWeeklyFee', params: {} }, why: 'a pro\'s own weekly fee: the pro fee screen, where it is seen and paid' },
 ];
 
 // ── [PUSH-ROUTING] The census keeps ONE payload per kind. The kinds below go to
@@ -519,12 +666,16 @@ const DOCUMENT_KINDS = ['verification_approved', 'verification_rejected', 'verif
 /** Census rows whose recipient is a store (owner or team). */
 const STORE_KINDS = [
   'low_stock', 'staff_added', 'staff_joined', 'category_request_resolved', 'category_backfill_review',
-  'vendor_tier_promoted', 'vendor_tier_nudge', 'vendor_needs_public_phone', 'store_pin_moved', 'booking_rescheduled',
+  'vendor_tier_promoted', 'vendor_tier_nudge', 'vendor_needs_public_phone', 'vendor_needs_food_handler_tick', 'vendor_needs_weekly_fee_tick', 'store_pin_moved', 'booking_rescheduled',
 ];
 
 /** Customer copies of kinds the census lists for someone else, or untagged. */
 const CUSTOMER_COPIES: Record<string, unknown>[] = [
   { kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' },
+  // [S4] A confirmed booking with no order on file (none is created that way today): their orders list.
+  { kind: 'appointment_reminder', bookingId: 'b1', audience: 'customer' },
+  // [BOOK-FU2] A moved booking with no order on file (none is created that way today): their orders list.
+  { kind: 'appointment_moved', bookingId: 'b2', audience: 'customer' },
   { kind: 'verification_rejected', audience: 'customer' },
   { kind: 'verification_approved', docId: 'd1', audience: 'customer' },
   { kind: 'verification_expired', docId: 'd1', audience: 'customer' },
@@ -535,6 +686,7 @@ const CUSTOMER_COPIES: Record<string, unknown>[] = [
   { kind: 'trip_share_rotated', orderId: 'o1' },
   { kind: 'trip_share_ended', outcome: 'COMPLETED' },
   { kind: 'trust_l3' },
+  { kind: 'call_incoming', callOrderId: 'o1', orderType: 'TAXI', from: 'driver', leg: 2, audience: 'customer' },
 ];
 
 /** Store copies of kinds the census lists with another audience. */
@@ -542,21 +694,43 @@ const STORE_COPIES: Record<string, unknown>[] = [
   ...PARTNER_FEE_KINDS.map((kind) => ({ kind, subscriptionId: 's1', audience: 'business' })),
   ...DOCUMENT_KINDS.map((kind) => ({ kind, docId: 'd1', audience: 'business' })),
   { kind: 'support_update', ticketId: 't1' },
+  { kind: 'call_incoming', callOrderId: 'o1', orderType: 'FOOD_DELIVERY', from: 'rider', leg: 2, audience: 'business' },
+  // [S4] The store's copy of the appointment reminder: its order desk; with no order on file, its Schedule.
+  { kind: 'appointment_reminder', bookingId: 'b1', orderId: 'o1', audience: 'business' },
+  { kind: 'appointment_reminder', bookingId: 'b1', audience: 'business' },
+  // [BOOK-FU2] The store's copy of a moved appointment (the customer moved it): its order desk; with no order on file, its Schedule.
+  { kind: 'appointment_moved', bookingId: 'b2', orderId: 'o1', audience: 'business' },
+  { kind: 'appointment_moved', bookingId: 'b2', audience: 'business' },
 ];
 
 /** [payload (+ the app that is open, as `intent`), where it lands]. */
 const DOCUMENT_COPIES: Array<[Record<string, unknown>, Dest]> = DOCUMENT_KINDS.flatMap((kind): Array<[Record<string, unknown>, Dest]> => [
   [{ kind, docId: 'd1', audience: 'earner' }, { screen: 'MoverDocuments' }],
-  [{ kind, docId: 'd1', audience: 'customer' }, { screen: 'IdentityVerification' }],
+  [{ kind, docId: 'd1', audience: 'customer' }, HOME],
   [{ kind, docId: 'd1', audience: 'business' }, VENDOR_TAB('Account')],
   // notifyRejection (and any older row) sends no audience: the open app decides.
   [{ kind, intent: 'mover' }, { screen: 'MoverDocuments' }],
   [{ kind, intent: 'vendor' }, VENDOR_TAB('Account')],
-  [{ kind, intent: 'customer' }, { screen: 'IdentityVerification' }],
-  [{ kind, intent: null }, { screen: 'IdentityVerification' }],
+  [{ kind, intent: 'customer' }, HOME],
+  [{ kind, intent: null }, HOME],
   // An advertiser account has no documents screen: its home, on purpose.
   [{ kind, intent: 'advertiser' }, HOME],
 ]);
+
+describe('[DRILL-STORM] an ops page opens the Ops alerts screen at that page', () => {
+  it('an SOS page (the ops alert the SOS opened rides in its payload) opens Ops alerts, not the order', () => {
+    expect(destinationFor({ kind: 'sos_active', orderId: 'o1', sosAlertId: 's1', opsAlertId: 'ops-1' })).toEqual({ screen: 'OpsAlerts', params: { opsAlertId: 'ops-1' } });
+  });
+  it('the collapsed re-page and a platform page open at the page they name', () => {
+    expect(destinationFor({ kind: 'ops_alert_escalated', opsAlertId: 'ops-2', opsAlertIds: ['ops-2', 'ops-3'], count: 2 })).toEqual({ screen: 'OpsAlerts', params: { opsAlertId: 'ops-2' } });
+    expect(destinationFor({ kind: 'safety_sweep_slo', workType: 'safety-lane', stalled: true, opsAlertId: 'ops-4' })).toEqual({ screen: 'OpsAlerts', params: { opsAlertId: 'ops-4' } });
+  });
+  it('a payload without an ops alert routes exactly as before; an empty or non-string id is not an ops page', () => {
+    expect(destinationFor({ kind: 'sos_active', orderId: 'o1', sosAlertId: 's1' })).toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'sos_active', orderId: 'o1', opsAlertId: '' })).toEqual({ screen: 'Delivery', params: { orderId: 'o1' } });
+    expect(destinationFor({ kind: 'ops_alert_drill', opsAlertId: 42 })).toBeNull();
+  });
+});
 
 describe('the census: every kind the API sends has an asserted destination', () => {
   it('routes each one exactly where this table says', () => {
@@ -613,7 +787,7 @@ describe('every destination is a route the app actually registers', () => {
     billing_mmg_checkout: 'MMG status is for every partner',
     guardian_driver_confirm: 'the driver is asked to confirm the trip status',
     dispatch_offer: 'the earner has an offer with a running clock',
-    claim_over_gate: 'the rider is owed a delivery guarantee',
+    claim_over_gate: 'an older notice: the rider asks for help with a large unpaid order',
     prep_ready: 'the rider is told the bag is packed at the counter',
     custody_handoff_code: 'the rider holding the goods is told a relay rider is coming',
     custody_relay_assigned: 'a relay rider is asked to take an order over',
@@ -653,6 +827,19 @@ describe('every destination is a route the app actually registers', () => {
       if (screen && !mounted.has(screen)) unreachable.push(`${kind} -> ${screen} (${why})`);
     }
     expect(unreachable, 'a mover tapping these opens nothing — the screen is in another stack').toEqual([]);
+  });
+
+  // [O-1] The call notice to a mover: a rider on their live job, a driver on the ride (Main).
+  it('a call notice aimed at a MOVER lands on a screen MoverStack mounts', () => {
+    const stack = readFileSync(join(process.cwd(), 'src', 'modules', 'mover', 'MoverStack.tsx'), 'utf8');
+    const mounted = new Set([...stack.matchAll(/\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g)].map((m) => m[1]!));
+    mounted.add('Main');
+    expect(mounted.has('ActiveJob'), 'the scan found the live-job screen').toBe(true);
+    for (const [orderType, screen] of [['FOOD_DELIVERY', 'ActiveJob'], ['COURIER', 'ActiveJob'], ['TAXI', 'Main']] as const) {
+      const dest = destinationFor({ kind: 'call_incoming', callOrderId: 'o1', orderType, from: 'customer', leg: 2, audience: 'earner' });
+      expect(dest, orderType).toEqual({ screen });
+      expect(mounted.has(dest!.screen), `${orderType} -> ${dest!.screen}`).toBe(true);
+    }
   });
 
   // [E28] THE SAME LESSON FOR THE CUSTOMER. booking_rescheduled goes to two
@@ -790,9 +977,26 @@ describe('a weekly-fee notice opens the fee of the family it is about [PUSH-ROUT
     }
   });
 
+  it('[ENTERPRISE E2] a fee notice naming its store (a chain branch\'s fee change) opens THAT store\'s fee screen; one without stays on the family', () => {
+    expect(destinationFor({ kind: 'billing_rate_change', change: 'RISE', subscriptionId: 's1', vendorId: 'v1', audience: 'business' }))
+      .toEqual({ screen: 'WeeklyFee', params: { vendorId: 'v1', subscriptionId: 's1' } });
+    expect(destinationFor({ kind: 'billing_rate_change', change: 'RISE', vendorId: 'v1', audience: 'business' }))
+      .toEqual({ screen: 'WeeklyFee', params: { feeFamily: 'vendor' } });
+  });
+
   it('billing_mmg_checkout keeps its own contract (build 9 to 11 phones route it the same way)', () => {
     expect(destinationFor({ kind: 'billing_mmg_checkout', subscriptionId: 's1', ref: 'r1', vendorId: 'v1', audience: 'business' }))
       .toEqual({ screen: 'WeeklyFee', params: { ref: 'r1', subscriptionId: 's1', vendorId: 'v1' } });
+  });
+
+  it('[ENTERPRISE E1b] a pay-all payment\'s notice (chainCheckout, no subscription) opens the owner\'s "Pay all my branches" on that ref', () => {
+    for (const chainCheckout of [true, 'true']) {
+      expect(destinationFor({ kind: 'billing_mmg_checkout', ref: 'chain-1', status: 'CONFIRMED', chainCheckout, audience: 'business' }))
+        .toEqual({ screen: 'WeeklyFee', params: { feeFamily: 'vendor', payAll: true, ref: 'chain-1' } });
+    }
+    // Anything else is not a pay-all notice: the one-branch contract stands.
+    expect(destinationFor({ kind: 'billing_mmg_checkout', ref: 'r1', subscriptionId: 's1', chainCheckout: false, audience: 'business' }))
+      .toEqual({ screen: 'WeeklyFee', params: { ref: 'r1', subscriptionId: 's1', vendorId: undefined } });
   });
 });
 
@@ -885,5 +1089,20 @@ describe('census drift vs apps/api/src', () => {
     // The other direction: a census entry nothing sends is dead weight.
     const phantom = CENSUS.filter((c) => c.scan !== false && !sent.has(c.k)).map((c) => c.k).sort();
     expect(phantom, 'census entries the API no longer sends').toEqual([]);
+  });
+});
+
+describe('[BILL-PRO · REVIEW-G #2217 S4-2] a pro\'s fee notice under a partner kind', () => {
+  it.each(['billing_failed', 'trial_fee_education', 'billing_rate_change'])('%s tagged provider opens the pro fee screen, whatever app is open', (kind) => {
+    for (const open of ['vendor', 'mover', 'customer'] as const) {
+      expect(destinationFor({ kind, subscriptionId: 's1', audience: 'provider' }, () => open)).toEqual({ screen: 'ProviderWeeklyFee', params: {} });
+    }
+  });
+  it('[REVIEW-F #2231 S4-2] a provider-tagged checkout notice opens the pro fee screen on its checkout, never the store/mover one', () => {
+    for (const open of ['vendor', 'mover', 'customer'] as const) {
+      expect(destinationFor({ kind: 'billing_mmg_checkout', subscriptionId: 's1', ref: 'c1', status: 'CONFIRMED', audience: 'provider' }, () => open)).toEqual({ screen: 'ProviderWeeklyFee', params: { ref: 'c1' } });
+    }
+    // A store's or mover's checkout notice is unchanged.
+    expect(destinationFor({ kind: 'billing_mmg_checkout', subscriptionId: 's1', ref: 'c1', audience: 'business' })).toMatchObject({ screen: 'WeeklyFee', params: { ref: 'c1' } });
   });
 });

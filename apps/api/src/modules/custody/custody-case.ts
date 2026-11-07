@@ -316,7 +316,7 @@ function returnMoney(order: CaseOrderFacts, audience: CaseAudience): string {
   return '';
 }
 
-function sentenceFor(state: CustodyRecoveryState, audience: CaseAudience, order: CaseOrderFacts): CaseSentence {
+function sentenceFor(state: CustodyRecoveryState, audience: CaseAudience, order: CaseOrderFacts, reason?: CustodyIncidentReason): CaseSentence {
   const courier = order.orderType === 'COURIER';
   const origin = courier ? 'you' : 'the store';
   if (audience === 'VENDOR') {
@@ -332,7 +332,9 @@ function sentenceFor(state: CustodyRecoveryState, audience: CaseAudience, order:
     }
   }
   switch (state) {
-    case 'SUPPORT_HOLD': return { headline: 'Your rider hit a problem', body: 'Your rider still has your order and reported a problem. Swift support has taken this on and will show the next step here.' };
+    case 'SUPPORT_HOLD': return reason === 'MOVER_SIGNAL_LOST'
+      ? { headline: 'We lost your rider’s signal', body: 'Your rider still has your order, and we have lost their location. Swift support has taken this on and will show the next step here.' }
+      : { headline: 'Your rider hit a problem', body: 'Your rider still has your order and reported a problem. Swift support has taken this on and will show the next step here.' };
     case 'RETURN_REQUIRED': return { headline: courier ? 'Parcel coming back to you' : 'Order going back to the store', body: `Your order could not be delivered and is on its way back to ${origin}.${returnMoney(order, audience)}` };
     case 'RELAY_REQUIRED': return { headline: 'Arranging another rider', body: 'Your rider cannot finish this delivery. Swift is arranging another rider to collect it from them.' };
     case 'TRANSFER_IN_PROGRESS': return { headline: 'Another rider is on the way', body: 'A second rider is on the way to collect your order from your first rider and bring it to you.' };
@@ -346,7 +348,7 @@ function sentenceFor(state: CustodyRecoveryState, audience: CaseAudience, order:
 /** The customer's and the store's view of the order's latest case: state,
  *  whether it is still open, and the sentence. No rider identity, no code. */
 export function partyCaseView(
-  kase: Pick<CustodyRecoveryCase, 'id' | 'state' | 'updatedAt' | 'ownerUserId'> | null,
+  kase: (Pick<CustodyRecoveryCase, 'id' | 'state' | 'updatedAt' | 'ownerUserId'> & { reason?: CustodyIncidentReason }) | null,
   audience: CaseAudience,
   order: CaseOrderFacts,
 ) {
@@ -356,7 +358,7 @@ export function partyCaseView(
     state: kase.state,
     open: CUSTODY_CASE_LAW[kase.state] === 'OPEN',
     ownedBySupport: kase.ownerUserId !== null,
-    ...sentenceFor(kase.state, audience, order),
+    ...sentenceFor(kase.state, audience, order, kase.reason),
     updatedAt: kase.updatedAt,
   };
 }

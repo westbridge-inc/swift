@@ -7,7 +7,6 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { HOME_RAIL_WINDOW, MARKET_WINDOW } from './listPerformance';
 import { retryRead } from './appQueryPolicy';
-import { profileIdRowSub } from './customerIdCopy';
 import { myRatingWords } from './myRatingWords';
 
 // Execute the real TSX control flow with inert native leaves. This is a Node
@@ -112,7 +111,6 @@ describe('actual tab render contracts', () => {
       '../../../stores/authStore': { useAuthStore: () => ({ isAuthenticated: authenticated, user: { id: 'fixture' } }) },
       '../../../lib/appQueryPolicy': { retryRead },
       '../../safety/MonitoringControl': { MonitoringControl: 'MonitoringControl' },
-      '../../../lib/customerIdCopy': { profileIdRowSub },
       '../../../lib/myRatingWords': { myRatingWords },
       '../../../kit': kit, '../../../kit/controls': { BrandSwitch: 'BrandSwitch' }, '../../../kit/toast': { toast: { error() {}, success() {}, show() {} } },
       'react-native-reanimated': { default: { View: 'AnimatedView' }, __esModule: true, FadeInDown: fluent, ReduceMotion: { System: 'system' } },

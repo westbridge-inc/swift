@@ -19,8 +19,10 @@ export async function isRecused(prisma: PrismaClient | Prisma.TransactionClient,
   return sameCluster.includes(subjectUserId);
 }
 
+export function recusedError(): AppError {
+  return new AppError(403, 'REVIEWER_RECUSED', 'You share an identity signal with this person — another reviewer must take this case (DOC-1 §8.6)');
+}
+
 export async function assertNotRecused(prisma: PrismaClient | Prisma.TransactionClient, reviewerId: string, subjectUserId: string): Promise<void> {
-  if (await isRecused(prisma, reviewerId, subjectUserId)) {
-    throw new AppError(403, 'REVIEWER_RECUSED', 'You share an identity signal with this person — another reviewer must take this case (DOC-1 §8.6)');
-  }
+  if (await isRecused(prisma, reviewerId, subjectUserId)) throw recusedError();
 }

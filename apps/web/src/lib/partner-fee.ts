@@ -7,51 +7,52 @@
 // U18: the card printed `weeklyRate`, the LIST rate. A partner on a custom rate
 // was shown a fee they are not charged. The rate in force is payInfo's
 // `weeklyFeeGyd`, then the row's `customRate`, then the list rate.
+// [CHAINS · REVIEW-M #2211] Without payInfo's figure, the biller's rule: a
+// custom rate is charged only when it is not above the list rate (the lower).
 // U46: it printed the status code raw ("PAST_DUE"), read a `trialEndsAt` the
 // server never sends (the column is `trialEndDate`), and dated the next bill
 // from `currentPeriodEnd` (the phone reads `nextBillingDate`).
 // ---------------------------------------------------------------------------
 
 import { formatMoney, parseAmount } from './money';
-import { feeDate, subscriptionWords } from './weekly-fee';
+import { feeStatusOf, type FeeSubscription } from './weekly-fee';
+import { feeStatusPillWords } from './subscription-words';
 
 type Sub = Record<string, unknown> | null | undefined;
 
 /** The weekly fee actually charged, or null when the server sent no figure. */
 export function chargedWeeklyFee(sub: Sub): number | null {
   if (!sub) return null;
-  for (const value of [sub['weeklyFeeGyd'], sub['customRate'], sub['weeklyRate']]) {
-    const amount = parseAmount(value);
-    if (amount !== null) return amount;
-  }
-  return null;
+  const charged = parseAmount(sub['weeklyFeeGyd']);
+  if (charged !== null) return charged;
+  const custom = parseAmount(sub['customRate']);
+  const list = parseAmount(sub['weeklyRate']);
+  if (custom !== null && list !== null) return Math.min(custom, list);
+  return custom ?? list;
 }
 
-/** The status word: trial and grace are flags layered on the status, read first (phone pill). */
+// [FEE-STATUS · owner 25 Oct 2026] The status word and the line say where the fee stands (the API's
+// feeStatus, lib/weekly-fee feeStatusOf): the phone read "Active" + "next bill 13 Oct" on 25 October.
+// Never the code, never "Active" or a next bill on a date that has passed.
+const statusOf = (sub: Record<string, unknown>) => feeStatusOf(sub as unknown as FeeSubscription);
+
+/** The status word, the phone's pill. */
 export function subscriptionStatusWord(sub: Sub): string {
   if (!sub) return 'Not active yet';
-  if (sub['isTrialActive'] === true) return 'Free trial';
-  if (sub['isInGracePeriod'] === true) return 'Grace period';
-  return subscriptionWords(String(sub['status'] ?? ''));
+  return feeStatusPillWords(statusOf(sub).state).label;
 }
 
-/** Trial and active operate; everything else needs the partner's attention. */
+/** A trial or a paid week is in good standing; everything else needs the partner's attention. */
 export function subscriptionInGoodStanding(sub: Sub): boolean {
   if (!sub) return false;
-  if (sub['isTrialActive'] === true) return true;
-  if (sub['isInGracePeriod'] === true) return false;
-  const status = String(sub['status'] ?? '');
-  return status === 'ACTIVE' || status === 'TRIAL';
+  const state = statusOf(sub).state;
+  return state === 'TRIAL' || state === 'PAID' || state === 'UPCOMING' || state === 'COVERED';
 }
 
-const date = (value: unknown) => feeDate(typeof value === 'string' ? value : null);
-
-/** The phone's one line under the status: trial end, grace deadline, or rate + next bill. */
+/** The phone's one line under the status: the rate and where the fee stands. */
 export function subscriptionLine(sub: Sub): string {
   if (!sub) return 'Not active yet';
   const fee = `${formatMoney(chargedWeeklyFee(sub))}/week`;
-  if (sub['isTrialActive'] === true && date(sub['trialEndDate'])) return `Trial ends ${date(sub['trialEndDate'])} · then ${fee}`;
-  if (sub['isInGracePeriod'] === true && date(sub['gracePeriodEnd'])) return `Weekly fee due by ${date(sub['gracePeriodEnd'])}`;
-  const next = date(sub['nextBillingDate']);
-  return `${fee}${next ? ` · next bill ${next}` : ''}`;
+  const status = statusOf(sub);
+  return status.state === 'TRIAL' ? `${status.headline} · then ${fee}` : `${fee} · ${status.headline}`;
 }

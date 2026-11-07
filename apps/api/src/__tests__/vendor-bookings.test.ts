@@ -76,10 +76,10 @@ beforeAll(async () => {
   const now = Date.now();
   await app.prisma.booking.createMany({
     data: [
-      { itemId, customerId, slotStart: new Date(now + 24 * HOUR), slotEnd: new Date(now + 25 * HOUR), status: 'RESERVED' },       // in window
-      { itemId, customerId, slotStart: new Date(now + 30 * 24 * HOUR), slotEnd: new Date(now + 30 * 24 * HOUR + HOUR), status: 'RESERVED' }, // past the 14-day window
-      { itemId, customerId, slotStart: new Date(now + 26 * HOUR), slotEnd: new Date(now + 27 * HOUR), status: 'CANCELLED' },       // in window but cancelled
-      { itemId: otherItemId, customerId, slotStart: new Date(now + 24 * HOUR), slotEnd: new Date(now + 25 * HOUR), status: 'RESERVED' }, // another vendor's
+      { itemId, vendorId, customerId, slotStart: new Date(now + 24 * HOUR), slotEnd: new Date(now + 25 * HOUR), status: 'RESERVED' },       // in window
+      { itemId, vendorId, customerId, slotStart: new Date(now + 30 * 24 * HOUR), slotEnd: new Date(now + 30 * 24 * HOUR + HOUR), status: 'RESERVED' }, // past the 14-day window
+      { itemId, vendorId, customerId, slotStart: new Date(now + 26 * HOUR), slotEnd: new Date(now + 27 * HOUR), status: 'CANCELLED' },       // in window but cancelled
+      { itemId: otherItemId, vendorId: other.vendorId, customerId, slotStart: new Date(now + 24 * HOUR), slotEnd: new Date(now + 25 * HOUR), status: 'RESERVED' }, // another vendor's
     ],
   });
 });

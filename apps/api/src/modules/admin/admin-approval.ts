@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { ADMIN_ACTION_CLASSES, type AdminActionClass, type AdminRouteAuthority } from './admin-authority';
 import { lockCreditRefundAsks, PAID_ACTION, validatePaidAsk } from '../billing/credit-refund';
+import { IN_PERSON_ACTION, validateInPersonAsk } from '../billing/in-person-payment';
+import { lockClaimPaymentAsks, validateClaimPayAsk } from '../cash/claim-payout';
 import { SOLO_ROLE, isSoleApprover } from './solo-approval';
 
 /**
@@ -34,6 +36,21 @@ export const APPROVAL_HEADER = 'x-swift-approval';
 
 /** CANCELLED: the requester withdrew it [OWNER #13]. */
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED' | 'CANCELLED';
+
+/** [Owner, admin-staging 25 Oct] Statuses a request can still move from: past its expiry each one is EXPIRED. */
+const LAPSES: readonly string[] = ['PENDING', 'APPROVED'];
+
+/** What a request IS now: an open one past its expiry is EXPIRED, whatever its column still says. */
+export function effectiveApprovalStatus(row: { status: string; expiresAt: Date }, now: Date): string {
+  return LAPSES.includes(row.status) && row.expiresAt.getTime() <= now.getTime() ? 'EXPIRED' : row.status;
+}
+
+/** The rows of one approvals view, by the status each row IS now (effectiveApprovalStatus). */
+export function approvalsViewWhere(view: ApprovalStatus, now: Date): Prisma.PrivilegedApprovalWhereInput {
+  if (LAPSES.includes(view)) return { status: view, expiresAt: { gt: now } };
+  if (view === 'EXPIRED') return { OR: [{ status: 'EXPIRED' }, { status: { in: [...LAPSES] }, expiresAt: { lte: now } }] };
+  return { status: view };
+}
 
 export interface ApprovalSubject {
   readonly method: string;
@@ -203,6 +220,8 @@ export type ApprovalRefusal =
  * stands in for one. Executing an approved ask is never refused by this.
  */
 export const OPEN_APPROVAL_STATUSES = ['PENDING', 'APPROVED'] as const;
+/** The ask that records a payment on an unpaid-door case, as its approval row names it. */
+export const PAY_ASK_ACTION = 'PUT /cash-rules/claims/:id/paid';
 export type OpenApprovalStatus = (typeof OPEN_APPROVAL_STATUSES)[number];
 
 function canonicalParams(params: Record<string, unknown>): string {
@@ -329,8 +348,14 @@ export async function resolveApproval(
     // it is written under that refund's ask lock, so a release applying at the
     // same moment either sees it or has finished before it.
     const refundEntity = data.action === PAID_ACTION ? data.entityId : null;
+    // An ask to record a payment on a case is the same kind of marker, under that case's lock: a reject either sees it
+    // or has finished, and then the ask is refused.
+    const claimEntity = data.action === PAY_ASK_ACTION ? data.entityId : null;
+    // [OWNER 5 Nov 2026] A fee paid in person that could never be recorded is refused now, not after the wait.
+    if (data.action === IN_PERSON_ACTION && data.entityId) await validateInPersonAsk(prisma, data.entityId, subject.body);
     const asked: AskResult = await prisma.$transaction(async (tx): Promise<AskResult> => {
       if (refundEntity) await lockCreditRefundAsks(tx, refundEntity);
+      if (claimEntity) await lockClaimPaymentAsks(tx, claimEntity);
       // [U06] One ask per act: two presses racing both wait here, and the
       // second sees the first's row.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`privileged-approval-ask:${askTargetKey(subject, fingerprint)}`}, 0))`;
@@ -339,6 +364,7 @@ export async function resolveApproval(
       // [Review S2-1] Checked before it is written: an ask that could never be recorded is
       // refused now and never becomes a "payout reported" marker.
       if (refundEntity) await validatePaidAsk(tx, refundEntity, subject.body);
+      if (claimEntity) await validateClaimPayAsk(tx, claimEntity);
       return { askState: 'created', created: await write(tx) };
     });
     if (asked.askState === 'standing') {
@@ -390,7 +416,8 @@ export async function resolveApproval(
 /** The compare-and-set that IS the authorisation: APPROVED -> APPLIED, once. */
 export async function markApplied(prisma: PrismaClient, approvalId: string, now = new Date()): Promise<boolean> {
   const spent = await prisma.privilegedApproval.updateMany({
-    where: { id: approvalId, status: 'APPROVED' },
+    // [Owner, admin-staging 25 Oct] The expiry is part of the compare-and-set too: a lapsed approval never spends.
+    where: { id: approvalId, status: 'APPROVED', expiresAt: { gt: now } },
     data: { status: 'APPLIED', appliedAt: now },
   });
   return spent.count === 1;
@@ -423,7 +450,8 @@ export async function decideApproval(
 
   const status: ApprovalStatus = decision.approve ? 'APPROVED' : 'REJECTED';
   const decided = await prisma.privilegedApproval.updateMany({
-    where: { id: approvalId, status: 'PENDING' },
+    // [Owner, admin-staging 25 Oct] Decided only while still inside its time, checked in the write itself.
+    where: { id: approvalId, status: 'PENDING', expiresAt: { gt: now } },
     data: { status, approvedBy: decider.userId, decisionNote: decision.note ?? null, decidedAt: now },
   });
   if (decided.count !== 1) return { ok: false, code: 'already-decided' };

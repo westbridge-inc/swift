@@ -46,7 +46,7 @@ async function scaffold(opts: { placementMediaKind?: 'IMAGE' | 'VIDEO'; placemen
   userIds.push(ownerUser.id);
   const a = await prisma.advertiser.create({ data: { companyName: `Co ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: 'c@x.gy', contactPhone: '+5926000000', createdByUserId: ownerUser.id, status: 'APPROVED' } });
   advertiserIds.push(a.id);
-  await prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUser.id, role: 'OWNER' } });
+  await prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUser.id, role: 'OWNER', acceptedAt: new Date() } });
   const p = await prisma.adPlacement.create({ data: { key: `k-${nanoid(6)}`, name: 'P', tier: opts.placementTier ?? 3, mediaKind: opts.placementMediaKind ?? 'IMAGE', weeklyPrice: 5000, slotsPerWeek: 6 } });
   placementIds.push(p.id);
   const c = await prisma.adCampaign.create({ data: { advertiserId: a.id, placementId: p.id, name: 'C', cities: ['*'], startWeek: MON, endWeek: MON, status: (opts.campaignStatus ?? 'PENDING_REVIEW') as never } });

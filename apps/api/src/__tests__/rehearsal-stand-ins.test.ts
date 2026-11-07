@@ -138,7 +138,7 @@ describe('rehearsal stand-ins pass the API boot guards (deploy/wall/stand-in.sh)
       PLACES_PROVIDER: 'osm',
       PHOTON_URL: 'http://photon.test',
       LIFECYCLE_V2: '1',
-      ORDER_HOLD_MINUTES: '5',
+      ORDER_HOLD_MINUTES: '1', // [owner 30 Oct 2026] the one-minute store-order hold
       STORAGE_PROVIDER: 's3',
       AWS_S3_BUCKET: 'synthetic-boot-bucket',
       ...twilio,

@@ -24,6 +24,9 @@ model User {
   billingFeeNotices BillingFeeNotice[]
   id               String     @id @default(cuid())
   phone            String     @unique
+  /// [BUG-HUNT F05] Support allowed one move between delivery and taxi work, until this moment; who allowed it.
+  moverPlanMoveUntil DateTime?
+  moverPlanMoveBy    String?
   email            String?    @unique
   /// [OWNER #13 · Opus S2] When the email last changed (PUT /customer/profile).
   /// Solo approval warns the owner at this address, so it stays off for seven
@@ -452,6 +455,8 @@ model Tenant {
   taxiTripStops    TaxiTripStop[]
   custodyRecoveryCases CustodyRecoveryCase[]
   taxiRideWaitings TaxiRideWaiting[]
+  callSessions     CallSession[]
+  appointmentNoShows AppointmentNoShow[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -461,6 +466,7 @@ model Tenant {
   reviewFixtures    ReviewFixture[]
   items             Item[]
   categories        Category[]
+  bookings          Booking[]
   // [DB-05 EXPAND] formerly PENDING_EXPAND
   returnRequests     ReturnRequest[]
   contentReports     ContentReport[]
@@ -612,8 +618,8 @@ model CountryConfig {
   /// { maxClaimsPerRiderPerMonth, strikeRestrictThreshold, strikeBanThreshold,
   ///   l3MinPaidOrders, l3MinAccountAgeDays, outlierMultiplier }
   cashRules Json?
-  /// [DOC-1 §3.6 · FD-DOC-1 · P3-2] Micro-vendor tier caps, merged over the code defaults in
-  /// vendor-tier.ts: ordersPerDay, grossPerWeek (major units), nudgeAtFraction.
+  /// [DOC-1 §3.6 · FD-DOC-1 · P3-2] Micro-vendor tier caps. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] RETIRED with
+  /// the self-declared tier: nothing reads it (kept so an older release still reads the row; a later contract step).
   vendorTierCaps Json?
 
   /// [MOB-018] The market emergency policy: per service (police/fire/ambulance)
@@ -700,6 +706,10 @@ model VerificationDocument {
   reviewedBy           String?
   reviewNote           String?
   reviewedAt           DateTime?
+  /// [BUG-HUNT F23] A reviewer checked this paper and it is the last one a partner needs: it waits for ordering day
+  /// (verification/approval-brake.ts). Who and when, so nobody checks it twice. Cleared when it is approved.
+  approvalHeldAt       DateTime?
+  approvalHeldBy       String?
   /// Insurance 5-point manual check (spec §3.4) — captured when an admin reviews
   /// a hire-insurance document. The taxi go-live gate requires HIRE + confirmed.
   insurerName          String?
@@ -1150,7 +1160,7 @@ model ReimbursementClaim {
   /// [DOC-1 §31.4 · DOC-INV-47 · P31-1] The evidence bundle as assembled at filing —
   /// from artefacts the platform already holds (arrival, GPS, photo, pickup, cart),
   /// never typed by the rider. Re-derived at payout; the stored copy is the review
-  /// record. `evidenceComplete` false means the claim is never auto-paid.
+  /// record, refreshed when a person decides. Incomplete evidence needs a person's written reason to be paid.
   evidence         Json?
   evidenceComplete Boolean     @default(false)
   handoverEvidenceId String? @unique
@@ -1167,14 +1177,14 @@ model ReimbursementClaim {
   @@map("reimbursement_claims")
 }
 
-/// [DOC-1 §31.4 · P31-1] Rider loss protection reserve ledger — see RlpReserveEntryKind.
+/// [DOC-1 §31.4 · P31-1] The set-aside ledger — see RlpReserveEntryKind.
 model RlpReserveEntry {
   id          String              @id @default(cuid())
   countryCode String
   kind        RlpReserveEntryKind
-  /// Signed, major units: provisioning and top-ups positive, a payout negative.
+  /// Signed, major units: top-ups positive, a payout negative.
   amount      Decimal             @db.Decimal(12, 2)
-  /// PROVISION idempotency: one provisioning row per country per calendar month (YYYY-MM).
+  /// History only: one PROVISION row per country per calendar month (YYYY-MM).
   periodKey   String?
   /// PAYOUT idempotency: one reserve draw per claim.
   claimId     String?             @unique
@@ -1196,11 +1206,12 @@ enum ClaimStatus {
   PAID
 }
 
-/// [DOC-1 §31.4 · P31-1] The rider loss protection reserve: a named liability line,
-/// per country. PROVISION is the monthly provisioning from fee revenue, PAYOUT is one
-/// claim drawn from it (negative), ADJUSTMENT an audited manual top-up or correction.
-/// The balance is the sum, and the database refuses a sum below zero — a claim is paid
-/// from the reserve or not at all, never ad hoc from operating cash.
+/// [DOC-1 §31.4 · P31-1] The company money a person has recorded for payments at the door,
+/// per country. ADJUSTMENT is an audited manual entry of plain company money or a correction,
+/// PAYOUT is one decided case drawn from it (negative). PROVISION is history: the old monthly
+/// share of fees, which nothing writes any more (coordinator ruling, 5 Nov 2026).
+/// The balance is the sum, and the database refuses a sum below zero: a payment is recorded
+/// from this line or not at all, so the record never goes negative.
 enum RlpReserveEntryKind {
   PROVISION
   PAYOUT
@@ -1298,6 +1309,10 @@ model Rider {
   completionRate           Float                    @default(100.0)
   /// % of dispatch offers accepted (EMA) — feeds candidate scoring
   acceptanceRate           Float                    @default(100.0)
+  /// [CARS-DELIVER] This delivery profile went online from "taxi + deliveries" (a delivery accepted from taxi
+  /// work): when its deliveries end, the account returns to taxi work with deliveries on (COORD ruling 26 Oct).
+  /// A delivery GO started by the mover clears it. False on every row today.
+  returnsToTaxi            Boolean                  @default(false)
   /// D.3 float gate — max vendor-cash this rider may front at once (derived from
   /// User.trustLevel via CountryConfig.floatL1/L2/L3); committedFloat = currently
   /// outstanding across live CASH orders. availableFloat = floatLimit - committedFloat.
@@ -1380,6 +1395,14 @@ model Driver {
   /// until the app says otherwise: an app that predates stops is never handed
   /// one. Nothing sets or reads it yet.
   taxiStopsCapable         Boolean          @default(false)
+  /// [CARS-DELIVER · owner 8 Oct "or get both"] "Taxi + deliveries": while this taxi profile is online and free,
+  /// its car's delivery profile (the account's Rider row) is also offered store deliveries. Only while the
+  /// CAR_DELIVERIES switch is on (modules/driver/car-deliveries.ts); false = taxi rides only, every row today.
+  takesDeliveries          Boolean          @default(false)
+  /// [CARS-DELIVER PR4 · REVIEW-F #2139 S2-2] The app on this taxi GO can show a delivery card (it declared
+  /// CAR_DELIVERY_CARDS_V1). Set on EVERY taxi GO from what the app declares, as taxiStopsCapable is: an older
+  /// app going online again clears it. "Taxi + deliveries" offers a delivery only to a taxi with this set.
+  deliveryCardsCapable     Boolean          @default(false)
   /// Vehicle visual identity [rides spec 6B] — additive, nullable, every
   /// consumer handles null. bodyType from the make/model fleet mapping
   /// (UNKNOWN surfaces one-tap classification in admin — never guessed
@@ -1463,6 +1486,36 @@ model VendorOwner {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   vendors   Vendor[]
   createdAt DateTime @default(now())
+  /// [CHAINS · owner 29 Oct 2026] A weekly fee Swift negotiated with this owner for EACH of its branches (a chain
+  /// deal). Never higher than a branch's own fee: a branch whose fee is already lower keeps it. Set by a person at
+  /// Swift (dealSetBy, dealReason, dealSetAt); null = no deal (every branch pays its own tier fee). Whole units of
+  /// dealCurrencyCode (CHECKed positive and whole).
+  dealWeeklyRate   Decimal?  @db.Decimal(10, 2)
+  dealCurrencyCode String?
+  dealSetAt        DateTime?
+  dealSetBy        String?
+  dealReason       String?
+  /// [CHAINS PR3 · owner 29 Oct 2026] The chain's name customers see ONCE for all its branches (one brand card that
+  /// opens the nearest open branch that delivers to them). Set by a person at Swift (admin, with a reason); null = no
+  /// brand, every store on its own card. CHECK vendor_owners_brand_name_shape: 2-60 characters, trimmed.
+  brandName        String?
+  /// [ENTERPRISE E2 · owner 29 Oct 2026] A change to the chain deal that RAISES the branches' fees: the deal ENDS
+  /// (each branch back to its own tier fee) or is RAISED to dealChangeTo. Never sooner than the fee-change notice
+  /// allows: each branch is told in the app at least 14 days ahead and pays the new fee only from its first weekly
+  /// fee due on or after dealChangeNotBefore and 14 days after it was told (fee-rise-notice.ts, source CHAIN_DEAL);
+  /// a week already paid keeps its price. dealChangeFrom is the deal it changes (the branches still on it move).
+  /// The owner's own deal moves to the new terms at dealChangeNotBefore (dealChangeSwitchedAt); the columns clear
+  /// once no branch is left on the old deal. All stated or all absent (CHECK).
+  dealChangeKind        String?
+  dealChangeFrom        Decimal?  @db.Decimal(10, 2)
+  dealChangeTo          Decimal?  @db.Decimal(10, 2)
+  dealChangeNotBefore   DateTime?
+  dealChangeReason      String?
+  dealChangeSetBy       String?
+  dealChangeSetAt       DateTime?
+  dealChangeSwitchedAt  DateTime?
+  /// [ENTERPRISE · E1] The owner's "pay all my branches" MMG checkouts (one MMG page for several branch fees).
+  chainCheckouts   MmgCheckoutIntent[]
 
   @@map("vendor_owners")
 }
@@ -1494,6 +1547,12 @@ model VendorStaff {
 
 model Vendor {
   id                      String                   @id @default(cuid())
+  /// [CHAINS · COORD ruling 29 Oct 2026] A branch added to an approved owner (POST /vendor/stores) waits for a PERSON
+  /// at Swift to approve it (its address and pin) before it can go live; the owner's documents are not asked again.
+  /// Cleared when a person activates it (admin approve). False for every store made any other way.
+  personApprovalRequired  Boolean                  @default(false)
+  /// [CHAINS PR3] Swift lists this branch on its own card even though its owner has a brand (admin "split").
+  brandListedAlone        Boolean                  @default(false)
   tenantId                String                   @default("swift-default")
   tenant                  Tenant                   @relation(fields: [tenantId], references: [id])
   ownerId                 String
@@ -1524,15 +1583,26 @@ model Vendor {
   /// courier (vs a platform rider). Default off — existing vendors are
   /// platform-rider-only until they opt in.
   selfDeliveryEnabled     Boolean                  @default(false)
+  /// [O-2 · owner 22 Oct 2026] The takeaway pickup code: OFF by default for every store type (the store
+  /// checks the customer's first name + order number and taps "Handed to customer"); a store may turn it on.
+  requirePickupCode       Boolean                  @default(false)
   /// FUL-007: kitchen-capacity guard. When set, new orders are refused once
   /// the vendor already holds this many in-flight (still-in-kitchen) orders —
   /// server-computed so it can't be gamed. Null = unlimited (current behavior).
   maxConcurrentOrders     Int?
+  /// [BOOK-S1 · COORD C1(a)] How many appointments the business serves at once, across all its
+  /// listings. 1 (the default) = one at a time: the database refuses an overlap
+  /// (bookings_vendor_one_at_a_time). Between 1 and 20 (vendors_booking_capacity_check).
+  bookingCapacity         Int                      @default(1)
+  /// [BOOK-S1] Every booking that takes this business's time, whichever listing it was made on.
+  bookings                Booking[]
   deliveryRadius          Float                    @default(10.0)
   minOrderAmount          Decimal                  @default(0) @db.Decimal(10, 2)
   estimatedPrepTime       Int                      @default(30)
   categories              Category[]
   items                   Item[]
+  /// [POS-SYNC] Till exports this store confirmed (one row per applied file).
+  posImports              PosImport[]
   isVerified              Boolean                  @default(false)
   // [REPORT-013 F-013-06] The wall-clock bound of the document authority
   // behind isVerified: min(expiresAt) over the checklist evidence, written
@@ -1541,15 +1611,27 @@ model Vendor {
   // lapse between daily sweeps stops sales at the next order, not the next
   // sweep.
   activationValidUntil    DateTime?
-  /// [DOC-1 §3.6 · P3-2] See VendorTier. Set to UNREGISTERED only by the vendor's own
-  /// signed self-declaration; set to REGISTERED only by a VALID registration record.
+  /// [RETIER PR-A] When the store FIRST went live (set by the activation projection and the console's reinstate,
+  /// never cleared). Null = never live: only such a store is priced on its own catalogue when its fee is born.
+  firstLiveAt             DateTime?
+  /// [DOC-1 §3.6 · P3-2] See VendorTier. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] Always REGISTERED: the
+  /// self-declared tier is removed (migration 20261101120000 moved every row) and nothing writes the column.
   tier                    VendorTier               @default(REGISTERED)
   tierChangedAt           DateTime?
+  /// [ROLE-DOCS · owner 21 Oct 2026] The store trades under its owner's own name (Business Names (Registration)
+  /// Act s.3: a true surname with only first names or initials needs no registration): its checklist asks for the
+  /// signed own-name declaration (vendor/own-name.ts) instead of a business registration. Set only by that signature.
+  tradesUnderOwnName      Boolean                  @default(false)
   tierNote                String?
   // [REPORT-013 F-013-07] WHO suspended the store: 'BILLING' (non-payment,
   // reversible by payment) or 'ADMIN' (manual/safety — payment must NOT
   // lift it). Reinstatement CAS-matches BILLING only.
   suspensionSource        String?
+  /// [WEB-DELETE · owner ruling 1 Nov 2026] When the owner's account closure request paused this store's NEW orders
+  /// (user/closure-pause.ts). While it is set nothing turns order intake back on (a database CHECK keeps
+  /// acceptingOrders false): only Swift staff resolving the request, or the owner cancelling it, clears it. Orders
+  /// already placed still finish.
+  closurePausedAt         DateTime?
   isFeatured              Boolean                  @default(false)
   averageRating           Float                    @default(5.0)
   totalRatings            Int                      @default(0)
@@ -1622,6 +1704,30 @@ model Vendor {
   /// owner only if the business is VAT-registered — for VAT tax invoices (VAT Act s.28, Sch. III). Digits
   /// only, format-checked, never looked up; no TIN certificate image is ever asked for. Never public.
   vatRegistrationNumber String?
+  /// [STORE-VAT · owner O-5, 22 Oct 2026] Whether this store's prices carry VAT the STORE charges (VAT Act Cap. 81:05).
+  /// NONE (default) = not VAT-registered: no VAT anywhere, prices as typed. A store that says it is registered
+  /// sends its GRA certificate (a VerificationDocument, docType vat_registration_certificate) and goes PENDING;
+  /// only a PERSON's approval (admin store-VAT decision: certificate checked, number typed from it, name
+  /// matched) makes it APPROVED. VAT shows only while modules/store-vat storeVatEffective() holds:
+  /// STORE_VAT on, APPROVED, a mode chosen, and the typed number still equal to the approved one.
+  vatStatus             StoreVatStatus           @default(NONE)
+  /// How the store's typed prices relate to VAT. Null until the store chooses.
+  vatMode               StoreVatMode?
+  /// [VAT-DOCS · owner ruling 31 Oct 2026] A price-mode change an APPROVED store asked for, waiting for a PERSON (the
+  /// store VAT review queue). Until a person approves it, vatMode (and every customer price) stays exactly as it is;
+  /// nothing ever switches by itself. Null when no change is waiting; cleared whenever the approval stops standing.
+  vatModeRequested      StoreVatMode?
+  /// The certificate the decision is about (VerificationDocument.id; loose reference, like OrderItem.itemId).
+  vatCertificateDocId   String?
+  /// Frozen by the person who approved: the number they typed from the certificate, the registered name on it,
+  /// and the effective date it states (VAT Act s.12(7)). Receipts show these, never the store-typed number.
+  vatApprovedNumber     String?
+  vatApprovedName       String?
+  vatEffectiveFrom      DateTime?                @db.Date
+  /// Who decided (admin user id), when, and the reason given for a rejection or revocation.
+  vatReviewedBy         String?
+  vatReviewedAt         DateTime?
+  vatReviewNote         String?
   /// [R3 · CAA s.70(3) · legal research D10 + E5 · owner 15 Oct 2026] The store's OWN refund rule, typed by the owner
   /// (plain words, no links, at most 300 characters; checked on write by utils/vendor-refund-rule.ts). Its storefront
   /// shows it with the statutory-rights sentence; null = none on file, and the storefront says "Ask the store".
@@ -1660,12 +1766,11 @@ enum VendorType {
   SERVICE
 }
 
-/// [DOC-1 §3.6 · P3-2] The micro-vendor tier. UNREGISTERED = a verified person trading
-/// without a DCRA certificate under a signed self-declaration: capped orders/day and
-/// gross/week, no promoted placement, licence-gated categories closed (it holds no
-/// licence). REGISTERED = a business-registration (or incorporation) record is VALID;
-/// promotion is automatic on that record and lifts every cap. Existing vendors default
-/// to REGISTERED so nothing already live is capped by the migration (expand rule).
+/// [DOC-1 §3.6 · P3-2] The micro-vendor tier. [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] UNREGISTERED is
+/// RETIRED: the self-declared tier (capped orders a day and sales a week under a signed self-declaration) is
+/// removed, and only a registered business or a trader under their own name joins. No row holds it after
+/// migration 20261101120000 and no code writes or reads it. The value stays in the type so an older release can
+/// still read the column and be rolled back to; dropping it is a later contract step.
 enum VendorTier {
   UNREGISTERED
   REGISTERED
@@ -1784,6 +1889,10 @@ model Item {
   /// Set when the inventory engine hid the item (stock hit 0) — distinguishes
   /// auto-hides (undone automatically on restock) from the owner's own toggle.
   autoHiddenAt      DateTime?
+  /// [POS-SYNC] Set when a till file marked the item "not for sale". Unlike autoHiddenAt, no restock undoes it
+  /// (a cancelled order, picking, a stock adjustment): only a later till file with the item for sale, or the
+  /// store's own switch, brings it back.
+  tillOffAt         DateTime?
   /// [GUARDRAILS §8] A person removed this item as prohibited (alcohol, tobacco,
   /// vapes, 18+, medicines, cooking gas, fuel). One way: hidden everywhere and
   /// never editable back. The class names what it is; the reason is shown to
@@ -1796,6 +1905,15 @@ model Item {
   /// approved — the hash of the judged text — so any edit brings the check back.
   reviewApprovedHash String?
   reviewApprovedAt   DateTime?
+  /// [STORE-VAT · owner O-5] The VAT class the STORE gives this item (it is told it is responsible; help text points
+  /// to the GRA, VAT Act Schedules I-II). Only STANDARD goods carry VAT, and only for a store whose VAT a person
+  /// approved. Default STANDARD: every existing item, and every item an older app creates.
+  vatClass          VatClass          @default(STANDARD)
+  /// [VAT-DOCS · owner 30 Oct 2026] ADD_VAT_AT_CHECKOUT: the price the STORE typed, before VAT, while its VAT is added
+  /// to this item. Non-null exactly while the store's approved VAT mode adds VAT and the item is STANDARD-rated; then
+  /// basePrice (what every customer surface shows and every order charges) = this price plus 14%, half-up to whole GYD
+  /// (modules/store-vat/vat-pricing.ts, the ONE writer). Null otherwise: basePrice is the price as typed.
+  vatListedPrice    Decimal?          @db.Decimal(10, 2)
   dietaryTags       String[]
   allergens         String[]
   totalOrdered      Int               @default(0)
@@ -1849,16 +1967,29 @@ model Booking {
   id         String        @id @default(cuid())
   itemId     String
   item       Item          @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  /// [BOOK-S1] The business whose time this booking takes: the resource, not the listing.
+  /// Always the listing's own business (bookings_vendor_matches_item, a DB trigger).
+  vendorId   String
+  vendor     Vendor        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  /// [BOOK-S1 · STA-1 §4 lineage] The business's tenant, held equal to it by
+  /// bookings_tenant_matches_vendor (a DB trigger); walled on the row itself.
+  tenantId   String        @default("swift-default")
+  tenant     Tenant        @relation(fields: [tenantId], references: [id])
   customerId String
-  /// Wired to the order at acceptance
+  /// Wired to the order at acceptance, or at checkout while INSTANT_BOOKING is on [BOOK-S2]
   orderId    String?
   slotStart  DateTime
   slotEnd    DateTime
   status     BookingStatus @default(RESERVED)
+  /// [BOOK-S1] Made while the business took one booking at a time (capacity 1): no other
+  /// such live booking of the business may overlap it (bookings_vendor_one_at_a_time).
+  exclusive  Boolean       @default(true)
   createdAt  DateTime      @default(now())
 
   @@index([itemId, slotStart])
+  @@index([vendorId, slotStart])
   @@index([customerId])
+  @@index([tenantId])
   @@map("bookings")
 }
 
@@ -1908,6 +2039,9 @@ model Option {
   optionGroup     OptionGroup @relation(fields: [optionGroupId], references: [id], onDelete: Cascade)
   name            String
   additionalPrice Decimal     @default(0) @db.Decimal(10, 2)
+  /// [VAT-DOCS] The option's extra price as the store typed it, before VAT, while its item's VAT is added (see
+  /// Item.vatListedPrice; same writer, same rule). Null otherwise.
+  vatListedAdditionalPrice Decimal? @db.Decimal(10, 2)
   isDefault       Boolean     @default(false)
   isAvailable     Boolean     @default(true)
   sortOrder       Int         @default(0)
@@ -2018,6 +2152,10 @@ model Order {
   /// charge frozen at "Fare collected" (one row, only for a ride booked while
   /// TAXI_WAITING_CHARGE was on). The charge itself is in totalAmount.
   taxiRideWaiting    TaxiRideWaiting?
+  /// [O-1] Swift call-bridge attempts on this order (never a phone number).
+  callSessions       CallSession[]
+  /// [BOOK-FU2 · owner B3] The business recorded that the customer did not come to this appointment (one, ever).
+  appointmentNoShow  AppointmentNoShow?
   /// [ALG-18] THE billable distance — decided once at quote time and frozen
   /// here, with the engine that produced it. The fee path priced this number;
   /// the receipt states it; the earnings sentence will read it. Null on
@@ -2042,6 +2180,22 @@ model Order {
   deliveryFee      Decimal @db.Decimal(12, 2)
   serviceFee       Decimal @default(0) @db.Decimal(12, 2)
   taxAmount        Decimal @default(0) @db.Decimal(12, 2)
+  /// [STORE-VAT · owner O-5] The VAT INCLUDED in this order's goods, frozen at checkout and recomputed by
+  /// store-vat/order-vat.ts whenever the goods change (substitution, a removed line). Null = the store was not
+  /// an approved VAT store when the order was placed (every order before this column). Never added to
+  /// totalAmount: VAT-registered stores' prices include VAT (VAT Act s.90), so taxAmount stays 0.
+  vatAmount        Decimal? @db.Decimal(12, 2)
+  /// The rate the VAT was computed at, in basis points (1400 = 14%), frozen with it.
+  vatRateBps       Int?
+  /// Goods by VAT class (VAT Regulations reg. 10(d): zero-rated goods shown separately with their own total),
+  /// and the standard-rated amount the VAT was taken from (after the goods discount).
+  vatStandardGoods Decimal? @db.Decimal(12, 2)
+  vatZeroRatedGoods Decimal? @db.Decimal(12, 2)
+  vatExemptGoods   Decimal? @db.Decimal(12, 2)
+  vatBase          Decimal? @db.Decimal(12, 2)
+  /// The seller's approved VAT number and registered name, frozen at checkout (what the receipt shows).
+  vatSellerNumber  String?
+  vatSellerName    String?
   tipAmount        Decimal @default(0) @db.Decimal(12, 2)
   discount         Decimal @default(0) @db.Decimal(12, 2)
   totalAmount      Decimal @db.Decimal(12, 2)
@@ -2125,9 +2279,10 @@ model Order {
   promiseRevisionReason String?
   promiseRevisions      Int       @default(0)
   actualDeliveryTime    Int?
-  /// Priority delivery (§4.2 parity with courier speed tiers): customer pays
-  /// 1.5x the delivery fee, the order dispatches ahead of standard ones, and
-  /// the whole premium goes to the rider (cash, no commission).
+  /// Priority delivery: the customer pays the delivery fee plus a flat
+  /// premium (utils/markup.ts EXPRESS_DELIVERY_SURCHARGE, owner 1 Nov 2026),
+  /// the order dispatches ahead of standard ones, and the whole premium goes
+  /// to the rider (cash, no commission).
   isExpress             Boolean   @default(false)
   scheduledFor          DateTime?
   /// LIFECYCLE_V2 hold (spec Part A): while in the FUTURE the order is HIDDEN
@@ -2242,6 +2397,10 @@ model Order {
   /// this value so delayed cleanup from generation N cannot erase N+1.
   fulfillmentModeVersion Int @default(0)
   appointmentSlot DateTime?
+  /// [BOOK-P3 · COORD 29 Oct 2026 (b)] When the BUSINESS last moved this appointment (its customer is told
+  /// at once). For APPOINTMENT_MOVED_FREE_CANCEL_MIN after it the customer cancels free in the app, even
+  /// inside the 2-hour cut-off (cancel-policy.ts; Terms s7). Null = never moved by the business.
+  appointmentMovedAt DateTime?
   /// Takeaway: 4-digit code the customer shows to collect a PICKUP order; the
   /// vendor verifies it to close the order (no rider involved). Null otherwise.
   pickupCode      String?
@@ -2446,6 +2605,8 @@ model TaxiRideWaiting {
   currencyCode   String
   /// The TAXI_RATES version the terms were read from; null = the declared defaults.
   termsVersion   Int?
+  /// [Owner 4 Nov 2026] Did GPS put the car at the pickup? Only TRUE starts the pickup wait; null or false is never billed.
+  pickupArrivalVerified Boolean?
   /// Frozen at completion, all four together or none.
   waitingSeconds Int?
   waitingMinutes Int?
@@ -2455,6 +2616,66 @@ model TaxiRideWaiting {
 
   @@index([tenantId])
   @@map("taxi_ride_waiting")
+}
+
+/// [BOOK-FU2 · owner B3, 28 Oct 2026] "Customer didn't come": the business recorded in the app that the customer did
+/// not come to an appointment it had accepted, after its start. The order closes (CANCELLED, no fee, no strike); a
+/// person at Swift reviews repeated cases. The row holds ONLY which booking it was, when the business recorded it and
+/// who at the business recorded it. Kept with its order's record (Privacy Policy section 6); one per order.
+model AppointmentNoShow {
+  id               String   @id @default(cuid())
+  tenantId         String   @default("swift-default")
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  orderId          String   @unique
+  order            Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// The booking (the order's live booking row at that moment).
+  bookingId        String
+  /// When the business recorded it.
+  recordedAt       DateTime @default(now())
+  /// Who at the business recorded it (the owner or a team member).
+  recordedByUserId String
+
+  @@index([tenantId])
+  @@map("appointment_no_shows")
+}
+
+/// [O-1 · owner 22-24 Oct 2026] One Swift call-bridge attempt on a live order:
+/// who asked (the caller), which party they asked for, and how far it got.
+/// NEVER a phone number: both numbers are read from the order's own rows at
+/// the moment each leg is dialled, and handed only to the voice provider.
+/// No row is written while CALL_RELAY is off. A connected call is one where
+/// Swift's own "Press 1" screen recorded the called party's 1 (Twilio's
+/// "completed" alone is not a person answering).
+model CallSession {
+  id                String    @id @default(cuid())
+  tenantId          String    @default("swift-default")
+  tenant            Tenant    @relation(fields: [tenantId], references: [id])
+  orderId           String
+  order             Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// The person who tapped Call (leg 1 rings them).
+  callerUserId      String
+  /// customer | rider | driver | store: what the caller is on this order.
+  callerRole        String
+  /// customer | rider | driver | store | recipient: who they asked for (leg 2).
+  calleeRole        String
+  /// The voice provider that placed the call ('twilio').
+  provider          String
+  /// The provider's id for leg 1 (Twilio CallSid); null until the provider takes the call.
+  providerCallId    String?   @unique
+  /// DIALING_CALLER -> CALLER_CONFIRMED -> CONNECTED, or NOT_CONNECTED / FAILED.
+  status            String    @default("DIALING_CALLER")
+  callerConfirmedAt DateTime?
+  connectedAt       DateTime?
+  endedAt           DateTime?
+  /// Seconds the provider reports for the bridged leg (0 when never connected).
+  durationSeconds   Int?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([tenantId])
+  @@index([orderId, createdAt])
+  @@index([callerUserId])
+  @@map("call_sessions")
 }
 
 /// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle
@@ -2729,8 +2950,37 @@ model OrderItem {
   /// total can't change in-app, the question is withdrawn. NULL = no open
   /// question (or one proposed before this column: the sweep starts its clock).
   substituteDecideBy DateTime?
+  /// [STORE-VAT · owner O-5] SNAPSHOT of the item's VAT class at order time (the substitute's, once a swap is
+  /// approved). Null = the order is not a VAT store's order.
+  vatClass           VatClass?
 
   @@map("order_items")
+}
+
+/// [STORE-VAT · owner O-5] VAT class of a store's item (VAT Act s.17 Schedule I zero-rated, s.18 Schedule II exempt).
+enum VatClass {
+  STANDARD
+  ZERO_RATED
+  EXEMPT
+}
+
+/// [STORE-VAT · owner O-5] Where a store's VAT registration stands. Only APPROVED (a person checked the
+/// certificate) ever shows VAT.
+enum StoreVatStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+  REVOKED
+}
+
+/// [STORE-VAT · owner O-5] PRICES_INCLUDE_VAT: the store's typed prices already include VAT (the customer pays
+/// them unchanged; VAT shown = price x 14/114). ADD_VAT_AT_CHECKOUT: the store types prices before VAT and the
+/// server adds 14% INTO the price customers see (never a surprise at checkout; VAT Act s.90(2)): Item.vatListedPrice
+/// keeps the typed price while a person's approval stands (modules/store-vat/vat-pricing.ts).
+enum StoreVatMode {
+  PRICES_INCLUDE_VAT
+  ADD_VAT_AT_CHECKOUT
 }
 
 enum SubstitutionStatus {
@@ -2753,7 +3003,16 @@ model StockAdjustment {
   note      String?
   createdBy String?
   createdAt DateTime              @default(now())
+  /// [MASTER-025] The client's command key (Idempotency-Key) for this
+  /// adjustment. Unique per item: the row is the durable receipt, written in
+  /// the SAME transaction as the movement, so a retry of the same command finds
+  /// it instead of moving stock again.
+  commandKey String?
+  /// [MASTER-025] The canonical StockMovement this adjustment produced. Not a
+  /// relation, like StockMovement.itemId: inventory evidence never cascades.
+  movementId String?
 
+  @@unique([itemId, commandKey])
   @@index([itemId, createdAt])
   @@map("stock_adjustments")
 }
@@ -2764,6 +3023,9 @@ enum StockAdjustmentReason {
   MANUAL
   RECONCILE
   RETURN
+  /// [IN-STORE-SALE] One sold at the counter, tapped on the store's menu list (delta -1); its Undo is a new
+  /// +1 row with the same reason, never an edit. The stock adjust route does not accept it.
+  IN_STORE_SALE
 }
 
 /// THE STOCK LEDGER [MKT-2 Movement 1] — the truth behind `Item.stockQuantity`.
@@ -2833,6 +3095,45 @@ enum StockMovementReason {
   /// One per tracked item at migration time, so the ledger explains the counter
   /// it inherited instead of pretending history started today.
   OPENING_BALANCE
+  /// [IN-STORE-SALE] Sold in person at the store (a store with no till system taps "Sold in store"): -1. Its
+  /// Undo is a compensating +1 row with the same reason, so the reason's deltas sum to the net sold in store.
+  IN_STORE_SALE
+  /// [POS-SYNC] The store re-uploaded its till export and confirmed the preview:
+  /// the till's count replaced Swift's. The movement's note names the upload.
+  POS_IMPORT
+}
+
+/// [POS-SYNC] One till export the store confirmed, applied once.
+///
+/// The id IS the upload id the preview handed out, so a retried confirm (a
+/// double click, a dropped connection) finds this row and gets the same result
+/// back instead of applying twice. (vendorId, contentHash) is unique, so the
+/// same file can never be applied to the same store a second time: an old file
+/// re-uploaded after sales would put back stock that was already sold.
+///
+/// The audit row (audit_logs, POS_IMPORT_APPLIED) is the tamper-evident record;
+/// this row is what makes the second confirm a no-op. `summary` is what the
+/// store was shown as applied, so a replay answers with exactly that.
+model PosImport {
+  id            String   @id
+  vendorId      String
+  vendor        Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  /// The store's tenant, stamped from the vendor by pos_imports_tenant_matches_vendor.
+  tenantId      String   @default("swift-default")
+  /// sha256 of the file as confirmed (line endings normalised).
+  contentHash   String
+  /// sha256 of the plan the preview showed: which items, to which counts and prices.
+  planDigest    String
+  /// LEAVE or SOLD_OUT: what the store chose for items missing from the file.
+  missingPolicy String
+  /// Who confirmed it (a user id; deliberately not a foreign key, like the ledger's actorId).
+  actorId       String
+  summary       Json
+  createdAt     DateTime @default(now())
+
+  @@unique([vendorId, contentHash])
+  @@index([tenantId])
+  @@map("pos_imports")
 }
 
 model OrderItemOption {
@@ -3081,13 +3382,64 @@ model ServiceProvider {
   isVerified      Boolean                @default(false)
   averageRating   Float                  @default(5)
   totalRatings    Int                    @default(0)
+  /// [BOOK-P1] When the provider takes bookings: weekly windows in Guyana wall-clock time,
+  /// [{ dayOfWeek, start: "09:00", end: "17:00" }], the shape of a listing's bookingConfig.slots.
+  /// Null = no hours set (nothing bookable). Written only while INSTANT_BOOKING is on.
+  weeklyHours     Json?
   qualifications  ServiceQualification[]
   jobs            ServiceJob[]
+  offerings       ServiceOffering[]
+  timeOff         ServiceProviderTimeOff[]
+  /// [BILL-PRO] The pro's weekly-fee subscription (none until the fee is switched on for pros).
+  subscription    Subscription?
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
   @@index([trade])
   @@map("service_providers")
+}
+
+/// [BOOK-P1 Track P] A provider's bookable service: a fixed name, length and price, shown
+/// before booking (Track P, P2 books it). Never deleted: a service the provider stops offering
+/// is switched off (active = false), so a kept job still names what was booked.
+model ServiceOffering {
+  id              String          @id @default(cuid())
+  /// [BOOK-P1 · STA-1 §4 lineage] The provider's tenant, held equal to it by
+  /// service_offerings_tenant_matches_provider (a DB trigger); walled on the row itself.
+  tenantId        String          @default("swift-default")
+  providerId      String
+  provider        ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  name            String
+  /// How long one booking of it takes the provider, 5 to 600 minutes (service_offerings_duration_check).
+  durationMinutes Int
+  /// The fixed price, GYD, shown before booking; a booked job carries it as its quoteAmount.
+  price           Decimal         @db.Decimal(12, 2)
+  active          Boolean         @default(true)
+  jobs            ServiceJob[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([providerId])
+  @@index([tenantId])
+  @@map("service_offerings")
+}
+
+/// [BOOK-P1 Track P] A provider's time away on one Guyana calendar date: the whole day (start
+/// and end null) or one window ("13:00"-"15:00"). The twin of a business's booking_exceptions.
+model ServiceProviderTimeOff {
+  id         String          @id @default(cuid())
+  /// [BOOK-P1 · STA-1 §4 lineage] The provider's tenant (service_provider_time_off_tenant_matches_provider).
+  tenantId   String          @default("swift-default")
+  providerId String
+  provider   ServiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  date       DateTime        @db.Date
+  start      String?
+  end        String?
+  createdAt  DateTime        @default(now())
+
+  @@index([providerId, date])
+  @@index([tenantId])
+  @@map("service_provider_time_off")
 }
 
 model ServiceQualification {
@@ -3133,9 +3485,20 @@ model ServiceJob {
   status              ServiceJobStatus @default(REQUESTED)
   quoteAmount         Decimal?         @db.Decimal(12, 2)
   scheduledFor        DateTime?
+  /// [BOOK-P1] The booked service, for a job booked from a provider's menu (P2). Null = a quote job.
+  offeringId          String?
+  offering            ServiceOffering? @relation(fields: [offeringId], references: [id], onDelete: Restrict)
+  /// [BOOK-P1] When the provider's time on this job ends: [scheduledFor, endsAt). Null = a quote
+  /// job, which holds its minimum block (provider-time.ts). No two live jobs of one provider
+  /// overlap (service_jobs_provider_one_at_a_time, a DB exclusion).
+  endsAt              DateTime?
   /// Booking accept/decline (master plan §4.3): the provider confirms the
   /// customer's slot. Null on a SCHEDULED job = awaiting confirmation.
   providerConfirmedAt DateTime?
+  /// [BOOK-P3 · COORD 29 Oct 2026 (b)] When the PROVIDER last moved this job booked from their list (the
+  /// customer is told at once): the customer then cancels free in the app for
+  /// APPOINTMENT_MOVED_FREE_CANCEL_MIN, even inside the 2-hour cut-off (cancel-policy.ts; Terms s7).
+  providerMovedAt     DateTime?
   chatRoomId          String?
   completedAt         DateTime?
   cancelledAt         DateTime?
@@ -3146,6 +3509,7 @@ model ServiceJob {
   @@index([providerId])
   @@index([status])
   @@index([tenantId])
+  @@index([offeringId])
   @@map("service_jobs")
 }
 
@@ -3237,6 +3601,8 @@ model Subscription {
   obligationTransitions BillingObligationTransition[] @relation("ObligationSource")
   priorObligationTransitions BillingObligationTransition[] @relation("ObligationPreviousSource")
   confirmationHolds PaymentConfirmationHold[]
+  /// [ENTERPRISE · E1] This branch's share of an owner's "pay all my branches" checkouts.
+  mmgCheckoutParts MmgCheckoutPart[]
   billingFeeNotices BillingFeeNotice[]
   moverFeeAuthority MoverFeeAuthority? @relation("CanonicalMoverFee")
   moverFeeMembership MoverFeeSubscription?
@@ -3247,6 +3613,10 @@ model Subscription {
   driver             Driver?               @relation(fields: [driverId], references: [id])
   vendorId           String?               @unique
   vendor             Vendor?               @relation(fields: [vendorId], references: [id])
+  /// [BILL-PRO] An independent service provider (a pro) who pays the weekly fee. Exactly one owner
+  /// column is set on a new row (rider, driver, vendor or pro); the database refuses two.
+  serviceProviderId  String?               @unique
+  serviceProvider    ServiceProvider?      @relation(fields: [serviceProviderId], references: [id])
   type               SubscriptionType
   status             SubscriptionStatus    @default(ACTIVE)
   weeklyRate         Decimal               @db.Decimal(10, 2)
@@ -3258,6 +3628,13 @@ model Subscription {
   isTrialActive      Boolean               @default(false)
   trialEndDate       DateTime?
   autoRenew          Boolean               @default(true)
+  /// [WEB-DELETE · owner ruling 2 Nov 2026] The store owner's account closure request holds this weekly fee from this
+  /// instant (billing/closure-fee-hold.ts): no week that starts at or after it is born, charged or reminded, and at
+  /// the end of the paid week the plan pauses owing nothing. A week owed before it settles exactly as ever (autoRenew
+  /// is untouched). Cleared, and the fee restarted from then, when the request ends without closing the account.
+  closureHoldAt       DateTime?
+  /// The closure request (support ticket) that holds it.
+  closureHoldTicketId String?
   lastPaymentDate    DateTime?
   lastPaymentId      String?
   failedAttempts     Int                   @default(0)
@@ -3454,6 +3831,10 @@ model PaymentConfirmationHold {
   checkout MmgCheckoutIntent? @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
   cardSessionId String? @unique
   cardSession CardSession? @relation(fields: [cardSessionId], references: [id], onDelete: Restrict)
+  /// [ENTERPRISE · E1] One branch's share of an owner's "pay all my branches" checkout: each covered branch's
+  /// clock is paused by its own hold, exactly as a single-branch checkout pauses it.
+  checkoutPartId String? @unique
+  checkoutPart MmgCheckoutPart? @relation(fields: [checkoutPartId], references: [id], onDelete: Restrict)
   /// ACTIVE | SETTLEMENT_APPLY_PENDING | PAID | PROVEN_UNPAID | PROVEN_NO_EFFECT
   status String @default("ACTIVE")
   reason String
@@ -3645,7 +4026,17 @@ model ProviderPayment {
 model MmgCheckoutIntent {
   id                    String    @id @default(cuid())
   tenantId              String    @default("swift-default")
-  subscriptionId        String
+  /// The one subscription a single-branch checkout pays. NULL exactly when the checkout is an owner's
+  /// "pay all my branches" checkout (chainOwnerId set): its branches and amounts are its `parts` [ENTERPRISE · E1].
+  subscriptionId        String?
+  /// [ENTERPRISE · E1] The store owner whose "pay all my branches" checkout this is (CHECK: exactly one of
+  /// subscriptionId and chainOwnerId). One OPEN or CONFIRMING per owner (a partial unique in the migration).
+  chainOwnerId          String?
+  chainOwner            VendorOwner? @relation(fields: [chainOwnerId], references: [id], onDelete: Restrict)
+  /// [ADS-ON] The advertising invoice this checkout pays. A third payer beside the two above (CHECK: exactly
+  /// one of the three). One OPEN or CONFIRMING per invoice (a partial unique in the migration).
+  adInvoiceId           String?
+  adInvoice             AdInvoice? @relation(fields: [adInvoiceId], references: [id], onDelete: Restrict)
   /// Ours, sent to MMG: 18 digits (providers/mmg newMerchantTransactionId).
   merchantTransactionId String    @unique
   /// Exactly what MMG was asked for, in whole GYD [I1].
@@ -3685,10 +4076,15 @@ model MmgCheckoutIntent {
   keys                  MmgCheckoutKey[]
   /// [MMG REVERSAL] Attempts to return this payment to the partner (one live at a time).
   reversals             MmgFeeReversal[]
+  refundCase            FeeRefundCase?
   confirmationHold      PaymentConfirmationHold?
+  /// [ENTERPRISE · E1] A chain checkout's branches: who it pays and how much of the one MMG payment each gets.
+  parts                 MmgCheckoutPart[]
 
   @@index([tenantId])
   @@index([subscriptionId, createdAt])
+  @@index([chainOwnerId, createdAt])
+  @@index([adInvoiceId, createdAt])
   @@index([status, nextCheckAt])
   // [MMG support lookup] Support finds a checkout by a transaction a reply named (candidates @> {id}).
   @@index([candidates], type: Gin)
@@ -3702,6 +4098,40 @@ model MmgCheckoutIntent {
 /// MMG is asked; the fee wallet is debited exactly once, and only after MMG's
 /// own lookup proves the reversal. A lost or unclear answer is HELD for a
 /// person, visible and paged, never guessed. One live reversal per payment.
+/// [Row 156 · owner 1 Oct 2026] A partner asked for a weekly-fee payment back: a duplicate or a mistaken one.
+/// This is the ask and its clock, and it moves no money. The money goes through MmgFeeReversal, and only a
+/// REVERSED reversal of this very payment closes the case (a database trigger holds that).
+model FeeRefundCase {
+  id             String            @id @default(cuid())
+  tenantId       String
+  subscriptionId String
+  /// One case per payment, ever.
+  checkoutId     String            @unique
+  checkout       MmgCheckoutIntent @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
+  /// DUPLICATE | MISTAKEN
+  kind           String
+  /// What the partner said, in the words of the staff member who recorded it (ADM-006).
+  reason         String
+  openedByUserId String
+  /// The whole payment, frozen when the ask was recorded (MMG returns a payment in full only).
+  amount         Decimal           @db.Decimal(12, 2)
+  currencyCode   String            @db.Char(3)
+  /// The end of the third Monday-to-Friday after the ask, Guyana time. There is no holiday list, so this only
+  /// ever falls early, never late.
+  dueBy          DateTime
+  /// OPEN | REFUNDED. Forward only (database trigger).
+  state          String            @default("OPEN")
+  /// The REVERSED reversal that closed the case.
+  reversalId     String?           @unique
+  refundedAt     DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@index([tenantId])
+  @@index([state, dueBy])
+  @@map("fee_refund_cases")
+}
+
 model MmgFeeReversal {
   id                String            @id @default(cuid())
   tenantId          String
@@ -3752,6 +4182,29 @@ model MmgFeeReversal {
   @@index([subscriptionId, state])
   @@index([checkoutId])
   @@map("mmg_fee_reversals")
+}
+
+/// [ENTERPRISE · E1 · 29 Oct 2026] One branch's share of an owner's "pay all my branches" MMG checkout. Written
+/// with the checkout, before its page leaves the server, and never changed: the branch's subscription and the whole
+/// GYD amount of the one MMG payment that is credited to that branch's fee once MMG's own lookup confirms the
+/// payment. The parts of a checkout add up exactly to its amount (a deferred check in the migration).
+model MmgCheckoutPart {
+  id             String            @id @default(cuid())
+  tenantId       String            @default("swift-default")
+  checkoutId     String
+  checkout       MmgCheckoutIntent @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
+  subscriptionId String
+  subscription   Subscription      @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  /// Whole GYD, positive (CHECKed).
+  amount         Decimal           @db.Decimal(12, 2)
+  currencyCode   String            @db.Char(3)
+  createdAt      DateTime          @default(now())
+  confirmationHold PaymentConfirmationHold?
+
+  @@unique([checkoutId, subscriptionId])
+  @@index([subscriptionId, createdAt])
+  @@index([tenantId])
+  @@map("mmg_checkout_parts")
 }
 
 /// [MMG checkout F3] Every Idempotency-Key a checkout answered. Once a key has
@@ -4008,6 +4461,48 @@ model StorageOrphan {
   @@map("storage_orphans")
 }
 
+/// [Row 312 · COORD rulings 21-22 Oct] An upload stored WITHOUT a clean malware scan: evidence (safety
+/// evidence, delivery or handover proof: never refused, stored ONLY in the held quarantine folder) or a
+/// mover's upload under the MALWARE_SCAN_BYPASS=1 emergency switch (lib/upload-scan-debt.ts). The
+/// upload-rescan job scans it once clamd answers: a positive is moved to quarantine and paged; held
+/// evidence that scans clean is released (its bytes moved to their normal folder). No person or tenant
+/// id and never the content: the object key, the file's sha256, and the outcome. Platform-wide, like the
+/// scanner itself. NOTE: an object key is a storage path, and some embed an owner's id (e.g. a liveness
+/// selfie's folder): a bypass row forgets it when it closes clean; an evidence row keeps its key (order
+/// folders) because it maps the issued key to where the bytes now live.
+model UploadScanDebt {
+  id            String    @id @default(cuid())
+  /// The upload surface (lib/malware-scan.ts UploadSurface).
+  surface       String
+  /// 'evidence' (safety evidence, delivery or handover proof: never refused) | 'bypass' (MALWARE_SCAN_BYPASS=1).
+  reason        String
+  /// The stored object (for evidence: the held key every record was issued). A bypass row forgets it
+  /// once closed clean; a quarantined sealed one keeps it (its key row is found by it).
+  fileKey       String?
+  /// The stored bytes are envelope-encrypted (encrypted_objects row keyed by fileKey).
+  sealed        Boolean   @default(false)
+  sha256        String
+  attempts      Int       @default(0)
+  createdAt     DateTime  @default(now())
+  rescannedAt   DateTime?
+  /// CLEAN | FOUND | UNSCANNABLE | GONE (erased before the rescan) | SHREDDED (sealed, key shredded)
+  /// | HELD (evidence that could not be scanned: kept in the quarantine, never served or admitted,
+  /// paged until a platform admin retries its scan and it answers CLEAN)
+  result        String?
+  signature     String?
+  quarantinedAt DateTime?
+  quarantineKey String?
+  /// Held evidence that scanned CLEAN left the quarantine at this time...
+  releasedAt    DateTime?
+  /// ...and its bytes now live here (the records keep the issued fileKey and resolve it through this row).
+  releasedKey   String?
+
+  @@index([rescannedAt, createdAt])
+  @@index([reason, rescannedAt])
+  @@index([fileKey])
+  @@map("upload_scan_debts")
+}
+
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by
 /// admin; the weekly billing job deducts from here before suspending.
 /// Floor-at-zero CHECK lives in raw migration SQL [tollgate 3.1].
@@ -4081,7 +4576,10 @@ enum SubscriptionType {
   RESTAURANT
   SUPERMARKET
   RETAIL_STORE
+  /// A Services STORE (a vendor of type SERVICE), not an independent pro.
   SERVICE_PROVIDER
+  /// [BILL-PRO] An independent service provider (a pro in the Services tab).
+  INDEPENDENT_PRO
 }
 
 enum SubscriptionStatus {
@@ -4571,6 +5069,10 @@ model DeliveryCashSettlement {
   storeConfirmedById  String?
   riderAttestedAmount Decimal?             @db.Decimal(10, 2)
   storeAttestedAmount Decimal?             @db.Decimal(10, 2)
+  /// Swift support closed this record because neither side can (the reason is in the audit row). Nobody can confirm it
+  /// any more and it blocks nobody. Everything above stays as it was: a closed record is not a settled one.
+  closedAt         DateTime?
+  closedById       String?
   createdAt        DateTime             @default(now())
   @@index([tenantId])
 
@@ -5508,6 +6010,13 @@ model OpsAlert {
   acknowledgedBy  String?
   escalationLevel Int                 @default(0)
   lastEscalatedAt DateTime?
+  /// [DRILL-STORM] The escalation level the on-call phones were last texted about, and when.
+  /// Re-texts are collapsed (one text covers every owed alert) and spaced (OPS_ALERT_REPAGE_MAX_PER_HOUR).
+  oncallTextedLevel Int               @default(0)
+  oncallTextedAt  DateTime?
+  /// [DRILL-STORM] Which on-call list that text went to (a short hash of the configured numbers, never a number):
+  /// the spacing is per list, so a changed list is texted at once.
+  oncallTextedList String?
   closedAt        DateTime?
   closeReason     String?
   createdAt       DateTime            @default(now())
@@ -5517,6 +6026,7 @@ model OpsAlert {
   @@index([acknowledgedAt, closedAt, ackDeadlineAt])
   @@index([tenantId, createdAt])
   @@index([sosAlertId])
+  @@index([oncallTextedList, oncallTextedAt])
   @@map("ops_alerts")
 }
 
@@ -5531,11 +6041,16 @@ model OpsAlertRecipient {
   seenAt         DateTime?
   ackedAt        DateTime?
   smsSentAt      DateTime?
+  /// [DRILL-STORM] The escalation level this person was last re-paged about, and when. A person is
+  /// re-paged at most OPS_ALERT_REPAGE_MAX_PER_HOUR times an hour, every owed alert in ONE push.
+  pagedLevel     Int       @default(0)
+  lastPagedAt    DateTime?
   createdAt      DateTime  @default(now())
 
   @@unique([opsAlertId, userId])
   @@index([tenantId, opsAlertId])
   @@index([notificationId])
+  @@index([userId, lastPagedAt])
   @@map("ops_alert_recipients")
 }
 
@@ -6116,6 +6631,12 @@ enum AdDestinationType {
   DEEPLINK
 }
 
+enum AdLinkDomainStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum AdRefundReason {
   AUTO_CANCEL_UNAPPROVED
   ADVERTISER_CANCEL
@@ -6180,6 +6701,9 @@ model AdvertiserMember {
   userId       String
   role         AdvertiserMemberRole @default(OWNER)
   createdAt    DateTime             @default(now())
+  /// [ads security] null = an open invitation the person has not accepted: no access, never named.
+  /// No default (fail closed): a row written without an acceptance is an invitation, never a member.
+  acceptedAt   DateTime?
   advertiser   Advertiser           @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
 
   @@id([advertiserId, userId])
@@ -6233,6 +6757,13 @@ model AdCampaign {
   endWeek          DateTime          @db.Date // Monday of the LAST booked week
   destinationType  AdDestinationType @default(NONE)
   destinationValue String?
+  /// [ADS-ON] The outside link's host (without www), the key into AdLinkDomain.
+  destinationHost  String?
+  /// [ADS-ON] Who approved this ad's link at review, and when. Nothing with a link serves without it.
+  destinationApprovedByUserId String?
+  destinationApprovedAt       DateTime?
+  /// [ADS-ON] The last check the link passed; re-checked weekly while the campaign can run.
+  destinationCheckedAt        DateTime?
   status           AdCampaignStatus  @default(DRAFT)
   statusReason     String?
   totalAmount      Decimal?          @db.Decimal(12, 2)
@@ -6316,6 +6847,7 @@ model AdInvoice {
   advertiser     Advertiser      @relation(fields: [advertiserId], references: [id])
   campaign       AdCampaign      @relation(fields: [campaignId], references: [id])
   refundIntents  AdRefundIntent[]
+  mmgCheckouts   MmgCheckoutIntent[]
 
   @@unique([id, tenantId, campaignId, currency], map: "ad_invoices_id_tenantId_campaignId_currency_key")
   @@index([tenantId, status])
@@ -6483,12 +7015,36 @@ model HouseAd {
   ctaLabel         String?
   destinationType  AdDestinationType @default(NONE)
   destinationValue String?
+  /// [ADS-ON] Same four fields as AdCampaign: the operator who saved the link is its human approval.
+  destinationHost  String?
+  destinationApprovedByUserId String?
+  destinationApprovedAt       DateTime?
+  destinationCheckedAt        DateTime?
   active           Boolean           @default(true)
   sort             Int               @default(0)
   placement        AdPlacement       @relation(fields: [placementId], references: [id])
 
   @@index([tenantId, placementId, active])
   @@map("house_ads")
+}
+
+/// [ADS-ON · 4 Oct ruling] The allow-list of outside websites an ad may open. The first ad using a new
+/// website leaves a PENDING row; only a person approves it (who and when below). The host is exact:
+/// a subdomain is its own row, so approving one shop never approves the platform it is hosted on.
+model AdLinkDomain {
+  id               String             @id @default(cuid())
+  tenantId         String             @default("swift-default")
+  host             String
+  status           AdLinkDomainStatus @default(PENDING)
+  reviewNotes      String?
+  reviewedByUserId String?
+  reviewedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@unique([tenantId, host])
+  @@index([tenantId, status])
+  @@map("ad_link_domains")
 }
 
 model AdsSettings {
@@ -8044,8 +8600,8 @@ model SubjectLink {
   /// [High #9 · DS109] NULL = a PENDING assignment (created when an account submitted a
   /// VEHICLE-kind document whose plate matched an existing vehicle subject it does not
   /// own). Pending links never propagate the subject's vehicle evidence; an admin-approved
-  /// assignment stamps this. The subject's registering account gets its link approved at
-  /// creation (the verified owner of record).
+  /// assignment stamps this. [SEC-TRUST F9] The subject's registering account's link also starts
+  /// PENDING; a person's approval of one of that account's own papers for the vehicle stamps it.
   approvedAt DateTime?
 
   @@unique([accountId, subjectId, relation, validFrom])
@@ -8079,8 +8635,9 @@ model BusinessProfile {
   subject        Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
   ownerAccountId String  @unique
   tradingName    String?
-  entityForm     String  @default("UNREGISTERED")
-  tier           String  @default("TIER_UNREGISTERED")
+  /// [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] Nothing reads these two; their defaults no longer name the removed tier.
+  entityForm     String  @default("UNDECLARED")
+  tier           String  @default("STANDARD")
 
   @@map("business_profile")
 }
@@ -8263,4 +8820,29 @@ model IdentityReviewCase {
   @@unique([clusterId, snapshotDigest], map: "identity_review_cases_clusterId_snapshotDigest_idx")
   @@index([tenantId, status])
   @@map("identity_review_cases")
+}
+
+/// [Off-site erasure ledger] One erasure's ledger entry (ids, timestamps, de-identified columns), written
+/// ONLY by database triggers in the erasure's own transaction. Append-only; the application reads it.
+model ErasureLedgerEntry {
+  id        String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kind      String
+  entry     Json
+  createdAt DateTime               @default(now())
+  shipment  ErasureLedgerShipment?
+
+  @@index([createdAt])
+  @@map("erasure_ledger_entry")
+}
+
+/// [Off-site erasure ledger] An entry shipped off-site (encrypted to the owner's backup key) by the host
+/// unit deploy/erasure-ledger-ship.sh. Append-only.
+model ErasureLedgerShipment {
+  id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryId     String             @unique @db.Uuid
+  ledgerEntry ErasureLedgerEntry @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  objectKey   String
+  shippedAt   DateTime           @default(now())
+
+  @@map("erasure_ledger_shipment")
 }

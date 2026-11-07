@@ -8,6 +8,7 @@ import { log } from '../../utils/logger';
 import { usdMigrationFlipsCounter, usdMigrationHeldGauge } from '../../plugins/observability';
 import { weeklyFeeAmount } from './subscription-fee';
 import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
+import { PAYER_INCLUDE, payerUserIdOf, subscriptionTenantWhere } from '../subscription/subscription-owner';
 
 // System 2 Part 13/20 — migration of existing local-priced subscriptions.
 // The founder picks a mode per tenant at enable time:
@@ -28,20 +29,16 @@ import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subsc
 
 const SUB_ROLE: Record<string, string> = {
   RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR',
-  SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER',
+  SERVICE_PROVIDER: 'SERVICE', INDEPENDENT_PRO: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER',
 };
 const DAY_MS = 86_400_000;
 
 async function userIdFor(prisma: PrismaClient, subId: string): Promise<string | null> {
   const sub = await prisma.subscription.findUnique({
     where: { id: subId },
-    select: {
-      rider: { select: { userId: true } },
-      driver: { select: { userId: true } },
-      vendor: { select: { owner: { select: { userId: true } } } },
-    },
+    select: PAYER_INCLUDE,
   });
-  return sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null;
+  return payerUserIdOf(sub);
 }
 
 /** MODE A preview — the founder's approval table: every active sub, its
@@ -124,13 +121,7 @@ export async function enactModeA(prisma: PrismaClient, io: Server): Promise<{ no
 
 /** [M-15] A subscription belongs to the tenant of the vendor, rider or driver
  *  that holds it. The migration's every read and write is scoped by this. */
-export const subscriptionTenantWhere = (tenantId: string) => ({
-  OR: [
-    { vendor: { tenantId }, riderId: null, driverId: null },
-    { rider: { user: { tenantId } }, vendorId: null, driverId: null },
-    { driver: { user: { tenantId } }, vendorId: null, riderId: null },
-  ],
-});
+export { subscriptionTenantWhere };
 
 export const modeBKey = (subscriptionId: string, phase: 't30' | 't7' | 'freeze' | 'flip') => `usdmigB:${subscriptionId}:${phase}`;
 

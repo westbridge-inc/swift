@@ -19,7 +19,6 @@ import { MonitoringControl } from '../../safety/MonitoringControl';
 import { BrandSwitch } from '../../../kit/controls';
 import { toast } from '../../../kit/toast';
 import { retryRead } from '../../../lib/appQueryPolicy';
-import { profileIdRowSub } from '../../../lib/customerIdCopy';
 import { myRatingWords } from '../../../lib/myRatingWords';
 
 const GUTTER = space['2xl'];
@@ -217,10 +216,8 @@ export function ProfileScreen() {
   // [ref 05] `next` speaks the reference's imperative ("place your first
   // order"), not the fact's past-tense label read backwards.
   // [Owner 16 Oct: customers take no photos] A customer is never asked for a
-  // picture of themselves, so no fact here is about one. The ID on file is not
-  // a fact either: an ID only on file is never called verified (owner 8 Oct),
-  // and the caption below counts facts as "Verified n of m". The "Your ID" row
-  // further down says where the customer's ID stands.
+  // picture of themselves, so no fact here is about one, and [owner 1 Nov 2026] Swift asks a customer for no ID.
+  // The caption below counts facts as "Verified n of m".
   const facts: { on: boolean; label: string; next: string }[] = [
     { on: true, label: 'Phone verified', next: 'verify your phone' },
     { on: orders > 0, label: 'First order placed', next: 'place your first order' },
@@ -395,16 +392,7 @@ export function ProfileScreen() {
               sub="People who cannot message or be matched with you"
               onPress={() => navigation.navigate('BlockedUsers')}
             />
-            <SettingsRow
-              icon="shield"
-              label="Your ID"
-              // [Owner ruling 8 Oct 2026 — CUSTOMER ID] The line is the server's own
-              // answer (/customer/profile `idCheck`), never a guess from a local
-              // flag: "on file" for an ID no person reviewed, "checked" only when
-              // one did. An older server sends nothing and the line claims nothing.
-              sub={profileIdRowSub(p?.idCheck)}
-              onPress={() => navigation.navigate('IdentityVerification')}
-            />
+            {/* [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] No "Your ID" row: Swift no longer asks a customer for an ID. */}
             <SettingsRow
               icon="star"
               // A fact about you; it opens what the rating means. Tiled like

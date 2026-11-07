@@ -1,5 +1,6 @@
 import { fetchVerificationQueue } from './api';
 import { isRejectionReasonCode, rejectionLabel } from './rejection-reasons';
+import { gyDate } from '@/lib/dates';
 
 export const REVIEW_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
@@ -22,10 +23,13 @@ export interface ReviewDocument {
   createdAt?: string; consentAt?: string | null; privacyNoticeVersion?: string | null;
   expiresAt?: string | null;
   previousDecision?: PreviousDecision | null;
-  reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind'>;
+  reviewerTypes?: Array<'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind' | 'ownNameConfirmed'>;
   /** A reviewer's id, or the server's automatic marker ('auto:id-on-file', 'kyc:auto') — never shown raw. */
   reviewedBy?: string | null;
+  /** [BUG-HUNT F23] A reviewer checked this paper and it waits for ordering day: nobody needs to check it again. */
+  approvalHeldAt?: string | null;
   user?: {
+    /** `phone` arrives masked (its last 4 digits only) [DOC-SECURITY G3]: the full number is the person page's audited reveal. */
     id: string; firstName?: string; lastName?: string; phone?: string; countryCode?: string;
     driver?: { licensePlate?: string; vehicleMake?: string; vehicleModel?: string; vehicleType?: string } | null;
   };
@@ -34,8 +38,10 @@ export interface Applicant { id: string; name: string; phone: string; documents:
 // Shared vocabulary for the queue, facts, dialogs and custody timeline.
 const LABELS: Record<string, string> = {
   national_id: 'National ID', owner_national_id: 'National ID', passport: 'Passport', identity_l2: 'Customer ID',
-  drivers_licence: "Driver's licence", gra_restaurant_licence: 'GRA restaurant licence',
+  drivers_licence: "Driver's licence", gra_restaurant_licence: 'GRA Food Restaurant Licence',
   business_registration: 'Business registration', police_clearance: 'Police clearance',
+  // [STORE-VAT · owner O-5] Decided in Store VAT, never here (the server refuses it at this door).
+  vat_registration_certificate: 'VAT registration certificate',
   fitness_cert: 'Vehicle fitness certificate', vehicle_insurance: 'Vehicle insurance',
   hire_car_permit: 'Hire car permit', road_service_licence: 'Road service licence',
   hire_car_driver_licence: "Hire Car Driver's Licence", hire_car_vehicle_licence: "Car's hire licence (yearly)",
@@ -43,9 +49,10 @@ const LABELS: Record<string, string> = {
   liquor_licence: 'Liquor licence', sanitary_certificate: 'Sanitary certificate',
   trade_licence: 'Trade licence', tin_certificate: 'TIN certificate', pharmacy_authorisation: 'Pharmacy authorisation',
   nis_employer_reg: 'NIS employer registration', digital_id: 'Guyana digital ID',
-  self_declaration_unregistered: 'Unregistered business declaration',
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] retired with its tier: only a copy filed before shows this label
+  self_declaration_unregistered: 'Unregistered business declaration (no longer accepted)',
   // [MC-PR2] checklist photo types the queue and the activation checklist both name
-  storefront_photo: 'Storefront photo', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
+  storefront_photo: 'Storefront photo', own_name_declaration: 'Own-name declaration (no business registration)', vehicle_plate_photo: 'Number-plate photo', vehicle_exterior_photo: 'Vehicle photo',
   // [TRADES · 13 Oct 2026; R15] service-trade documents
   pest_control_operator_licence: 'PTCCB pest-control operator licence', pesticide_applicator_certificate: 'PTCCB applicator certificate',
   eating_house_registration: 'Eating-house registration', gei_electrical_licence: 'GEI electrical licence',
@@ -73,10 +80,17 @@ export const docLabel = (type: string) => LABELS[type] ?? 'Document';
  * Supersedes the 8 Oct "licence must include the hire-car class" wording.
  */
 const REVIEWER_HINTS: Record<string, string> = {
-  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] the licence must cover the vehicle: motorcycles for a motorbike rider
+  // (an e-bike or e-scooter rider signs up as one), motor cars for a taxi driver. No certificate of fitness for a motorbike.
+  drivers_licence: "Ordinary driver's licence: check the name, photo and expiry, and that it covers the vehicle: a motorbike rider's licence must cover motorcycles (an e-bike or e-scooter counts as a motorbike); a taxi driver's must cover motor cars, and so must a car delivery driver's. Do not look for an H or hire class — the right to drive a taxi is the separate Hire Car Driver's Licence.",
   hire_car_driver_licence: "Hire Car Driver's Licence (GRA, its own document): same name as the driver's licence, and a current date (usually 3 years).",
   hire_car_vehicle_licence: "The car's yearly hire licence: the plate matches the registration, and the date is current.",
-  vehicle_registration: 'For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234) and match the plate the driver gave.',
+  // [CARS-PLATES · owner 6 Nov 2026] The person checking the certificate is what makes the plate's letter count: P-plate
+  // (private) cars deliver only; H-plate (hire) cars drive taxi rides and deliver.
+  vehicle_registration: 'The plate on the certificate must match the plate the mover gave: its first letter decides the work. For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234). A private (P) plate car may do deliveries only — approve it for that; Swift never offers it a ride.',
+  // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] a private (P) plate delivery car uploads ONE car photo so a person can match
+  // the plate's letter; it sits next to the registration in the applicant's papers (groupApplicants).
+  vehicle_exterior_photo: 'The plate must be readable in the photo and match the Certificate of Registration and the plate the mover gave. Its first letter decides the work: H = taxi rides and deliveries; P (private) = deliveries only.',
   // [R13 · owner 15 Oct 2026, research D6] every motor vehicle, not only a taxi
   vehicle_insurance: "Read 'Limitations as to use': it must permit use for hire or reward (taxi: passengers for hire; delivery: commercial use). A policy for social, domestic and pleasure use only is rejected as 'Insurance does not permit use for hire or reward'.",
 };
@@ -96,7 +110,8 @@ const REVIEW_NOTES: Record<string, string> = {
   food_handler_cert: 'Food handler’s certificate for this year, with the issuing office (for a chef or caterer: the Mayor and City Council of Georgetown). Never a medical certificate. Type the year it is for.',
   gei_electrical_licence: 'Government Electrical Inspectorate licence in this person’s name. Type the year it is for; it is checked again every January.',
   // [owner 16 Oct 2026] a store's yearly licences: the same January re-check as a business name
-  gra_restaurant_licence: 'GRA restaurant licence for this store. Type the year it is for; it is checked again every January.',
+  // [CHECKLIST-LEGAL · COORD 1 Nov 2026 (d), delegated] the GRA's own name for it, and its provisional licence is accepted
+  gra_restaurant_licence: 'GRA Food Restaurant Licence for this store. A GRA Provisional Licence is accepted too. Type the year it is for; it is checked again every January.',
   sanitary_certificate: 'Sanitary certificate for this store’s premises. Type the year it is for; it is checked again every January.',
   trade_licence: 'Trade licence for this store. Type the year it is for; it is checked again every January.',
 };
@@ -225,7 +240,14 @@ export function resubmissionLabel(doc: Pick<ReviewDocument, 'previousDecision'>)
   if (!prev) return null;
   return prev.kind === 'RESUBMITTED_AFTER_REJECTION' ? 'Re-submitted after rejection' : 'Renewal';
 }
-const shortDay = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric' }) : null);
+const shortDay = (iso: string | null) => (iso ? gyDate(iso) : null);
+/** [BUG-HUNT F23] The queue's marker for a paper held for ordering day. */
+export const HELD_FOR_ORDERING_DAY = 'Held for ordering day';
+/** [BUG-HUNT F23] What a held paper means, in one sentence; null for any other paper. */
+export function heldForOrderingDayLine(doc: Pick<ReviewDocument, 'approvalHeldAt'>): string | null {
+  if (!doc.approvalHeldAt) return null;
+  return `Checked ${gyDate(doc.approvalHeldAt)}. This is the last paper this partner needs, and approving it starts their free trial. Approve it on ordering day; it needs no second check.`;
+}
 /** [MC-AD1] What the earlier decision was, in one sentence (the reviewer's note is quoted separately). */
 export function previousDecisionLine(prev: PreviousDecision): string {
   const when = shortDay(prev.decidedAt);
@@ -266,6 +288,18 @@ export async function loadReviewQueue(status: ReviewStatus, lane: ReviewLane): P
   }
   return [...docs.values()];
 }
+/** [CARS-PLATES · owner 6 Nov 2026] The car photo (plate showing) sits right after the registration it is matched against;
+ *  every other paper keeps its order. */
+export function platePapersTogether(docs: ReviewDocument[]): ReviewDocument[] {
+  const registration = docs.findIndex((d) => d.docType === 'vehicle_registration');
+  if (registration < 0) return docs;
+  const photos = docs.filter((d) => d.docType === 'vehicle_exterior_photo');
+  if (photos.length === 0) return docs;
+  const rest = docs.filter((d) => d.docType !== 'vehicle_exterior_photo');
+  const at = rest.findIndex((d) => d.docType === 'vehicle_registration');
+  return [...rest.slice(0, at + 1), ...photos, ...rest.slice(at + 1)];
+}
+
 export function groupApplicants(docs: ReviewDocument[]): Applicant[] {
   const groups = new Map<string, Applicant>();
   for (const doc of docs) {
@@ -279,6 +313,7 @@ export function groupApplicants(docs: ReviewDocument[]): Applicant[] {
     group.oldest = Math.min(group.oldest, created);
     groups.set(id, group);
   }
+  for (const group of groups.values()) group.documents = platePapersTogether(group.documents);
   return [...groups.values()].sort((a, b) => a.oldest - b.oldest || a.id.localeCompare(b.id));
 }
 export function waitingSince(timestamp: number, now: number): string {

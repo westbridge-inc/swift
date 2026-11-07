@@ -370,6 +370,33 @@ class SeedProductionScript(unittest.TestCase):
         self.assertNotIn("DATABASE_URL", result.stdout + result.stderr)
         self.assertNotIn("DATABASE_URL", calls)
 
+    def test_stdout_carries_only_the_seeds_own_text(self):
+        """The request run's stdout is what the operator saves and the signers
+        read (`> ~/seed-request.txt`): exactly the seed's own text. The image
+        build talks on stderr, where the operator still sees it (14 Oct: 87
+        build lines in front of the request block made the signer refuse it)."""
+        block = ("swift-seed-approval v2\n"
+                 "request: cmVxdWVzdA==\n"
+                 "end of request\n")
+        (self.tmp / "block.txt").write_text(block)
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\n'
+                'case "$*" in\n'
+                '  *"exec -T postgres"*) echo "1:staging"; exit 0;;\n'
+                '  *"config --quiet"*) echo "WARN the attribute version is obsolete"; exit 0;;\n'
+                '  *" build seed"*) i=0; while [ $i -lt 87 ]; do echo "#$i [build 2/9] RUN pnpm install"; i=$((i+1)); done; echo "build progress" >&2; exit 0;;\n'
+                '  *"run --rm --no-TTY seed"*) cat "$BLOCK"; echo "Container seed-run Creating" >&2; exit 2;;\n'
+                '  *) exit 0;;\n'
+                'esac')
+        sh_shim(self.bin, "git", 'echo "git $*" >> "$CALL_LOG"\ncase "$*" in *"rev-parse HEAD"*) echo "$GIT_HEAD";; '
+                '*fetch*) echo "From github.com:example/swift";; esac\nexit 0')
+        result = self.run_script(SEED_ADMIN_PHONE="+5925559001", BLOCK=str(self.tmp / "block.txt"))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, block)
+        self.assertIn("[build 2/9] RUN pnpm install", result.stderr)
+        self.assertEqual(result.stderr.count("[build 2/9]"), 87)
+        self.assertIn("From github.com:example/swift", result.stderr)
+        self.assertIn("attribute version is obsolete", result.stderr)
+
     def test_the_script_and_its_compose_override_never_carry_database_url(self):
         script = (DEPLOY / "seed-production.sh").read_text()
         override = (DEPLOY / "docker-compose.seed.yml").read_text()
@@ -568,6 +595,87 @@ class SeedSoloCeremony(SeedBreakGlassCeremony):
 
     def test_the_compose_override_passes_solo_with_an_empty_default(self):
         self.assertIn("SEED_SOLO: ${SEED_SOLO:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
+
+    # [SOLO RE-SEED] Owner ruling 26 Oct (D1, under 30 Sep #13 SOLO MODE): while
+    # the owner is the only admin, a LATER re-seed may be approved by them alone
+    # (12-hour cancellable wait, sign-in code; enforced by the seed itself,
+    # seed-solo-reseed.test.ts). The script passes the cancel through, needs no
+    # personal data or FX for it, and keeps the typed sign-in code off the screen.
+    def reseed_production(self):
+        (self.deploy / ".env").write_text("PILOT_ENV=production\nNODE_ENV=production\n")
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in "context show") echo default;; *"exec -T postgres"*) echo "1:production"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV cancel=[$SEED_SOLO_CANCEL] solo=[$SEED_SOLO] phone=[$SEED_ADMIN_PHONE] email=[$SEED_ADMIN_EMAIL] fx=[$SEED_FX_GYD_PER_USD]" >> "$CALL_LOG"; [ -t 0 ] && stty -a >> "$CALL_LOG" 2>&1; exit 0;; *) exit 0;; esac')
+
+    def test_the_cancel_reaches_the_seed_without_a_phone_an_email_or_fx(self):
+        self.reseed_production()
+        result = self.run_script(SEED_SOLO_CANCEL="1", SEED_ADMIN_EMAIL="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV cancel=[1] solo=[] phone=[] email=[] fx=[]", self.log.read_text())
+        self.assertNotIn("admin email", result.stderr)
+
+    def test_without_the_cancel_the_production_requirements_stand(self):
+        self.reseed_production()
+        result = self.run_script(SEED_ADMIN_EMAIL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_FX_GYD_PER_USD", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+        result = self.run_script(SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_ADMIN_PHONE", result.stderr)
+
+    def test_the_cancel_is_the_production_ceremony_only(self):
+        result = self.run_script(SEED_SOLO_CANCEL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_SOLO_CANCEL is for the production seed ceremony only", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_the_cancel_is_exactly_1_or_unset(self):
+        self.reseed_production()
+        for value in ("yes", "true", "0", " 1", "2"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.run_script(SEED_SOLO_CANCEL=value, SEED_ADMIN_EMAIL="")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_SOLO_CANCEL must be exactly 1", result.stderr)
+                self.assertNotIn("run --rm", self.log.read_text())
+
+    def test_the_compose_override_carries_the_cancel_and_the_notice_providers_from_deploy_env(self):
+        override = (DEPLOY / "docker-compose.seed.yml").read_text()
+        self.assertIn("SEED_SOLO_CANCEL: ${SEED_SOLO_CANCEL:-}", override)
+        for name in ("NOTIFICATION_PROVIDER", "TWILIO_ACCOUNT_SID", "TWILIO_API_KEY_SID", "TWILIO_API_KEY_SECRET_FILE", "TWILIO_FROM",
+                     "TWILIO_MESSAGING_SERVICE_SID", "EMAIL_PROVIDER", "SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_USER", "SMTP_PASS_FILE", "EMAIL_FROM",
+                     # [EMAIL-HTTPS] email over HTTPS (Resend): its key as a file from the store.
+                     "RESEND_API_KEY_FILE", "RESEND_TIMEOUT_MS"):
+            self.assertIn(f"{name}: ${{{name}:-}}", override)
+        # The secrets only ever as files from the store, never a value.
+        self.assertIsNone(re.search(r"(?m)^\s*(TWILIO_API_KEY_SECRET|SMTP_PASS|RESEND_API_KEY)\s*:", override))
+
+    def test_a_notice_setting_exported_in_the_shell_is_refused(self):
+        # One configuration: the seed's providers come from deploy/.env, never this shell.
+        self.reseed_production()
+        result = self.run_script(SEED_SOLO_CANCEL="1", SEED_ADMIN_EMAIL="", SMTP_HOST="mail.example.invalid")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SMTP_HOST is set in this shell", result.stderr)
+        self.assertNotIn("run --rm", self.log.read_text())
+
+    def test_on_a_terminal_a_solo_run_with_its_line_keeps_the_typed_code_off_the_screen(self):
+        import pty
+        self.reseed_production()
+        main, sub = pty.openpty()
+        self.addCleanup(os.close, main)
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA, "SEED_ADMIN_PHONE": "+5920400001",
+                    "SEED_FX_GYD_PER_USD": "209", "SEED_ADMIN_EMAIL": self.OWNER_EMAIL, "SEED_SOLO": "1", "STORE_NAMES": "SEED_APPROVER_KEYS",
+                    "SEED_PLAN_APPROVALS": '[{"approver":"owner","request":"cg==","signature":"cw=="}]'})
+        try:
+            result = subprocess.run(["bash", str(self.deploy / "seed-production.sh"), self.SHA], env=env, stdin=sub, text=True, capture_output=True, timeout=20)
+            after = subprocess.run(["stty", "-a"], stdin=sub, text=True, capture_output=True, timeout=5).stdout
+        finally:
+            os.close(sub)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        during = self.log.read_text()
+        self.assertIn("ENV cancel=[] solo=[1]", during)
+        self.assertRegex(during, r"(^|\s)-echo(\s|$)")         # hidden while the seed may read the code
+        self.assertNotRegex(after, r"(^|\s)-echo(\s|$)")       # and shown again afterwards
 
 
 
@@ -786,10 +894,19 @@ class Q11WebsiteRenderedByCompose(unittest.TestCase):
         # site's pre-launch switch, read while it runs (closed unless WEB_ORDERING=live),
         # and [#1608] the Android signing fingerprint it publishes in
         # /.well-known/assetlinks.json: a public value, empty unless deploy/.env sets it.
+        # [G11] And the App Store / Google Play links switch, read while it runs
+        # (no store link unless APP_STORES=live).
+        # [SEC-DOS F8] And API_URL: the API's PRIVATE address, read only by the
+        # MMG return page, so its relay reaches the API over the private network
+        # (where TRUST_PROXY trusts the partner address it forwards). Never a
+        # public address, never a secret.
         # No other setting, and never a settings file, reaches the website.
         self.assertEqual(sorted((web.get("environment") or {}).keys()),
-                         ["ANDROID_CERT_SHA256", "NODE_OPTIONS", "SWIFT_WEB_ORDERING"])
+                         ["ANDROID_CERT_SHA256", "API_URL", "NODE_OPTIONS", "SWIFT_APP_STORES", "SWIFT_WEB_ORDERING"])
+        self.assertEqual(web["environment"]["API_URL"], "http://api:3000")
         self.assertEqual(web["environment"]["SWIFT_WEB_ORDERING"], "")
+        self.assertEqual(web["environment"]["SWIFT_APP_STORES"], "")
+        self.assertNotIn("NEXT_PUBLIC_APP_STORES", web["build"]["args"])
         self.assertEqual(web["environment"]["ANDROID_CERT_SHA256"], "")
         self.assertNotIn("env_file", web)
         self.assertNotIn("NEXT_PUBLIC_WEB_ORDERING", web["build"]["args"])
@@ -856,6 +973,13 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
         # Every host that is not the API's (or the console's) is the website:
         # its catch-all route stays last.
         self.assertTrue(body.endswith("\nhandle {\nreverse_proxy web:3000\n}"), body)
+
+    def test_the_mmg_return_body_cap_matches_the_route(self):
+        # [MASTER-051] The proxy refuses an oversized MMG return body before
+        # forwarding it, at exactly the cap the route itself reads under.
+        route = (DEPLOY.parent / "apps" / "web" / "src" / "app" / "pay" / "mmg" / "[...path]" / "route.ts").read_text()
+        self.assertRegex(route, r"(?m)^const MAX_RETURN_BODY_BYTES = 256 \* 1024;$")
+        self.assertRegex(self.TEXT, r"(?m)^\s*max_size 256KiB$")
 
     def test_the_website_keeps_its_own_security_headers(self):
         # next.config.ts sets them; the proxy neither duplicates nor overrides any.
@@ -1033,6 +1157,17 @@ class Q11WebsiteCaddyfileRenderedByCaddy(unittest.TestCase):
         self.assertIn('"dial": "web:3000"', config)
         self.assertIn('"dial": "api:3000"', config)
 
+    def test_the_mmg_return_body_cap_runs_before_every_route(self):
+        # [MASTER-051] In the config Caddy actually runs, the 256 KiB cap on
+        # /pay/mmg/* is the site's first step, ahead of the routes that forward.
+        config = json.loads(self.caddy("adapt", {"API_HOST": API_HOST, "WEB_HOST": WEB_HOST}))
+        site = config["apps"]["http"]["servers"]["srv0"]["routes"][0]
+        steps = [route for handler in site["handle"] if handler["handler"] == "subroute" for route in handler["routes"]]
+        first = [h for h in steps[0]["handle"]]
+        self.assertEqual(first, [{"handler": "request_body", "max_size": 262144}])
+        self.assertEqual(steps[0]["match"], [{"path": ["/pay/mmg/*"]}])
+        self.assertTrue(any(h.get("handler") == "subroute" for step in steps[1:] for h in step["handle"]))
+
 
 LETS_ENCRYPT_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory"
 
@@ -1182,7 +1317,7 @@ class Q11PilotUpWebsite(unittest.TestCase):
         self.store = " ".join(sorted(set(re.findall(r"_FILE: /run/secrets/([A-Z][A-Z0-9_]*)", compose))
                                      | {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"}))
 
-    def run_pilot(self, web_host=None, alias=None, web_aliases=None, web_ordering=None, **extra):
+    def run_pilot(self, web_host=None, alias=None, web_aliases=None, web_ordering=None, app_stores=None, **extra):
         settings = (f"PILOT_ENV=staging\nAPI_HOST={API_HOST}\nMAPS_PROVIDER=osrm\nOSRM_URL=http://osrm:5000\n"
                     "BACKUP_BUCKET=test-backups\nNODE_ENV=development\nCORS_ORIGIN=https://staging.example.com\n")
         if web_host is not None:
@@ -1193,6 +1328,8 @@ class Q11PilotUpWebsite(unittest.TestCase):
             settings += f"WEB_ALIAS_HOSTS={web_aliases}\n"
         if web_ordering is not None:
             settings += f"WEB_ORDERING={web_ordering}\n"
+        if app_stores is not None:
+            settings += f"APP_STORES={app_stores}\n"
         (self.here / ".env").write_text(settings)
         env = os.environ.copy()
         env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
@@ -1340,6 +1477,22 @@ class Q11PilotUpWebsite(unittest.TestCase):
                 result, calls = self.run_pilot(WEB_HOST, web_ordering=value)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("WEB_ORDERING must be live or empty", result.stderr)
+                self.assertEqual(calls, [])
+
+    # [G11] The store links switch: `live` or nothing. A near miss would quietly
+    # keep the links off on Release day, so it is refused before anything changes.
+    def test_the_store_links_switch_is_live_or_nothing(self):
+        for value in ("", "live"):
+            with self.subTest(app_stores=value):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, app_stores=value)
+                self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        for value in ("Live", "LIVE", "true", "1", "yes", "soon"):
+            with self.subTest(app_stores=value):
+                self.log.write_text("")
+                result, calls = self.run_pilot(WEB_HOST, app_stores=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("APP_STORES must be live or empty", result.stderr)
                 self.assertEqual(calls, [])
 
     def test_a_site_that_does_not_build_leaves_the_running_stack_untouched(self):
@@ -1493,8 +1646,11 @@ class AdminConsoleCompose(unittest.TestCase):
         admin = self.admin()
         self.assertIn("dockerfile: apps/admin/Dockerfile", admin)
         self.assertIn("image: swift-admin:${SWIFT_TAG:-local}", admin)
+        # [ADMIN-TILES] The only other input is the Live Ops map's MapTiler BROWSER key (public by
+        # design, certified !not-a-secret in security/public-env-allowlist.txt), the website's key.
         self.assertEqual(re.findall(r"(?m)^        ([A-Z][A-Z0-9_]*): (.*)$", admin),
-                         [("NEXT_PUBLIC_API_URL", "https://${API_HOST:-localhost}")])
+                         [("NEXT_PUBLIC_API_URL", "https://${API_HOST:-localhost}"),
+                          ("NEXT_PUBLIC_MAPTILER_KEY", "${WEB_MAPTILER_KEY:-}")])
 
     def test_the_console_has_a_memory_ceiling_that_v8_collects_below(self):
         admin = self.admin()
@@ -1547,7 +1703,8 @@ class AdminConsoleRenderedByCompose(unittest.TestCase):
         self.assertNotIn("ports", admin)
         self.assertEqual(list((admin.get("networks") or {}).keys()), ["private"])
         self.assertEqual(sorted((admin.get("environment") or {}).keys()), ["NODE_OPTIONS"])
-        self.assertEqual(admin["build"]["args"], {"NEXT_PUBLIC_API_URL": "https://api-staging.example.invalid"})
+        # [ADMIN-TILES] No WEB_MAPTILER_KEY in deploy/.env: an empty key, so the Live Ops map has no tiles.
+        self.assertEqual(admin["build"]["args"], {"NEXT_PUBLIC_API_URL": "https://api-staging.example.invalid", "NEXT_PUBLIC_MAPTILER_KEY": ""})
         self.assertEqual(model["services"]["caddy"]["environment"]["ADMIN_HOST"], "admin-staging.example.invalid")
         # pilot-up's isolation check passes with the console in the model.
         check = subprocess.run(
@@ -1799,7 +1956,11 @@ class AdminConsoleDockerfile(unittest.TestCase):
         declared = re.search(r"(?m)^ARG NEXT_PUBLIC_API_URL$", build)
         self.assertIsNotNone(declared, "NEXT_PUBLIC_API_URL must be a build ARG with no baked-in default")
         self.assertLess(declared.start(), build.index("RUN pnpm run build"))
-        self.assertEqual(re.findall(r"(?m)^ARG (\S+)", self.text), ["NEXT_PUBLIC_API_URL"])
+        # [ADMIN-TILES] ...and the Live Ops map's public MapTiler browser key, also before the build.
+        tiles = re.search(r"(?m)^ARG NEXT_PUBLIC_MAPTILER_KEY$", build)
+        self.assertIsNotNone(tiles, "NEXT_PUBLIC_MAPTILER_KEY must be a build ARG with no baked-in default")
+        self.assertLess(tiles.start(), build.index("RUN pnpm run build"))
+        self.assertEqual(re.findall(r"(?m)^ARG (\S+)", self.text), ["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_MAPTILER_KEY"])
         self.assertIn("ENV SWIFT_ADMIN_IMAGE_BUILD=1", build)
         # A public variable in the runtime would claim a setting the bundle cannot change.
         self.assertNotIn("NEXT_PUBLIC_", self.stages["runtime"])
@@ -1809,7 +1970,14 @@ class AdminConsoleDockerfile(unittest.TestCase):
         for line in re.findall(r"(?m)^ENV (.*)$", self.text):
             names += re.findall(r"([A-Z][A-Z0-9_]*)=", line)
         self.assertTrue(names)
+        # [ADMIN-TILES] Exempt ONLY a public (NEXT_PUBLIC_) name the allowlist certifies "!not-a-secret"
+        # with its written who-can-read / what-it-allows reasoning — today the MapTiler browser key.
+        certified = set(re.findall(r"(?m)^(NEXT_PUBLIC_[A-Z0-9_]+) !not-a-secret ",
+                                   (DEPLOY.parent / "security" / "public-env-allowlist.txt").read_text()))
+        self.assertEqual(certified & set(names), {"NEXT_PUBLIC_MAPTILER_KEY"})
         for name in names:
+            if name in certified:
+                continue
             self.assertNotRegex(name, r"SECRET|TOKEN|PASSWORD|PASSWD|KEY|HASH|CREDENTIAL|AUTH", name)
         # The build context never carries a settings file: every .env stays out.
         ignored = (DEPLOY.parent / ".dockerignore").read_text().splitlines()
@@ -2191,6 +2359,17 @@ class PublicSiteWebAliasHosts(unittest.TestCase):
         example = (DEPLOY / ".env.deploy.example").read_text()
         self.assertRegex(example, r"(?m)^WEB_ALIAS_HOSTS=$")
         self.assertRegex(example, r"(?m)^WEB_ORDERING=$")
+        # [G11] The store links switch: documented, empty (no store link) by default.
+        self.assertRegex(example, r"(?m)^APP_STORES=$")
+
+    def test_the_website_reads_the_store_links_switch_at_run_time_off_by_default(self):
+        # [G11] Like the pre-launch switch: the running site's own environment,
+        # never a build argument, so turning the store links on at Release
+        # recreates the website container and never rebuilds it.
+        web = service_block(DEPLOY / "docker-compose.yml", "web")
+        self.assertIn("SWIFT_APP_STORES: ${APP_STORES:-}", web)
+        self.assertNotIn("NEXT_PUBLIC_APP_STORES", web)
+        self.assertNotRegex(dockerfile_stages(WEB_DOCKERFILE)["build"], r"(?m)^ARG \S*APP_STORES")
 
 
 # ===========================================================================

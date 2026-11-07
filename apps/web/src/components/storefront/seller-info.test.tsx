@@ -46,4 +46,13 @@ describe('[R3] the storefront seller block', () => {
     expect(fact('Refunds').textContent).toBe(`Ask the store${STATUTORY}`);
     expect(screen.queryByRole('link')).toBeNull();
   });
+
+  // [FOOD-PERMIT · owner 24 Oct 2026] A restaurant's food handler's certificate is optional; one on file is a trust badge.
+  it('names a food handler’s certificate on file; nothing when the server says none (or an older server)', () => {
+    const { unmount } = render(<SellerInfo seller={{ ...full, foodHandlerCertificate: true }} />);
+    expect(fact('Food handler’s certificate').textContent).toBe('On file with Swift');
+    unmount();
+    render(<SellerInfo seller={{ ...full, foodHandlerCertificate: false }} />);
+    expect(screen.queryByText('Food handler’s certificate', { selector: 'dt' })).toBeNull();
+  });
 });

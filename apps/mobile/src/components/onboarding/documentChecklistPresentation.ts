@@ -44,8 +44,8 @@ export function pendingDocumentLabel(replaced: boolean, submittedAt?: string | n
 
 /**
  * [VERIFY-DOCS · owner rulings 6 Oct 2026] The documents the server says this person MAY add —
- * GET /verification/status's `optional` (a police clearance for a mover; a licence holder's
- * national ID). Never required, never in the progress count. Only the server's own list, only
+ * GET /verification/status's `optional` ([ROLE-DOCS · owner 21 Oct 2026] a police clearance for a
+ * taxi driver; no mover is offered a second ID any more). Never required, never in the progress count. Only the server's own list, only
  * strings, and never a type the required checklist already shows.
  */
 export function optionalDocTypes(status: { optional?: unknown; checklist?: unknown } | null | undefined): string[] {
@@ -64,6 +64,5 @@ export function optionalDocTypes(status: { optional?: unknown; checklist?: unkno
 export function optionalDocHint(docType: string): string {
   // [VERIFY-DOCS] Say what really happens: no screen shows a Police-cleared badge yet, so promise none.
   if (docType === 'police_clearance') return 'Optional. If Swift approves a current one, your account is recorded as police-cleared.';
-  if (docType === 'national_id') return 'Optional. Your driver’s licence already proves who you are.';
   return 'Optional. Not needed to start working.';
 }

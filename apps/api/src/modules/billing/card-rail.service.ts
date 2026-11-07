@@ -21,6 +21,7 @@ import {
 } from '../../providers/card/card-provider';
 import { POWERTRANZ_PROVIDER, readCompletion } from '../../providers/card/powertranz-provider';
 import { SIMULATOR_PAGE, SIMULATOR_PROVIDER } from '../../providers/card/simulator-provider';
+import { PAYER_INCLUDE, payerAudienceOf, payerUserIdOf } from '../subscription/subscription-owner';
 
 // ---------------------------------------------------------------------------
 // [PT-1 · AH.10.9.2] The card rail v2 service: hosted sessions and enrolled
@@ -270,8 +271,8 @@ export class CardRailService {
             || current.nextBillingDate.getTime() !== priced.periodStart.getTime()) {
             throw new AppError(409, 'MOVER_FEE_PRICE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
           }
-          // [OWNER RULING 8 Oct (2) · owner #62] A Pay now pays the next unpaid
-          // week: one week ahead at most, refused before any page exists.
+          // [OWNER RULING 8 Oct (2) · owner 6 Nov 2026] A Pay now pays the next unpaid
+          // week: four weeks ahead at most, refused before any page exists.
           await assertPayAheadRoom(tx, sub.id, priced.amount, now, 'partner');
         }
         await lockBillingAuthority(tx, sub.id);
@@ -396,13 +397,9 @@ export class CardRailService {
   private async ownedSubscription(userId: string, subscriptionId: string) {
     const sub = await this.prisma.subscription.findUnique({
       where: { id: subscriptionId },
-      include: {
-        rider: { select: { userId: true } },
-        driver: { select: { userId: true } },
-        vendor: { select: { owner: { select: { userId: true } } } },
-      },
+      include: PAYER_INCLUDE,
     });
-    const payer = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
+    const payer = payerUserIdOf(sub);
     if (!sub || payer !== userId) throw new NotFoundError('Subscription', subscriptionId);
     // The user lookup is tenant-scoped under a request: a payer in another
     // tenant is invisible, and so is their subscription.
@@ -1032,17 +1029,17 @@ export class CardRailService {
   }
 
   private async noticeBanked(session: CardSession, paymentId: string): Promise<void> {
-    const sub = await this.prisma.subscription.findUnique({ where: { id: session.subscriptionId }, select: { vendorId: true } });
+    const sub = await this.prisma.subscription.findUnique({ where: { id: session.subscriptionId }, select: { vendorId: true, serviceProviderId: true } });
     await this.notifications.send({
       userId: session.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Card payment received — kept for your next weekly fee',
       body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and kept for your next weekly fee. It did not change your plan.`,
-      audience: sub?.vendorId ? 'business' : 'earner',
+      audience: payerAudienceOf({ vendorId: sub?.vendorId, serviceProviderId: sub?.serviceProviderId }),
       data: { kind: 'billing_banked', subscriptionId: session.subscriptionId },
       dedupeKey: `card-paynow-banked:${paymentId}`,
     }).catch(() => {});
-    // [OWNER RULING 8 Oct (2) · owner #62] Kept, never refused; past one week ahead the operators refund the excess.
+    // [OWNER RULING 8 Oct (2) · owner 6 Nov 2026] Kept, never refused; past the four-week limit the operators refund the excess.
     await this.billing.pageIfPayAheadOverCap(session.subscriptionId);
   }
 

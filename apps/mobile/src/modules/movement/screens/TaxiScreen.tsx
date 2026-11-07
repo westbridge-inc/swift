@@ -18,7 +18,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useActiveRide, useRideEstimate, useRequestRide, useCancelRide, useConfirmDriverArrival, useRideAvailability, useWatchAvailability, useRideSupply, useRidePresence, useQueueStatus, useJoinQueue, useLeaveQueue, useRideCapabilities } from '../../../hooks';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
 import { addStop, canAddStop, maxStopsFrom, moveStop, removeStop, replaceStop, rideStops, sameWireStops, stopRefusalCopy, wireStops } from '../../../lib/taxiItinerary';
-import { fareBreakdownOf, liveWaiting, waitingDisclosure } from '../../../lib/taxiWaiting';
+import { fareBreakdownOf, liveWaiting, waitingDisclosure, waitingEcho } from '../../../lib/taxiWaiting';
 import { AddStopRow, RideItinerary, RouteLegs, StopNumber, StopRows, WaitingCard, oneFareLine } from '../TaxiStops';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { RidePostTripSheet } from '../RidePostTripSheet';
@@ -34,11 +34,11 @@ import { safetyApi, type RideClass, type RideRequestBody, type TierEstimate } fr
 import { CalmRadar, Card, CircleChip, Eyebrow, IconChip, LoadingBlock, Money, PillButton, Pictogram, type PictogramName, PinGlyph, PopupCard, PopupTitle, Stars, T, VehicleRender, cardShadow } from '../../../kit';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
-import { openExternal } from '../../../lib/openExternal';
+import { CallParty } from '../../../components/CallParty';
+import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { orderStatusLabel } from '../../../lib/orderStatus';
-import { taxiDoorFor } from '../../../lib/taxiDoors';
 import { noDriverView } from '../../../lib/taxiNoDriver';
 import { TaxiSignedOut } from '../TaxiSignedOut';
 import { signInForTaxi } from '../taxiEntry';
@@ -475,16 +475,13 @@ function TaxiBooking({ navigation }: any) {
     : stops.length > 0 ? stopRefusalCopy(estimateErrorCode, estimateErrorBody?.details) : null;
   // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
   const waitingTerms = waitingDisclosure(estimate);
-  // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  // [Owner 16 Oct] Customers take no photos: the ID check is the only door.
-  const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
-  const needsL2 = door === 'identity';
+  // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] A ride needs no ID (and, since 16 Oct, no
+  // photo), so the screen opens no ID door: the server no longer refuses a ride for it.
   // Joining the queue passes the same account gates as a request (the route
-  // and the queue share one authority boundary), so its refusal must show,
-  // with the same doors — never a silent tap.
+  // and the queue share one authority boundary), so its refusal must show —
+  // never a silent tap.
   const queueErrBody = (joinQueue.error as any)?.response?.data;
   const queueErrMsg = queueErrBody?.error?.message ?? queueErrBody?.message;
-  const queueDoor = taxiDoorFor(queueErrBody?.error?.code ?? queueErrBody?.code);
 
   // One coherent /supply snapshot owns visible counts, level and ETA. The
   // older /availability read contributes only its rollout gate.
@@ -514,12 +511,16 @@ function TaxiBooking({ navigation }: any) {
   // fare the passenger saw (409 FARE_CHANGED refetches the quote otherwise).
   // With stops, the stops too, in the passenger's order; a ride with stops is
   // never sent without its fare.
+  // [TAXI waiting charge · quote proof] With the fare, the waiting terms shown
+  // beside it (waitingTerms below), so the server books the terms the passenger saw.
   const requestPayload = (): RideRequestBody | null => {
     const base = tripPayload();
     if (!base) return null;
-    if (stops.length === 0) return selectedTier ? { ...base, expectedFare: selectedTier.fare } : base;
+    const echo = waitingEcho(estimate);
+    const quote = (fare: number) => ({ expectedFare: fare, ...(echo ? { waiting: echo } : {}) });
+    if (stops.length === 0) return selectedTier ? { ...base, ...quote(selectedTier.fare) } : base;
     if (!selectedTier) return null;
-    return { ...base, stops: stopsWire, expectedFare: selectedTier.fare };
+    return { ...base, stops: stopsWire, ...quote(selectedTier.fare) };
   };
 
   const onRequest = () => {
@@ -710,7 +711,7 @@ function TaxiBooking({ navigation }: any) {
                     </T>
                   ) : (
                     <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                      Fare estimate · pay the driver cash or MMG at drop-off{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
+                      Your fare · pay the driver cash or MMG at drop-off{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
                     </T>
                   )}
                   {waitingTerms ? (
@@ -744,14 +745,6 @@ function TaxiBooking({ navigation }: any) {
             <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.lg }}>
               {errMsg}
             </T>
-          ) : null}
-          {needsL2 ? (
-            <PillButton
-              label="Add your ID — takes a minute"
-              variant="outline"
-              style={{ marginTop: space.md }}
-              onPress={() => navigation?.navigate?.('IdentityVerification')}
-            />
           ) : null}
 
           {queue.data ? (
@@ -832,14 +825,6 @@ function TaxiBooking({ navigation }: any) {
                 <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
                   {queueErrMsg}
                 </T>
-              ) : null}
-              {queueDoor === 'identity' ? (
-                <PillButton
-                  label="Add your ID — takes a minute"
-                  variant="outline"
-                  style={{ marginTop: space.sm }}
-                  onPress={() => navigation?.navigate?.('IdentityVerification')}
-                />
               ) : null}
               <PillButton
                 label={watchMatchesPickup ? "We'll ping you — watching for drivers" : 'Notify me instead'}
@@ -1093,16 +1078,22 @@ function AssignedRideCard({
             </View>
           ) : <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>New on Swift</T>}
         </View>
-        {driver.user?.phone ? (
-          <PillButton
-            label="Call"
-            variant="soft"
-            size="md"
-            icon="phone"
-            onPress={() => void openExternal(`tel:${driver.user.phone}`, "Couldn't start the call — dial your driver directly.")}
-          />
-        ) : null}
+        {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this phone). */}
+        <CallParty orderId={ride?.id} target="driver" phone={driver.user?.phone} dialFailText="Couldn't start the call — dial your driver directly.">
+          {(call) => (
+            <PillButton
+              label={call.label}
+              variant="soft"
+              size="md"
+              icon="phone"
+              disabled={call.busy}
+              onPress={call.onPress}
+            />
+          )}
+        </CallParty>
       </View>
+      {/* [CALL-RELAY-ON] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
+      <SwiftCallNumberTip />
 
       {showStartCode ? (
         <StartCodeCeremony
@@ -1402,7 +1393,8 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
     && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(status)
     && !pinVerified;
   // [owner #50] The server's verdict decides (`canCancel` on the ride read):
-  // free while no driver has accepted, inside the five minutes after acceptance (owner ruling 14 Oct), or when
+  // free while no driver has accepted, inside the free-cancel window after acceptance (one minute, owner ruling 22 Oct;
+  // the server's FREE_CANCEL_WINDOW_MIN decides), or when
   // the driver is very late — otherwise the passenger contacts the driver. A
   // server that does not say yet leaves the old status rule in charge.
   const serverAllowsCancel = typeof ride.canCancel === 'boolean' ? ride.canCancel : true;
@@ -1700,7 +1692,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               />
             ) : null}
           </View>
-          {/* [owner #50] Five minutes after the driver accepted, the passenger contacts the
+          {/* [owner #50] One minute after the driver accepted (owner 22 Oct; was five), the passenger contacts the
               driver — the server's own words; the driver card above has the call. */}
           {cancelUnavailableMessage && !pinVerified ? (
             <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>{cancelUnavailableMessage}</T>

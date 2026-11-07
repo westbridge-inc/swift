@@ -13,6 +13,7 @@ import { providerChecklist, sendBookingReminders } from '../../modules/services/
 import { NotificationService } from '../../modules/notification/notification.service';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { ownedVerificationFixture } from '../helpers/verification-object';
+import { canonicalSlotStart } from '../../modules/booking/availability';
 
 // ---------------------------------------------------------------------------
 // GOLD-4 · SERV-02 — the professional-services golden journey.
@@ -93,6 +94,8 @@ async function submitDocs(owner: { userId: string; token: string }, docTypes: st
       fileUrl: await ownedVerificationFixture(app.prisma, owner.userId, `auto-approve-${docType}`),
       consent: true,
       privacyNoticeVersion: 'v1',
+      // [WEB-POLICE (a)] a police clearance needs a consent tick: send the build-12 one
+      ...(docType === 'police_clearance' ? { consentTick: 'document_v1' } : {}),
     }, owner.token);
     expect(submitted.statusCode).toBe(201);
     expect(submitted.json().data.status).toBe('APPROVED');
@@ -290,7 +293,11 @@ describe('GOLD-4 · SERV-02 — the professional-services golden journey', () =>
     expect(schedule.statusCode).toBe(200);
     const scheduled = await jobRow(jobId);
     expect(scheduled.status).toBe('SCHEDULED');
-    expect(scheduled.scheduledFor!.toISOString()).toBe(scheduledFor.toISOString());
+    // [BOOK-P1] A slot is minute-grained: a time sent with seconds is stored on its minute, and the
+    // response carries that stored value, which is what every app build reads back and sends again as
+    // the slot it confirms, declines or starts (the CONFIRM below, a build-9 body, judges the stored value).
+    expect(scheduled.scheduledFor!.toISOString()).toBe(canonicalSlotStart(scheduledFor).toISOString());
+    expect(schedule.json().data.scheduledFor).toBe(canonicalSlotStart(scheduledFor).toISOString());
     expect(scheduled.providerConfirmedAt).toBeNull();
     expect(await inbox(provider.userId, 'booking_to_confirm', jobId)).toHaveLength(1);
 
@@ -474,8 +481,9 @@ describe('GOLD-4 · SERV-02 — the professional-services golden journey', () =>
 
     // Durable: exactly one live job holds the slot; the loser is still QUOTED
     // with no slot; the provider was asked to confirm the winner only.
+    // [BOOK-P1] The winner holds the slot on its minute (canonicalSlotStart).
     const holders = await runWithoutTenant(() => app.prisma.serviceJob.findMany({
-      where: { providerId: provider.providerId, scheduledFor: slot, status: { in: ['SCHEDULED', 'IN_PROGRESS'] } },
+      where: { providerId: provider.providerId, scheduledFor: canonicalSlotStart(slot), status: { in: ['SCHEDULED', 'IN_PROGRESS'] } },
     }));
     expect(holders.map((h) => h.id)).toEqual([winnerJob]);
     const loserRow = await jobRow(loserJob);
@@ -490,7 +498,7 @@ describe('GOLD-4 · SERV-02 — the professional-services golden journey', () =>
     expect(retry.statusCode).toBe(200);
     const recovered = await jobRow(loserJob);
     expect(recovered.status).toBe('SCHEDULED');
-    expect(recovered.scheduledFor!.toISOString()).toBe(later.toISOString());
+    expect(recovered.scheduledFor!.toISOString()).toBe(canonicalSlotStart(later).toISOString());
     expect(await inbox(provider.userId, 'booking_to_confirm', loserJob)).toHaveLength(1);
   });
 

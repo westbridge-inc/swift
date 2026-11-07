@@ -3,8 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderWithQuery } from '@/test/test-utils';
 import { setSelectedStore } from '@/lib/auth';
 import * as vendorApi from '@/lib/vendor-api';
+import * as storeVatRead from '@/lib/store-vat-read';
+import * as storeFeeApi from '@/lib/store-fee-api';
 import SettingsPage from './page';
 import { storeCheckLabel } from './store-check';
+import { feeDate } from '@/lib/weekly-fee';
 
 // ---------------------------------------------------------------------------
 // [GUARDRAILS §7(4)] The settings card names the SELECTED store and says what
@@ -28,6 +31,9 @@ function stubReads() {
   vi.spyOn(vendorApi, 'getSubscription').mockReturnValue(new Promise(() => {}) as never);
   vi.spyOn(vendorApi, 'getCashSettlements').mockReturnValue(new Promise(() => {}) as never);
   vi.spyOn(vendorApi, 'getHours').mockReturnValue(new Promise(() => {}) as never);
+  vi.spyOn(storeVatRead, 'getStoreVat').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT] the owner's VAT card and (SPEED 30 Oct, the same read) the VAT report link
+  // The owner's weekly-fee card read: left to the network it failed at a random moment and drew a second "Try again" (a flake on main)
+  vi.spyOn(storeFeeApi, 'getStoreFee').mockReturnValue(new Promise(() => {}) as never);
 }
 
 afterEach(() => {
@@ -52,15 +58,70 @@ describe('dashboard settings: the store card', () => {
     setSelectedStore('store-1');
     renderWithQuery(<SettingsPage />);
     expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
-    expect(screen.getByText(/Shop · Town A · Not checked by Swift yet: see your documents in the Swift app/)).toBeTruthy();
+    // [OPEN-EARLY PR-2] the documents are on this website too: the card points to Documents, and the owner has a way there
+    expect(screen.getByText(/Shop · Town A · Not checked by Swift yet: see Documents/)).toBeTruthy();
+    expect(screen.queryByText(/documents in the Swift app/)).toBeNull();
+    expect(screen.getByRole('link', { name: 'Documents' }).getAttribute('href')).toBe('/dashboard/documents');
     expect(screen.queryByText(/Waiting for Swift/)).toBeNull();
+  });
+
+  // [OPEN-EARLY PR-2] The Documents card is the owner's, as on the phone (Account → Documents, owner only).
+  it('a manager gets no Documents card', async () => {
+    stubReads();
+    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue({ ...profile, myRole: 'MANAGER' } as never);
+    setSelectedStore('store-1');
+    renderWithQuery(<SettingsPage />);
+    expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Documents' })).toBeNull();
+  });
+
+  // [WEB-SETTINGS · owner 31 Oct 2026] Partners have no app yet: the details, the pin and the MMG number are set here.
+  it('the owner finds the store\'s details, its pin and its MMG number here, never "in the Swift app"', async () => {
+    stubReads();
+    setSelectedStore('store-1');
+    renderWithQuery(<SettingsPage />);
+    expect(await screen.findByRole('button', { name: 'Edit name and description' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Store location' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Your MMG number' })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/in the Swift app/);
+  });
+
+  // [WEB-SETTINGS PR-B] The phone's Account > Promotions, Seller status and Review your categories (manager and owner).
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a) — a DELIBERATE change] no Seller status link: the tier is removed
+  it('owners and managers find promotions and categories (no seller status any more); staff do not', async () => {
+    for (const role of ['OWNER', 'MANAGER', 'STAFF']) {
+      stubReads();
+      vi.spyOn(vendorApi, 'getProfile').mockResolvedValue({ ...profile, myRole: role } as never);
+      setSelectedStore('store-1');
+      const view = renderWithQuery(<SettingsPage />);
+      expect(await screen.findByRole('heading', { name: 'First Sample Shop' })).toBeTruthy();
+      const links = { Promotions: '/dashboard/promotions', Categories: '/dashboard/categories' };
+      expect(screen.queryByRole('link', { name: 'Seller status' }), role).toBeNull();
+      for (const [name, href] of Object.entries(links)) {
+        const link = screen.queryByRole('link', { name });
+        if (role === 'STAFF') expect(link, `${role} ${name}`).toBeNull();
+        else expect(link?.getAttribute('href'), `${role} ${name}`).toBe(href);
+      }
+      view.unmount();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('a manager sees the MMG number card but not the store\'s pin or the details editor (owner only)', async () => {
+    stubReads();
+    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue({ ...profile, myRole: 'MANAGER' } as never);
+    setSelectedStore('store-1');
+    renderWithQuery(<SettingsPage />);
+    expect(await screen.findByRole('heading', { name: 'Your MMG number' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Store location' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit name and description' })).toBeNull();
   });
 
   it('never says "checked" once a checked document has lapsed', () => {
     const now = new Date('2026-10-16T12:00:00.000Z');
-    expect(storeCheckLabel({ isVerified: true, activationValidUntil: '2026-10-16T11:59:59.000Z' }, now)).toBe('A checked document has expired: renew it in the Swift app');
+    expect(storeCheckLabel({ isVerified: true, activationValidUntil: '2026-10-16T11:59:59.000Z' }, now)).toBe('A checked document has expired: renew it under Documents');
     expect(storeCheckLabel({ isVerified: true, activationValidUntil: null }, now)).toBe('Documents checked by Swift');
-    expect(storeCheckLabel({ isVerified: false, activationValidUntil: '2999-01-01T00:00:00.000Z' }, now)).toBe('Not checked by Swift yet: see your documents in the Swift app');
+    expect(storeCheckLabel({ isVerified: false, activationValidUntil: '2999-01-01T00:00:00.000Z' }, now)).toBe('Not checked by Swift yet: see Documents');
   });
 });
 
@@ -73,10 +134,13 @@ describe('dashboard settings: the store card', () => {
 // `trialEndsAt` the server never sends (the column is trialEndDate). Synthetic.
 // ---------------------------------------------------------------------------
 
+const AHEAD = new Date(Date.now() + 6 * 86_400_000).toISOString();
 const subscriptionRow = (over: Record<string, unknown> = {}) => ({
   id: 'sub-1', vendorId: 'store-1', status: 'ACTIVE', weeklyRate: '5000.00', customRate: '3000.00', weeklyFeeGyd: 3000,
   isTrialActive: false, trialEndDate: null, isInGracePeriod: false, gracePeriodEnd: null,
-  currentPeriodEnd: '2026-10-20T04:00:00.000Z', nextBillingDate: '2026-10-26T16:00:00.000Z',
+  // [FEE-STATUS] The next fee's date is AHEAD of now (it was a fixed 26 Oct, which passes): a passed date
+  // never reads as a next bill, and a date alone never reads as paid.
+  currentPeriodEnd: AHEAD, nextBillingDate: AHEAD,
   ...over,
 });
 
@@ -85,6 +149,8 @@ function stubSettings({ role = 'OWNER', subscription, settlements }: { role?: st
   const sub = vi.spyOn(vendorApi, 'getSubscription').mockImplementation((subscription ?? (() => new Promise(() => {}))) as never);
   const cash = vi.spyOn(vendorApi, 'getCashSettlements').mockImplementation((settlements ?? (() => Promise.resolve({ unsettled: [], summary: { owed: 0, count: 0 } }))) as never);
   vi.spyOn(vendorApi, 'getHours').mockReturnValue(new Promise(() => {}) as never);
+  vi.spyOn(storeVatRead, 'getStoreVat').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT] the owner's VAT card and (SPEED 30 Oct, the same read) the VAT report link
+  vi.spyOn(storeFeeApi, 'getStoreFee').mockReturnValue(new Promise(() => {}) as never); // the weekly-fee card (see stubReads)
   return { sub, cash };
 }
 
@@ -98,26 +164,49 @@ describe('dashboard settings: the subscription card (U18 / U20 / U46)', () => {
     const card = await subscriptionCard();
     expect(card.textContent).toContain(`$${(3000).toLocaleString()}/week`);
     expect(card.textContent).not.toContain(`$${(5000).toLocaleString()}`);
-    // The next bill is the phone's nextBillingDate, not the period end.
-    expect(card.textContent).toContain('next bill 26 Oct 2026');
+    // The next fee is the phone's nextBillingDate, not the period end, and a date is never read as paid.
+    expect(card.textContent).toContain(`Next weekly fee due on ${feeDate(AHEAD)}`);
+    expect(card.textContent).not.toMatch(/paid/i);
     expect(card.textContent).toContain('Status: Active');
   });
 
   it('says the status in words, and shows a trial from the column the server sends', async () => {
-    stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'PAST_DUE' })) });
+    // [FEE-STATUS] As the API sends it: the amount due rides with the row. A week past its date says so.
+    const passed = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'PAST_DUE', amountDueGyd: 3000, nextBillingDate: passed })) });
     setSelectedStore('store-1');
     const { unmount } = renderWithQuery(<SettingsPage />);
     let card = await subscriptionCard();
-    expect(card.textContent).toContain('Status: Weekly fee overdue');
-    expect(card.textContent).not.toMatch(/PAST_DUE/);
+    expect(card.textContent).toContain('Status: Payment due');
+    expect(card.textContent).toContain(`Payment due since ${feeDate(passed)}`);
+    expect(card.textContent).not.toMatch(/PAST_DUE|next bill/);
     unmount();
     vi.restoreAllMocks();
 
-    stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'TRIAL', isTrialActive: true, trialEndDate: '2026-11-02T16:00:00.000Z' })) });
+    // The trial end is a fixed date, so the clock is frozen before it (only Date: timers stay real for the renders);
+    // read against the real clock, this case failed for good once that date passed.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-30T12:00:00.000Z'));
+    try {
+      stubSettings({ subscription: () => Promise.resolve(subscriptionRow({ status: 'TRIAL', isTrialActive: true, trialEndDate: '2026-11-02T16:00:00.000Z' })) });
+      renderWithQuery(<SettingsPage />);
+      card = await subscriptionCard();
+      expect(card.textContent).toContain('Status: Free trial');
+      expect(card.textContent).toContain(`Free trial until 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('[FLOW-QA2 NEW-8] no subscription yet: it starts when Swift approves the store, as the Weekly fee tab says', async () => {
+    // The server makes a store's weekly fee only when it makes the store live: on Swift's approval (verification
+    // projectVendorActivation -> startTrialForVendor), not when the documents alone are verified.
+    stubSettings({ subscription: () => Promise.resolve(null) });
+    setSelectedStore('store-1');
     renderWithQuery(<SettingsPage />);
-    card = await subscriptionCard();
-    expect(card.textContent).toContain('Status: Free trial');
-    expect(card.textContent).toContain(`Trial ends 2 Nov 2026 · then $${(3000).toLocaleString()}/week`);
+    const card = await subscriptionCard();
+    expect(card.textContent).toContain('No subscription on this store yet — it starts when Swift approves your store.');
+    expect(card.textContent).not.toMatch(/documents are verified/);
   });
 
   it('a failed read is not "no subscription": it says it could not check, and retries', async () => {
@@ -261,6 +350,7 @@ describe('dashboard settings: operating hours (U50)', () => {
     vi.spyOn(vendorApi, 'getSubscription').mockReturnValue(new Promise(() => {}) as never);
     vi.spyOn(vendorApi, 'getCashSettlements').mockReturnValue(new Promise(() => {}) as never);
     vi.spyOn(vendorApi, 'getHours').mockResolvedValue([{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00', isClosed: false }] as never);
+    vi.spyOn(storeVatRead, 'getStoreVat').mockReturnValue(new Promise(() => {}) as never); // [STORE-VAT] the owner's VAT card and (SPEED 30 Oct, the same read) the VAT report link
     const put = vi.spyOn(vendorApi, 'putHours')
       .mockRejectedValueOnce(new Error('Hours could not be saved'))
       .mockResolvedValue({} as never);

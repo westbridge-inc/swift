@@ -325,7 +325,8 @@ describe('Bookings — double-booking is impossible at the data layer', () => {
     const winner = await app.prisma.booking.findFirstOrThrow({
       where: { itemId: serviceItemId, slotStart: slot, status: 'RESERVED' },
     });
-    await booking.cancelBooking(winner.id, winner.customerId);
+    // [BOOK-S2] A bare booking has no order to cancel through (the dead BookingService.cancelBooking is gone): the row is cancelled as the coupling seam would.
+    await app.prisma.booking.update({ where: { id: winner.id }, data: { status: 'CANCELLED' } });
 
     const next = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rebooked = await booking.reserveSlot(serviceItemId, next.userId, slot);
@@ -465,7 +466,9 @@ describe('deleting a menu item archives its order and booking references', () =>
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('CANCELLED');
     expect(await app.prisma.item.findUnique({ where: { id: item.id } })).toMatchObject({ stockQuantity: 1, isAvailable: false, autoHiddenAt: null });
     expect(await app.prisma.stockMovement.count({ where: { orderId: order.id, itemId: item.id, reason: 'CANCEL_RESTOCK' } })).toBe(1);
-    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture retry' }, customerToken)).statusCode).toBe(400);
+    // A second tap gets the first tap's answer, and restocks nothing.
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, { reason: 'Fixture retry' }, customerToken)).statusCode).toBe(200);
+    expect(await app.prisma.stockMovement.count({ where: { orderId: order.id, itemId: item.id, reason: 'CANCEL_RESTOCK' } })).toBe(1);
   });
 
   it('a stale menu editor cannot restore an archived item to availability', async () => {
@@ -531,12 +534,13 @@ describe('deleting a menu item archives its order and booking references', () =>
   });
 
   it('does not erase an existing booking when the service listing is deleted', async () => {
+    // Far from the next-Friday slot an earlier case holds: at now + 1 day this collided for an hour every Thursday.
     const category = await app.prisma.category.create({ data: { vendorId, name: `Archive service ${wordFreeTag(8)}` } });
     const item = await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Booked fixture', basePrice: 500, fulfillment: 'APPOINTMENT' } });
-    const held = await app.prisma.booking.create({ data: { itemId: item.id, customerId, slotStart: new Date(Date.now() + DAY), slotEnd: new Date(Date.now() + DAY + 1800000) } });
+    const held = await app.prisma.booking.create({ data: { itemId: item.id, vendorId, customerId, slotStart: new Date(Date.now() + 20 * DAY), slotEnd: new Date(Date.now() + 20 * DAY + 1800000) } });
     expect((await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)).statusCode).toBe(200);
     expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: item.id, status: 'RESERVED' });
-    await booking.cancelBooking(held.id, customerId);
+    await app.prisma.booking.update({ where: { id: held.id }, data: { status: 'CANCELLED' } }); // [BOOK-S2] as the coupling seam would
     expect((await app.prisma.booking.findUniqueOrThrow({ where: { id: held.id } })).status).toBe('CANCELLED');
   });
 });
@@ -566,7 +570,10 @@ describe('[owner 11 Oct] deleting a category archives it and its listings — hi
       items: { create: { itemId: dish.id, name: dish.name, quantity: 1, basePrice: 500, markedUpPrice: 500, markupAmount: 0, totalBase: 500, totalMarkup: 0, totalCustomer: 500 } },
     } });
     fixtureOrderIds.push(order.id);
-    const held = await app.prisma.booking.create({ data: { itemId: service.id, customerId, slotStart: new Date(Date.now() + 2 * DAY), slotEnd: new Date(Date.now() + 2 * DAY + 1800000) } });
+    // [BOOK-S1] Each fixture's booking takes its own hour, away from the appointments other cases book:
+    // one business is never booked twice at once.
+    const heldAt = Date.now() + 40 * DAY + fixtureOrderIds.length * 3_600_000;
+    const held = await app.prisma.booking.create({ data: { itemId: service.id, vendorId, customerId, slotStart: new Date(heldAt), slotEnd: new Date(heldAt + 1800000) } });
     const response = await inject('DELETE', `/api/v1/vendor/categories/${category.id}`, undefined, vendorToken);
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json().data).toMatchObject({ deleted: true, itemsRemoved: 2 }); // the shipped contract
@@ -581,7 +588,7 @@ describe('[owner 11 Oct] deleting a category archives it and its listings — hi
     }
     expect((await app.prisma.item.findUnique({ where: { id: dish.id }, include: { optionGroups: { include: { options: true } } } }))?.optionGroups[0]?.options).toHaveLength(1);
     expect(await app.prisma.booking.findUnique({ where: { id: held.id } })).toMatchObject({ itemId: service.id, status: 'RESERVED' });
-    await booking.cancelBooking(held.id, customerId);
+    await app.prisma.booking.update({ where: { id: held.id }, data: { status: 'CANCELLED' } }); // [BOOK-S2] as the coupling seam would
     expect((await app.prisma.booking.findUniqueOrThrow({ where: { id: held.id } })).status).toBe('CANCELLED');
   });
 

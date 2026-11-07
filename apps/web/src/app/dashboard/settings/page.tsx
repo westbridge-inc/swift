@@ -1,17 +1,33 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { selectedProfileStore, storeCheckLabel, type ProfileData } from './store-check';
+import { selectedProfileStore, type ProfileData } from './store-check';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { CheckingLatest, useCheckingLatest } from '@/components/checking-latest';
 import { readSettlementLedger } from '@/lib/cash-settlement-view';
 import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 import { RefundRuleCard } from './refund-rule-card';
+import { BookingCapacityCard } from './booking-capacity-card';
+import { KitchenCapacityCard } from './kitchen-capacity-card';
+import { DeliveryStatusNotice } from '../delivery-status-notice';
+import { FoodHandlersCard } from './food-handlers-card';
+import { StoreFeeCard } from './store-fee-card';
+import { CallUsCard } from './call-us-card';
 import { StorePhotosCard } from './store-photos-card';
+import { VatCard } from './vat-card';
+import { VatReportLink } from './vat-report-link';
+import { StoreDetailsCard } from './store-details-card';
+import { lazyRetry } from '@/lib/chunk-retry';
+
+// [WEB-SETTINGS · owner 31 Oct 2026] The store's pin and address, and its MMG number: loaded with the page, but in their
+// own pieces (the "Confirm it's you" code and the map picker load only when used), so the console's shared code does not grow.
+const StoreLocationCard = lazyRetry(() => import('./store-location-card').then((m) => ({ default: m.StoreLocationCard })));
+const MmgNumberCard = lazyRetry(() => import('./mmg-number-card').then((m) => ({ default: m.MmgNumberCard })));
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -141,6 +157,8 @@ function HoursEditor() {
 function SubscriptionCard({ isOwner }: { isOwner: boolean }) {
   const storeId = useStoreId();
   const sub = useQuery({ queryKey: storeKey(storeId, 'subscription'), queryFn: getSubscription, enabled: isOwner });
+  // [SPEED 30 Oct] The fee's standing from memory says it is being checked until Swift answers.
+  const checkingLatest = useCheckingLatest(sub);
   if (!isOwner) return null;
   if (sub.isError) return <DataUnavailable what="your subscription" error={sub.error} onRetry={() => void sub.refetch()} />;
   // isPending, not isLoading: a read paused offline has no data and is not "no subscription".
@@ -150,13 +168,14 @@ function SubscriptionCard({ isOwner }: { isOwner: boolean }) {
     <div className="sw-card p-6">
       <h2 className="font-bold">Subscription</h2>
       {!s ? (
-        <p className="mt-2 text-sm text-[var(--swift-muted)]">No subscription on this store yet — it starts when your documents are verified.</p>
+        <p className="mt-2 text-sm text-[var(--swift-muted)]">No subscription on this store yet — it starts when Swift approves your store.</p>
       ) : (
         <div className="mt-3 space-y-1 text-sm">
           <p>
             Status: <b className={subscriptionInGoodStanding(s) ? 'text-green-600' : 'text-[var(--swift-red)]'}>{subscriptionStatusWord(s)}</b>
           </p>
           <p>{subscriptionLine(s)} — you keep 100% of every sale.</p>
+          <CheckingLatest show={checkingLatest} />
           <p className="text-[var(--swift-muted)]">
             <Link href="/dashboard/weekly-fee" className="font-semibold underline">Weekly fee — view and pay</Link>
           </p>
@@ -190,6 +209,8 @@ function SettlementsCard() {
     },
   });
   const ledger = readSettlementLedger(data, 'rider');
+  // [SPEED 30 Oct] What the store owes, from memory, says it is being checked until Swift answers.
+  const checkingLatest = useCheckingLatest(data);
   if (ledger.state === 'unavailable') {
     return <DataUnavailable what="what you owe riders" error={data.error} onRetry={() => void data.refetch()} />;
   }
@@ -197,6 +218,7 @@ function SettlementsCard() {
     <div className="sw-card p-6">
       <h2 className="font-bold">You owe riders</h2>
       <MutationNotice errors={[confirm.error]} className="mt-2" />
+      <CheckingLatest show={checkingLatest} />
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
         MMG orders — the delivery fee came to you with the customer&apos;s payment. Hand it to the rider in cash (usually at
         pickup), then mark it paid. Both sides confirm; then it{'’'}s settled.
@@ -260,32 +282,86 @@ export default function SettingsPage() {
   const storeId = useStoreId();
   const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
   const p = selectedProfileStore(profile.data as ProfileData | undefined, storeId);
-  const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
+  const myRole = (profile.data as { myRole?: string } | undefined)?.myRole;
+  const isOwner = myRole === 'OWNER';
+  // [CHAINS PR2] A manager sees the branches they manage (GET /vendor/stores/summary allows it); the team is the owner's.
+  const seesBranches = isOwner || myRole === 'MANAGER';
 
   return (
     <div className="max-w-3xl space-y-6">
       <h1 className="sw-title">Settings</h1>
+      <DeliveryStatusNotice storeId={storeId} />
 
-      {profile.isError && <DataUnavailable what="your store details" error={profile.error} onRetry={() => void profile.refetch()} />}
-      {p && (
-        <div className="sw-card p-6">
-          <h2 className="font-bold">{p.name}</h2>
-          <p className="mt-1 text-sm text-[var(--swift-muted)]">
-            {p.vendorType === 'SUPERMARKET' ? 'Grocery' : p.vendorType === 'STORE' ? 'Shop' : p.vendorType === 'SERVICE' ? 'Services' : 'Restaurant'}
-            {p.city ? ` · ${p.city}` : ''} · {storeCheckLabel(p)}
-          </p>
-          {p.description && <p className="mt-2 text-sm">{p.description}</p>}
-          <p className="mt-3 text-xs text-[var(--swift-muted)]">
-            Name, description, address and MMG details are edited in the Swift app (they go through review).
-          </p>
+      {/* [WEB-SETTINGS] The store's name and description: the owner edits them here (partners have no app yet). */}
+      <StoreDetailsCard storeId={storeId} />
+
+      {/* [OPEN-EARLY PR-2] The store's documents (owner only, as the phone's Account → Documents). */}
+      {isOwner && (
+        <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+          <div className="min-w-0 flex-1">
+            <h2 className="font-bold">Documents</h2>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">Upload your store&apos;s documents and renewals, and see where each one stands.</p>
+          </div>
+          <Link href="/dashboard/documents" className="sw-chip">Documents</Link>
         </div>
       )}
 
+      {/* [CHAINS PR2] The team (owner) and the branches (owner and managers); the phone has them under Account. */}
+      {seesBranches && (
+        <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+          <div className="min-w-0 flex-1">
+            <h2 className="font-bold">{isOwner ? 'Team and branches' : 'Branches'}</h2>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">{isOwner ? 'Add managers and staff, or another branch of your business.' : 'Every branch you manage at a glance.'}</p>
+          </div>
+          {isOwner && <Link href="/dashboard/team" className="sw-chip">Team</Link>}
+          <Link href="/dashboard/branches" className="sw-chip">Branches</Link>
+        </div>
+      )}
+      {/* [WEB-SETTINGS PR-B] The phone's Account > Promotions and Review your categories (manager and owner).
+          [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No Seller status: the self-declared tier and its limits are removed. */}
+      {seesBranches && (
+        <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+          <div className="min-w-0 flex-1">
+            <h2 className="font-bold">Grow your store</h2>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">Run promo codes and review the categories customers find you under.</p>
+          </div>
+          <Link href="/dashboard/promotions" className="sw-chip">Promotions</Link>
+          <Link href="/dashboard/categories" className="sw-chip">Categories</Link>
+        </div>
+      )}
+      {/* [WEB-SETTINGS] Where the store is (owner) and its MMG number (owner edits, manager sees it masked), as the phone's Account. */}
+      <Suspense fallback={null}>
+        <StoreLocationCard storeId={storeId} />
+        <MmgNumberCard storeId={storeId} />
+      </Suspense>
       <StorePhotosCard storeId={storeId} />
+      {/* [BOOK-S5b · owner C1] Services only, and only when the server sends the setting. */}
+      <BookingCapacityCard storeId={storeId} />
+      {/* [RIDER-SAFE 4] How many orders the kitchen holds at once (stores that cook or pack). */}
+      <KitchenCapacityCard storeId={storeId} />
       <RefundRuleCard storeId={storeId} />
+      {/* [REVIEW-F #2220 S3-1] the number customers can call (a waiting store's go-live step) */}
+      <CallUsCard storeId={storeId} />
+      {/* [FOOD-PERMIT · owner 24 Oct 2026] a registered restaurant's owner ticks for its food handlers */}
+      <FoodHandlersCard storeId={storeId} isOwner={isOwner} vendorType={p?.vendorType} />
+      {/* [RETIER PR-A2] a store whose fee follows its catalogue above the first step: its owner ticks it to go live */}
+      <StoreFeeCard storeId={storeId} isOwner={isOwner} />
+      <VatCard storeId={storeId} />
+      <VatReportLink storeId={storeId} />
       <SubscriptionCard isOwner={isOwner} />
       <SettlementsCard />
       <HoursEditor />
+      {/* [WEB-DELETE · owner 1 Nov 2026] The phone's Personal data -> Delete my account; a store owner's account
+          closes by a request the team completes (the next page asks the server which, and shows what happens). */}
+      <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+        <div className="min-w-0 flex-1">
+          <h2 className="font-bold">Your Swift account</h2>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">
+            {isOwner ? 'Close your account. New orders and your weekly fee stop as soon as you ask; our team takes your store off sale once every order and payment is settled.' : 'Delete your account and the personal data Swift holds about you.'}
+          </p>
+        </div>
+        <Link href="/dashboard/settings/delete-account" className="sw-chip text-[var(--swift-red)]">{isOwner ? 'Request account closure' : 'Delete my account'}</Link>
+      </div>
     </div>
   );
 }

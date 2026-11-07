@@ -173,7 +173,9 @@ const reviewed = (authority: AdminRouteAuthority, grant: string = DOCUMENT_REVIE
 /** [ADM-004] Shorthands for the rows the admin surface changes most. */
 const E = {
   user: { model: 'user', fields: ['status', 'activeRole', 'roles'] },
-  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured'] },
+  deliveryCashSettlement: { model: 'deliveryCashSettlement', fields: ['status', 'amount', 'closedAt', 'closedById'] },
+  serviceJob: { model: 'serviceJob', fields: ['status', 'cancelledAt'] },
+  vendor: { model: 'vendor', fields: ['status', 'isVerified', 'acceptingOrders', 'isFeatured', 'personApprovalRequired', 'brandListedAlone', 'vendorType', 'name'] },
   // [ADM-002] Rider/Driver never had `isVerified` or `status`; verification
   // lives in `documentsVerified*`, and a safety suspension is a timestamp.
   rider: { model: 'rider', fields: ['documentsVerified', 'documentsVerifiedAt', 'isAvailable', 'isOnline', 'safetySuspendedAt'] },
@@ -186,10 +188,20 @@ const E = {
   // [DOC-1 §31.5 · P31-2] mmgClaimMismatchAt is the fact a claim-mismatch resolution changes.
   // [ORDER-SPINE S1-6] …and a decision's outcome and the claim generation it produced.
   order: { model: 'order', fields: ['status', 'totalAmount', 'paymentStatus', 'cancelledAt', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'mmgClaimMismatchAt', 'mmgClaimResolution', 'mmgClaimRevision'] },
+  // [BUG-HUNT-2 G08] The refund rail's facts: where an obligation stands, and support's finding on a send.
+  mmgRefundObligation: { model: 'mmgRefundObligation', fields: ['status', 'amount', 'dueAt', 'missedAt', 'resolvedAt', 'resolvedById', 'resolutionNote', 'revision'] },
+  mmgRefundSend: { model: 'mmgRefundSend', fields: ['answer', 'resolution', 'resolvedById', 'resolvedAt', 'note', 'revision'] },
   // [L02 · row 34] Partial cash a rider could not hand back at the door, and its resolution.
   orderDoorCash: { model: 'order', fields: ['status', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'doorCashReturnResolvedById'] },
   moverFee: { model: 'moverFeeAuthority', routeParam: 'userId', uniqueField: 'userId', fields: ['state', 'holdReason', 'canonicalSubscriptionId', 'feeType', 'revision', 'decisionId'] },
   subscription: { model: 'subscription', fields: ['status', 'feeWaived', 'weeklyRate', 'customRate', 'nextBillingDate'] },
+  // [CHAINS] A chain deal: the owner's negotiated weekly fee per branch, who set it and why. VendorOwner has no tenant
+  // column: walled through its user.
+  chainDeal: { model: 'vendorOwner', fields: ['dealWeeklyRate', 'dealCurrencyCode', 'dealSetAt', 'dealSetBy', 'dealReason'], tenantVia: ['user'] },
+  // [CHAINS PR3] The chain's name customers see once for all its branches (walled through the owner's user).
+  chainBrand: { model: 'vendorOwner', fields: ['brandName'], tenantVia: ['user'] },
+  // [ENTERPRISE E2] A chain deal's end date, or its end / raise, through the 14-day fee-change notice.
+  chainDealChange: { model: 'vendorOwner', fields: ['dealChangeKind', 'dealChangeFrom', 'dealChangeTo', 'dealChangeNotBefore', 'dealChangeReason', 'dealChangeSetBy', 'dealChangeSwitchedAt'], tenantVia: ['user'] },
   settlement: { model: 'settlement', fields: ['status', 'netSales', 'moverPayable', 'paidAt', 'reference'] },
   docType: { model: 'docType', routeParam: 'code', uniqueField: 'code', fields: ['externalProcessingAllowed', 'externalProcessingDecisionRef', 'externalProcessingDecidedAt'] },
   platformConfig: { model: 'platformConfig', routeParam: 'key', uniqueField: 'key', fields: ['value'] },
@@ -201,7 +213,7 @@ const E = {
   zoneFare: { model: 'zoneFare', fields: ['fare', 'fromZoneId', 'toZoneId', 'updatedBy'], tenantVia: ['fromZone', 'toZone'] },
   advertiser: { model: 'advertiser', fields: ['status'] },
   adCampaign: { model: 'adCampaign', fields: ['status'] },
-  adInvoice: { model: 'adInvoice', fields: ['status', 'amount', 'paidAt'] },
+  adLinkDomain: { model: 'adLinkDomain', fields: ['status'] },
   adRefundIntent: { model: 'adRefundIntent', fields: ['status', 'payoutRail', 'manualPayoutRef', 'providerRefundRef', 'completedAt'] },
   paymentConfirmation: { model: 'paymentConfirmationHold', fields: ['status', 'resolvedAt', 'resolvedBy', 'resolutionEvidence'] },
   // [PT-4] A held card payment's resolution: what finance decided and the provider actions it took.
@@ -211,6 +223,8 @@ const E = {
   feeReversal: { model: 'mmgFeeReversal', fields: ['state', 'heldReason', 'resolution', 'resolvedBy', 'failedAt', 'reversedAt', 'walletDebitedAt'] },
   settlementBatch: { model: 'settlementBatch', fields: ['status', 'expectedNetGyd', 'depositedGyd', 'depositedAt', 'bankRef'] },
   verification: { model: 'verificationDocument', fields: ['status', 'reviewedAt'] },
+  // [STORE-VAT] A store's VAT decision (the number itself is never named in the trail's diff).
+  storeVat: { model: 'vendor', routeParam: 'vendorId', fields: ['vatStatus', 'vatMode', 'vatModeRequested', 'vatEffectiveFrom', 'vatReviewedAt'] },
   // [ADM-002] `resolvedAt` does not exist on ReturnRequest (`reviewedAt` does).
   returnRequest: { model: 'returnRequest', fields: ['status', 'refundAmount', 'reviewedAt', 'refundRef', 'refundPaidAmount', 'refundPaidAt'] },
   claim: { model: 'reimbursementClaim', fields: ['status', 'amount', 'paidAt', 'paymentRef', 'paidAmount', 'reviewedAt'] },
@@ -246,6 +260,9 @@ const E = {
 export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAuthority>> = {
   // ── Dashboard and search ────────────────────────────────────────────────
   'GET /dashboard/overview': c('C0', 'dashboard.read'),
+  // [ADMIN-AUDIT S2-1] Today's count of every queue that waits for a person. Counts only, and each one only
+  // when this same grant would open that queue's own read (dashboard-waiting.ts).
+  'GET /dashboard/waiting': c('C0', 'dashboard.read'),
   'GET /legal/processors': c('C0', 'legal.processors.read'),
   'PUT /verification/doc-types/:code/external-processing': c('C4', 'verification.doctype.external', E.docType),
   'GET /search': c('C1', 'search.read'),
@@ -253,30 +270,54 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // ── People ──────────────────────────────────────────────────────────────
   'GET /users': c('C1', 'user.read'),
   'GET /users/:id': c('C1', 'user.read'),
+  'GET /users/:id/phone': c('C1', 'user.contact.read'),
   'GET /users/:id/risk': c('C1', 'user.risk.read'),
+  // A person's service jobs, on either side: what a complaint about a pro has to open.
+  'GET /users/:id/service-jobs': c('C1', 'user.read'),
+  // Closes a job nobody else can: no money moves, both sides are told, the reason stays in the record.
+  'POST /service-jobs/:id/close': c('C3', 'service.job.close', E.serviceJob),
+  // [BOOK-FU2 · owner B3] Repeat "Customer didn't come" records for a person to review: counts and dates, numbers masked.
+  'GET /missed-appointments': c('C1', 'user.risk.read'),
   'PUT /users/:id/suspend': c('C3', 'user.suspend', E.user),
+  // [BUG-HUNT F21] A checked legal name changes only through a person: the door the refusal points at.
+  'PUT /users/:id/name': c('C3', 'user.name.change', E.user),
+  // [BUG-HUNT F22] A person's number is their sign-in: its own capability, never in a support grant. The code goes to the new number.
+  // [BUG-HUNT F22] The number is the sign-in, so asking takes two people. The read-back then takes the code.
+  'POST /users/:id/phone-change': c('C5', 'user.phone.change', E.user),
+  'POST /users/:id/phone-change/confirm': c('C3', 'user.phone.change', E.user),
+  // [BUG-HUNT F05] Allows one move between delivery and taxi work. No money moves; the fee follows the existing rule.
+  'POST /users/:id/mover-plan/allow-move': c('C3', 'subscription.plan.move', E.user),
   'PUT /users/:id/unsuspend': c('C3', 'user.suspend', E.user),
   'PUT /users/:id/ban': c('C3', 'user.ban', E.user),
   'PUT /users/:id/unban': c('C3', 'user.ban', E.user),
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b), Q1] a person lifts a strike restriction from Help (the same hands as a suspension)
+  'POST /users/:id/strike-restriction/lift': c('C3', 'user.suspend', E.user),
 
   // ── Vendors ─────────────────────────────────────────────────────────────
   'GET /vendors': c('C0', 'vendor.read'),
   'GET /vendors/pending': c('C0', 'vendor.read'),
   'GET /vendors/:id': c('C1', 'vendor.read'),
+  'GET /vendors/:id/party-phone': c('C1', 'vendor.contact.read'),
   // [MC-PR2] which of the owner's documents are approved, waiting, rejected or missing — document status, so C1
   'GET /vendors/:id/activation-checklist': c('C1', 'vendor.read'),
   'PUT /vendors/:id/approve': c('C3', 'vendor.approve', E.vendor),
   'PUT /vendors/:id/suspend': c('C3', 'vendor.suspend', E.vendor),
   'PUT /vendors/:id/feature': c('C2', 'vendor.feature', E.vendor),
+  // [BUG-HUNT F22] What the screens tell a store to ask support for: a type picked by mistake, a checked name.
+  'PUT /vendors/:id/type': c('C3', 'vendor.edit', E.vendor),
+  'PUT /vendors/:id/name': c('C3', 'vendor.edit', E.vendor),
 
   // ── Movers ──────────────────────────────────────────────────────────────
   'GET /riders': c('C1', 'mover.read'),
   'GET /riders/:id': c('C1', 'mover.read'),
   'GET /riders/:id/activation-checklist': c('C1', 'mover.read'),
+  // [FOLLOWUPS · follows O-1] One person's full number from a person page: its own capability, like order.contact.read.
+  'GET /riders/:id/phone': c('C1', 'mover.contact.read'),
   'PUT /riders/:id/verify-documents': c('C3', 'mover.verify', E.rider),
   'GET /drivers': c('C1', 'mover.read'),
   'GET /drivers/:id': c('C1', 'mover.read'),
   'GET /drivers/:id/activation-checklist': c('C1', 'mover.read'),
+  'GET /drivers/:id/phone': c('C1', 'mover.contact.read'),
   'PUT /drivers/:id/verify-documents': c('C3', 'mover.verify', E.driver),
   'PUT /drivers/:id/ride-class': c('C3', 'driver.rideclass', E.driver),
   // [High #9 · DS109] Approving a pending vehicle assignment grants this driver the
@@ -287,20 +328,34 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /orders': c('C1', 'order.read'),
   'GET /orders/held': c('C0', 'order.read'),
   'GET /orders/sla-breaches': c('C0', 'order.read'),
+  // [RIDER-SAFE 5] Swift's delivery pause: read it; set or lift it (a reason, audited).
+  'GET /delivery-pause': c('C0', 'order.read'),
+  'PUT /delivery-pause': c('C3', 'delivery.pause'),
   'GET /orders/:id': c('C1', 'order.read'),
   'GET /ops/live': c('C1', 'ops.live.read'),
   'POST /orders/:id/retry-dispatch': c('C2', 'order.dispatch'),
   'POST /orders/:id/payment-claim/resolve': c('C3', 'order.dispatch', E.order),
   'POST /orders/:id/food-age-hold/release': c('C2', 'order.hold.release'),
+  'GET /orders/:id/party-phone': c('C1', 'order.contact.read'),
+  // [BUG-HUNT-2 G11] A proof photo: a short signed link, a stated reason, the read recorded first.
+  'GET /orders/:id/proof-photo': c('C1', 'order.proof.read'),
   'GET /orders/:id/handover-secret': c('C1', 'order.handover.read'),
   'POST /orders/:id/handover-secret/rotate': c('C2', 'order.handover.rotate'),
   'POST /orders/:id/handover-secret/reset-delivery-pin': c('C2', 'order.handover.rotate'),
+  'POST /orders/:id/handover-secret/reset-ride-pin': c('C2', 'order.handover.rotate'),
   'GET /orders/:id/customer-identity': c('C1', 'order.identity.read'),
   'PUT /orders/:id/cancel': c('C3', 'order.cancel', E.order),
+  // [BUG-HUNT-2 G01] A ride in progress whose driver is gone: its only exits were the driver's own handover.
+  'POST /orders/:id/end-ride': c('C3', 'order.ride.end', E.order),
   'PUT /orders/:id/refund-settled': c('C4', 'order.refund.settle', E.order),
   // [MMGCLOSE] Record-only: closes a store-claimed MMG order as "refund handled
   // by the store" (an OWED refund obligation, no money moves) — money class, two admins.
   'POST /orders/:id/close-store-refund': c('C4', 'order.refund.settle', E.order),
+  // [BUG-HUNT-2 G08] The MMG refund rail, record only. The queue names stores and orders (C1). A finding on a disputed
+  // refund is a decision with a reason (C3, like a payment-claim resolve); a void says nothing is owed, so two people (C4).
+  'GET /mmg-refunds': c('C1', 'order.read'),
+  'POST /mmg-refunds/sends/:id/resolve': c('C3', 'order.refund.settle', E.mmgRefundSend),
+  'POST /mmg-refunds/:id/void': c('C4', 'order.refund.settle', E.mmgRefundObligation),
   // [L02 · row 34 · review S2-1] Record-only: operations records partial cash a
   // rider could not hand back (HELD) as resolved. It claims settlement of a
   // customer's money (like refund-settled), so: money class, reason, two admins.
@@ -311,6 +366,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // someone else's goods and a rider's fronted cash go, so a reason is owed (C3).
   'GET /custody-cases': c('C1', 'custody.read'),
   'GET /custody-cases/:id': c('C1', 'custody.read'),
+  'GET /custody-cases/:id/party-phone': c('C1', 'custody.contact.read'),
   'POST /custody-cases/:id/claim': c('C2', 'custody.claim', E.custodyCase),
   'POST /custody-cases/:id/direct': c('C3', 'custody.decide', E.custodyCase),
   'POST /custody-cases/:id/relay': c('C3', 'custody.decide', E.custodyCase),
@@ -343,7 +399,14 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /finance/vat-tracker': c('C0', 'finance.read'),
   'GET /finance/settlements': c('C0', 'finance.read'),
   'GET /finance/cash-settlements': c('C0', 'finance.read'),
+  // Record-only, like the close of a store-claimed MMG order above: a debt between two people stops being tracked, and
+  // no money moves. It closes a claim about money, so: money class, reason, two admins.
+  'POST /finance/cash-settlements/:id/close': c('C4', 'order.refund.settle', E.deliveryCashSettlement),
   'GET /finance/payment-mix': c('C0', 'finance.read'),
+  // [OWNER 5 Nov 2026] Fees paid in person, apart from MMG. Account numbers, no names.
+  'GET /finance/in-person-payments': c('C0', 'finance.read'),
+  // A receipt names its partner: the level of GET /billing/receipts/:receiptNumber, not the list's.
+  'GET /finance/in-person-payments/:receiptNumber': c('C0', 'billing.read'),
   'PUT /finance/settlements/:id/process': c('C4', 'finance.settlement.process', E.settlement),
   'POST /finance/settlements/:id/adjust': c('C4', 'finance.settlement.adjust', E.settlement),
 
@@ -368,10 +431,23 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'POST /notifications/broadcast': c('C5', 'platform.broadcast'),
 
   // ── Subscriptions ───────────────────────────────────────────────────────
-  'GET /subscriptions': c('C0', 'subscription.read'),
+  // [SEC-PII · security scan 28 Oct 2026] Movers' names (and masked numbers) on every row: a logged sensitive read.
+  'GET /subscriptions': c('C1', 'subscription.read'),
   'GET /subscriptions/:id/billing-events': c('C0', 'subscription.read'),
   'PUT /subscriptions/:id/waive-fee': c('C4', 'subscription.waive', E.subscription),
+  // [CHAINS · owner 29 Oct 2026] A chain's negotiated weekly fee per branch: money, so a reason and a second person.
+  'GET /vendor-owners/:id/chain': c('C0', 'subscription.read'),
+  'PUT /vendor-owners/:id/deal-rate': c('C4', 'subscription.deal', E.chainDeal),
+  // [CHAINS PR3] One brand card per chain (no money; it changes which branch a customer reaches first): a reason.
+  'PUT /vendor-owners/:id/brand': c('C3', 'vendor.brand', E.chainBrand),
+  'PUT /vendors/:id/brand-listing': c('C3', 'vendor.brand', E.vendor),
+  'POST /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
+  'DELETE /vendor-owners/:id/deal-change': c('C4', 'subscription.deal', E.chainDealChange),
   'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),
+  // [OWNER 5 Nov 2026] A weekly fee paid directly to Westbridge Inc. in person. SUPER_ADMIN only (founderGuard on the route), works under BILLING_TOPUP_HOLD.
+  'POST /subscriptions/:id/in-person-payment': c('C4', 'subscription.inperson', E.subscription),
+  // [OWNER 5 Nov 2026] Read before anyone takes money: can this account pay now, and how much. Changes nothing.
+  'GET /subscriptions/:id/in-person-payment': c('C0', 'subscription.inperson'),
   'POST /subscriptions/:id/refund-credit/set-aside': c('C4', 'subscription.refund', E.subscription),
   'POST /subscriptions/:id/refund-credit/paid': c('C4', 'subscription.refund', E.subscription),
   'POST /subscriptions/:id/refund-credit/release': c('C4', 'subscription.refund', E.subscription),
@@ -385,16 +461,19 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /ads/campaigns': c('C0', 'ads.read'),
   'GET /ads/settings': c('C0', 'ads.read'),
   'GET /ads/house': c('C0', 'ads.read'),
+  'GET /ads/link-domains': c('C0', 'ads.read'),
   'PUT /ads/advertisers/:id/approve': c('C3', 'ads.advertiser.decide', E.advertiser),
   'PUT /ads/advertisers/:id/reject': c('C3', 'ads.advertiser.decide', E.advertiser),
   'PUT /ads/advertisers/:id/suspend': c('C3', 'ads.advertiser.suspend', E.advertiser),
   'PUT /ads/advertisers/:id/reinstate': c('C3', 'ads.advertiser.suspend', E.advertiser),
   'PUT /ads/creatives/:id/approve': c('C2', 'ads.creative.decide'),
   'PUT /ads/creatives/:id/reject': c('C2', 'ads.creative.decide'),
+  // [ADS-ON] Allowing a website decides what every phone may open; refusing one stops paid campaigns.
+  'PUT /ads/link-domains/:id/approve': c('C3', 'ads.creative.decide', E.adLinkDomain),
+  'PUT /ads/link-domains/:id/reject': c('C3', 'ads.creative.decide', E.adLinkDomain),
   'PUT /ads/campaigns/:id/kill': c('C3', 'ads.campaign.kill', E.adCampaign),
   'POST /ads/refund-intents/:id/settle': c('C4', 'ads.refund.settle', E.adRefundIntent),
   'POST /ads/refund-intents/backfill': c('C4', 'ads.refund.backfill'),
-  'PUT /ads/invoices/:id/mark-paid': c('C4', 'ads.invoice.pay', E.adInvoice),
   'POST /ads/placements/seed': c('C2', 'ads.placement.write'),
   'PUT /ads/placements/:id': c('C2', 'ads.placement.write'),
   'PUT /ads/settings': c('C5', 'ads.settings.write'),
@@ -434,6 +513,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/mmg-checkouts/:id/reversal': c('C0', 'billing.read'),
   'POST /billing/mmg-checkouts/:id/reverse': c('C4', 'billing.mmg.reverse'),
   'POST /billing/mmg-fee-reversals/:id/check': c('C2', 'billing.mmg.reverse.check'),
+  // [Row 156] A partner asked for a weekly-fee payment back: a clock and a record, no money. A reason, one person; the
+  // return itself stays the C4 above. A case closes only on a REVERSED reversal, never from here.
+  'GET /billing/fee-refund-cases': c('C1', 'billing.mmg.read'),
+  'GET /billing/mmg-checkouts/:id/refund-case': c('C1', 'billing.mmg.read'),
+  'POST /billing/mmg-checkouts/:id/refund-case': c('C3', 'billing.mmg.refund.case'),
   // [DS1112] A person closes a HELD return on MMG's evidence: money (C4).
   'POST /billing/mmg-fee-reversals/:id/resolve': c('C4', 'billing.mmg.reverse.resolve', E.feeReversal),
   'GET /billing/collections': c('C0', 'billing.read'),
@@ -482,13 +566,22 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'PUT /rides/drivers/:id/vehicle-identity': c('C3', 'rides.vehicle.write'),
 
   // ── Verification ────────────────────────────────────────────────────────
-  'GET /verification/queue': c('C0', 'verification.read'),
+  // [DOC-SECURITY G3] The queue lists people's identity papers by name: a document reviewer's read, like
+  // opening the file (`*` never implies the grant), and a sensitive read (C1) that leaves an access row.
+  'GET /verification/queue': reviewed(c('C1', 'verification.read')),
   // [DOC-1 §8.4 · P8-4] SUPPORT sees status counts, never a document, a name or a phone (DOC-INV-19).
   'GET /verification/queue/counts': c('C0', 'verification.counts'),
-  // [VERIFY-DOCS V3] The four document doors also demand the explicit reviewer grant.
+  // [VERIFY-DOCS V3] The four document doors also demand the explicit reviewer grant (and the queue, above).
   'PUT /verification/:id/approve': reviewed(c('C3', 'verification.decide', E.verification)),
   'PUT /verification/:id/reject': reviewed(c('C3', 'verification.decide', E.verification)),
   'PUT /verification/:id/revoke': reviewed(c('C3', 'verification.decide', E.verification)),
+  // [STORE-VAT · owner O-5] A store's VAT certificate: decided by a document reviewer, like every document.
+  'GET /store-vat/pending': c('C0', 'verification.read'),
+  'POST /store-vat/:vendorId/approve': reviewed(c('C3', 'verification.decide', E.storeVat)),
+  'POST /store-vat/:vendorId/reject': reviewed(c('C3', 'verification.decide', E.storeVat)),
+  'POST /store-vat/:vendorId/revoke': reviewed(c('C3', 'verification.decide', E.storeVat)),
+  // [VAT-DOCS · owner ruling 31 Oct 2026] An approved store's change of price choice: decided by the same reviewers.
+  'POST /store-vat/:vendorId/mode': reviewed(c('C3', 'verification.decide', E.storeVat)),
   'GET /verification/:id/document-url': reviewed(c('C1', 'verification.document.read')),
   // [DOC-1 §20.2 · P20-2] the custody narrative is metadata about a document, never its content — still a logged read
   'GET /verification/:id/custody': c('C1', 'verification.custody.read'),
@@ -550,6 +643,10 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   // [DELETION-INTEGRITY] Completes an in-app closure request: the account is
   // closed and de-identified. Consequential and irreversible, so a reason is owed.
   'POST /support/:id/complete-account-closure': c('C3', 'user.close', E.supportTicket),
+  // [BUG-HUNT F20] A verified deletion request from someone who cannot sign in. Irreversible, with no
+  // confirmation from the person inside a session, so it takes two people like a platform act.
+  // SUPER_ADMIN only (founderGuard on the route).
+  'POST /users/:id/verified-deletion': c('C5', 'user.close.verified', E.user),
 
   // ── Compliance ──────────────────────────────────────────────────────────
   'GET /compliance': c('C0', 'compliance.read'),
@@ -562,6 +659,11 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /dlq': c('C0', 'ops.read'),
   'POST /dlq/:queue/:id/requeue': c('C2', 'ops.dlq.requeue'),
   'DELETE /dlq/:queue/:id': c('C3', 'ops.dlq.delete'),
+  // [Row 312] Evidence held in the malware quarantine: listed, and its scan retried; released ONLY on a CLEAN answer.
+  'GET /upload-scan-debts/held': c('C1', 'ops.uploads.held.read'),
+  // [ADM-004] The trail names the debt row's outcome fields; never its object keys (a storage key can
+  // embed an owner's id, and the audit table is append-only).
+  'POST /upload-scan-debts/:id/release': c('C3', 'ops.uploads.release', { model: 'uploadScanDebt', fields: ['result', 'releasedAt', 'attempts', 'rescannedAt'] }),
 
   // ── Discovery taxonomy ──────────────────────────────────────────────────
   'GET /discovery/categories': c('C0', 'discovery.read'),
@@ -595,7 +697,7 @@ export const ROLE_DEFAULT_CAPABILITIES: Readonly<Record<string, readonly string[
 /** A worked example, and the shape the red test uses: a support operator. Counts only on the review queue (DOC-1 §8.4). */
 export const SUPPORT_OPERATOR_CAPABILITIES: readonly string[] = [
   'dashboard.read', 'support.read', 'support.resolve', 'order.read', 'user.read', 'moderation.read',
-  'verification.counts',
+  'verification.counts', 'service.job.close',
 ];
 
 /**
@@ -841,6 +943,8 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'POST /promos': 'creates the row; there is no before state to digest',
   // [MMG REVERSAL] the claim row is the record; the audit facts name it
   'POST /billing/mmg-checkouts/:id/reverse': 'creates the reversal claim row; the audit facts carry the reversal id, the checkout, the amount and the MMG transaction',
+  // [Row 156] the case row is the record; the audit facts name it
+  'POST /billing/mmg-checkouts/:id/refund-case': 'creates the case row; the audit facts carry the case id, the checkout, the kind and the due date',
   // [DOC-1 §31.4 · P31-1] a reserve adjustment creates a ledger entry; the audit row carries the entry id and the resulting balance as facts
   'POST /cash-rules/rlp/reserve/adjust': 'creates a ledger entry; the audit facts carry the entry id and the resulting balance',
   'POST /zones': 'creates the row; there is no before state to digest',
@@ -852,6 +956,8 @@ export const ADMIN_ROUTES_WITHOUT_ENTITY: Readonly<Record<AdminRouteKey, string>
   'PUT /billing/price-book': 'a versioned price book; the version register is the record',
   'PUT /billing/agent-cash-config': 'a tenant-wide settings singleton with no id in the route',
   'PUT /batching/settings': 'a tenant-wide settings singleton with no id in the route',
+  // [RIDER-SAFE 5] each write creates a new immutable AlgoConfig version row; the inline audit row names it
+  'PUT /delivery-pause': 'creates a new immutable version row of the delivery.pause switch; there is no before row to digest — the audit facts carry the new version row id, the version and both sides of the switch',
   'POST /billing/fx-rates': 'creates a rate row; there is no before state to digest',
   'POST /billing/usd-migration/mode-a': 'a fleet-wide migration over many rows, not one subject',
   'POST /billing/usd-migration/mode-b': 'a fleet-wide migration over many rows, not one subject',

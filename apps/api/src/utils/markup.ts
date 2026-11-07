@@ -75,15 +75,24 @@ export function deliveryFeeFromRates(distanceKm: number, rates: DeliveryRates): 
   return calculateDeliveryFee(distanceKm, rates.baseFee, rates.perKmRate, rates.includedKm, rates.surgeMultiplier);
 }
 
-/** Express (priority) delivery multiplier — the whole premium is the rider's
- *  cash upside. ONE definition [SWIFT-070]: the cart quote and the checkout
- *  charge both derive the express fee from here, so the displayed total can
- *  never drift from the total actually charged. */
-export const EXPRESS_DELIVERY_MULTIPLIER = 1.5;
+/** [Owner ruling, 1 Nov 2026] Express (priority) delivery on a store or food
+ *  order costs the standard delivery fee PLUS this flat amount, whatever the
+ *  distance (before, express was a multiple of the fee). Whole GYD, like
+ *  DEFAULT_DELIVERY_RATES. The whole premium is the rider's cash upside: it
+ *  rides inside the order's deliveryFee, which createEarnings pays the rider
+ *  in full. ONE definition [SWIFT-070]: the cart quote and the checkout charge
+ *  both derive the express fee from here (cart-plans planVendorGroup), so the
+ *  displayed total can never drift from the total actually charged. Parcels
+ *  are not priced here: courier speeds are DEFAULT_COURIER_RATES.speedMultiplier,
+ *  unchanged. The website's Delivery policy states this amount
+ *  (express-flat-surcharge.unit.test.ts holds the two together). */
+export const EXPRESS_DELIVERY_SURCHARGE = 1000;
 
-/** The delivery fee when express/priority is chosen. */
+/** The delivery fee when express/priority is chosen: the standard fee plus the
+ *  flat surcharge. Only a DELIVERY plan asks for it — a plan with no rider
+ *  (pickup, appointment) carries no premium (cart-plans guards that). */
 export function expressDeliveryFee(standardFee: number): number {
-  return Math.round(standardFee * EXPRESS_DELIVERY_MULTIPLIER);
+  return standardFee + EXPRESS_DELIVERY_SURCHARGE;
 }
 
 /**

@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { runAsSystem } from '../../plugins/tenant-context';
-import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, erasureExceptionOpen } from './account-closure';
+import { ACCOUNT_CLOSURE_MESSAGES, ACCOUNT_CLOSURE_SUBJECT, erasureExceptionOpen } from './account-closure';
 import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION } from '../../utils/public-photo-deletion';
 import { eraseNoticesOf } from '../../lib/owner-wall-notices';
@@ -158,7 +158,11 @@ export async function deidentifyProfiles(db: PrismaClient, userId: string): Prom
     const queuedPhotos = provider && provider.portfolioPhotos.length > 0
       ? await queuePortfolioPhotoDeletions(tx, { id: provider.id, userId }, (await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } })).tenantId, provider.portfolioPhotos, PUBLIC_PHOTO_ACCOUNT_DELETION)
       : [];
-    await tx.serviceProvider.updateMany({ where: { userId }, data: { bio: null, portfolioPhotos: [] } });
+    await tx.serviceProvider.updateMany({ where: { userId }, data: { bio: null, portfolioPhotos: [], weeklyHours: Prisma.DbNull } });
+    // [BOOK-P1] A closed account's services are switched off: never booked again, still named by the jobs kept.
+    if (provider) await tx.serviceOffering.updateMany({ where: { providerId: provider.id, active: true }, data: { active: false } });
+    // [BOOK-P1 · REVIEW-X S4-3] Dates away are the person's schedule, and no kept record names them: deleted.
+    if (provider) await tx.serviceProviderTimeOff.deleteMany({ where: { providerId: provider.id } });
     // Order totals stay. The referral link goes, and the code is retired so no one is referred to a closed account.
     const customer = await tx.customer.findUnique({ where: { userId }, select: { id: true, referralCode: true, referredBy: true } });
     if (customer && (!customer.referralCode.startsWith('retired-') || customer.referredBy !== null)) {
@@ -199,7 +203,7 @@ export async function deidentifyCaseRecords(db: PrismaClient, userId: string): P
     // The closure request's subject and message are server-written (the support queue completes by them), and
     // so is its completion note: they stay. Every other ticket's text goes.
     await tx.supportTicket.updateMany({ where: { userId, subject: { notIn: [TICKET_TEXT_REMOVED, ACCOUNT_CLOSURE_SUBJECT] } }, data: { subject: TICKET_TEXT_REMOVED } });
-    await tx.supportTicket.updateMany({ where: { userId, message: { notIn: [TICKET_TEXT_REMOVED, ACCOUNT_CLOSURE_MESSAGE] } }, data: { message: TICKET_TEXT_REMOVED } });
+    await tx.supportTicket.updateMany({ where: { userId, message: { notIn: [TICKET_TEXT_REMOVED, ...ACCOUNT_CLOSURE_MESSAGES] } }, data: { message: TICKET_TEXT_REMOVED } });
     await tx.supportTicket.updateMany({ where: { userId, adminNote: { not: null }, subject: { not: ACCOUNT_CLOSURE_SUBJECT } }, data: { adminNote: null } });
     await tx.complianceViolation.updateMany({ where: { userId, NOT: { evidence: { equals: {} } } }, data: { evidence: {} } });
     await tx.complianceReviewCase.updateMany({ where: { userId, note: { not: null } }, data: { note: null } });

@@ -13,6 +13,8 @@ import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
 import { amountDueNow } from './amount-due';
 import { PAY_AHEAD_LIMIT, payAheadRefusal, readPayAhead } from './pay-ahead';
+import { PAYER_INCLUDE, payerUserIdOf } from '../subscription/subscription-owner';
+
 /** [REVIEW S3-2] A provider transaction whose money was refunded to the payer. */
 export const PROVIDER_REFUNDED = 'REFUNDED';
 import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
@@ -196,7 +198,7 @@ export async function payInfo(
     const tenant = await prisma.tenantBillingCurrency.findUnique({ where: { tenantId: 'swift-default' } });
     if (tenant?.usdPricingEnabled && tenant.displayDual) {
       const { resolveRateForRun, dualDisplay } = await import('./fx');
-      const role = { RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR', SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER' }[sub.type] ?? 'VENDOR';
+      const role = { RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR', SERVICE_PROVIDER: 'SERVICE', INDEPENDENT_PRO: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER' }[sub.type] ?? 'VENDOR';
       const [entry, rate] = await Promise.all([
         // [F2] The row in force now, never a scheduled one.
         prisma.priceBookEntry.findFirst({ where: { role, active: true, effectiveFrom: { lte: new Date() } }, orderBy: { effectiveFrom: 'desc' } }),
@@ -544,7 +546,7 @@ export class AgentCashService {
         throw new Error('DESTINATION_TENANT_MISMATCH');
       }
 
-      // [OWNER RULING 8 Oct (2) · owner #62] One week ahead at most, decided under
+      // [OWNER RULING 8 Oct (2) · owner 6 Nov 2026] Four weeks ahead at most, decided under
       // the payer lock and BEFORE the provider transaction is marked credited.
       // Arriving money past the cap is held for a person (refund), never
       // credited and never dropped; an admin attaching it is refused in words.
@@ -638,7 +640,7 @@ export class AgentCashService {
       return { status: 'reconciled', paymentId, originalPaymentId: committed.refundedAs };
     }
     if ('payAheadLimit' in committed && committed.payAheadLimit) {
-      log().warn({ paymentId, subscriptionId: committed.subscriptionId }, 'agent payment held: it would take the weekly fee past one week ahead; a person refunds it');
+      log().warn({ paymentId, subscriptionId: committed.subscriptionId }, 'agent payment held: it would take the weekly fee past the four-week limit; a person refunds it');
       return { status: 'received_unmatched', paymentId, failureCode: PAY_AHEAD_LIMIT };
     }
     if (committed.duplicateOf) {
@@ -667,14 +669,10 @@ export class AgentCashService {
     if (p.payerMsisdn) {
       const sub = await this.prisma.subscription.findUnique({
         where: { id: committed.subscriptionId },
-        select: {
-          rider: { select: { userId: true } },
-          driver: { select: { userId: true } },
-          vendor: { select: { owner: { select: { userId: true } } } },
-        },
+        select: PAYER_INCLUDE,
       });
-      const userId = sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId;
-      if (userId) await captureMmgPayer(this.prisma, { userId, role: sub?.vendor ? 'VENDOR' : sub?.driver ? 'DRIVER' : 'RIDER', payerMsisdn: p.payerMsisdn, observed: true, observationId: paymentId, subscriptionId: committed.subscriptionId }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
+      const userId = payerUserIdOf(sub);
+      if (userId) await captureMmgPayer(this.prisma, { userId, role: sub?.vendor ? 'VENDOR' : sub?.serviceProvider ? 'PROVIDER' : sub?.driver ? 'DRIVER' : 'RIDER', payerMsisdn: p.payerMsisdn, observed: true, observationId: paymentId, subscriptionId: committed.subscriptionId }).catch((err) => log().error({ err }, 'advisory payer observation failed; money facts unchanged'));
     }
     return { status: 'accepted', paymentId: committed.paymentId, subscriptionId: committed.subscriptionId };
   }

@@ -1,14 +1,25 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import Link from 'next/link';
+import { Suspense, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, ShieldCheck, AlertTriangle } from 'lucide-react';
 import {
   getRiderProfile, getVerificationStatus, submitVerificationDocument, uploadVerificationFile,
 } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { LEGAL_URL } from '@/lib/api';
+import { LEGAL_URL } from '@/lib/legal-url';
 import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
+import { vehicleDocumentHint } from '@/lib/vehicle-document-hints';
+import { documentExpiryDay } from '@/lib/documentExpiry';
+import { moverNextStep, moverNextWords } from '@/lib/first-steps';
+import { lazyRetry } from '@/lib/chunk-retry';
+
+// [PERF · REVIEW-F S2-1] The taxi driver's police-clearance card (its own consent, the phone's words) loads on demand,
+// only for a taxi checklist that offers it: it stays out of this page's first load.
+const PoliceClearanceSection = lazyRetry(() => import('./police-clearance-section'));
+/** The police clearance's code (the API's POLICE_CLEARANCE_DOC_TYPE): never in the privacy-notice uploads below. */
+const POLICE_CLEARANCE_DOC = 'police_clearance';
 
 // [Owner ruling 11 Oct 2026] plain names and, on a taxi checklist, what each document is.
 const pretty = documentLabel;
@@ -56,6 +67,16 @@ export default function DocumentsPage() {
   });
 
   const d = status.data;
+  const next = moverNextStep(d);
+  // Documents can be approved before a vehicle is saved: the server names no vehicle (null) until a rider or driver
+  // profile exists, and that account is not cleared to work whatever its papers say.
+  const noVehicle = !!d?.roleVerified && d.vehicleType === null;
+  const cleared = !!d?.roleVerified && !noVehicle;
+  // [POLICE-CLEARANCE CONSENT · owner 31 Oct 2026] A TAXI driver may add a police clearance (optional; an approved,
+  // current one records the account as police-cleared; it never gates), on the phone's card with its OWN consent in the
+  // API's words — never under the privacy-notice tick below. A delivery rider is never offered one, whatever a list says
+  // (the section checks again with the phone's own list rule).
+  const offersPolice = !!d && isTaxiChecklist(d.checklist ?? []) && (d.optional ?? []).includes(POLICE_CLEARANCE_DOC);
   // Newest document per checklist type wins the display.
   const latestByType = new Map<string, NonNullable<typeof d>['documents'][number]>();
   for (const doc of d?.documents ?? []) {
@@ -66,9 +87,13 @@ export default function DocumentsPage() {
     <div className="max-w-3xl space-y-5">
       <div>
         <h1 className="sw-title">Documents</h1>
+        {/* [WEB-ONBOARDING · FLOW-QA F18] a new mover reads how to start first; the renewal line is for an approved one */}
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
-          Upload renewals on a big screen — we review documents Monday to Saturday, 8:00–20:00 Guyana time. An expired document takes you
-          offline until it is renewed.
+          {/* [REVIEW-LIGHT2 #2309] an approved mover whose document lapsed (marked EXPIRED, or approved and past its date)
+              keeps the renewal line: it is exactly when it applies */}
+          {d?.roleVerified || (d?.documents ?? []).some((doc) => doc.status === 'EXPIRED' || (doc.status === 'APPROVED' && !!doc.expiresAt && new Date(doc.expiresAt).getTime() <= Date.now()))
+            ? 'Upload renewals on a big screen — we review documents Monday to Saturday, 8:00–16:00 Guyana time. An expired document takes you offline until it is renewed.'
+            : 'Send these documents to start. We review documents Monday to Saturday, 8:00–16:00 Guyana time.'}
         </p>
       </div>
 
@@ -77,15 +102,20 @@ export default function DocumentsPage() {
       )}
 
       {d && (
-        <div className={`flex items-center gap-3 rounded-2xl p-4 ${d.roleVerified ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
-          {d.roleVerified ? <ShieldCheck className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
+        <div className={`flex items-center gap-3 rounded-2xl p-4 ${cleared ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
+          {cleared ? <ShieldCheck className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
           <p className="text-sm font-semibold">
-            {d.roleVerified
+            {cleared
               ? 'You are fully verified and cleared to work.'
-              : `${d.missing.length} document${d.missing.length === 1 ? '' : 's'} still needed before you can go online.`}
+              : noVehicle ? 'Your documents are approved. You still need to choose rider or driver and add your vehicle.'
+                // [WEB-ONBOARDING · FLOW-QA F17] what is left to SEND (a copy in review is Swift's turn, not the mover's)
+                : next?.kind === 'send' ? moverNextWords(next)
+                  : next?.kind === 'review' ? 'In review — nothing more needed from you.'
+                    : `${d.missing.length} document${d.missing.length === 1 ? '' : 's'} still needed before you can go online.`}
           </p>
         </div>
       )}
+      {noVehicle && <Link href="/signup?resume=mover" className="sw-btn sw-btn-md">Choose rider or driver</Link>}
 
       <div className="space-y-3">
         {status.isLoading && <p className="text-sm text-[var(--swift-muted)]">Loading…</p>}
@@ -99,11 +129,14 @@ export default function DocumentsPage() {
             onRetry={() => void status.refetch()}
           />
         )}
-        {(d?.checklist ?? []).map((docType) => {
+        {(d?.checklist ?? []).filter((docType) => docType !== POLICE_CLEARANCE_DOC).map((docType) => {
           const doc = latestByType.get(docType);
           const tone = doc ? statusTone(doc.status, doc.expiresAt, doc.replaced === true) : null;
           // An approved document stays locked until its renewal window; a copy waiting for review can be replaced.
           const locked = doc?.status === 'APPROVED' && !expiringSoonAt(doc.expiresAt);
+          // [WEB-ONBOARDING] what the reviewer checks, said before the upload: a taxi's documents, and every motor vehicle's
+          // insurance (hire or reward) and a motorbike's licence class
+          const hint = taxiDocumentHint(docType, d?.checklist ?? []) ?? vehicleDocumentHint(docType, d?.checklist ?? [], vehicleType);
           return (
             <div key={docType} className="sw-card p-5">
               <div className="flex flex-wrap items-center gap-3">
@@ -114,7 +147,7 @@ export default function DocumentsPage() {
                   <span className="rounded-full bg-black/5 px-2.5 py-0.5 text-xs font-bold text-[var(--swift-muted)]">Not submitted</span>
                 )}
                 {doc?.expiresAt && (
-                  <span className="text-xs text-[var(--swift-muted)]">expires {new Date(doc.expiresAt).toLocaleDateString()}</span>
+                  <span className="text-xs text-[var(--swift-muted)]">expires {documentExpiryDay(doc.expiresAt)}</span>
                 )}
                 {!locked && (
                   <button
@@ -125,9 +158,7 @@ export default function DocumentsPage() {
                   </button>
                 )}
               </div>
-              {taxiDocumentHint(docType, d?.checklist ?? []) && (
-                <p className="mt-1 text-xs text-[var(--swift-muted)]">{taxiDocumentHint(docType, d?.checklist ?? [])}</p>
-              )}
+              {hint && <p className="mt-1 text-xs text-[var(--swift-muted)]">{hint}</p>}
               {doc?.reviewNote && doc.status === 'REJECTED' && (
                 <p className="mt-2 text-sm text-[var(--swift-red)]">Reviewer: {doc.reviewNote}</p>
               )}
@@ -167,6 +198,12 @@ export default function DocumentsPage() {
           );
         })}
       </div>
+
+      {d && offersPolice && (
+        <Suspense fallback={<p role="status" className="text-sm text-[var(--swift-muted)]">Loading…</p>}>
+          <PoliceClearanceSection status={d} onSent={() => void queryClient.invalidateQueries({ queryKey: ['p-docs'] })} />
+        </Suspense>
+      )}
     </div>
   );
 }

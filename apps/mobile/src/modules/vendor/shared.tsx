@@ -22,7 +22,7 @@ export function prettyVendorType(t?: string) {
 
 // ─── Order helpers ───────────────────────────────────────────────────────────
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
 
 /** Statuses where a rider owns the status lane; kitchen progress then rides
  *  the preparingAt/readyAt timestamps (see the vendor prep routes). */
@@ -764,7 +764,8 @@ export function VendorBillingNotice({ sub, onPay }: { sub: any; onPay: () => voi
   const behind = !blocked && (sub.isInGracePeriod || status === 'PAST_DUE');
   if (!blocked && !behind) return null;
   const due = numericFact(sub.amountDueGyd);
-  const deadline = sub.gracePeriodEnd ? fmtDate(sub.gracePeriodEnd) : null;
+  // [FEE-STATUS] A grace deadline that has passed is never a "due by" date.
+  const deadline = sub.gracePeriodEnd && new Date(sub.gracePeriodEnd).getTime() > Date.now() ? fmtDate(sub.gracePeriodEnd) : null;
 
   return (
     <View

@@ -10,6 +10,7 @@
 // amount, and refuses an amount that is not its quote right now (WEEKLY_FEE_CHANGED).
 // ---------------------------------------------------------------------------
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import { catalogueRetierOf } from '@/lib/catalogue-retier';
 
 /** The server's fee words and the tick (the API anchors the consent row to exactly these). */
 export interface FeeTerms {
@@ -23,9 +24,22 @@ export interface SignupPricing {
   currencyCode: string;
   currencySymbol: string;
   movers?: { vehicleType: string; rate: number }[];
-  vendors?: { service: number; catalogue: { minItems: number; rate: number }[] };
+  /** [D1] A catalogue step may carry its own free trial (a NEW department store: 7 days). */
+  vendors?: { service: number; catalogue: { minItems: number; rate: number; trialDays?: unknown }[] };
+  /** [D1] The free trial every new partner starts on (14 days), in days. */
+  trialDays?: unknown;
   /** Absent from an API older than the tick: then there is nothing to tick and nothing is sent. */
   feeTerms?: FeeTerms;
+  /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
+  catalogueRetier?: { on?: unknown; noticeDays?: unknown };
+  /** [CARS-PLATES · owner 6 Nov 2026] A private (P) plate car: deliveries only, at the delivery rider's fee (`on` = the
+   *  server's CAR_DELIVERIES switch). Absent from an API that predates it. */
+  privateCars?: { on?: unknown; quotes?: { vehicleType: string; rate: number; role?: string }[] };
+}
+
+/** [CARS-PLATES] Private (P) plate cars deliver today: only for exactly `on: true` from the server. */
+export function privateCarsOpen(pricing: Pick<SignupPricing, 'privateCars'> | null | undefined): boolean {
+  return pricing?.privateCars?.on === true;
 }
 
 /** What sign-up sends for the tick: the words' version and the fee on screen. */
@@ -37,10 +51,13 @@ export interface WeeklyFeeAck {
 
 /** What the sign-up button may do: `ask` names what is missing (the button waits); with no ask it
  *  may submit, sending `ack` when the server asked for the tick. */
-export type FeeState = { ask: string; ack?: undefined } | { ask: null; ack?: WeeklyFeeAck };
+/** `tick`: [FLOW-QA2 NEW-10] the ask is the fee's own unticked box (the block then shows only the box, so the step's
+ *  "what is missing" line says it). */
+export type FeeState = { ask: string; ack?: undefined; tick?: boolean } | { ask: null; ack?: WeeklyFeeAck; tick?: undefined };
 
 /** Who is being priced: a business by its type, a rider or driver by the vehicle. */
-export type FeeChoice = { role: 'VENDOR'; vendorType: string } | { role: 'MOVER'; vehicleType: string };
+/** `privateCar`: [CARS-PLATES] a car on a private (P) plate, priced as a delivery rider (owner, 6 Nov 2026). */
+export type FeeChoice = { role: 'VENDOR'; vendorType: string } | { role: 'MOVER'; vehicleType: string; privateCar?: boolean };
 
 export const FEE_ASK = {
   loading: 'Loading your weekly fee…',
@@ -51,11 +68,43 @@ export const FEE_ASK = {
 } as const;
 
 /** Beside a catalogue store's amount when the price list has more steps (the phone's price card says the same). */
-export const FEE_LADDER = 'This is the starting rate; it steps up as you list more items.';
+/** [RETIER PR-A · owner 30 Oct 2026] A store signs up before it has a catalogue: the fee is born when Swift approves it,
+ *  on its own catalogue's step, ticked by its owner first. [RETIER PR-C · REVIEW-M N3] What happens after that is the
+ *  server's word (`catalogueRetier`, feeLadderLine below): off, nothing moves it; on, a rise is told ahead with how to
+ *  stop it and a fall applies after two weekly counts; no word, no claim. */
+export const FEE_LADDER = 'This is the starting rate. If your store has more items by the time Swift approves it (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged.';
+
+/** The ladder line for this price list: FEE_LADDER, then what happens to the rate after the store is approved, true to
+ *  the server's weekly re-tier (api billing.service recalculateVendorTiers + fee-rise-notice.ts; the phone's
+ *  partnerPricing afterBirthWords says the same). */
+export function feeLadderLine(pricing: SignupPricing): string {
+  const r = catalogueRetierOf(pricing);
+  if (!r) return FEE_LADDER;
+  if (!r.on) return `${FEE_LADDER} After that, the rate does not change as your catalogue grows.`;
+  return `${FEE_LADDER} After that, Swift counts your items every week. If your items for sale reach a higher rate, Swift tells you in the app at least ${r.noticeDays} days before the new fee applies, and how to stop it. If your items, counting items taken off sale, changed or removed in the last 7 days, fit a lower rate on two weekly counts a week apart, your fee goes down and you are told.`;
+}
 
 /** True when this choice starts on a catalogue step the price list goes beyond. */
 export function feeSteps(pricing: SignupPricing, choice: FeeChoice): boolean {
   return choice.role === 'VENDOR' && choice.vendorType !== 'SERVICE' && (pricing.vendors?.catalogue?.length ?? 0) > 1;
+}
+
+/** [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D1)] A free trial the price list states: a whole number of days above zero,
+ *  else null, and no trial is claimed (the app's partnerPricing bandTrialDays reads it the same way). */
+export function trialDaysOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/** [D1] The app's price card's sentence for each catalogue step above the first with a trial of its own (apps/mobile
+ *  PricingCard): a NEW store at the department step when Swift approves it gets 7 days (api subscription/trial-length.ts).
+ *  Nothing for a rider, a services business, or a list without a trial length. */
+export function stepTrialLines(pricing: SignupPricing, choice: FeeChoice): string[] {
+  const days = trialDaysOf(pricing.trialDays);
+  if (days === null || choice.role !== 'VENDOR' || choice.vendorType === 'SERVICE') return [];
+  return (pricing.vendors?.catalogue ?? []).slice(1).flatMap((step) => {
+    const own = trialDaysOf(step.trialDays) ?? days;
+    return own === days ? [] : [`A new store with ${step.minItems.toLocaleString()}+ items when Swift approves it gets ${own} days free.`];
+  });
 }
 
 /** The server's refusals of the tick: the form reads the price again when it sees one. */
@@ -75,6 +124,12 @@ const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().
 /** The weekly fee quoted for this choice (a new store starts on the first catalogue step), or null. */
 export function feeQuote(pricing: SignupPricing, choice: FeeChoice): number | null {
   if (choice.role === 'MOVER') {
+    // [CARS-PLATES] A private car is the delivery rider's fee, only while the server says private cars deliver.
+    if (choice.privateCar) {
+      if (!privateCarsOpen(pricing)) return null;
+      const quote = pricing.privateCars?.quotes?.find((q) => q.vehicleType === choice.vehicleType);
+      return quote && quote.role === 'RIDER' && isRate(quote.rate) ? quote.rate : null;
+    }
     const rate = pricing.movers?.find((q) => q.vehicleType === choice.vehicleType)?.rate;
     return isRate(rate) ? rate : null;
   }

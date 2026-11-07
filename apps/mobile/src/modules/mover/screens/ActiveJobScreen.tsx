@@ -1,4 +1,5 @@
 import { RetainedUploadPhotos } from '../../../lib/retainedUploadPhotos';
+import { parcelUnpaidWords, reviewWords } from '../../../lib/parcelUnpaidWords';
 import { MapCredits } from '../../../components/MapCredits';
 import { uploadHandoverPhoto } from '../../../hooks/mover';
 import type { AuthSessionSnapshot } from '../../../lib/authSession';
@@ -26,14 +27,18 @@ import { haversineKm, streetEtaMin } from '../../../lib/geo';
 // are still with the vendor. `showBagIsWaiting` is why the counter signal no
 // longer survives past custody — see that file.
 import { riderStep, showBagIsWaiting, legStopLabel } from '../../../lib/riderLeg';
-import { money } from '../../../lib/money';
+import { money, moneyIn } from '../../../lib/money';
 import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
-import { openExternal } from '../../../lib/openExternal';
+import { CallParty } from '../../../components/CallParty';
+import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
+import { RECIPIENT_CALL_WORDS } from '../../../lib/callBridge';
 import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
-import { canDriverHandbackRide } from '../../../lib/driverRide';
+import { DOOR_CODE_REFUSALS, doorCashDue, doorCashRecordCopy, doorCashReturnOnJob } from '../../../lib/doorCash';
+import { DoorCash } from '../DoorCash';
+import { canDriverHandbackRide, driverHandbackDoneWords, driverStepFailedWords } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
 import { driverMapLine } from '../../../lib/routeLine';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
@@ -324,16 +329,8 @@ export function ActiveJobScreen({ navigation }: any) {
         {
           onSuccess: (res: any) => {
             capturedProofs.current.forget(captured.key);
-            if (outcome && outcome !== 'paid') {
-              const claim = res?.claim?.status;
-              toast.show(
-                claim === 'AUTO_APPROVED' ? 'Failed delivery recorded — the Swift guarantee covers it.'
-                  : claim === 'PENDING_REVIEW' ? 'Failed delivery recorded — your claim is under review.'
-                    : 'Failed delivery recorded.',
-              );
-              navigation?.goBack?.();
-              return;
-            }
+            // [BUG-HUNT-2 G02] Unpaid at the door: the parcel is still in their hands, so the job stays, on its return leg.
+            if (outcome && outcome !== 'paid') toast.show(parcelUnpaidWords(res?.claim?.status, res?.claim?.flags));
             active.refetch?.();
           },
           onError: (proofError: any) => {
@@ -420,6 +417,10 @@ export function ActiveJobScreen({ navigation }: any) {
   const courierFee = jobAmount(job);
   const pickedUp = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(String(job?.status ?? '').toUpperCase());
   const returning = jobStatus === 'RETURNING';
+  // [L02 · row 56] The partial cash the server recorded at this door (handed
+  // back, still held by the rider, or settled by operations) — its figures.
+  const returnCash = returning && !isCourier ? doorCashReturnOnJob(job) : null;
+  const returnCashWords = returnCash ? doorCashRecordCopy(returnCash, (n) => moneyIn(n, doorCashDue(job)?.currency ?? 'GYD')) : null;
   // The store owes the rider fee PLUS any prepaid tip on MMG — the settlement
   // ledger records fee + tip, so the door copy must claim the same number
   // [REPORT-006 carryover: fee-only copy under-claimed the rider's pay].
@@ -478,6 +479,10 @@ export function ActiveJobScreen({ navigation }: any) {
                 ? "If your GPS isn't working, ask the passenger to tap 'My driver is here'."
                 : undefined,
             );
+          } else {
+            // [BUG-HUNT-2 G05] Every other failed step was silent: the boxes shook, or nothing moved, and the server's words
+            // ("Incorrect code. 3 attempts left.") never reached the screen.
+            toast.error(driverStepFailedWords(e));
           }
         },
         onSuccess: () => {
@@ -523,11 +528,14 @@ export function ActiveJobScreen({ navigation }: any) {
     const recorded = isDriver ? 'Unpaid fare recorded' : 'Failed delivery recorded';
     const onSuccess = (res: any) => {
       const claim = res?.claim?.status;
-      toast.show(
-        claim === 'AUTO_APPROVED' ? `${recorded} — the Swift guarantee covers it.`
-          : claim === 'PENDING_REVIEW' ? `${recorded} — your claim is under review.`
-            : `${recorded}.`,
-      );
+      const flags = res?.claim?.flags;
+      if (isCourier) {
+        toast.show(parcelUnpaidWords(claim, flags));
+        active.refetch?.();
+        return;
+      }
+      const next = reviewWords(claim, flags);
+      toast.show(next ? `${recorded}. ${next}` : `${recorded}.`);
       navigation?.goBack?.();
     };
     const onError = (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the outcome — try again or call support.");
@@ -637,6 +645,9 @@ export function ActiveJobScreen({ navigation }: any) {
   // ceremony. The value never appears on this screen: only the entry boxes.
   // The server is the authority (MISSING_PIN / INVALID_PIN / MAX_ATTEMPTS come
   // back as error toasts); a legacy order without a PIN completes as before.
+  // Only a refusal OF THE CODE marks the code boxes: a cash-amount refusal at
+  // the same door is answered in its own popup [L02 · row 56].
+  const pinRefused = riderAct.isError && DOOR_CODE_REFUSALS.has(String((riderAct as { error?: any }).error?.response?.data?.error?.code ?? ''));
   const doorPinCeremony = (
     <View style={{ marginBottom: space.md }}>
       <View style={{ alignItems: 'center', marginBottom: space.md }}>
@@ -645,7 +656,7 @@ export function ActiveJobScreen({ navigation }: any) {
           Ask {custName ?? 'the customer'} for their delivery code
         </T>
       </View>
-      <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={riderAct.isError} autoFocus={false} />
+      <CodeInput value={pin} onChange={setPin} length={RIDE_PIN_LENGTH} error={pinRefused} autoFocus={false} />
       <T variant="caption" center style={{ color: dk.muted, marginTop: space.sm }}>
         Their code proves you handed the order to the right person.
       </T>
@@ -819,15 +830,18 @@ export function ActiveJobScreen({ navigation }: any) {
                     {custName ?? 'Customer'}
                   </T>
                 </View>
-                {cust.phone ? (
-                  <Pressable onPress={() => void openExternal(`tel:${cust.phone}`, "Couldn't start the call — dial the customer directly.")} hitSlop={6}>
-                    {({ pressed }) => (
-                      <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, marginRight: space.sm, opacity: pressed ? 0.7 : 1 }}>
-                        <Feather name="phone" size={17} color={dk.success} />
-                      </View>
-                    )}
-                  </Pressable>
-                ) : null}
+                {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this phone). */}
+                <CallParty orderId={job?.id} target="customer" phone={cust.phone} dialFailText="Couldn't start the call — dial the customer directly.">
+                  {(call) => (
+                    <Pressable onPress={call.onPress} disabled={call.busy} hitSlop={6} accessibilityRole="button" accessibilityLabel={call.label} accessibilityHint={call.hint}>
+                      {({ pressed }) => (
+                        <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, marginRight: space.sm, opacity: pressed || call.busy ? 0.7 : 1 }}>
+                          <Feather name="phone" size={17} color={dk.success} />
+                        </View>
+                      )}
+                    </Pressable>
+                  )}
+                </CallParty>
                 <Pressable onPress={() => navigation.navigate('Conversation', { orderId: job.id, title: custName ?? 'Customer' })} hitSlop={6}>
                   {({ pressed }) => (
                     <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, opacity: pressed ? 0.7 : 1 }}>
@@ -837,6 +851,37 @@ export function ActiveJobScreen({ navigation }: any) {
                 </Pressable>
               </DCard>
             ) : null}
+            {/* [O-1 · COORD 26 Oct] Courier: the parcel recipient, through Swift only. No build has shown or
+                dialled the number the sender typed for them, so it is handed no number: with the bridge off
+                there is no control (exactly today); with it on, Swift rings them "about a delivery for you". */}
+            {isCourier ? (
+              <CallParty orderId={job?.id} target="recipient" phone={null} dialFailText="Couldn't start the call — ask support to reach the recipient.">
+                {(call) => (
+                  <DCard style={{ flexDirection: 'row', alignItems: 'center', marginBottom: space.md }}>
+                    <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft }}>
+                      <Feather name="package" size={18} color={dk.accent} />
+                    </View>
+                    <View style={{ flex: 1, marginLeft: space.md }}>
+                      <T variant="body" weight="bold" numberOfLines={1} style={{ color: dk.text }}>
+                        {RECIPIENT_CALL_WORDS.title}
+                      </T>
+                      <T variant="caption" style={{ color: dk.muted }}>
+                        {RECIPIENT_CALL_WORDS.subtitle}
+                      </T>
+                    </View>
+                    <Pressable onPress={call.onPress} disabled={call.busy} hitSlop={6} accessibilityRole="button" accessibilityLabel={RECIPIENT_CALL_WORDS.a11y} accessibilityHint={call.hint}>
+                      {({ pressed }) => (
+                        <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, opacity: pressed || call.busy ? 0.7 : 1 }}>
+                          <Feather name="phone" size={17} color={dk.success} />
+                        </View>
+                      )}
+                    </Pressable>
+                  </DCard>
+                )}
+              </CallParty>
+            ) : null}
+            {/* [O-1] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
+            {cust ? <SwiftCallNumberTip /> : null}
 
             {/* SOS — anyone alone with a stranger on a cash job needs an
                 emergency path, not just the passenger and not just the driver.
@@ -1074,6 +1119,25 @@ export function ActiveJobScreen({ navigation }: any) {
                   onPress={() => setReturnConfirm(true)}
                 />
               </>
+            ) : returning ? (
+              // [L02 · row 56] A goods order going back to the store (the
+              // customer couldn't pay in full, or a recovery decision): the door
+              // is closed, nothing is collected, and the partial cash the
+              // server recorded at the door is read back as it stands.
+              <>
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(dk.accent, 0.14), borderWidth: 1, borderColor: dk.accentBorder, padding: space.md, marginBottom: space.md }}>
+                  <Feather name="rotate-ccw" size={15} color={dk.accent} style={{ marginTop: 1 }} />
+                  <T variant="caption" weight="semibold" style={{ flex: 1, color: dk.text }}>
+                    This order is going back to the store. Don't hand it over to the customer.
+                  </T>
+                </View>
+                {returnCash ? (
+                  <View testID="door-cash-return-record" style={{ borderRadius: radius.lg, backgroundColor: withAlpha(returnCashWords!.held ? color.warning : color.success, 0.12), borderWidth: 1, borderColor: withAlpha(returnCashWords!.held ? color.warning : color.success, 0.4), padding: space.md, marginBottom: space.md }}>
+                    <T variant="label" weight="bold" style={{ color: dk.text }}>{returnCashWords!.title}</T>
+                    <T variant="caption" style={{ color: dk.text, marginTop: 2 }}>{returnCashWords!.body}</T>
+                  </View>
+                ) : null}
+              </>
             ) : doorBlocked ? (
               <>
                 {/* [MOB-023 · F-106-03] No hand-over, nothing collected, nothing
@@ -1120,9 +1184,21 @@ export function ActiveJobScreen({ navigation }: any) {
                 {/* CASH: the ONLY completion path is capturing the money, which
                     hands over + completes the delivery server-side. No plain
                     "mark delivered" here — the server refuses a cash order that
-                    wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered. */}
-                {doorPinCeremony}
-                {bigButton('Confirm payment & hand over', () => riderAct.mutate({ id: job.id, action: 'handover', pin }, { onError: onPinRefused }), { loading: riderAct.isPending, disabled: busy })}
+                    wasn't paid (PAYMENT_NOT_CAPTURED), so it must not be offered.
+                    [L02 · row 56] The rider states the cash actually taken (or
+                    that the customer can't pay in full) and confirms it; the
+                    server decides and records it, with the door's version. */}
+                <DoorCash
+                  key={job.id}
+                  job={job}
+                  pin={pin}
+                  busy={busy}
+                  pending={riderAct.isPending}
+                  submit={(fields, handlers) => riderAct.mutate({ id: job.id, action: 'handover', ...fields, handoverVersion: door.version ?? undefined }, handlers)}
+                  onDoorRefused={onPinRefused}
+                >
+                  {doorPinCeremony}
+                </DoorCash>
                 {/* [M-29] The door's other outcome — the rail existed on the
                     server (strike + guarantee claim) with no way to reach it. */}
                 <PillButton
@@ -1220,14 +1296,14 @@ export function ActiveJobScreen({ navigation }: any) {
       {/* [M-29] The unpaid sheet: the failed fare outcome at the destination
           (driver) or the failed handover at the door (rider). The choice names
           what happened; the server records the GPS evidence, the strike and
-          the guarantee claim together. */}
+          the case for a person together. */}
       <PopupCard visible={unpaidSheet} onClose={() => setUnpaidSheet(false)}>
         <PopupTitle variant="title" center>{isDriver ? 'The passenger didn’t pay?' : isCourier ? 'The recipient didn’t pay?' : 'The customer didn’t pay?'}</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {isDriver
-            ? 'Record what happened. Your evidence and fare claim will be reviewed; a missing photo does not stop you recording the outcome.'
+            ? 'Record what happened. Your evidence and the unpaid fare will be reviewed; a missing photo does not stop you recording the outcome.'
             : isCourier
-              ? 'Record what happened at the door. Add a photo if available; incomplete evidence goes to review.'
+              ? 'Record what happened at the door, then bring the parcel back to the sender. Add a photo if available; incomplete evidence goes to review.'
               : 'Record what happened. Add a photo if available; missing or insufficient evidence goes to review.'}
         </T>
         {<PillButton label={photoBusy ? 'Saving photo…' : handoverPhoto?.orderId === job?.id ? 'Replace photo' : 'Add photo'} disabled={busy} onPress={() => void addHandoverPhoto()} />}
@@ -1285,9 +1361,9 @@ export function ActiveJobScreen({ navigation }: any) {
       >
         <PopupTitle variant="title" center>Hand this ride back?</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          The passenger keeps this ride and Swift will look for another driver. This may affect your driver standing. Pick what happened:
+          Pick what happened. If the passenger did not come, the ride closes once you have waited 5 minutes at the pickup, and this does not count against you. Otherwise the passenger keeps this ride and Swift looks for another driver, and this may affect your driver standing.
         </T>
-        {(['Vehicle problem', 'Road or access blocked', 'Passenger did not arrive'] as const).map((why) => (
+        {(['Vehicle problem', 'Road or access blocked', 'GPS not working', 'Passenger did not arrive'] as const).map((why) => (
           <PillButton
             key={why}
             label={why}
@@ -1301,10 +1377,11 @@ export function ActiveJobScreen({ navigation }: any) {
               driverAct.mutate(
                 { id: rideId, action: 'handback', reason: why },
                 {
-                  onSuccess: () => {
+                  onSuccess: (answer: unknown) => {
                     driverHandbackNavigateAfterDismissRef.current = true;
                     setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'dismissing' } : flow);
-                    toast.show('Ride handed back', 'The passenger is being matched with another driver.');
+                    const done = driverHandbackDoneWords(answer);
+                    toast.show(done.title, done.body);
                   },
                   onError: (e: any) => {
                     setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'confirm' } : flow);

@@ -270,6 +270,8 @@ vi.mock('../../../components/RefundRuleCard', () => ({ RefundRuleCard: 'RefundRu
 vi.mock('../../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
 vi.mock('../../../components/StorePhotosCard', () => ({ StorePhotosCard: 'StorePhotosCard' }));
 vi.mock('../../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: 'DocumentChecklist' }));
+vi.mock('../StoreVatSection', () => ({ StoreVatSection: () => null })); // [STORE-VAT] a child section, stubbed like its siblings
+vi.mock('../VatDocumentRow', () => ({ VatDocumentRow: () => null })); // [VAT-DOCS] the Documents list's optional VAT row, stubbed the same way
 vi.mock('../../../hooks/useStepUp', () => ({
   useStepUp: () => ({ withStepUp: (fn: unknown) => fn, sheet: null, active: false }),
 }));
@@ -597,6 +599,16 @@ describe('a signed-in account keeps the server-authorized switch', () => {
 describe('[Q8] the Account tab moves the store pin', () => {
   const pinnedStore = { ...liveStore, addressLine1: '12 Regent Street', city: 'Georgetown', latitude: 6.8046, longitude: -58.1553 };
   const moved = { latitude: 6.8102, longitude: -58.1623, address: '14 Regent St, Georgetown' };
+
+  it('[PIN-OWNER] a manager has no store-pin move control', async () => {
+    await signIn('manager-a', ['CUSTOMER']);
+    fx.profile = { data: { myRole: 'MANAGER', vendors: [pinnedStore] }, error: null };
+    const account = fx.mount(VendorAccountScreen, {});
+
+    expect(named(account.output, 'StoreLocationCard')).toHaveLength(0);
+    expect(named(account.output, 'StoreLocationPicker')).toHaveLength(0);
+    expect(fx.updateProfile).not.toHaveBeenCalled();
+  });
 
   /** The Account tab's store-location card, rendered, with its map opened from the row. */
   async function openStoreMap() {

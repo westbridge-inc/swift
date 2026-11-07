@@ -20,7 +20,8 @@ const src = (rel: string) => readFileSync(join(process.cwd(), rel), 'utf8');
 
 describe('[PR1270-S2-04] signup commits only to a fetched, current, on-screen quote', () => {
   it.each([
-    ['src/modules/mover/screens/MoverOnboardingScreen.tsx', 'moverQuote(p, vt)'],
+    // [CARS-PLATES] the car's plate decides its quote (a private car at the rider's fee): still the one gate.
+    ['src/modules/mover/screens/MoverOnboardingScreen.tsx', 'vehicleQuote(p, vt, plate, isHirePlate)'],
     ['src/modules/vendor/screens/BusinessSetup.tsx', 'vendorQuote(p, type)'],
   ])('%s gates its submit control on the quote gate', (file, pick) => {
     const s = src(file);
@@ -49,8 +50,9 @@ describe('[PR1270-S2-04] signup commits only to a fetched, current, on-screen qu
 describe('[H7] a preview with no quote says so — never $0, never covered', () => {
   it('the shared weekly fee screen says when the amount is unknown', () => {
     const screen = src('src/modules/billing/screens/WeeklyFeeScreen.tsx');
-    expect(screen).toContain('dueLine(sub)');
-    expect(src('src/lib/weeklyFee.ts')).toContain("if (!Number.isFinite(due)) return 'Amount due unavailable.'");
+    // [FEE-STATUS] The header is feeStatusOf (it replaced dueLine); unknown is still said, never $0 or covered.
+    expect(screen).toContain('feeStatusOf(sub)');
+    expect(src('src/lib/fee-status.ts')).toContain("if (!Number.isFinite(amountDue)) return word('UNKNOWN', 'Amount due unavailable.');");
   });
 
   it.each(['src/hooks/vendorops.ts', 'src/hooks/mover.ts'])('%s carries the price list\'s loading and error state into the preview subscription', (file) => {

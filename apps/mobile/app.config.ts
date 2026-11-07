@@ -136,6 +136,9 @@ const splashImage = './assets/icon.png';
 // interception half. The domain must serve
 // /.well-known/apple-app-site-association and /.well-known/assetlinks.json —
 // apps/web serves both, gated on APPLE_TEAM_ID / ANDROID_CERT_SHA256 env.
+// [DEPLOY-GUARD] This line is the one source of the link domain: the production
+// deploy (deploy/pilot-up.sh) reads it and refuses an APP_PUBLIC_URL other than
+// https://<it>. Keep it one line in this exact shape (deploy-prod-path.test.ts).
 const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';
 
 /**

@@ -1,16 +1,19 @@
 /**
- * [DOC-1 §31.4 · DOC-INV-47 · P31-1] Rider Loss Protection — the promise, written, funded and capped.
+ * [DOC-1 §31.4 · DOC-INV-47 · P31-1] What happens when a customer does not pay at the door.
  *
- * Below the ID gate the rider fronts the food cost out of his own pocket, and when the
- * customer bails at the door Swift covers the loss. §31.4 says that promise must be a
- * POLICY, not a sentence: covered amount and cap per claim (the gate), a cap per rider
- * per rolling 30 days, a pay-out SLA, a named reserve line provisioned from fee revenue,
- * and — DOC-INV-47 — no payout without a complete evidence bundle assembled from the
- * artefacts the platform already holds, never typed by the rider.
+ * [Coordinator ruling, 5 Nov 2026] CASE BY CASE. Swift MAY help a mover who loses money at the door, at its
+ * discretion, from general company money. A person decides each case: there is no advance promise, no entitlement,
+ * no link to fees. So nothing is approved by a machine, nothing tells a mover that Swift will pay, no share of fees is
+ * set aside, and no sum has to be held. The line below holds only what a person records into it. The code names
+ * (`ReimbursementClaim`, `RLP_*`, `/claims`) are older than the ruling and no person reads them.
  *
- * This file is the ONE author of: the evidence bundle, the reserve ledger (balance,
- * draw, provisioning) and the daily sweep. cash-rules.service.ts files and pays claims
- * and calls in here; nothing else re-expresses any of it.
+ * A decided payment needs the evidence bundle (DOC-INV-47), assembled from the artefacts the platform already holds and
+ * never typed by the rider. Where it is incomplete a person may still pay, recording a written reason on the same
+ * two-person path. Either way it needs a line that can pay it. No case is ever stuck: until it is paid, a person can
+ * always close it.
+ *
+ * This file is the ONE author of: the evidence bundle, the set-aside ledger (balance, draw, entries) and the daily
+ * sweep. cash-rules.service.ts files and pays cases and calls in here; nothing else re-expresses any of it.
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -21,39 +24,45 @@ import { ownerWallSystem } from '../../lib/owner-rls';
 type Db = PrismaClient | Prisma.TransactionClient;
 
 // ---------------------------------------------------------------------------
-// Policy tunables — merged into CashRulesConfig (CountryConfig.cashRules overrides).
-// Expressed RELATIVE to the ID gate so they carry the gate's USD anchor and need no
+// Tunables — merged into CashRulesConfig (CountryConfig.cashRules overrides). What a reviewer is told and when, never
+// a cap on what a mover may expect. Expressed RELATIVE to the ID gate so they carry the gate's USD anchor and need no
 // second currency constant (FD-DOC-30 defaults, delegated ruling 2026-09-06).
 // ---------------------------------------------------------------------------
 export interface LossProtectionRules {
-  /** Cap per rider per rolling 30 days, as a multiple of the ID gate (2 = twice the gate). */
+  /** A case past this total per rider per rolling 30 days is flagged, as a multiple of the ID gate (2 = twice the gate). */
   rlpMonthlyCapMultiple: number;
-  /** Every claim above this fraction of the gate is human-reviewed with the full bundle. */
+  /** A case above this fraction of the gate is flagged for a closer look. */
   rlpReviewFraction: number;
-  /** Pay-out SLA: an approved claim unpaid for longer is flagged and the admins told. */
+  /** Staff deadline, never told to a mover: a case a person approved and nobody paid for longer is flagged and the admins told. */
   rlpSlaHours: number;
-  /** Monthly provisioning: this percentage of the previous month's paid fee revenue. */
-  rlpReserveRatePct: number;
-  /** The reserve is "low" below this multiple of the gate; the sweep says so. */
-  rlpReserveFloorMultiple: number;
+  /** Staff reminder: a case nobody decided for this many days is flagged and the admins told, once. */
+  rlpReviewReminderDays: number;
 }
 
 export const LOSS_PROTECTION_DEFAULTS: LossProtectionRules = {
   rlpMonthlyCapMultiple: 2,
   rlpReviewFraction: 0.5,
   rlpSlaHours: 48,
-  rlpReserveRatePct: 2,
-  rlpReserveFloorMultiple: 5,
+  rlpReviewReminderDays: 7,
 };
 
 /** The guardrail flags this policy adds to a claim (the fraud flags live in cash-rules). */
 export const LOSS_PROTECTION_FLAGS = {
   overMonthlyCap: 'over_monthly_cap',
   overReviewThreshold: 'over_review_threshold',
+  /** At or over the ID gate: it used to write no row at all. Now a person decides it like any other. */
+  overGate: 'over_gate',
   protectionSuspended: 'protection_suspended',
   evidenceIncomplete: 'evidence_incomplete',
   slaBreached: 'sla_breached',
+  /** Still undecided at the reminder: a fact for the queue, told to staff once. */
+  reviewOverdue: 'review_overdue',
+  /** Paid with evidence missing, on a person's written reason (on the audit row and the ledger entry). */
+  paidEvidenceIncomplete: 'paid_evidence_incomplete',
 } as const;
+
+/** The shortest written reason that can stand for missing evidence. */
+export const EVIDENCE_REASON_MIN = 10;
 
 export const ROLLING_WINDOW_DAYS = 30;
 const DAY_MS = 86_400_000;
@@ -146,7 +155,7 @@ export async function assembleClaimEvidence(
     where: { id: claim.orderId },
     include: { _count: { select: { items: true } } },
   });
-  if (!order) throw new AppError(404, 'ORDER_NOT_FOUND', 'The claim names an order that does not exist.');
+  if (!order) throw new AppError(404, 'ORDER_NOT_FOUND', 'This names an order that does not exist.');
   const rail: ClaimEvidence['rail'] = order.orderType === 'TAXI' ? 'TAXI' : order.orderType === 'COURIER' ? 'COURIER' : 'DELIVERY';
   const filedAt = claim.createdAt;
   const logs = await db.orderStatusLog.findMany({
@@ -172,7 +181,7 @@ export async function assembleClaimEvidence(
     item('handover_not_completed', admitted.bound, 'immutable filing bound to the current unpaid failed order', { status: order.status }),
     item('rider_at_door', withinRadius, 'server-recorded device location at filing; device-reported, not independent event proof',
       { fixAgeMs: admitted.fixAge, distanceKm: admitted.distanceKm }),
-    item('elapsed_wait', admitted.wait, rail === 'TAXI' ? 'taxi destination wait policy unresolved' : 'stored arrival event and exact elapsed wait where required',
+    item('elapsed_wait', admitted.wait, rail === 'TAXI' ? 'taxi destination wait rule unresolved' : 'stored arrival event and exact elapsed wait where required',
       { waitedMs: admitted.evidence?.waitedMs ?? null }),
     item('customer_contacted', contacted > 0, 'in-app chat messages (direct calls may leave no artifact)', { messages: contacted }),
     item('door_photo', admitted.photo, 'server-issued order/tenant/mover-bound image; provenance does not establish refusal'),
@@ -189,13 +198,19 @@ async function moverUserIdOf(db: Db, claim: { riderId: string | null; driverId: 
   return null;
 }
 
-/** The payout gate, in one place: an incomplete bundle refuses the payout and says what is missing. */
-export function assertEvidenceComplete(evidence: ClaimEvidence): void {
-  if (evidence.complete) return;
+/**
+ * The payout gate, in one place. A complete bundle passes. An incomplete one is refused, naming what is missing, unless
+ * a person wrote why it should be paid anyway: the C4 fingerprint covers the reason, so the second admin approves those
+ * words. Returns the trimmed reason when it was needed.
+ */
+export function evidenceReasonFor(evidence: ClaimEvidence, reason: string | undefined): string | null {
+  if (evidence.complete) return null;
+  const written = reason?.trim() ?? '';
+  if (written.length >= EVIDENCE_REASON_MIN) return written;
   throw new AppError(
     409,
     'RLP_EVIDENCE_INCOMPLETE',
-    `The loss-protection payout needs a complete evidence bundle; missing: ${evidence.missing.join(', ')}. The reviewer decides with the bundle — nobody pays without it.`,
+    `This payment has incomplete evidence; missing: ${evidence.missing.join(', ')}. To pay it anyway, write why: the second admin approves that reason.`,
   );
 }
 
@@ -222,6 +237,22 @@ export async function rollingClaimTotal(
 // The reserve — a named liability line per country
 // ---------------------------------------------------------------------------
 
+/**
+ * [REVIEW-G2 S4-1 + REVIEW-M S4 on #2079] Whose program this is. The reserve is a COUNTRY line
+ * (rlp_reserve_entries has no tenant) and it is Swift's own: like billing (requireDefaultTenantBilling),
+ * loss protection belongs to the default tenant until a per-operator reserve exists. Another operator's
+ * claim is never paid from it, its partners' fees never provision it, and its admins are never paged with
+ * the line's balance. (Reading and topping it up are the default tenant's since #2079.)
+ */
+export const RLP_TENANT = 'swift-default';
+
+/** Refuses a payout for another operator's claim, before the reserve is read (so nothing states its balance). */
+export function assertRlpOperator(tenantId: string | null | undefined): void {
+  if (tenantId === RLP_TENANT) return;
+  throw new AppError(409, 'RLP_NOT_THIS_OPERATOR',
+    'This is paid from Swift\'s own set-aside, which this operator does not use. Settle this through the operator\'s own process.');
+}
+
 export async function reserveBalance(db: Db, countryCode: string): Promise<number> {
   const agg = await db.rlpReserveEntry.aggregate({ _sum: { amount: true }, where: { countryCode } });
   return Number(agg._sum.amount ?? 0);
@@ -235,24 +266,25 @@ export async function reserveBalance(db: Db, countryCode: string): Promise<numbe
  */
 export async function drawReserveForPayout(
   tx: Prisma.TransactionClient,
-  input: { countryCode: string; claimId: string; amount: number; byId: string },
+  input: { countryCode: string; claimId: string; amount: number; byId: string; tenantId: string | null | undefined; note?: string },
 ): Promise<{ balanceAfter: number }> {
+  assertRlpOperator(input.tenantId);
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'rlp_reserve:' + input.countryCode}))`;
   const balance = await reserveBalance(tx, input.countryCode);
   if (balance < input.amount) {
     throw new AppError(
       409,
       'RLP_RESERVE_UNFUNDED',
-      `The ${input.countryCode} loss-protection reserve holds ${balance.toLocaleString()} against a ${input.amount.toLocaleString()} payout. Provision the reserve line first — a claim is paid from it or not at all.`,
+      `The ${input.countryCode} set-aside holds ${balance.toLocaleString()} against a ${input.amount.toLocaleString()} payment. Add to the set-aside first — a payment comes from it or not at all.`,
     );
   }
   try {
     await tx.rlpReserveEntry.create({ data: {
-      countryCode: input.countryCode, kind: 'PAYOUT', amount: -input.amount, claimId: input.claimId, createdById: input.byId, note: `payout of claim ${input.claimId}`,
+      countryCode: input.countryCode, kind: 'PAYOUT', amount: -input.amount, claimId: input.claimId, createdById: input.byId, note: input.note ?? `payment for request ${input.claimId}`,
     } });
   } catch (err) {
     if (isReserveUnfundedError(err)) {
-      throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `The ${input.countryCode} loss-protection reserve cannot cover this payout.`);
+      throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `The ${input.countryCode} set-aside cannot pay this.`);
     }
     throw err;
   }
@@ -273,7 +305,7 @@ export async function adjustReserve(
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'rlp_reserve:' + input.countryCode}))`;
   const balance = await reserveBalance(tx, input.countryCode);
   if (balance + input.amount < 0) {
-    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (it holds ${balance.toLocaleString()}).`);
+    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} set-aside below zero (it holds ${balance.toLocaleString()}).`);
   }
   const row = await tx.rlpReserveEntry.create({ data: { countryCode: input.countryCode, kind: 'ADJUSTMENT', amount: input.amount, createdById: input.byId, note: input.note } });
   return { id: row.id, balanceAfter: balance + input.amount };
@@ -282,95 +314,20 @@ export async function adjustReserve(
 export interface ReserveStatement {
   countryCode: string;
   balance: number;
-  floor: number;
-  low: boolean;
-  provisionedThisPeriod: boolean;
   entries: Array<{ id: string; kind: string; amount: string; periodKey: string | null; claimId: string | null; note: string | null; createdAt: string }>;
 }
 
-export async function reserveStatement(
-  db: Db,
-  countryCode: string,
-  ctx: { gateLocal: number; rules: LossProtectionRules; now?: Date; take?: number },
-): Promise<ReserveStatement> {
-  const now = ctx.now ?? new Date();
+export async function reserveStatement(db: Db, countryCode: string, ctx: { take?: number } = {}): Promise<ReserveStatement> {
   const balance = await reserveBalance(db, countryCode);
-  const floor = ctx.gateLocal * ctx.rules.rlpReserveFloorMultiple;
-  const period = periodKeyOf(now);
-  const provisioned = await db.rlpReserveEntry.findFirst({ where: { countryCode, kind: 'PROVISION', periodKey: period }, select: { id: true } });
   const rows = await db.rlpReserveEntry.findMany({ where: { countryCode }, orderBy: { createdAt: 'desc' }, take: ctx.take ?? 50 });
   return {
-    countryCode, balance, floor, low: balance < floor, provisionedThisPeriod: Boolean(provisioned),
+    countryCode, balance,
     entries: rows.map((r) => ({ id: r.id, kind: r.kind, amount: String(r.amount), periodKey: r.periodKey, claimId: r.claimId, note: r.note, createdAt: r.createdAt.toISOString() })),
   };
 }
 
-/** The calendar month a provisioning row belongs to (UTC), e.g. "2026-09". */
-export function periodKeyOf(d: Date): string { return d.toISOString().slice(0, 7); }
-
-/**
- * Monthly provisioning: PREVIOUS month's PAID subscription revenue, by the payer's
- * country, times the provisioning rate — one PROVISION row per country per month,
- * idempotent by the (country, kind, periodKey) unique. A month with no revenue
- * provisions nothing and says so. Re-running is safe; it adds nothing twice.
- */
-export async function provisionReserveForPreviousMonth(
-  prisma: PrismaClient,
-  opts: { now?: Date; rulesFor: (countryCode: string) => Promise<LossProtectionRules>; notifications?: NotificationService },
-): Promise<Array<{ countryCode: string; periodKey: string; revenue: number; provisioned: number; created: boolean }>> {
-  const now = opts.now ?? new Date();
-  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const periodKey = periodKeyOf(monthStart);
-  const payments = await prisma.subscriptionPayment.findMany({
-    where: { status: 'CAPTURED', paidAt: { gte: monthStart, lt: monthEnd } },
-    select: {
-      amount: true,
-      subscription: { select: {
-        rider: { select: { user: { select: { countryCode: true } } } },
-        driver: { select: { user: { select: { countryCode: true } } } },
-        vendor: { select: { owner: { select: { user: { select: { countryCode: true } } } } } },
-      } },
-    },
-  });
-  const revenue = new Map<string, number>();
-  for (const p of payments) {
-    const s = p.subscription;
-    const country = s.rider?.user.countryCode ?? s.driver?.user.countryCode ?? s.vendor?.owner.user.countryCode ?? null;
-    if (!country) continue;
-    revenue.set(country, (revenue.get(country) ?? 0) + Number(p.amount));
-  }
-  const out: Array<{ countryCode: string; periodKey: string; revenue: number; provisioned: number; created: boolean }> = [];
-  for (const [countryCode, total] of revenue) {
-    const rules = await opts.rulesFor(countryCode);
-    const provisioned = Math.round(total * rules.rlpReserveRatePct) / 100;
-    let created = false;
-    if (provisioned > 0) {
-      try {
-        await prisma.rlpReserveEntry.create({ data: {
-          countryCode, kind: 'PROVISION', amount: provisioned, periodKey, note: `${rules.rlpReserveRatePct}% of ${periodKey} paid fee revenue (${total.toLocaleString()})`,
-        } });
-        created = true;
-      } catch (err) {
-        if (!(typeof err === 'object' && err !== null && (err as { code?: string }).code === 'P2002')) throw err;
-      }
-    }
-    out.push({ countryCode, periodKey, revenue: total, provisioned, created });
-    if (created && opts.notifications) {
-      const balance = await reserveBalance(prisma, countryCode);
-      await notifyAdmins(prisma, opts.notifications, {
-        tenantId: null,
-        title: `Loss-protection reserve provisioned (${countryCode})`,
-        body: `${provisioned.toLocaleString()} added for ${periodKey} (${rules.rlpReserveRatePct}% of ${total.toLocaleString()} paid fee revenue). The reserve line now holds ${balance.toLocaleString()}.`,
-        data: { kind: 'rlp_reserve_provisioned', countryCode, periodKey, provisioned, balance },
-      });
-    }
-  }
-  return out;
-}
-
 // ---------------------------------------------------------------------------
-// The daily sweep — SLA breaches and a low reserve, said once a day
+// The daily sweep — decided cases nobody paid, and cases nobody decided. Staff only.
 // ---------------------------------------------------------------------------
 
 export interface LossProtectionSweep {
@@ -378,13 +335,15 @@ export interface LossProtectionSweep {
   slaHours: Record<string, number>;
   breached: Array<{ claimId: string; ageHours: number; countryCode: string; status: string; amount: string }>;
   newlyFlagged: number;
-  lowReserve: Array<{ countryCode: string; balance: number; floor: number }>;
+  overdue: Array<{ claimId: string; ageDays: number; countryCode: string; status: string; amount: string }>;
+  newlyOverdue: number;
 }
 
 /**
- * Every approved claim older than the SLA and unpaid is flagged ONCE (`sla_breached`)
- * and listed; every country whose reserve stands below the floor is listed. One audit
- * row per run, at most one admin notice per day per finding kind.
+ * Every case a person approved and nobody paid past the staff deadline, counted from that decision, is flagged ONCE
+ * (`sla_breached`) and listed. Every case nobody decided at the reminder, new or from the old rule, is flagged ONCE
+ * (`review_overdue`) and listed. One audit row per run, at most one admin notice per day per finding kind. The size of
+ * the line is no finding: no sum has to be held.
  */
 export async function sweepLossProtection(
   prisma: PrismaClient,
@@ -392,70 +351,71 @@ export async function sweepLossProtection(
     now?: Date;
     notifications?: NotificationService;
     rulesFor: (countryCode: string) => Promise<LossProtectionRules>;
-    gateFor: (countryCode: string) => Promise<number>;
   },
 ): Promise<LossProtectionSweep> {
   const now = opts.now ?? new Date();
   const today = now.toISOString().slice(0, 10);
   const openRows = await prisma.reimbursementClaim.findMany({
-    where: { status: { in: ['AUTO_APPROVED', 'APPROVED'] } },
-    select: { id: true, amount: true, status: true, flags: true, createdAt: true, orderId: true },
+    where: { status: { in: ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'] } },
+    select: { id: true, amount: true, status: true, flags: true, createdAt: true, reviewedAt: true, orderId: true },
   });
-  // A claim carries no country of its own; the order's customer does.
+  // A claim carries no country of its own; the order's customer does. Only Swift's own claims (RLP_TENANT):
+  // another operator's claim is never paid from this line, so it is not this sweep's to list or page about.
   const orders = await prisma.order.findMany({
-    where: { id: { in: openRows.map((c) => c.orderId) } },
+    where: { id: { in: openRows.map((c) => c.orderId) }, tenantId: RLP_TENANT },
     select: { id: true, customer: { select: { countryCode: true } } },
   });
   const countryOf = new Map(orders.map((o) => [o.id, o.customer.countryCode]));
-  const open = openRows.map((c) => ({ ...c, countryCode: countryOf.get(c.orderId) ?? 'GY' }));
+  const open = openRows.filter((c) => countryOf.has(c.orderId)).map((c) => ({ ...c, countryCode: countryOf.get(c.orderId)! }));
   const slaHours: Record<string, number> = {};
   const breached: LossProtectionSweep['breached'] = [];
+  const overdue: LossProtectionSweep['overdue'] = [];
   let newlyFlagged = 0;
+  let newlyOverdue = 0;
+  // A flag is a fact on the row, pushed once, so the admin queue sorts on it.
+  const flagOnce = async (id: string, flags: string[], flag: string): Promise<number> => {
+    if (flags.includes(flag)) return 0;
+    const res = await prisma.reimbursementClaim.updateMany({ where: { id, NOT: { flags: { has: flag } } }, data: { flags: { push: flag } } });
+    return res.count;
+  };
   for (const c of open) {
-    const countryCode = c.countryCode;
-    if (slaHours[countryCode] == null) slaHours[countryCode] = (await opts.rulesFor(countryCode)).rlpSlaHours;
-    const ageHours = (now.getTime() - c.createdAt.getTime()) / 3_600_000;
-    if (ageHours < slaHours[countryCode]!) continue;
-    breached.push({ claimId: c.id, ageHours: Math.floor(ageHours), countryCode, status: c.status, amount: String(c.amount) });
-    if (!c.flags.includes(LOSS_PROTECTION_FLAGS.slaBreached)) {
-      // Flag once; a flag is a fact on the row, so the admin queue sorts on it.
-      const res = await prisma.reimbursementClaim.updateMany({
-        where: { id: c.id, NOT: { flags: { has: LOSS_PROTECTION_FLAGS.slaBreached } } },
-        data: { flags: { push: LOSS_PROTECTION_FLAGS.slaBreached } },
-      });
-      newlyFlagged += res.count;
+    const rules = await opts.rulesFor(c.countryCode);
+    slaHours[c.countryCode] = rules.rlpSlaHours;
+    if (c.status === 'APPROVED') {
+      const ageHours = (now.getTime() - (c.reviewedAt ?? c.createdAt).getTime()) / 3_600_000;
+      if (ageHours < rules.rlpSlaHours) continue;
+      breached.push({ claimId: c.id, ageHours: Math.floor(ageHours), countryCode: c.countryCode, status: c.status, amount: String(c.amount) });
+      newlyFlagged += await flagOnce(c.id, c.flags, LOSS_PROTECTION_FLAGS.slaBreached);
+    } else {
+      const ageDays = (now.getTime() - c.createdAt.getTime()) / DAY_MS;
+      if (ageDays < rules.rlpReviewReminderDays) continue;
+      overdue.push({ claimId: c.id, ageDays: Math.floor(ageDays), countryCode: c.countryCode, status: c.status, amount: String(c.amount) });
+      newlyOverdue += await flagOnce(c.id, c.flags, LOSS_PROTECTION_FLAGS.reviewOverdue);
     }
-  }
-  const countries = new Set<string>([...open.map((c) => c.countryCode), ...(await prisma.rlpReserveEntry.findMany({ distinct: ['countryCode'], select: { countryCode: true } })).map((r) => r.countryCode)]);
-  const lowReserve: LossProtectionSweep['lowReserve'] = [];
-  for (const countryCode of countries) {
-    const [balance, gate, rules] = await Promise.all([reserveBalance(prisma, countryCode), opts.gateFor(countryCode), opts.rulesFor(countryCode)]);
-    const floor = gate * rules.rlpReserveFloorMultiple;
-    if (balance < floor) lowReserve.push({ countryCode, balance, floor });
   }
   await prisma.auditLog.create({ data: {
     action: 'RLP_SWEEP', entity: 'ReimbursementClaim', entityId: `daily:${today}`,
-    changes: { checked: open.length, breached: breached.length, newlyFlagged, lowReserve: lowReserve.map((l) => l.countryCode) },
+    changes: { checked: open.length, breached: breached.length, newlyFlagged, overdue: overdue.length, newlyOverdue },
   } });
   if (opts.notifications) {
     if (breached.length > 0 && !(await noticedToday(prisma, 'rlp_sla_breached', today))) {
       await notifyAdmins(prisma, opts.notifications, {
-        tenantId: null,
-        title: `${breached.length} loss-protection payout${breached.length === 1 ? '' : 's'} past the SLA`,
-        body: `Approved claims unpaid beyond the pay-out SLA: ${breached.map((b) => `${b.amount} (${b.ageHours} h)`).slice(0, 5).join(', ')}${breached.length > 5 ? ', …' : ''}. A rider who is owed money and waiting stops taking cash orders — pay from the reserve line today.`,
+        tenantId: RLP_TENANT,
+        title: `${breached.length} set-aside payment${breached.length === 1 ? '' : 's'} past the staff deadline`,
+        body: `Approved payments unpaid past the staff deadline: ${breached.map((b) => `${b.amount} (${b.ageHours} h)`).slice(0, 5).join(', ')}${breached.length > 5 ? ', …' : ''}. A rider left waiting after a person decided stops taking cash orders. Pay or reject these today.`,
         data: { kind: 'rlp_sla_breached', breached: breached.length, date: today },
       });
     }
-    if (lowReserve.length > 0 && !(await noticedToday(prisma, 'rlp_reserve_low', today))) {
+    if (newlyOverdue > 0 && !(await noticedToday(prisma, 'rlp_review_overdue', today))) {
       await notifyAdmins(prisma, opts.notifications, {
-        tenantId: null,
-        title: 'Loss-protection reserve below its floor',
-        body: lowReserve.map((l) => `${l.countryCode}: ${l.balance.toLocaleString()} of a ${l.floor.toLocaleString()} floor`).join('; ') + '. Payouts refuse once the line is empty — provision it.',
-        data: { kind: 'rlp_reserve_low', countries: lowReserve.map((l) => l.countryCode), date: today },
+        tenantId: RLP_TENANT,
+        title: `${overdue.length} unpaid cash order${overdue.length === 1 ? '' : 's'} still waiting for a person`,
+        body: 'Open for a week or more. Decide each one: the rider or driver cannot delete their account while it stays open.',
+        data: { kind: 'rlp_review_overdue', overdue: overdue.length, date: today },
       });
     }
   }
-  return { runAt: now.toISOString(), slaHours, breached, newlyFlagged, lowReserve };
+  return { runAt: now.toISOString(), slaHours, breached, newlyFlagged, overdue, newlyOverdue };
 }
 
 async function noticedToday(prisma: PrismaClient, kind: string, today: string): Promise<boolean> {
@@ -494,15 +454,13 @@ export interface MoverClaimView {
   filedAt: string; paidAt: string | null; paymentRef: string | null;
   /** The bundle as it stood at filing: what a reviewer needs and what is missing. */
   evidence: { complete: boolean; missing: string[]; items: Array<{ key: string; present: boolean; required: boolean }> } | null;
-  /** For an approved, unpaid claim: when the pay-out SLA runs out. */
-  payoutDueBy: string | null;
+  /** Waiting for a person: a new case, or a row the old rule approved automatically. */
   underReview: boolean;
 }
 
 export async function moverClaims(
   db: Db,
   mover: { riderId: string | null; driverId: string | null },
-  rules: LossProtectionRules,
   opts: { take?: number } = {},
 ): Promise<{ claims: MoverClaimView[]; suspended: boolean; suspendedAt: string | null }> {
   const mine = mover.riderId ? { riderId: mover.riderId } : { driverId: mover.driverId };
@@ -515,13 +473,13 @@ export async function moverClaims(
   ]);
   const claims = rows.map((c) => {
     const ev = c.evidence as { complete?: boolean; missing?: string[]; items?: Array<{ key: string; present: boolean; required: boolean }> } | null;
-    const approvedUnpaid = c.status === 'AUTO_APPROVED' || c.status === 'APPROVED';
     return {
-      id: c.id, orderId: c.orderId, amount: String(c.amount), status: c.status, reason: c.reason, flags: c.flags,
+      id: c.id, orderId: c.orderId, amount: String(c.amount), status: c.status, reason: c.reason,
+      // A closed case is never told it is late, on any phone: that reads as money still on its way.
+      flags: c.status === 'PAID' || c.status === 'REJECTED' ? c.flags.filter((f) => f !== LOSS_PROTECTION_FLAGS.slaBreached) : c.flags,
       filedAt: c.createdAt.toISOString(), paidAt: c.paidAt ? c.paidAt.toISOString() : null, paymentRef: c.paymentRef ?? null,
       evidence: ev ? { complete: Boolean(ev.complete), missing: ev.missing ?? [], items: (ev.items ?? []).map((i) => ({ key: i.key, present: i.present, required: i.required })) } : null,
-      payoutDueBy: approvedUnpaid ? new Date(c.createdAt.getTime() + rules.rlpSlaHours * 3_600_000).toISOString() : null,
-      underReview: c.status === 'PENDING_REVIEW',
+      underReview: c.status === 'PENDING_REVIEW' || c.status === 'AUTO_APPROVED',
     };
   });
   return { claims, suspended: Boolean(account?.lossProtectionSuspendedAt), suspendedAt: account?.lossProtectionSuspendedAt?.toISOString() ?? null };

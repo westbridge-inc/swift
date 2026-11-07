@@ -36,23 +36,23 @@ interface RevenueBreakdownProps {
 
 export function RevenueBreakdown({ data, weeklyTotal, weeklyWaived, unavailable }: RevenueBreakdownProps) {
   return (
-    <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
-      <h3 className="text-lg font-semibold">Weekly subscription fees</h3>
+    <div className="mc-card">
+      <h3 className="mc-section-title mb-0">Weekly subscription fees</h3>
       {/* [A-07] Naming what the number is. It is what active subscriptions will
           be BILLED this week at their own price — not money collected, and not
           the tier list rate. */}
-      <p className="text-xs text-[var(--muted)] mb-4">Billable this week · not cash collected</p>
+      <p className="mc-muted mb-4 text-xs">Billable this week · not cash collected</p>
       <div className="space-y-3">
         {data?.map((item) => (
           <div key={item.type} className="flex items-center justify-between text-sm">
-            <span className="text-[var(--muted)]">{LABELS[item.type] ?? label('SubscriptionType', item.type)}</span>
+            <span className="mc-muted">{LABELS[item.type] ?? label('SubscriptionType', item.type)}</span>
             <span>
               {item.count} active ={' '}
-              <span className="font-semibold text-white">
+              <span className="mc-numbers font-semibold">
                 GY${item.weeklyRevenue.toLocaleString()}
               </span>
               {item.waivedCount ? (
-                <span className="text-[var(--muted)]">
+                <span className="mc-muted">
                   {' '}(+{item.waivedCount} waived, GY${(item.weeklyWaived ?? 0).toLocaleString()})
                 </span>
               ) : null}
@@ -62,13 +62,13 @@ export function RevenueBreakdown({ data, weeklyTotal, weeklyWaived, unavailable 
           (unavailable ? (
             <DataUnavailable what="Revenue" notAnAllClear="These figures are unknown, not zero." />
           ) : (
-            <p className="text-[var(--muted)] text-sm">No data</p>
+            <p className="mc-muted">No data</p>
           ))}
       </div>
-      <div className="mt-4 pt-4 border-t border-[var(--border)]">
+      <div className="mt-4 border-t border-[var(--mc-line)] pt-4">
         <div className="flex justify-between">
           <span className="font-semibold">Weekly Total</span>
-          <span className="text-[var(--accent)] font-bold text-lg">
+          <span className="mc-numbers text-lg font-bold text-[var(--mc-accent)]">
             {/* [A-07] A missing total is UNKNOWN, never zero. `|| '0'` turned an
                 absent aggregate into an authoritative GY$0. */}
             {unavailable || weeklyTotal === undefined || weeklyTotal === null
@@ -79,13 +79,13 @@ export function RevenueBreakdown({ data, weeklyTotal, weeklyWaived, unavailable 
         {/* [A-06] A projection multiplies the total. Multiplying a number we
             do not have produces an authoritative-looking figure out of nothing. */}
         {weeklyWaived ? (
-          <div className="flex justify-between text-sm text-amber-400 mt-1">
+          <div className="mc-text-warn mt-1 flex justify-between text-sm">
             <span>Waived this period</span>
             <span>−GY${weeklyWaived.toLocaleString()}</span>
           </div>
         ) : null}
         {!unavailable && weeklyTotal !== undefined && weeklyTotal !== null && (
-          <div className="flex justify-between text-sm text-[var(--muted)] mt-1">
+          <div className="mc-muted mt-1 flex justify-between text-sm">
             <span>Monthly Projection</span>
             <span>GY${Math.round(weeklyTotal * 4.33).toLocaleString()}</span>
           </div>

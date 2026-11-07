@@ -416,7 +416,7 @@ async function storeOrders(a: Signed): Promise<any[]> {
 async function storeAccept(a: Signed, cmd: HelperCommand, deps: HelperDeps): Promise<HelperResult> {
   let orderId = cmd.order;
   if (!orderId) {
-    deps.log(`${a.id} is waiting up to ${cmd.waitSeconds} s for a new order to accept (after its 5-minute hold)…`);
+    deps.log(`${a.id} is waiting up to ${cmd.waitSeconds} s for a new order to accept (after its hold)…`);
     const deadline = deps.now() + cmd.waitSeconds * 1000;
     while (deps.now() < deadline && !orderId) {
       const pending = (await storeOrders(a)).filter((o) => o.status === 'PENDING').sort((x, y) => Date.parse(y.createdAt ?? 0) - Date.parse(x.createdAt ?? 0));
@@ -486,7 +486,7 @@ async function customerOrderAt(a: Signed, cmd: HelperCommand): Promise<HelperRes
   if (cmd.pickup) {
     body['fulfillmentSelections'] = { [store.id]: 'PICKUP' };
   } else {
-    // Delivery: the door is --at, else a few hundred metres from the store; express skips the 5-minute hold.
+    // Delivery: the door is --at, else a few hundred metres from the store; express skips the hold.
     const door = cmd.at ?? { lat: Number(store.latitude) + 0.002, lng: Number(store.longitude) + 0.002 };
     const addressId = await addressAt(a.session, door);
     if (!addressId) return { ok: false, summary: `${a.id} could not save a delivery address at ${door.lat},${door.lng}`, details: {} };

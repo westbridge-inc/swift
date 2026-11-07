@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchRiderDetail,
   fetchDriverDetail,
+  revealMoverPhone,
   fetchMoverActivationChecklist,
   verifyRiderDocuments,
   verifyDriverDocuments,
@@ -21,6 +22,11 @@ import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
+import { PhoneReveal, usePhoneReveal } from '@/components/mc/PhoneReveal';
+import { billDateLabel } from '@/lib/bill-date';
+import { liveDocumentsLabel, liveDocumentsOk } from '@/lib/live-documents';
+import { chargedWeeklyFee } from '@/lib/weekly-fee';
+import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-2] Rider (delivery/courier) and driver (taxi) pages.
@@ -37,7 +43,7 @@ import { ActivationChecklist } from '@/components/mc/ActivationChecklist';
 const RIDE_CLASSES = ['ECONOMY', 'COMFORT', 'XL'] as const;
 
 const when = (iso: string | null | undefined) =>
-  iso ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+  iso ? gyDate(iso) : '—';
 const gyd = (n: unknown) => `G$${Number(n || 0).toLocaleString('en-GY', { maximumFractionDigits: 2 })}`;
 
 function Row({ label: name, children }: { label: string; children: React.ReactNode }) {
@@ -86,6 +92,8 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
     void qc.invalidateQueries({ queryKey: [`${kind}-checklist`, id] });
     void qc.invalidateQueries({ queryKey: [`${kind}s`] });
   };
+  // [FOLLOWUPS · follows O-1] The number is masked; "Show number" is the audited read, for this page view only.
+  const { revealed, revealFor } = usePhoneReveal(async (request) => show(await dialog.run(request)));
 
   const listHref = isDriver ? '/drivers' : '/riders';
   const listLabel = isDriver ? 'Drivers' : 'Riders';
@@ -114,6 +122,7 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
   }
 
   const name = [m.user?.firstName, m.user?.lastName].filter(Boolean).join(' ') || 'Unnamed';
+  const kindWords = isDriver ? 'Taxi driver' : label('RiderType', m.riderType);
   const vehicle = [m.vehicleColor, m.vehicleMake, m.vehicleModel].filter(Boolean).join(' ');
   const sub = m.subscription;
   const earnings: any[] = m.earnings ?? [];
@@ -154,18 +163,22 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
           {name.charAt(0).toUpperCase()}
         </div>
         <div className="min-w-0 flex-1 basis-56">
-          <h1 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
+          {/* [ADMIN-AUDIT S4-2] The shell's header is the page's h1; the person's name is the next level. */}
+          <h2 className="mc-numbers text-2xl font-semibold leading-tight" style={{ letterSpacing: '-0.02em' }}>
             <Truncate text={name} lines={2} focusable />
-          </h1>
+          </h2>
           <div className="flex flex-wrap items-center gap-2 mt-2">
-            <span className={`mc-badge ${m.documentsVerified ? 'mc-tone-good' : 'mc-tone-warn'}`}>
-              {m.documentsVerified ? 'Documents verified' : 'Documents not verified'}
+            {/* [BUG-HUNT F06] The verdict GO uses, never the old flag the Review Center does not set. */}
+            <span className={`mc-badge ${liveDocumentsOk({ documentsVerified: m.documentsVerified, documentsLive: c?.live }) ? 'mc-tone-good' : 'mc-tone-warn'}`}>
+              {liveDocumentsLabel({ documentsVerified: m.documentsVerified, documentsLive: c?.live })}
             </span>
             <span className={`mc-badge${m.isOnline ? ' mc-tone-good' : ''}`}>{m.isOnline ? 'Online' : 'Offline'}</span>
             {isDriver && m.rideClass ? <span className="mc-badge mc-tone-info">{label('RideClass', m.rideClass)}</span> : null}
           </div>
           <p className="mc-muted mt-1.5">
-            {[isDriver ? 'Taxi driver' : label('RiderType', m.riderType), m.user?.phone, `Joined ${when(m.user?.createdAt)}`].filter(Boolean).join(' · ')}
+            {kindWords}{kindWords && m.user?.phone ? ' · ' : ''}
+            {m.user?.phone ? <PhoneReveal phone={m.user.phone} revealed={revealed[`mover:${m.user.id ?? id}`]} onReveal={revealFor(`mover:${m.user.id ?? id}`, `Show ${name}'s full number?`, `${name}'s number is shown.`, (reason) => revealMoverPhone(kind, id, reason))} /> : null}
+            {kindWords || m.user?.phone ? ' · ' : ''}{`Joined ${when(m.user?.createdAt)}`}
           </p>
         </div>
         <div className="flex flex-wrap gap-2 w-full sm:w-auto sm:ml-auto">
@@ -250,12 +263,12 @@ export function MoverDetail({ id, kind }: { id: string; kind: 'rider' | 'driver'
             {sub ? (
               <dl className="mc-rows">
                 <Row label="Status"><StatusBadge group="SubscriptionStatus" value={sub.status} /></Row>
-                <Row label="Weekly fee"><span className="mc-numbers">{gyd(sub.customRate ?? sub.weeklyRate)}</span></Row>
+                <Row label="Weekly fee"><span className="mc-numbers">{gyd(chargedWeeklyFee(sub))}</span></Row>
                 {sub.isTrialActive && sub.trialEndDate ? <Row label="Trial ends">{when(sub.trialEndDate)}</Row> : null}
-                {sub.nextBillingDate ? <Row label="Next bill">{when(sub.nextBillingDate)}</Row> : null}
+                {sub.nextBillingDate ? <Row label={billDateLabel(sub.nextBillingDate)}>{when(sub.nextBillingDate)}</Row> : null}
               </dl>
             ) : (
-              <p className="mc-muted">No subscription yet. It starts when their documents are verified.</p>
+              <p className="mc-muted">No subscription yet. It starts when Swift approves them.</p>
             )}
           </section>
 

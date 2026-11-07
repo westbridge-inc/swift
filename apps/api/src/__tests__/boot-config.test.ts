@@ -41,7 +41,8 @@ const good: Record<string, string | undefined> = {
   // [ledger E08] The settled production posture ships the hold ON in both env
   // examples, so the valid production base carries it explicitly.
   LIFECYCLE_V2: '1',
-  ORDER_HOLD_MINUTES: '5',
+  // [owner 30 Oct 2026] the store-order hold is one minute (was five).
+  ORDER_HOLD_MINUTES: '1',
   MASTER_KEK: KEK,
   STORAGE_SIGNING_SECRET: 'a-managed-signing-secret-of-at-least-32-chars',
   STORAGE_PROVIDER: 's3',
@@ -537,20 +538,23 @@ describe('[ledger E08] production must be explicit about the order hold', () => 
     expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1' })).not.toThrow();
   });
 
-  // [CANCEL-WINDOW · owner 22 Oct 2026] '1' joins the list: the free-cancel window after acceptance is now one
-  // minute, but the hold floor stays the settled five minutes (ORDER_HOLD_FLOOR_MIN) — the guard is never relaxed.
-  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '1', '2', '4.99'])(
-    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the settled five-minute hold',
+  // [CANCEL-WINDOW · owner 22 Oct 2026] The free-cancel window after acceptance became one minute; the hold
+  // floor stayed five. [owner 30 Oct 2026, staging test: "the 5 minute wait time is still there, not 1 minute"]
+  // The store-order hold itself is now ONE minute, so the floor is one minute (ORDER_HOLD_FLOOR_MIN): '1', '2' and
+  // '4.99' are accepted now (below). Everything else stays refused — no hold, a broken value, or anything shorter
+  // than one minute ('0.5', '0.99' are new pins of that floor).
+  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '0.5', '0.99', 'NaN', '-Infinity'])(
+    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the one-minute hold',
     (minutes) => {
       expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }))
         .toThrow(/ORDER_HOLD_MINUTES/);
     },
   );
 
-  it('accepts the unset default and any hold at least the settled five minutes (DS214 D1) — not the one-minute window', () => {
+  it('accepts the unset default and any hold of at least the owner\'s one minute (DS214 D1 · owner 30 Oct 2026)', () => {
     expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
-    expect(ORDER_HOLD_FLOOR_MIN).toBe(5);
-    for (const minutes of [undefined, '5', '7', '10']) {
+    expect(ORDER_HOLD_FLOOR_MIN).toBe(1);
+    for (const minutes of [undefined, '1', '1.5', '2', '4.99', '5', '7', '10']) {
       expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }), String(minutes))
         .not.toThrow();
     }
@@ -897,6 +901,8 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
   it('a misspelled switch refuses to start, in production and outside it', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: 'true' })).toThrow(/MMG_CHECKOUT_ENABLED must be exactly 0 or 1/);
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_CHECKOUT_ENABLED: 'yes' })).toThrow(/MMG_CHECKOUT_ENABLED must be exactly 0 or 1/);
+    expect(() => assertSafeBootConfig({ ...good, ADS_MMG_CHECKOUT: 'true' })).toThrow(/ADS_MMG_CHECKOUT must be exactly 0 or 1/);
+    for (const value of [undefined, '', '0', '1']) expect(() => assertSafeBootConfig({ ...good, ADS_MMG_CHECKOUT: value })).not.toThrow();
   });
 
   it('enabled on the live driver without its configuration refuses to start — development (staging) included', () => {
@@ -1071,6 +1077,41 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-test.example.test' })).not.toThrow();
   });
 
+  // [GUARD-FIX] Production serves the API as api-live.swiftgy.com (and keeps that name after launch,
+  // adding api.swiftgy.com beside it). A guard keyed on one public name alone never fired there.
+  it('[GUARD-FIX] in EVERY mode, a TEST card system refuses to start on EITHER production public name, api.swiftgy.com or api-live.swiftgy.com', () => {
+    const sandbox = { CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'sandbox' };
+    for (const env of [
+      { NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+      { NODE_ENV: 'development', CARD_RAIL_V2: '0', CARD_RAIL_PROVIDER: 'simulator', API_PUBLIC_URL: 'https://API-LIVE.swiftgy.com/' },
+      { NODE_ENV: 'development', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, CARD_RAIL_ENVIRONMENT: undefined, API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+      { NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api-live.swiftgy.com./' },
+      { NODE_ENV: 'test', ...sandbox, API_PUBLIC_URL: 'https://api-live.swiftgy.com' },
+    ]) {
+      expect(() => assertSafeBootConfig(env), JSON.stringify(env)).toThrow(/public API host api-live\.swiftgy\.com/);
+    }
+    // The original name still refuses, and names itself.
+    expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: 'https://api.swiftgy.com' })).toThrow(/public API host api\.swiftgy\.com /);
+    // Staging and test servers keep their own names and boot exactly as before.
+    for (const url of ['https://api-staging.swiftgy.com', 'https://api-test.example.test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', ...sandbox, API_PUBLIC_URL: url }), url).not.toThrow();
+      expect(() => assertSafeBootConfig({ NODE_ENV: 'development', CARD_RAIL_V2: '1', CARD_RAIL_PROVIDER: 'simulator', CARD_RAIL_SIMULATOR_LIVE: '1', API_PUBLIC_URL: url }), url).not.toThrow();
+    }
+  });
+
+  it('[GUARD-FIX] production refuses the provider\'s TEST system (its sandbox) whatever its public name, even with card rail v2 off', () => {
+    for (const url of ['https://api-live.swiftgy.com', 'https://api.swiftgy.com', 'https://api.example.com', undefined]) {
+      for (const environment of ['sandbox', undefined, '']) {
+        const env = { ...good, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: environment, API_PUBLIC_URL: url };
+        expect(() => assertSafeBootConfig(env), JSON.stringify({ url, environment })).toThrow(/^FATAL: a TEST card system/);
+      }
+    }
+    // Live (real) cards with v2 off on production's own name are no test system: nothing here refuses them.
+    expect(() => assertSafeBootConfig({ ...good, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', API_PUBLIC_URL: 'https://api-live.swiftgy.com' })).not.toThrow();
+  });
+
   it('[review S3] in EVERY mode but production, live (real) cards refuse to start: a test server never charges real cards', () => {
     for (const mode of ['development', 'test']) {
       expect(() => assertSafeBootConfig({ NODE_ENV: mode, CARD_RAIL_PROVIDER: 'powertranz', CARD_RAIL_ENVIRONMENT: 'live', API_PUBLIC_URL: 'https://api-test.example.test' }), mode)
@@ -1236,6 +1277,47 @@ describe('[PROD-PATH] production needs an on-call phone and an email sender', ()
     try { assertSafeBootConfig({ ...good, SMTP_TLS: 'none' }); } catch (e) { message = String(e); }
     expect(message).toMatch(/SMTP_TLS/);
     expect(message).not.toContain(String(good['SMTP_PASS']));
+  });
+
+  // [EMAIL-HTTPS 27 Oct] The droplets cannot reach SMTP, so production may send
+  // email over HTTPS through Resend instead. NOT a relaxation: a real sender is
+  // still required (unset, dev and anything else stay refused, above and below),
+  // and resend is held to its own whole configuration, by name, like smtp.
+  const RESEND_KEY = 're_synthetic_boot_key_never_echoed';
+  const resend = {
+    ...good, EMAIL_PROVIDER: 'resend', RESEND_API_KEY: RESEND_KEY, EMAIL_FROM: 'Swift <no-reply@swiftgy.com>',
+    SMTP_HOST: undefined, SMTP_PORT: undefined, SMTP_USER: undefined, SMTP_PASS: undefined,
+  };
+
+  it('accepts smtp, and accepts resend with its key and a sender (no SMTP setting needed)', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    expect(() => assertSafeBootConfig(resend)).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...resend, EMAIL_FROM: 'no-reply@swiftgy.com' })).not.toThrow();
+  });
+
+  it.each(['RESEND_API_KEY', 'EMAIL_FROM'])('refuses resend without %s (unset or blank), FATAL by name, never echoing the key', (name) => {
+    for (const value of [undefined, '', '  ']) {
+      let message = '';
+      try { assertSafeBootConfig({ ...resend, [name]: value }); } catch (e) { message = String(e); }
+      expect(message, JSON.stringify(value)).toMatch(new RegExp(`FATAL: EMAIL_PROVIDER=resend needs ${name}`));
+      expect(message).toMatch(/Refusing to start/);
+      expect(message).not.toContain(RESEND_KEY);
+    }
+  });
+
+  it('refuses resend with a sender that is not an address, never echoing the key', () => {
+    let message = '';
+    try { assertSafeBootConfig({ ...resend, EMAIL_FROM: 'Swift' }); } catch (e) { message = String(e); }
+    expect(message).toMatch(/FATAL: EMAIL_FROM must be an email address/);
+    expect(message).not.toContain(RESEND_KEY);
+  });
+
+  it.each([undefined, '', 'dev', 'sendgrid', 'postmark', 'Resend', ' resend', 'smtp,resend'])('still refuses EMAIL_PROVIDER=%j with every resend setting present', (provider) => {
+    expect(() => assertSafeBootConfig({ ...resend, EMAIL_PROVIDER: provider })).toThrow(/FATAL: EMAIL_PROVIDER must be smtp or resend in production/);
+  });
+
+  it('smtp is unchanged: a Resend key does not stand in for a missing SMTP setting', () => {
+    expect(() => assertSafeBootConfig({ ...good, RESEND_API_KEY: RESEND_KEY, SMTP_PASS: undefined })).toThrow(/EMAIL_PROVIDER=smtp needs SMTP_PASS/);
   });
 
   it('outside production neither is required', () => {

@@ -84,6 +84,8 @@ export function Pager({ meta, shown, onPage, onShowTestData }: {
           </>
         ) : null}
       </p>
+      {/* [SEC-PII] The server's own words when a search by phone number or email needs contact access. */}
+      {meta.searchHint ? <p role="status" className="mc-muted">{meta.searchHint}</p> : null}
       {meta.totalPages > 1 || meta.hasPrev ? (
         <div className="flex items-center gap-2">
           <button type="button" className="mc-btn" disabled={!meta.hasPrev} onClick={() => onPage(meta.page - 1)}>

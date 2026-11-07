@@ -1,23 +1,29 @@
 import { Prisma, type PrismaClient, type UserRole, type VehicleType, type RideClass } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { AppError, ValidationError } from '../../utils/errors';
-import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
+import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isPassengerVehicle, isVehicleOffered, type MoverRole } from '../../config/vehicle-classes';
+import { followTaxiCar, isTaxiTwin } from '../driver/car-deliveries';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
 import { alignStoredVehicleKind, papersUnderSecondReview, requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
-import { assertHirePlate } from '../verification/hire-plate';
+import { assertPlateForWork, moverRoleForVehicle } from '../verification/hire-plate';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
 import {
-  assertSawQuote, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
+  assertSawQuote, signupQuote, WEEKLY_FEE_ACK_TEXT, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
 } from './weekly-fee-ack';
 import { assertStorePinInMarket } from '../vendor/store-pin';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
+import { lockVendorActivationBilling } from '../billing/billing-access';
+import { hasActiveHold } from '../integrity/enforcement';
+import { FOOD_HANDLERS_CONSENT_TYPE, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, foodHandlerTickApplies } from '../vendor/food-handlers';
+import { publicPhoneForWrite } from '../../utils/vendor-public-phone';
+import { moveMoverFeeToDelivery } from '../subscription/mover-fee-authority';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -94,6 +100,64 @@ function slugify(name: string): string {
     .slice(0, 40);
 }
 
+/** [CHAINS] The most stores one owner account runs (VENDOR_BRANCH_LIMIT, default 50; nonsense falls back). */
+export const DEFAULT_BRANCH_LIMIT = 50;
+export function branchLimit(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(env['VENDOR_BRANCH_LIMIT']);
+  return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_BRANCH_LIMIT;
+}
+
+/**
+ * [CHAINS · COORD ruling 29 Oct 2026] A branch rides the owner's standing, so an owner in trouble anywhere adds none.
+ * Read under the add's locks (PartnerService.addBranch). In order, each with its own plain reason:
+ *  - OWNER_ON_HOLD: an open enforcement hold on the owner's account (enforcement.ts hasActiveHold);
+ *  - FEE_UNPAID: a store's weekly fee past due, or a store suspended or churned for it (pay first, the spirit of
+ *    DEBT_REINSTATE_FIRST);
+ *  - STORE_SUSPENDED / STORE_CLOSED: a store Swift suspended (any other reason) or closed;
+ *  - STORE_ON_HOLD: a store whose MMG checkout Swift holds (a fraud-safety hold);
+ *  - NO_ACTIVE_STORE / FIRST_STORE_NOT_APPROVED: no store is live now (documents approved once is not enough).
+ */
+type StandingStore = { name: string; status: string; isVerified: boolean; suspensionSource: string | null; mmgCheckoutHeldAt: Date | null; subscription: { status: string } | null };
+export function assertOwnerInGoodStanding(stores: readonly StandingStore[], ownerOnHold: boolean): void {
+  if (ownerOnHold) throw new AppError(403, 'OWNER_ON_HOLD', 'Your account is being checked by Swift. You can add branches once that check is finished.');
+  const unpaid = stores.find((s) => ['PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(s.subscription?.status ?? '') || (s.status === 'SUSPENDED' && s.suspensionSource === 'BILLING'));
+  if (unpaid) throw new AppError(409, 'FEE_UNPAID', `Pay the weekly fee for ${unpaid.name} first. Then you can add a branch.`);
+  const suspended = stores.find((s) => s.status === 'SUSPENDED');
+  if (suspended) throw new AppError(403, 'STORE_SUSPENDED', `${suspended.name} is suspended. You can add branches once Swift reinstates it.`);
+  const closed = stores.find((s) => s.status === 'CLOSED');
+  if (closed) throw new AppError(403, 'STORE_CLOSED', `Swift closed ${closed.name}. Contact Swift before adding a branch.`);
+  const held = stores.find((s) => s.mmgCheckoutHeldAt !== null);
+  if (held) throw new AppError(403, 'STORE_ON_HOLD', `Swift is checking payments at ${held.name}. You can add branches once that check is finished.`);
+  if (!stores.some((s) => s.status === 'ACTIVE')) {
+    throw stores.some((s) => s.isVerified)
+      ? new AppError(403, 'NO_ACTIVE_STORE', 'You can add branches while one of your stores is live on Swift.')
+      : new AppError(403, 'FIRST_STORE_NOT_APPROVED', 'You can add branches once Swift has approved your first store.');
+  }
+}
+
+/** A new store of an owner, waiting for Swift's approval: sign-up's first store and every branch after it. */
+async function createStore(tx: Tx, ownerId: string, business: Business, opts: { branch?: boolean; publicPhone?: string | null } = {}) {
+  return tx.vendor.create({
+    data: {
+      ownerId,
+      // [CHAINS · COORD ruling] A branch waits for a person at Swift to approve it before it can go live.
+      ...(opts.branch ? { personApprovalRequired: true } : {}),
+      // [REVIEW-F #2220 S3-1] The number customers can call, published by the owner on the add-a-branch form.
+      ...(opts.publicPhone ? { publicPhone: opts.publicPhone } : {}),
+      name: business.name,
+      slug: `${slugify(business.name) || 'store'}-${nanoid(6)}`,
+      vendorType: business.vendorType,
+      phone: business.phone,
+      addressLine1: business.addressLine1,
+      city: business.city,
+      region: business.region ?? '',
+      latitude: business.latitude,
+      longitude: business.longitude,
+      status: 'PENDING_APPROVAL',
+    },
+  });
+}
+
 export class PartnerService {
   constructor(
     private prisma: PrismaClient,
@@ -133,11 +197,12 @@ export class PartnerService {
     // [Row 628] The weekly-fee tick anchors to its own published words, the same way.
     const feeAck = consent?.weeklyFeeAck;
     if (feeAck) {
-      await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+      await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
     }
     const feeSubject = input.role === 'VENDOR'
       ? { role: 'VENDOR' as const, vendorType: input.business!.vendorType }
-      : { role: 'MOVER' as const, vehicleType: input.vehicleType! };
+      // [CARS-PLATES] A car is priced for the work its plate gets: a private-plate car as a delivery rider.
+      : { role: 'MOVER' as const, vehicleType: input.vehicleType!, moverRole: moverRoleForVehicle(input.vehicleType!, input.vehicle?.licensePlate) };
     const combined = await this.prisma.$transaction(async (tx) => {
       // [Row 628] The fee the partner saw is the quote now, or nothing is written (WEEKLY_FEE_CHANGED).
       const quote = feeAck ? await signupQuote(tx, userId, feeSubject) : null;
@@ -205,8 +270,9 @@ export class PartnerService {
     if (rideClass && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
-    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
-    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed. [CARS-PLATES · owner 6 Nov]
+    // A car's plate decides its work: a private plate is a delivery car (only while CAR_DELIVERIES is on).
+    if (input.vehicle) assertPlateForWork(input.vehicleType, input.vehicle.licensePlate, moverRoleForVehicle(input.vehicleType, input.vehicle.licensePlate));
   }
 
   private async provisionLocked(tx: Tx, userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
@@ -227,6 +293,10 @@ export class PartnerService {
     }
     const vehicleType = input.vehicleType!;
     const rideClass = VEHICLE_CLASSES[vehicleType]?.rideClass;
+    // [CARS-PLATES] A private-plate car is a delivery profile carrying its own car (never a taxi).
+    if (rideClass && moverRoleForVehicle(vehicleType, input.vehicle?.licensePlate) === 'RIDER') {
+      return this.provisionRider(tx, user.id, user.roles, vehicleType, input.vehicle);
+    }
     return rideClass
       ? this.provisionDriver(tx, user.id, user.roles, input.vehicle, rideClass, vehicleType)
       : this.provisionRider(tx, user.id, user.roles, vehicleType);
@@ -245,9 +315,16 @@ export class PartnerService {
   // Cargo-only vehicles (bike, motorbike, canters, box trucks) provision a
   // delivery/courier Rider. Passenger-capable vehicles (car, wagon, bus) take
   // the Driver path above, at their ride tier.
-  private async provisionRider(tx: Tx, userId: string, roles: UserRole[], vehicleType: VehicleType): Promise<PartnerProvisionResult> {
+  private async provisionRider(tx: Tx, userId: string, roles: UserRole[], vehicleType: VehicleType, vehicle?: Vehicle): Promise<PartnerProvisionResult> {
     const existing = await tx.rider.findUnique({ where: { userId } });
-    const rider = existing ?? (await tx.rider.create({ data: { userId, riderType: 'BOTH', vehicleType } }));
+    // [CARS-PLATES] A private-plate car's delivery profile carries the car's details from the start: its plate is what
+    // its papers bind to and what a person checks against the Certificate of Registration.
+    const details = vehicle
+      ? { vehicleMake: vehicle.make, vehicleModel: vehicle.model, vehicleYear: vehicle.year, vehicleColor: vehicle.color, licensePlate: vehicle.licensePlate }
+      : {};
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car takes food and shop orders only, never courier parcels: DELIVERY.
+    const riderType = isPassengerVehicle(vehicleType) ? 'DELIVERY' as const : 'BOTH' as const;
+    const rider = existing ?? (await tx.rider.create({ data: { userId, riderType, vehicleType, ...details } }));
     // D.3 — seed the new rider's float limit from their trust level + country.
     if (!existing) await new FloatService(tx).recomputeForUser(userId);
     const updatedRoles = await this.ensureRoles(tx, userId, roles, ['MOVER', 'RIDER']);
@@ -296,24 +373,122 @@ export class PartnerService {
       return { kind: 'VENDOR' as const, id: existing.id, created: false, roles: updatedRoles, targetRole: 'VENDOR_OWNER' as const };
     }
 
-    const vendor = await tx.vendor.create({
-      data: {
-        ownerId: owner.id,
-        name: business.name,
-        slug: `${slugify(business.name) || 'store'}-${nanoid(6)}`,
-        vendorType: business.vendorType,
-        phone: business.phone,
-        addressLine1: business.addressLine1,
-        city: business.city,
-        region: business.region ?? '',
-        latitude: business.latitude,
-        longitude: business.longitude,
-        status: 'PENDING_APPROVAL',
-      },
-    });
+    const vendor = await createStore(tx, owner.id, business);
     const updatedRoles = await this.ensureRoles(tx, userId, roles, ['VENDOR_OWNER']);
 
     return { kind: 'VENDOR' as const, id: vendor.id, created: true, roles: updatedRoles, targetRole: 'VENDOR_OWNER' as const };
+  }
+
+  /**
+   * [CHAINS · owner 29 Oct 2026] Add a branch: one more store under the SAME owner, so one login runs the chain.
+   * The route (POST /vendor/stores) has already checked that the caller owns a store, confirmed it is them (step-up),
+   * the pin and the name. Here, in ONE transaction under the owner's account lock (so two adds at once can never pass
+   * the limit together):
+   *  - never for a demo (REVIEW) account, an account that is not ACTIVE, or an owner Swift has not approved a store
+   *    for yet: a branch rides the owner's checked identity and papers, so there must be a check to ride on;
+   *  - at most branchLimit() stores per owner;
+   *  - the weekly fee shown for THIS branch is the fee quoted now (each branch pays its own fee: owner, 29 Oct), and
+   *    the tick is recorded with the branch it is for;
+   *  - the branch is born PENDING_APPROVAL, like any store: the one activation projection makes it live when its own
+   *    checklist (published phone, food handlers tick, name basis) is met, and prices its fee then (a shared trial
+   *    while the owner's trial runs, else billed from day one: SubscriptionService.createRow);
+   *  - [REVIEW-F #2220 S3-1] what go-live needs from the owner comes with the add, in the same transaction: the
+   *    number customers can call (`setup.publicPhone`, judged by the storefront's validator) and, for a restaurant,
+   *    the food handlers tick (`consent.foodHandlers`), recorded exactly as the branch's own screen records it
+   *    (POST /vendor/onboarding/food-handlers) — so the branch then waits for Swift, not for its owner.
+   */
+  async addBranch(
+    userId: string,
+    business: Business,
+    consent: { weeklyFeeAck: WeeklyFeeAck; ip?: string | null; surface: ConsentSurface; foodHandlers?: boolean },
+    env: Record<string, string | undefined> = process.env,
+    setup: { publicPhone?: string | null } = {},
+  ): Promise<{ id: string; name: string; status: string; ownerId: string }> {
+    assertStorePinInMarket(business.latitude, business.longitude);
+    const publicPhone = publicPhoneForWrite(setup.publicPhone);
+    if (consent.foodHandlers && !foodHandlerTickApplies({ vendorType: business.vendorType })) {
+      throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', 'Only a restaurant confirms its food handlers.');
+    }
+    await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT });
+    if (consent.foodHandlers) {
+      await publishLegalDocumentOnce(this.prisma, { documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION, renderedText: FOOD_HANDLERS_TICK_V1 });
+    }
+    const created = await this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ id: string; status: string; tenantKind: string }>>`
+        SELECT u."id", u."status"::text AS "status", t."kind"::text AS "tenantKind"
+        FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId"
+        WHERE u."id" = ${userId}
+        FOR UPDATE OF u
+      `;
+      const user = rows[0];
+      if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+      if (user.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
+      if (user.status !== 'ACTIVE') throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'This account cannot add a branch right now.');
+      // The owner's stores and their fees, locked in the settlement order (account row above, then every
+      // subscription by id), then the stores themselves: a suspension, a hold or a missed fee committed first is
+      // seen here, and one that comes second waits for this add to finish.
+      await lockVendorActivationBilling(tx, userId);
+      await tx.$queryRaw`SELECT v."id" FROM "vendors" v JOIN "vendor_owners" o ON o."id" = v."ownerId" WHERE o."userId" = ${userId} ORDER BY v."id" FOR SHARE OF v /* add-branch-owner-stores */`;
+      const owner = await tx.vendorOwner.findUnique({
+        where: { userId },
+        select: {
+          id: true,
+          vendors: { select: { id: true, name: true, status: true, isVerified: true, suspensionSource: true, mmgCheckoutHeldAt: true, closurePausedAt: true, subscription: { select: { status: true } } } },
+        },
+      });
+      if (!owner || owner.vendors.length === 0) throw new AppError(404, 'VENDOR_NOT_FOUND', 'Set up your first store before adding a branch.');
+      // [WEB-DELETE · REVIEW-M #2304 S3-1] An open closure request holds the owner's stores (closure-pause.ts): a branch
+      // added now would be born outside that pause. Read under the account lock above, which the request also takes.
+      if (owner.vendors.some((v) => v.closurePausedAt)) {
+        throw new AppError(409, 'CLOSURE_REQUESTED', 'You asked Swift to close your account, so a new branch can’t be added while that request is open. To keep trading, cancel the request on swiftgy.com (Account, Request account closure) or contact Swift support.');
+      }
+      assertOwnerInGoodStanding(owner.vendors, (await hasActiveHold(tx as unknown as PrismaClient, userId)).held);
+      const limit = branchLimit(env);
+      if (owner.vendors.length >= limit) {
+        throw new AppError(409, 'BRANCH_LIMIT', `An account can run up to ${limit} stores. Contact Swift to add more.`, { limit });
+      }
+      // [Row 628] The fee the owner saw is the fee for this branch now, or nothing is written (WEEKLY_FEE_CHANGED).
+      const quote = await signupQuote(tx, userId, { role: 'VENDOR', vendorType: business.vendorType });
+      assertSawQuote(consent.weeklyFeeAck, quote);
+      const vendor = await createStore(tx, owner.id, business, { branch: true, publicPhone });
+      if (consent.foodHandlers) {
+        // The branch's own tick, as POST /vendor/onboarding/food-handlers records it (the same ledger row shape).
+        await recordConsent(tx, {
+          subjectType: 'vendor_user', subjectId: userId, documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION,
+          action: 'granted', surface: consent.surface, ip: consent.ip ?? null,
+          evidence: { vendorId: vendor.id, storeName: vendor.name, control: 'checkbox', path: 'vendor/stores', attestedAt: new Date().toISOString() },
+        });
+      }
+      await recordConsent(tx, {
+        subjectType: 'vendor_user',
+        subjectId: userId,
+        documentType: WEEKLY_FEE_ACK_TYPE,
+        version: WEEKLY_FEE_ACK_VERSION,
+        action: 'granted',
+        surface: consent.surface,
+        ip: consent.ip ?? null,
+        evidence: {
+          control: 'weekly_fee_checkbox', path: 'vendor/stores', kind: 'VENDOR_BRANCH', vendorId: vendor.id, vendorType: business.vendorType,
+          weeklyFee: { amount: quote.amount, currencyCode: quote.currencyCode, tier: quote.tier },
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          userId, action: 'VENDOR_BRANCH_ADDED', entity: 'Vendor', entityId: vendor.id,
+          changes: { ownerId: owner.id, storesBefore: owner.vendors.length, vendorType: business.vendorType },
+        },
+      });
+      return { id: vendor.id, name: vendor.name, status: vendor.status as string, ownerId: owner.id, tenantId: vendor.tenantId };
+    });
+    if (this.notifications) {
+      await notifyAdmins(this.prisma, this.notifications, {
+        tenantId: created.tenantId,
+        title: 'New branch awaiting approval',
+        body: `${business.name} (${business.vendorType.toLowerCase()}) was added as a branch of an approved business and is waiting for its checklist.`,
+        data: { kind: 'vendor_pending', vendorId: created.id },
+      }).catch(() => {});
+    }
+    return { id: created.id, name: created.name, status: created.status, ownerId: created.ownerId };
   }
 
   /**
@@ -346,17 +521,18 @@ export class PartnerService {
     if (!isVehicleOffered(input.vehicleType)) {
       throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Choose another vehicle.');
     }
-    const target = moverRoleFor(input.vehicleType);
-    if (target === 'DRIVER' && !input.vehicle) {
+    // [CARS-PLATES · owner 6 Nov] A car's plate decides its work: a private plate is a delivery car.
+    const target = moverRoleForVehicle(input.vehicleType, input.vehicle?.licensePlate);
+    if ((target === 'DRIVER' || isPassengerVehicle(input.vehicleType)) && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
     // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
-    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
+    if (input.vehicle) assertPlateForWork(input.vehicleType, input.vehicle.licensePlate, target);
     return this.prisma.$transaction(async (tx) => {
       const now = new Date();
       // The global lock order (mover-authority): User, then Rider, then Driver.
-      const users = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; lastMoverRole: string | null; countryCode: string; tenantKind: string }>>`
-        SELECT u."id", u."roles", u."lastMoverRole", u."countryCode", t."kind"::text AS "tenantKind"
+      const users = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; lastMoverRole: string | null; countryCode: string; tenantId: string; tenantKind: string }>>`
+        SELECT u."id", u."roles", u."lastMoverRole", u."countryCode", u."tenantId", t."kind"::text AS "tenantKind"
         FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId" WHERE u."id" = ${userId} FOR UPDATE OF u
       `;
       const user = users[0];
@@ -378,11 +554,16 @@ export class PartnerService {
       }
 
       // The vehicle in use now: the profile the mover pointer names, else the one that exists.
-      const current: MoverRole = user.lastMoverRole === 'DRIVER' && driver
+      // [CARS-DELIVER] A taxi car's delivery profile only mirrors the taxi profile's car: that car is the one in use.
+      // [CARS-PLATES] Only the twin (same car, same plate); a private car on another plate is its own vehicle.
+      const current: MoverRole = isTaxiTwin(rider, driver)
         ? 'DRIVER'
-        : user.lastMoverRole === 'RIDER' && rider ? 'RIDER' : rider ? 'RIDER' : 'DRIVER';
+        : user.lastMoverRole === 'DRIVER' && driver
+          ? 'DRIVER'
+          : user.lastMoverRole === 'RIDER' && rider ? 'RIDER' : rider ? 'RIDER' : 'DRIVER';
       const currentProfile = (current === 'DRIVER' ? driver : rider)!;
       const previousVehicleType = currentProfile.vehicleType;
+      let planMoved = false;
       const next = input.vehicle;
       // The vehicle's details after the change. A rider naming the SAME vehicle without
       // details keeps the ones it has (the payload omitted them, it did not ask to clear
@@ -406,15 +587,24 @@ export class PartnerService {
         };
       }
       if (target !== current) {
+        // [BUG-HUNT F05] The fee decides, not the row: one fee can sit on either profile, and after a move it stays on the
+        // old one. A taxi fee moving to delivery work, or the reverse, is what needs a person.
         const plan = await tx.subscription.findFirst({
-          where: { ...(current === 'RIDER' ? { riderId: currentProfile.id } : { driverId: currentProfile.id }), status: { in: [...LIVE_PLAN] } },
-          select: { id: true },
+          where: { OR: [...(rider ? [{ riderId: rider.id }] : []), ...(driver ? [{ driverId: driver.id }] : [])], status: { in: [...LIVE_PLAN] } },
+          select: { type: true },
         });
-        if (plan) {
-          throw new AppError(409, 'PLAN_ON_CURRENT_ROLE', current === 'RIDER'
+        const feeType = plan ? (await tx.moverFeeAuthority.findUnique({ where: { userId }, select: { feeType: true } }))?.feeType ?? plan.type : null;
+        const crossesPlan = feeType !== null && (feeType === 'TAXI_DRIVER' ? 'DRIVER' : 'RIDER') !== target;
+        // Support allows one move, for a week (POST /admin/users/:id/mover-plan/allow-move): spent here.
+        const allowed = crossesPlan
+          ? await tx.user.updateMany({ where: { id: userId, moverPlanMoveUntil: { gt: now } }, data: { moverPlanMoveUntil: null, moverPlanMoveBy: null } })
+          : null;
+        if (allowed?.count === 0) {
+          throw new AppError(409, 'PLAN_ON_CURRENT_ROLE', target === 'DRIVER'
             ? 'Your weekly plan is for delivery work. Contact support to move it to taxi work.'
             : 'Your weekly plan is for taxi work. Contact support to move it to delivery work.');
         }
+        planMoved = allowed?.count === 1;
       }
 
       // The target profile carries the new vehicle; it is created when this is the first
@@ -444,6 +634,13 @@ export class PartnerService {
         await tx.rider.update({
           where: { id: created.id },
           data: {
+            // [CARS-DELIVER] A taxi car's delivery profile (store orders only) that now carries a goods vehicle
+            // is an ordinary rider: it serves both kinds of work, as onboarding provisions one.
+            // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] …and a delivery profile that now carries a car takes food and shop
+            // orders only (never courier parcels), whatever it did before.
+            ...(isPassengerVehicle(input.vehicleType)
+              ? { riderType: 'DELIVERY' as const }
+              : rider && isPassengerVehicle(rider.vehicleType) ? { riderType: 'BOTH' as const } : {}),
             vehicleType: input.vehicleType,
             // The details describe THIS vehicle or nothing: a bicycle keeps no plate of the canter it replaced.
             vehicleMake: details.make, vehicleModel: details.model, vehicleYear: details.year,
@@ -459,7 +656,12 @@ export class PartnerService {
       // really uses — not one they no longer drive — decides how that plate's papers are judged.
       const movedPlate = (retiredPlate: string | null) => normalizeRegistrationMark(retiredPlate ?? '') !== ''
         && samePlate(retiredPlate, details.licensePlate);
-      if (target === 'DRIVER' && rider) {
+      // [CARS-DELIVER] A taxi car's delivery profile (a Rider row on a passenger vehicle, car-deliveries.ts) is
+      // the car's mirror: it follows the new car, offline and with the taxi profile's (now cleared) grant.
+      const carTwin = target === 'DRIVER' && !!rider && isPassengerVehicle(rider.vehicleType);
+      if (carTwin) {
+        await followTaxiCar(tx, rider!.id, targetId, retire);
+      } else if (target === 'DRIVER' && rider) {
         await tx.rider.update({ where: { id: rider.id }, data: {
           ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null,
           ...(movedPlate(rider.licensePlate) ? { licensePlate: null } : {}),
@@ -577,6 +779,10 @@ export class PartnerService {
           },
         },
       });
+
+      // [BUG-HUNT F05] Taxi to delivery: the fee follows here, the rider's vehicle now being known. Delivery to taxi
+      // re-tiers when the taxi papers are approved (SubscriptionService.moverRow), under the 14-day rule.
+      if (planMoved && target === 'RIDER') await moveMoverFeeToDelivery(tx, { userId, tenantId: user.tenantId }, userId);
 
       const authorityCleanup = await transitionAuthority(tx, target);
       return {

@@ -9,17 +9,16 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUpRight, BarChart3, BookOpen, CalendarClock, Check, ChevronRight, History, QrCode, Receipt, ToggleRight, UserCog } from 'lucide-react';
+import { ArrowUpRight, BarChart3, BookOpen, CalendarClock, Check, History, QrCode, Receipt, ToggleRight, UserCog } from 'lucide-react';
 import { apiFetch } from '@/lib/auth';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { storeKey, useStoreId } from '@/lib/store-scope';
-import { catalogueName } from '@/lib/catalogue-name';
 import {
-  DAY_LABELS, billingSummary, canAttestPayment, financialDeltaLabel, fmtWhen, guyanaDate, guyanaDayKey, hasTrailingGuyanaDays, hoursSummary,
-  numericFact, orderActions, reconciledRevenueDays, storeStatusEyebrow, subscriptionTone, windowTotals,
+  DAY_LABELS, canAttestPayment, financialDeltaLabel, fmtWhen, guyanaDate, guyanaDayKey, hasTrailingGuyanaDays, hoursSummary,
+  numericFact, orderActions, reconciledRevenueDays, storeStatusEyebrow, windowTotals,
 } from '@/lib/vendor-hub';
 import {
-  acceptOrder, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, markDelivered, markPreparing, markReady,
+  acceptOrder, completePickup, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, markDelivered, markPreparing, markReady,
   money, rejectOrder, toggleOpen, toggleOrders, updateProfile, type VendorOrder,
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
@@ -28,10 +27,16 @@ import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
 // The app's own O-4 rules and words (plain file, imported as is).
 import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
-import { subscriptionWords } from '@/lib/subscription-words';
+import { HANDOVER_WORDS, withHandoverSteps } from '../../../mobile/src/modules/vendor/storeHandover';
+import { handedToRider } from '@/lib/store-handover-api';
+import { RiderHandoverLine } from './rider-handover-line';
+import { billingHeadline, billingPill } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '@/lib/mmg-dispute';
+// [REVIEW-LIGHT2 #2306 S3] the app's own reading of a held store (plain file), and its words
+import { storeHoldOf } from '../../../mobile/src/lib/vendorProfile';
+import { STORE_HOLD_WORDS } from '@/lib/store-hold-words';
 
 export type { HubStore };
 
@@ -57,11 +62,11 @@ function useRevenue(enabled: boolean) {
   const storeId = useStoreId();
   return useQuery({ queryKey: storeKey(storeId, 'analytics', 'revenue', 14), queryFn: () => getRevenue(14), enabled });
 }
-function useItems() {
+export function useItems() {
   const storeId = useStoreId();
   return useQuery({ queryKey: storeKey(storeId, 'items', 'all'), queryFn: () => getItems() });
 }
-function useQr(enabled: boolean) {
+export function useQr(enabled: boolean) {
   const storeId = useStoreId();
   return useQuery({ queryKey: storeKey(storeId, 'qr'), queryFn: getQr, enabled });
 }
@@ -200,55 +205,6 @@ export function LoadedBoard({ loading, unavailable, total, newCount, progressCou
   );
 }
 
-function GuideRow({ index, label, detail, done, href, external }: { index: number; label: string; detail: string; done?: boolean; href?: string; external?: boolean }) {
-  const body = (
-    <>
-      <span className="grid h-6 w-6 flex-none place-items-center rounded-full bg-white/15 text-[12px] font-semibold">{done ? <Check size={14} aria-hidden="true" /> : index}</span>
-      <span className="min-w-0 flex-1"><span className="block font-semibold">{label}</span><span className="block truncate text-[13px] opacity-90">{detail}</span></span>
-      {href && <ChevronRight size={16} aria-hidden="true" />}
-    </>
-  );
-  const cls = 'flex min-h-11 items-center gap-3 rounded-xl bg-white/10 px-3 py-2';
-  if (!href) return <div className={cls}>{body}</div>;
-  if (external) return <a href={href} target="_blank" rel="noreferrer" className={`${cls} hover:bg-white/15`}>{body}</a>;
-  return <Link href={href} className={`${cls} hover:bg-white/15`}>{body}</Link>;
-}
-
-/** VendorBoardEmpty's first-morning card: "The board is live." with three real next steps. */
-export function FirstOrderGuide({ store, manager, listening }: { store: HubStore; manager: boolean; listening: boolean }) {
-  const itemsQ = useItems();
-  const qrQ = useQr(manager);
-  const catalogue = catalogueName(store.vendorType).toLowerCase();
-  const items = itemsQ.data ?? [];
-  const missingPhotos = items.filter((i) => !i.imageUrl).length;
-  const shortUrl = qrQ.data?.shortUrl ?? undefined;
-  const open = !!store.isCurrentlyOpen;
-  return (
-    <section aria-label="Your first order" className="rounded-2xl bg-[var(--swift-red-600)] p-6 text-white">
-      <p className="text-[11px] font-bold tracking-[0.1em] opacity-80">YOUR FIRST ORDER</p>
-      <p className="mt-1 text-[24px] font-semibold leading-8 [font-family:var(--swift-face-display)]">The board is live.</p>
-      <p className="mt-2 opacity-90">Orders land here the second they&apos;re placed, with a sound you can&apos;t miss. These bring the first one sooner:</p>
-      <div className="mt-4 space-y-2">
-        {manager && !itemsQ.isSuccess ? (
-          <GuideRow index={1} label={itemsQ.isError ? 'Menu status unavailable' : 'Checking your menu'} detail={itemsQ.isError ? 'Open the menu to check its items' : 'Loading your menu details'} href="/dashboard/inventory" />
-        ) : manager && items.length === 0 ? (
-          <GuideRow index={1} label="Add your first item" detail={`Your ${catalogue} is empty — nothing to order yet`} href="/dashboard/inventory" />
-        ) : manager ? (
-          <GuideRow index={1} label={`Add photos to your ${catalogue}`} done={missingPhotos === 0}
-            detail={missingPhotos === 0 ? `All ${items.length} items have a photo` : `Photos missing on ${missingPhotos} of ${items.length} items`} href="/dashboard/inventory" />
-        ) : null}
-        <GuideRow index={manager ? 2 : 1} label={open ? 'You are open' : 'Your store is closed'} done={open}
-          detail={open ? 'Customers can order right now' : manager ? 'Use the switch below to start taking orders' : 'Ask a manager or owner to open the store'} />
-        {manager && <GuideRow index={3} label="Share your store link" detail={shortUrl ?? (qrQ.isError ? 'Link unavailable — try again shortly' : 'Loading your live store link')} href={shortUrl} external />}
-      </div>
-      <p className="mt-4 flex items-center gap-2 text-[11px] font-bold tracking-[0.1em]">
-        <span className={`h-2 w-2 rounded-full ${listening ? 'bg-[var(--swift-success)]' : 'bg-white/40'}`} aria-hidden="true" />
-        {listening ? 'LISTENING FOR ORDERS' : 'RECONNECTING TO THE BOARD'}
-      </p>
-    </section>
-  );
-}
-
 /** VendorBoardQuiet: an experienced store with nothing open. */
 export function BoardQuiet({ lastOrderAt }: { lastOrderAt?: string }) {
   return (
@@ -260,8 +216,8 @@ export function BoardQuiet({ lastOrderAt }: { lastOrderAt?: string }) {
   );
 }
 
-function Tile({ icon: Icon, label, detail, badge, badgeLabel, href, onClick, external }: {
-  icon: typeof BookOpen; label: string; detail: string; badge?: ReactNode; badgeLabel?: string; href: string; onClick?: () => void; external?: boolean;
+function Tile({ icon: Icon, label, detail, badge, badgeLabel, href, onClick }: {
+  icon: typeof BookOpen; label: string; detail: string; badge?: ReactNode; badgeLabel?: string; href: string; onClick?: () => void;
 }) {
   const body = (
     <>
@@ -275,7 +231,6 @@ function Tile({ icon: Icon, label, detail, badge, badgeLabel, href, onClick, ext
     </>
   );
   const props = { 'aria-label': [label, detail, badgeLabel].filter(Boolean).join('. '), className: 'sw-card block min-w-0 p-5 hover:outline hover:outline-1 hover:outline-[var(--swift-border-strong)]' };
-  if (external) return <a href={href} target="_blank" rel="noreferrer" {...props}>{body}</a>;
   return <Link href={href} onClick={onClick} {...props}>{body}</Link>;
 }
 
@@ -323,14 +278,14 @@ export function ManageGrid({ store, owner, onOrderHistory }: { store: HubStore |
           badgeLabel={revenueKnown ? financialDeltaLabel(revenueWindow.cur.revenue, revenueWindow.prev?.revenue ?? null) : undefined} />
         {/* As the app: a Services store's hours tile opens its Schedule, every other store's opens Account. */}
         <Tile icon={CalendarClock} label="Hours & schedule" detail={scheduleDetail} href={store?.vendorType === 'SERVICE' ? '/dashboard/schedule' : '/dashboard/settings'} />
-        <Tile icon={QrCode} label={owner ? 'My QR & number' : 'My QR'} detail={qrDetail} href={qrQ.data?.shortUrl ?? '/dashboard/settings'} external={!!qrQ.data?.shortUrl}
+        <Tile icon={QrCode} label={owner ? 'My QR & number' : 'My QR'} detail={qrDetail} href="/dashboard/qr"
           badge={qrStatus ? <Pill tone={qrStatus === 'ACTIVE' ? 'success' : 'neutral'}>{qrStatusWords(qrStatus)}</Pill> : undefined}
           badgeLabel={qrStatus ? `QR: ${qrStatusWords(qrStatus)}` : undefined} />
         <Tile icon={History} label="Order history" detail={rollingOrders == null ? 'Past orders' : `${rollingOrders} recent orders`} href="#other-orders" onClick={onOrderHistory} />
         {owner ? (
-          <Tile icon={Receipt} label="Billing" detail={subQ.isError && !sub ? 'Billing unavailable' : billingSummary(sub)} href="/dashboard/weekly-fee"
-            badge={sub ? <Pill tone={subscriptionTone(sub)}>{subscriptionWords(String(sub.status ?? ''))}</Pill> : undefined}
-            badgeLabel={sub ? `Subscription: ${subscriptionWords(String(sub.status ?? ''))}` : undefined} />
+          <Tile icon={Receipt} label="Billing" detail={subQ.isError && !sub ? 'Billing unavailable' : billingHeadline(sub)} href="/dashboard/weekly-fee"
+            badge={sub ? <Pill tone={billingPill(sub).tone}>{billingPill(sub).label}</Pill> : undefined}
+            badgeLabel={sub ? `Subscription: ${billingPill(sub).label}` : undefined} />
         ) : (
           <Tile icon={UserCog} label="Account" detail="Store settings & hours" href="/dashboard/settings" />
         )}
@@ -373,7 +328,7 @@ function ReadFailed({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-export function StoreStatusCard({ store, manager, readFailed = false, onRetryRead = () => {} }: { store: HubStore; manager: boolean; readFailed?: boolean; onRetryRead?: () => void }) {
+export function StoreStatusCard({ store, manager, owner = false, readFailed = false, onRetryRead = () => {} }: { store: HubStore; manager: boolean; owner?: boolean; readFailed?: boolean; onRetryRead?: () => void }) {
   const storeId = useStoreId();
   const client = useQueryClient();
   // The server FLIPS the stored value (it ignores the body), so a second tap
@@ -389,6 +344,11 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
   // A store that is not live yet (being reviewed) cannot open: as in the app,
   // the switch is locked and Pause is not offered.
   const inPreview = store.status != null && store.status !== 'ACTIVE';
+  // [REVIEW-LIGHT2 #2306 S3] A store held from orders is told its real hold, in the app's words, never "opens once
+  // verification is approved" (that is a store waiting for approval).
+  const hold = inPreview ? storeHoldOf(store) : null;
+  const holdTitle = hold === 'FEE_UNPAID' ? STORE_HOLD_WORDS.FEE_UNPAID.title : hold ? STORE_HOLD_WORDS[hold].title : null;
+  const holdBody = hold === 'FEE_UNPAID' ? (owner ? STORE_HOLD_WORDS.FEE_UNPAID.owner : STORE_HOLD_WORDS.FEE_UNPAID.staff) : hold ? STORE_HOLD_WORDS[hold].body : null;
   // [PERF row 562] Both controls move at the tap (dimmed until the server
   // answers) and go back, with the server's words, if it refuses. The server
   // FLIPS what it holds and answers with both flags: that answer is shown at
@@ -426,8 +386,8 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
   const text = (
     <span className="min-w-0 flex-1">
       <span className="flex items-center gap-2 font-semibold"><span className={`h-2.5 w-2.5 rounded-full ${open && accepting ? 'bg-[var(--swift-success)]' : 'bg-[var(--swift-muted)]'}`} aria-hidden="true" />
-        {inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}</span>
-      <span className="sw-caption mt-1 block">{inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}</span>
+        {holdTitle ?? (inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused')}</span>
+      <span className="sw-caption mt-1 block">{holdBody ?? (inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders')}</span>
     </span>
   );
   return (
@@ -436,6 +396,9 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
         <button type="button" role="switch" aria-label="Store open to customers" aria-checked={!inPreview && open} disabled={inPreview || locked} onClick={() => openMut.mutate(!open)}
           className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">{text}<Switch on={!inPreview && open} /></button>
       ) : <div className="flex min-h-12 items-center">{text}</div>}
+      {/* [OPEN-EARLY PR-2] A store not live yet: its owner sends its documents on this website (Documents). */}
+      {owner && inPreview && !hold && <Link href="/dashboard/documents" className="sw-btn sw-btn-md mt-4 w-full">Upload your documents</Link>}
+      {owner && hold === 'FEE_UNPAID' && <Link href="/dashboard/weekly-fee" className="sw-btn sw-btn-md mt-4 w-full">Weekly fee</Link>}
       {manager && !inPreview && (
         <button type="button" disabled={locked} onClick={() => ordersMut.mutate(!accepting)} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
           {accepting ? 'Pause new orders' : 'Resume orders'}
@@ -443,6 +406,36 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
       )}
       <MutationNotice errors={[openMut.error, ordersMut.error]} className="mt-2" />
       {manager && readFailed && <ReadFailed onRetry={onRetryRead} />}
+    </section>
+  );
+}
+
+/** [STORE-DASH · O-2] "Ask for the pickup code" — the store-wide takeaway setting (owners and managers), off by default. */
+export function PickupCodeCard({ store, readFailed = false, onRetryRead = () => {} }: { store: HubStore; readFailed?: boolean; onRetryRead?: () => void }) {
+  const storeId = useStoreId();
+  const client = useQueryClient();
+  // [TAP-AUDIT] The switch moves at the tap (as the app's does): it shows the tapped state while the request is out and
+  // stays locked until the store is re-read, so a quick second tap cannot send the stale opposite.
+  const mut = useMutation({
+    mutationFn: (on: boolean) => updateProfile({ requirePickupCode: on }),
+    onSettled: () => Promise.all([
+      client.invalidateQueries({ queryKey: storeKey(storeId, 'profile') }),
+      client.invalidateQueries({ queryKey: storeKey(storeId, 'orders') }),
+    ]),
+  });
+  const required = mut.isPending && typeof mut.variables === 'boolean' ? mut.variables : !!store.requirePickupCode;
+  return (
+    <section aria-label="Pickup code" className="sw-card p-5">
+      <button type="button" role="switch" aria-label={HANDOVER_WORDS.settingTitle} aria-checked={required} disabled={readFailed || mut.isPending} onClick={() => mut.mutate(!required)}
+        className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">
+        <span className="min-w-0 flex-1">
+          <span className="block font-semibold">{HANDOVER_WORDS.settingTitle}</span>
+          <span className="sw-caption mt-1 block">{required ? HANDOVER_WORDS.settingOn : HANDOVER_WORDS.settingOff}</span>
+        </span>
+        <Switch on={required} />
+      </button>
+      {mut.isError && <p className="mt-2 text-[13px] text-[var(--swift-error)]">Couldn’t update — try again.</p>}
+      {readFailed && <ReadFailed onRetry={onRetryRead} />}
     </section>
   );
 }
@@ -498,6 +491,9 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       if (kind === 'preparing') return markPreparing(order.id);
       if (kind === 'ready') return markReady(order.id);
       if (kind === 'delivered') return markDelivered(order.id);
+      // [STORE-DASH · O-2] One tap from the card: the takeaway hand-over with the code off (no code sent), and the rider hand-over.
+      if (kind === 'handed-to-customer') return completePickup(order.id);
+      if (kind === 'handed-to-rider') return handedToRider(order.id);
       if (kind === 'complete-appointment') return apiFetch(`/api/v1/vendor/orders/${order.id}/complete-appointment`, { method: 'PUT', body: '{}' });
       throw new Error(`Unknown action ${kind}`);
     },
@@ -528,8 +524,9 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
   const canConfirm = attestable && order.canConfirmPayment === true && !mmgDisputePaused(order);
   const blockedReason = isMmg && !moneyMoved && !attestable && !terminal ? mmgPayBlockedReason(order.paymentStatus) : null;
   const paused = mmgDisputePaused(order);
-  const actions = orderActions(order).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
-  if (actions.length === 0 && !isMmg && !paused) return null;
+  // [STORE-DASH · O-2] The hand-overs ride on top of the app's steps (storeHandover), as on the phone card.
+  const actions = withHandoverSteps(order, orderActions(order), paused).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
+  if (actions.length === 0 && !isMmg && !paused && !order.handedToRiderAt) return null;
   const busy = act.isPending || reject.isPending;
   return (
     <div className="mt-3 space-y-2">
@@ -541,6 +538,12 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       {blockedReason && <p className="sw-caption">{blockedReason}</p>}
       {/* [REVIEW-F S4-3 on #2032] One name for the MMG step: the window's own button (the reference is typed there). */}
       {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Paid by MMG</button>}
+      {/* [STORE-DASH · O-2] What the store checks before a one-tap hand-over (the app card's line): the
+          customer's name and order number with the pickup code off; the rider. Then that it went. */}
+      {actions.some((a) => a.action === 'handed-to-customer') && <p className="sw-caption font-semibold">{HANDOVER_WORDS.checkName(order.customer?.firstName, order.orderNumber)}</p>}
+      {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside "Handed to rider" (never before ready, never while paused), as on the phone. */}
+      {actions.some((a) => a.action === 'handed-to-rider') && <RiderHandoverLine rider={order.rider} />}
+      {order.handedToRiderAt && <p className="sw-caption font-semibold">{HANDOVER_WORDS.handedToRider}</p>}
       {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
       {!paused && customerDeciding(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-warning)]">{OUT_OF_STOCK_WORDS.deciding}</p>}
       {!paused && nothingToAccept(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-red-600)]">{OUT_OF_STOCK_WORDS.nothing}</p>}

@@ -309,7 +309,7 @@ describe('flag off — the booking screen is exactly today’s', () => {
     expect(byTestId('taxi-add-stop')).toBeNull();
     expect(host.querySelector('[data-testid^="taxi-stop"]')).toBeNull();
     expect(text()).not.toMatch(/Add a stop|One fare for the whole trip|Your route|stops/);
-    expect(text()).toContain('Fare estimate · pay the driver cash or MMG at drop-off');
+    expect(text()).toContain('Your fare · pay the driver cash or MMG at drop-off');
 
     for (const config of sent('post /rides/estimate')) expect(Object.keys(bodyOf(config))).toEqual(['pickup', 'dropoff']);
 
@@ -519,8 +519,18 @@ describe('the waiting charge at booking (Rev 2 §8.2)', () => {
     fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, waiting: WAITING_TERMS });
     await mount();
     await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
-    expect(byTestId('taxi-waiting-terms')?.textContent).toBe('Waiting: 300 per 10 minutes after your driver arrives');
+    expect(byTestId('taxi-waiting-terms')?.textContent).toBe('Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride');
     snap('rider-booking-waiting-terms');
+  });
+
+  it('[quote proof] the booking echoes the terms it showed, with the fare', async () => {
+    fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, waiting: WAITING_TERMS });
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    await click(requestButton() ?? null);
+    const [request] = sent('post /rides/request');
+    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass', 'expectedFare', 'waiting']);
+    expect(bodyOf(request).waiting).toEqual({ chargePerBlock: 300, blockMinutes: 10 });
   });
 
   it('says nothing when the server sends no terms', async () => {

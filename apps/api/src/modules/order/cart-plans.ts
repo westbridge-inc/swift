@@ -23,8 +23,9 @@
  *   - one plan order: the tip rides the FIRST delivery plan and a platform code
  *     fills plans in order, so the quote's per-vendor rows and the orders
  *     checkout writes must be built in the same order — groupLinesByVendor;
- *   - a plan's fee is `deliveryFeeFromRates(canonical km)`; express multiplies
- *     it through `expressDeliveryFee`; PICKUP and APPOINTMENT plans carry none;
+ *   - a plan's fee is `deliveryFeeFromRates(canonical km)`; express adds the
+ *     flat premium through `expressDeliveryFee`; PICKUP and APPOINTMENT plans
+ *     carry none;
  *   - a plan's minimum compares THAT vendor's subtotal with ITS OWN minimum —
  *     never the combined basket against one vendor's;
  *   - the client never computes a total the server owns; it renders these.
@@ -159,7 +160,7 @@ export async function planVendorGroup(ctx: {
   /** Where a DELIVERY goes. Null only in the quote (see QUOTE_FALLBACK_KM). */
   destination: LatLng | null;
   deliveryRates: DeliveryRates;
-  /** Priority delivery: the fee carries the rider's 1.5x premium. */
+  /** Priority delivery: the fee carries the rider's flat premium (markup.ts). */
   express: boolean;
   routeKm: (from: LatLng, to: LatLng) => Promise<{ km: number; source: RouteSource | null }>;
 }): Promise<VendorPlan> {
@@ -182,8 +183,10 @@ export async function planVendorGroup(ctx: {
     }
     standardDeliveryFee = deliveryFeeFromRates(distanceKm, ctx.deliveryRates);
   }
-  // Express mirrors the courier EXPRESS multiplier; the premium is the
-  // rider's cash upside. Zero off DELIVERY (expressDeliveryFee(0) is 0).
+  // [owner 1 Nov 2026] Express = the standard fee + the flat premium, any
+  // distance; the premium is the rider's cash upside. Only a DELIVERY plan
+  // carries it: PICKUP and APPOINTMENT have no rider, so their premium is zero
+  // HERE — the helper itself would add the surcharge even to a zero fee.
   const expressFee = ctx.fulfillment === 'DELIVERY' ? expressDeliveryFee(standardDeliveryFee) : 0;
   const minOrderAmount = Number(ctx.vendor.minOrderAmount);
   return {
@@ -209,6 +212,13 @@ export interface BasketPlan {
   fulfillment: PlanFulfillment;
   subtotal: number;
   deliveryFee: number;
+  /** [owner + COORD rulings 1 Nov 2026] The fee without the express premium.
+   *  No code takes more than this from the delivery fee — not a free-delivery
+   *  code, not an amount-off code larger than the order: on an express plan the
+   *  customer still pays the premium, and the rider (paid the whole deliveryFee)
+   *  still gets all of it. Required, so a caller cannot forget it and let a code
+   *  pay the premium. */
+  standardDeliveryFee: number;
 }
 
 /** The promo terms plus the vendor a store's own code belongs to (null or
@@ -231,7 +241,7 @@ export interface PricedBasket {
   /** The tip actually charged: zero unless some plan is DELIVERY (a pickup or
    *  appointment-only basket has no rider to tip). */
   effectiveTip: number;
-  /** Feeds checkout's ID gate and the customer's totalSpent. Equal to the sum
+  /** Feeds checkout's call-to-confirm flag and the customer's totalSpent. Equal to the sum
    *  of `perPlan[].total` (the discount never exceeds what the plans absorb). */
   grandTotal: number;
   /** Index-aligned with the input plans. */
@@ -247,6 +257,9 @@ export interface PricedBasket {
  *   - [REPORT-034 S1 · M-32] the discount is clamped to what its funder may
  *     absorb — goods, plus the delivery fee only for a platform code, never
  *     the tip;
+ *   - [owner + COORD rulings 1 Nov 2026] of a plan's fee, a code may take only
+ *     the STANDARD part: no code (free delivery, or an amount-off code larger
+ *     than the order) ever covers the express premium;
  *   - [REPORT-012 F-012-01] the tip rides the first DELIVERY plan, and a basket
  *     with no DELIVERY plan charges none;
  *   - the discount is spread plan by plan (goods first, then a platform code's
@@ -262,16 +275,19 @@ export function priceBasket(input: {
   const promoPlanIndex = promo?.vendorId ? plans.findIndex((p) => p.vendorId === promo.vendorId) : -1;
   const promoApplies = promo != null && (promoPlanIndex >= 0 || !promo.vendorId);
   const targets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
+  // [owner + COORD rulings 1 Nov 2026] The fee a code may take from: the
+  // normal fee only, never the express premium, whatever the code.
+  const promoFee = (p: BasketPlan) => Math.min(p.deliveryFee, p.standardDeliveryFee);
 
   let discount = 0;
   if (promo && promoApplies) {
     const basis = targets.reduce(
-      (b, i) => ({ subtotal: b.subtotal + plans[i]!.subtotal, deliveryFee: b.deliveryFee + plans[i]!.deliveryFee }),
+      (b, i) => ({ subtotal: b.subtotal + plans[i]!.subtotal, deliveryFee: b.deliveryFee + promoFee(plans[i]!) }),
       { subtotal: 0, deliveryFee: 0 },
     );
     // [ALG-24] The one promo switch, then the one capacity clamp.
     const capacity = targets.reduce(
-      (sum, i) => sum + promoCapacity(promo.funder, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promo.discountType),
+      (sum, i) => sum + promoCapacity(promo.funder, { subtotal: plans[i]!.subtotal, deliveryFee: promoFee(plans[i]!) }, promo.discountType),
       0,
     );
     discount = Math.min(promoDiscount(promo, basis), Math.max(0, capacity));
@@ -285,7 +301,7 @@ export function priceBasket(input: {
   const perPlan = plans.map((plan, i): PricedPlan => {
     let allocation: PromoAllocation | null = null;
     if (promo && promoApplies && targets.includes(i) && remaining > 0) {
-      allocation = allocatePromo(promo.funder, remaining, { subtotal: plan.subtotal, deliveryFee: plan.deliveryFee }, promo.discountType);
+      allocation = allocatePromo(promo.funder, remaining, { subtotal: plan.subtotal, deliveryFee: promoFee(plan) }, promo.discountType);
       remaining -= allocation.total;
     }
     const planDiscount = allocation?.total ?? 0;

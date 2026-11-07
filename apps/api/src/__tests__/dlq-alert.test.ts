@@ -129,7 +129,11 @@ describe('the door: the DLQ endpoints have a caller again', () => {
     // [MC shell] The sidebar renders its items from components/layout/nav.ts.
     const nav = readFileSync(join(process.cwd(), '../admin/src/components/layout/nav.ts'), 'utf8');
     expect(nav).toMatch(/href: '\/jobs'/);
+    // [ADMIN-AUDIT S3-2] The sidebar renders navGroupsFor(role): NAV_GROUPS less the founder pages for anyone but the
+    // founder. /jobs is a founder page (the API serves /dlq to the founder only), so it is in the founder's navigation.
     const sidebar = readFileSync(join(process.cwd(), '../admin/src/components/layout/Sidebar.tsx'), 'utf8');
-    expect(sidebar).toMatch(/NAV_GROUPS/);
+    expect(sidebar).toMatch(/navGroupsFor\(role\)/);
+    expect(nav).toMatch(/export function navGroupsFor[\s\S]*?NAV_GROUPS\.map/);
+    expect(nav).toMatch(/href: '\/jobs'[^}]*founderOnly: true/);
   });
 });

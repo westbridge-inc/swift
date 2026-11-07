@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LEGAL_VERSION, TERMS, PRIVACY } from '../modules/legal/legal.routes';
 import { MATERIAL_CHANGES, NON_MATERIAL_CHANGES, materialVersion } from '../modules/legal/reaccept';
 import { PROCESSOR_REGISTER } from '../modules/legal/processor-register';
-import { TAXI_WAITING_DEFAULTS, waitingTermsText } from '../modules/rides/taxi-waiting';
+import { TAXI_WAITING_DEFAULTS, waitingChargeCap, waitingTermsText } from '../modules/rides/taxi-waiting';
 
 // ---------------------------------------------------------------------------
 // [Owner rulings 21 Oct 2026 · legal research E4 + B8 · R26] One version, one fresh tick.
@@ -10,9 +10,9 @@ import { TAXI_WAITING_DEFAULTS, waitingTermsText } from '../modules/rides/taxi-w
 // (1) The taxi waiting charge goes ON at launch. Research E4: lawful once shown before booking, with a live
 //     timer, itemised on the receipt, and named in Terms section 4 (CAA ss.18, 33, 35). The Terms must say only
 //     what taxi-waiting.ts does: the amount and block are the code's defaults, waiting is counted at the pickup
-//     (from the driver's arrival, which the server gates on the driver's GPS fix or the passenger's own
-//     confirmation) and at stops on the way, never at the final destination, only full blocks are charged, and
-//     a ride that does not finish is never charged.
+//     (from when GPS puts the car there until the ride code, owner 4 Nov 2026) and at stops on the way, never at
+//     the final destination, only full blocks are charged, up to GY$1,800 for a ride (owner 4 Nov 2026), and a
+//     ride that does not finish is never charged.
 // (2) Phone crash reports go on (self-hosted GlitchTip, kept 90 days). Research B8: "Crash and error reports,
 //     kept 90 days" is enough. The Privacy Policy says what a phone report carries (crashReporting.ts /
 //     crash-scrub.ts) and that it goes to Swift's own server; the retention section says 90 days.
@@ -34,12 +34,11 @@ describe('[2026-10-21] Terms section 4: the taxi waiting charge', () => {
     expect(s4()).toContain(`GY$${chargePerBlock} for each full ${blockMinutes} minutes the car waits for you`);
     expect(s4()).toContain('When the app shows a waiting charge beside the taxi fare before you book, that charge applies to the ride');
     // The disclosure the app shows is built from the same terms (no second author of the numbers).
-    expect(waitingTermsText({ chargePerBlock, blockMinutes, currencyCode: 'GYD' })).toBe(`Waiting: ${chargePerBlock} per ${blockMinutes} minutes after your driver arrives`);
+    expect(waitingTermsText({ chargePerBlock, blockMinutes, currencyCode: 'GYD' })).toBe(`Waiting: ${chargePerBlock} per ${blockMinutes} minutes after your driver arrives, up to 1,800 a ride`);
   });
 
   it('says where waiting counts, and where it never does — what tallyTaxiWaiting computes', () => {
-    expect(s4()).toContain('at the pickup, from when your driver arrives until your trip starts');
-    expect(s4()).toContain('the app checks the driver\'s location before the count starts, or you confirm the arrival yourself');
+    expect(s4()).toContain('at the pickup, from when the app has placed the car at your pickup until your ride code is verified');
     expect(s4()).toContain('at any stop on the way, from when the car arrives until it leaves');
     expect(s4()).toContain('Waiting at your final destination is never counted, and part of a 10-minute block is never charged.');
     expect(s4()).toContain('A ride that is cancelled, or that ends without the trip being completed, carries no waiting charge.');
@@ -50,6 +49,25 @@ describe('[2026-10-21] Terms section 4: the taxi waiting charge', () => {
     expect(s4()).toContain('You pay it with your fare, directly to the driver.');
     expect(s4()).toContain('Swift never holds, collects or transmits Order money');
     expect(s4(), 'never a fee Swift keeps').not.toMatch(/Swift (charges|collects) (a|the) waiting/i);
+  });
+});
+
+describe('[2026-11-04 · owner 4 Nov 2026] Terms section 4: the cap, the GPS start, the ride code', () => {
+  const s4 = () => section(TERMS, /<h2>4\. /);
+
+  it('the cap in the Terms is the cap the code charges', () => {
+    expect(waitingChargeCap(TAXI_WAITING_DEFAULTS)).toBe(1800);
+    expect(s4()).toContain('The waiting charge is never more than GY$1,800 for a ride.');
+  });
+
+  it('a passenger\'s confirmation no longer starts the count, and the trip start no longer ends it', () => {
+    expect(s4()).not.toContain('or you confirm the arrival yourself');
+    expect(s4()).not.toContain('from when your driver arrives until your trip starts');
+  });
+
+  it('is non-material: nobody is asked to tick again', () => {
+    expect(NON_MATERIAL_CHANGES.filter((c) => c.version === '2026-11-04')).toHaveLength(1);
+    expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-11-04');
   });
 });
 
@@ -81,13 +99,32 @@ describe('[2026-10-21] Privacy Policy: phone crash reports, kept 90 days', () =>
 
 describe('[2026-10-21] one material version: everyone re-accepts once, with the summary', () => {
   // [owner 22 Oct 2026] 2026-10-22 (Terms s.7 one-minute cancel window, NON-material) is served on top of it: the
-  // newest MATERIAL version is still 2026-10-21, so this summary is still the one a re-accept shows.
-  it('2026-10-21 is the newest material version (served under 2026-10-22, non-material)', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-22');
-    expect(materialVersion(LEGAL_VERSION)).toBe('2026-10-21');
+  // newest MATERIAL version is still 2026-10-21, so this summary is still the one a re-accept shows. [ROLE-DOCS]
+  // 2026-10-22.1 (non-material: police clearance for taxi drivers only) is served on top of both. [owner 24 Oct
+  // 2026] 2026-10-25 (non-material: no customer ID for taxi rides or larger orders) is served on top of those.
+  // [O-1 · COORD 25 Oct] 2026-10-25.1 (material: Swift-bridged calling, Twilio for calls) is served on top of all of
+  // these and is now the newest material version; 2026-10-21 stays material, and stays the newest one below it.
+  // [POLICE-CLEARANCE CONSENT] 2026-10-25.2 (non-material) is served on top: the newest material version stays 2026-10-25.1.
+  // [EMAIL-HTTPS] 2026-10-27 (material: Resend delivers the emails) is served on top and is now the newest material version.
+  // [BOOK-S7] 2026-10-28 (non-material pending the owner: appointment rules) is served on top: the newest material version stays 2026-10-27.
+  // [BOOK-FU2] 2026-10-28.1 (material: "Customer didn't come") is served on top and is now the newest material version.
+  // [TERMS] 2026-10-29 (non-material: Terms s.7 pro appointments) is served on top: the newest material version stays 2026-10-28.1.
+  // [BOOK-P3] 2026-10-29.1 (non-material: the free cancel after a move) is served on top: the same.
+  // [BILL-PRO] 2026-10-29.2 is material for Providers only: the newest material version for everyone stays 2026-10-28.1.
+  // [EXPRESS-FEE] 2026-11-01 (non-material) is served on top: the same.
+  it('2026-10-21 is a material version, the newest one below 2026-10-25.1 (material: calls), served under 2026-11-01 (newest material: 2026-10-28.1, no-show record)', () => {
+    // served now under 2026-11-06 (four weeks ahead: material for partners only; the version everyone answers to stays 2026-11-05)
+    expect(LEGAL_VERSION).toBe('2026-11-06');
+    expect(materialVersion('2026-10-25')).toBe('2026-10-21');
+    expect(materialVersion('2026-10-25.2')).toBe('2026-10-25.1');
+    expect(materialVersion('2026-11-04')).toBe('2026-10-28.1');
+    expect(materialVersion(LEGAL_VERSION)).toBe('2026-11-05');
+    expect(materialVersion('2026-10-28')).toBe('2026-10-27');
     expect(MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-21');
     expect(NON_MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-21');
-    expect(MATERIAL_CHANGES[MATERIAL_CHANGES.length - 1]!.version, 'newest last').toBe('2026-10-21');
+    expect(MATERIAL_CHANGES.map((c) => c.version).slice(-7), 'newest last').toEqual(['2026-10-21', '2026-10-25.1', '2026-10-27', '2026-10-28.1', '2026-10-29.2', '2026-11-05', '2026-11-06']);
+    expect(MATERIAL_CHANGES.filter((c) => c.audience === 'provider').map((c) => c.version), 'provider-only versions').toEqual(['2026-10-29.2']);
+    expect(MATERIAL_CHANGES.filter((c) => c.audience === 'partner').map((c) => c.version), 'partner-only versions').toEqual(['2026-11-06']);
   });
 
   it('the summary names both changes', () => {

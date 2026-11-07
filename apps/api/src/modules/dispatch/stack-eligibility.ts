@@ -1,7 +1,7 @@
 import type { Prisma, PrismaClient, VehicleType } from '@prisma/client';
 import { evaluatePureRules, DEFAULT_BATCHING_CONFIG, type BatchingConfig, type CandidateOrder, type RunShape } from '../batching/eligibility';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
-import { bandForBulk, totalBulkUnits, requiredPackageSizeForOrder, DEFAULT_BULK_UNITS, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { bandForBulk, totalBulkUnits, readOrderSize, DEFAULT_BULK_UNITS, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { log } from '../../utils/logger';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
@@ -87,11 +87,12 @@ function toCandidate(o: OrderRow): CandidateOrder | null {
   const pickupLat = o.pickupLat ?? (o.vendor?.latitude != null ? Number(o.vendor.latitude) : null);
   const pickupLng = o.pickupLng ?? (o.vendor?.longitude != null ? Number(o.vendor.longitude) : null);
   if (pickupLat == null || pickupLng == null) return null;
-  // [owner #20 · DS1323 S3] The one size rule (utils/load): a bulky line means a car or van, so a stacked leg is
-  // weighed exactly as dispatch gated it — a bulky order is XL and never batches. An order the rule cannot size
+  // [owner #20 · DS1323 S3] The one size reading (utils/load), its TRUE band: [owner 31 Oct] the cap that lets a
+  // big store order go to a motorbike decides who may carry it, never what it weighs, so an order past the
+  // motorbike band is still XL here and never batches (R3), cars on or off. An order the rule cannot size
   // keeps the reading it always had.
   const lines = o.items.map((l) => ({ quantity: l.quantity, bulkUnits: l.bulkUnits ?? DEFAULT_BULK_UNITS }));
-  const size = requiredPackageSizeForOrder({ orderType: o.orderType, courierPackageSize: o.courierPackageSize, items: lines }, DEFAULT_LOAD_BANDS)
+  const size = readOrderSize({ orderType: o.orderType, courierPackageSize: o.courierPackageSize, items: lines }, DEFAULT_LOAD_BANDS).trueBand
     ?? o.courierPackageSize
     ?? bandForBulk(totalBulkUnits(lines));
   return {
@@ -102,6 +103,62 @@ function toCandidate(o: OrderRow): CandidateOrder | null {
     pickup: { lat: pickupLat, lng: pickupLng, vendorId: o.vendorId },
     dropoff: { lat: o.deliveryLat, lng: o.deliveryLng },
   };
+}
+
+/**
+ * [RIDER-SAFE 1] Which of these riders could take a NEW order from this store
+ * as an extra leg — the checkout's honest-capacity read, asked BEFORE any
+ * order exists. The same rulebook as `stackVerdict` (evaluatePureRules, the
+ * one capacity knob as R2's limit); the candidate leg is described from the
+ * store, the customer's drop-off and the basket instead of an order row.
+ *
+ * Conservative in the same directions: a rider with no live leg is not a
+ * stack (the caller counts them as free), and a rider whose live run cannot
+ * be described, or who cannot be read, is never counted. One read for all the
+ * riders' legs, not one per rider.
+ */
+export async function stackableForProbe(
+  tx: Tx,
+  riderIds: readonly string[],
+  probe: Omit<CandidateOrder, 'orderId'>,
+  capacity: number,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (riderIds.length === 0 || capacity <= 1) return out;
+  const [riders, legs] = await Promise.all([
+    tx.rider.findMany({ where: { id: { in: [...riderIds] } }, select: { id: true, vehicleType: true, floatLimit: true } }),
+    tx.order.findMany({
+      where: { riderId: { in: [...riderIds] }, status: { notIn: TERMINAL_ORDER_STATUSES } },
+      select: { ...ORDER_SELECT, riderId: true },
+    }) as unknown as Promise<Array<OrderRow & { riderId: string }>>,
+  ]);
+  const candidate: CandidateOrder = { ...probe, orderId: 'probe' };
+  const cfg: BatchingConfig = { ...DEFAULT_BATCHING_CONFIG, maxOrdersPerRun: capacity };
+  for (const rider of riders) {
+    const runRows = legs.filter((l) => l.riderId === rider.id);
+    if (runRows.length === 0) continue; // free, not a stack
+    const runOrders: CandidateOrder[] = [];
+    let describable = true;
+    for (const row of runRows) {
+      const c = toCandidate(row);
+      if (!c) { describable = false; break; }
+      runOrders.push(c);
+    }
+    if (!describable) continue;
+    const run: RunShape = {
+      orders: runOrders,
+      vehicleType: VEHICLE_KEY[rider.vehicleType] ?? '__UNPRICED__',
+      riderCashFloatCap: Number(rider.floatLimit),
+      riderBlocked: false,
+    };
+    if (evaluatePureRules(candidate, run, cfg).eligible) out.add(rider.id);
+  }
+  return out;
+}
+
+/** The size class the stacking rulebook speaks, for a goods order's required size (unknown = XL, conservative). */
+export function sizeClassForProbe(size: string | null | undefined): CandidateOrder['sizeClass'] {
+  return (size ? SIZE_CLASS[size] : undefined) ?? 'XL';
 }
 
 export type StackVerdict =

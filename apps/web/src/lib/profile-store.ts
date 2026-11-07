@@ -1,8 +1,16 @@
+import type { StoreGoLive } from './branch-label';
+
 /** The store record inside GET /vendor/profile, as the app reads it. */
 export interface HubStore {
   id?: string; name?: string; vendorType?: string; status?: string; isVerified?: boolean;
   isCurrentlyOpen?: boolean; acceptingOrders?: boolean; selfDeliveryEnabled?: boolean;
+  /** [O-2] "Ask for the pickup code" (absent on an older server). */
+  requirePickupCode?: boolean;
   operatingHours?: unknown; _count?: { orders?: number; items?: number };
+  /** [WEB-ONBOARDING] A store not live yet: whose turn it is and the owner's steps (vendor.routes GET /profile). */
+  goLive?: StoreGoLive | null;
+  /** [REVIEW-LIGHT2 #2306] Why a SUSPENDED store is held (BILLING, ADMIN, WIND_DOWN), the app's storeHoldOf input. */
+  suspensionSource?: string | null;
 }
 
 /** GET /vendor/profile answers `{ id, userId, vendors: [...], myRole }`; the store

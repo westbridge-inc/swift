@@ -157,7 +157,14 @@ describe('[S-19] the register’s red test: a connected socket that never acknow
     const later = await escalateOverdueOpsAlerts(app.prisma, notifications(), getChannels().sms, { now: new Date(t1.getTime() + 301_000) });
     expect(later.escalated).toContain(page.id);
     expect((await opsAlertFor(alert.id)).escalationLevel).toBe(2);
-    expect(await escalationPushes(admin.userId)).toBe(2);
+    // [DRILL-STORM] the second re-page went out, and it UPDATED the person's one escalation notice
+    // (unread again, at level 2) instead of adding a second row
+    expect(await escalationPushes(admin.userId)).toBe(1);
+    expect((await opsAlertFor(alert.id)).recipients.find((r) => r.userId === admin.userId)).toMatchObject({ pagedLevel: 2, lastPagedAt: new Date(t1.getTime() + 301_000) });
+    const notice = await app.prisma.notification.findFirstOrThrow({ where: { userId: admin.userId, dedupeKey: 'ops-alert-unacked' } });
+    expect(notice.isRead).toBe(false);
+    expect((notice.data as { opsAlertIds: string[] }).opsAlertIds).toContain(page.id);
+    expect(oncallTexts()).toBe(3);
     const scan = await scanOpsAlerts(app.prisma, new Date(t1.getTime() + 301_000));
     expect(scan.unacknowledgedOverdue).toBeGreaterThanOrEqual(1);
   });

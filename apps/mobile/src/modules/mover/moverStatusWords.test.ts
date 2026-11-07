@@ -105,8 +105,9 @@ describe('[UI-SWEEP U73] the screens use the words', () => {
     expect(active).not.toMatch(/String\(job\.status[^)]*\)\.replace\(/);
   });
 
-  it('the weekly-fee pill falls back to the Billing words', () => {
-    expect(src('screens/EarningsScreen.tsx')).toMatch(/label: subscriptionWords\(status\)/);
+  it('the weekly-fee pill names where the fee stands in words [FEE-STATUS]', () => {
+    // It was the Billing words of the status ("Active"), which stayed "Active" on a week that was due.
+    expect(src('screens/EarningsScreen.tsx')).toMatch(/const pill = feeStatus \? feeStatusPill\(feeStatus\.state\) : undefined;/);
   });
 
   it('the expiring-document banner names the document', () => {

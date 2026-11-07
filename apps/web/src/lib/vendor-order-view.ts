@@ -89,7 +89,7 @@ export function storeCanConfirmReturn(view: RecoveryView | null, o: VendorOrder)
 }
 
 /** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
-export const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt'] as const;
+export const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'handedToRiderAt'] as const;
 
 /** The fields the server just confirmed for order `id` in a step's answer (the bare updated row),
  *  or null when the answer is not that order's row. Nothing else is taken from it. */

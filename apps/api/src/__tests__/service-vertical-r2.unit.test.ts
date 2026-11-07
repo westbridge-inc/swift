@@ -135,7 +135,7 @@ describe('F01 — a booking is cancelled by its LOCAL slot, resolved through the
   const slot = computeDaySlots({
     itemId: 'item-haircut',
     config: { durationMinutes: 30, slots: [{ dayOfWeek: 4, start: '10:00', end: '10:30' }] },
-    year: 2026, month: 9, day: 24, exceptions: [], takenStarts: [], now: PLACED_AT,
+    year: 2026, month: 9, day: 24, exceptions: [], busy: [], now: PLACED_AT,
   })[0]!;
   /** 09:55 in America/Guyana on the 24th — five minutes before the 10:00 the picker shows. */
   const LOCAL_CUTOFF = new Date('2026-09-24T13:55:00.000Z');
@@ -386,5 +386,80 @@ describe('F04 — the cancel result names a booking and its provider; the fee an
     expect(screen).toContain('setCancelMessage(payload.message)');
     expect(screen).not.toMatch(/setCancelFee|late-cancellation|cancellation fee/i);
     expect(screen).toMatch(/: cancelMessage\s*\?\?/);
+  });
+});
+
+// ── BUG-HUNT F17 ────────────────────────────────────────────────────────────
+
+describe('[BUG-HUNT F17] the ready push follows the order, through the real route', () => {
+  it('a pickup customer is told to go and collect it, and no word of a rider', async () => {
+    const h = harness([foodDelivery('food-r2', { status: 'PREPARING', acceptedAt: new Date(), preparingAt: new Date(), fulfillment: 'PICKUP', fulfillmentMode: 'PICKUP' })]);
+    const host = await hostRoutes(vendorRoutes, { prisma: h.prisma, redis: recordingRedis(), io: h.io });
+    await host.call('put /orders/:id/ready', asProvider({ params: { id: 'food-r2' } }));
+    expect(h.pushes.at(-1)).toMatchObject({ title: 'Ready for pickup' });
+    expect(h.pushes.at(-1)!.body).toContain('to collect it');
+    expect(h.pushes.at(-1)!.body).not.toMatch(/rider/);
+  });
+});
+
+// ── BUG-HUNT F12 ────────────────────────────────────────────────────────────
+
+describe('[BUG-HUNT F12] a lost reply or a late tap never reads as a refusal of something that worked', () => {
+  const store = (h: ReturnType<typeof harness>) => hostRoutes(vendorRoutes, { prisma: h.prisma, redis: recordingRedis(), io: h.io });
+  const tap = (id: string) => asProvider({ params: { id } });
+
+  it('Accept again after the reply was lost: the same answer, nothing done twice', async () => {
+    const h = harness([foodDelivery('food-r2', { status: 'ACCEPTED', acceptedAt: new Date() })]);
+    const host = await store(h);
+    expect(await host.call('put /orders/:id/accept', tap('food-r2'))).toMatchObject({ success: true, data: { id: 'food-r2', status: 'ACCEPTED' } });
+    expect(h.pushes).toHaveLength(0);
+    expect(h.store.rows[0]).toMatchObject({ status: 'ACCEPTED' });
+  });
+
+  it('Accept on an order already further along is the same safe answer', async () => {
+    const h = harness([foodDelivery('food-r2', { status: 'PREPARING', acceptedAt: new Date(), preparingAt: new Date() })]);
+    const host = await store(h);
+    expect(await host.call('put /orders/:id/accept', tap('food-r2'))).toMatchObject({ success: true, data: { status: 'PREPARING' } });
+    expect(h.store.rows[0]).toMatchObject({ status: 'PREPARING' });
+  });
+
+  it('Ready, the reply is lost, Ready again: the same answer, nothing done twice', async () => {
+    const h = harness([foodDelivery('food-r2', { status: 'PREPARING', acceptedAt: new Date(), preparingAt: new Date() })]);
+    const host = await store(h);
+    await host.call('put /orders/:id/ready', tap('food-r2'));
+    expect(h.store.rows[0]).toMatchObject({ status: 'READY_FOR_PICKUP' });
+    const told = h.pushes.length;
+    expect(await host.call('put /orders/:id/ready', tap('food-r2'))).toMatchObject({ success: true, data: { status: 'READY_FOR_PICKUP' } });
+    expect(h.pushes).toHaveLength(told);
+  });
+
+  it('Cancel, the reply is lost, Cancel again: the customer reads what the first one said', async () => {
+    const h = harness([foodDelivery('food-r2', { status: 'PENDING' })]);
+    const first = await h.svc.cancelOrder('food-r2', 'user-customer');
+    const told = h.pushes.length;
+    expect(await h.svc.cancelOrder('food-r2', 'user-customer')).toEqual(first);
+    expect(h.pushes).toHaveLength(told);
+  });
+
+  it('a second cancel on an MMG order keeps the words about the money', async () => {
+    const h = harness([foodDelivery('food-r2', { status: 'CANCELLED', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' })]);
+    expect((await h.svc.cancelOrder('food-r2', 'user-customer')).message).toBe('Order cancelled. If you already sent the MMG payment, the store refunds you directly.');
+  });
+
+  it('the customer got there first: the store reads what happened, in words', async () => {
+    const h = harness([foodDelivery('food-r2', { status: 'CANCELLED' })]);
+    const host = await store(h);
+    for (const [route, words] of [
+      ['put /orders/:id/accept', 'This order is cancelled, so it cannot be accepted.'],
+      ['put /orders/:id/ready', 'This order is cancelled, so it cannot be marked ready.'],
+      ['put /orders/:id/reject', 'This order is cancelled, so it cannot be rejected.'],
+    ] as const) {
+      await expect(host.call(route, tap('food-r2')), route).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_STATUS', message: words });
+    }
+  });
+
+  it('a customer who cancels too late reads where the order is, never its code', async () => {
+    const h = harness([foodDelivery('food-r2', { status: 'RIDER_ARRIVED_PICKUP', acceptedAt: new Date() })]);
+    await expect(h.svc.cancelOrder('food-r2', 'user-customer')).rejects.toThrow(/^(?!.*[A-Z]{2,}_[A-Z]).*$/);
   });
 });

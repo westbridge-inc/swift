@@ -1,17 +1,17 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import Link from 'next/link';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ban, Calendar, X } from 'lucide-react';
-import { Modal } from '@/components/modal';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
+import { lazyRetry } from '@/lib/chunk-retry';
 import { getStores, money } from '@/lib/vendor-api';
 import {
-  createBookingException, deleteBookingException, getBookingExceptions, getBookings, getListingNames,
+  bookingMovable, deleteBookingException, getBookingExceptions, getBookings, getListingNames,
   type VendorBooking, type VendorBookingException,
 } from '@/lib/booking-api';
 import { formatAppointmentClock, formatAppointmentDay } from '@/lib/appointmentTime';
@@ -19,7 +19,10 @@ import { formatAppointmentClock, formatAppointmentDay } from '@/lib/appointmentT
 // does (lib/vendor-hub guyanaDayKey), so the console loads one copy of them.
 import { addAppointmentDays, appointmentDayKey } from '../../../../../mobile/src/lib/appointmentTime';
 
-const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+// [size budget] Opened by a tap: loaded then, not in the tab's first load.
+const BlockTimeDialog = lazyRetry(() => import('@/components/schedule-block-time'));
+// [BOOK-S5b · owner B2] "Move": loaded on tap too.
+const MoveBookingDialog = lazyRetry(() => import('@/components/schedule-move-booking'));
 
 /** The selected store's type, from the same stores read the console shell makes
  *  (`known` once it answered; `failed` when it failed with no answer at all). */
@@ -62,10 +65,10 @@ const blockSpoken = (e: VendorBookingException, names: Map<string, string> | und
   return `${names?.get(e.itemId) ?? 'one listing'}, ${blockWhen(e)}`;
 };
 
-function AppointmentRow({ b }: { b: VendorBooking }) {
+function AppointmentRow({ b, onMove }: { b: VendorBooking; onMove?: () => void }) {
   const confirmed = b.status === 'CONFIRMED';
   return (
-    <li className="sw-card flex items-center gap-4 p-4">
+    <li className="sw-card flex flex-wrap items-center gap-4 p-4">
       <div className="min-w-[64px] text-center">
         <p className="text-sm font-bold">{formatAppointmentClock(b.slotStart)}</p>
         <p className="text-xs text-[var(--swift-muted)]">{formatAppointmentClock(b.slotEnd)}</p>
@@ -80,64 +83,13 @@ function AppointmentRow({ b }: { b: VendorBooking }) {
       <span className={`flex-none rounded-full px-3 py-1 text-[12px] font-semibold ${confirmed ? 'bg-[var(--swift-soft-success)] text-[var(--swift-success)]' : 'bg-[var(--swift-sunken)] text-[var(--swift-muted)]'}`}>
         {bookingWords(b.status)}
       </span>
-    </li>
-  );
-}
-
-function BlockTimeDialog({ dayKey, onClose }: { dayKey: string; onClose: () => void }) {
-  const storeId = useStoreId();
-  const queryClient = useQueryClient();
-  const [fullDay, setFullDay] = useState(true);
-  const [blockStart, setBlockStart] = useState('13:00');
-  const [blockEnd, setBlockEnd] = useState('17:00');
-  const [note, setNote] = useState('');
-  const blockValid = fullDay || (HHMM.test(blockStart) && HHMM.test(blockEnd) && blockStart < blockEnd);
-  const addBlock = useMutation({
-    mutationFn: () => createBookingException({
-      date: dayKey,
-      ...(fullDay ? {} : { start: blockStart, end: blockEnd }),
-      ...(note.trim() ? { reason: note.trim() } : {}),
-    }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'booking-exceptions') });
-      void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'bookings') });
-      onClose();
-    },
-  });
-  return (
-    <Modal labelledBy="block-time-title" onClose={onClose} className="bg-[var(--swift-card)] px-6 pb-6 pt-5">
-      <h2 id="block-time-title" className="sw-title text-center">Block time</h2>
-      <p className="sw-caption mt-1 text-center">{formatAppointmentDay(dayKey)}. Customers won&apos;t see these slots. Nothing is shown as a reason.</p>
-      <div className="mt-5 flex items-center justify-between">
-        <span id="block-all-day" className="text-sm">All day</span>
-        <button type="button" role="switch" aria-labelledby="block-all-day" aria-checked={fullDay} onClick={() => setFullDay((v) => !v)}
-          className="grid h-11 w-16 flex-none place-items-center" data-modal-initial-focus>
-          <span className={`sw-stock-switch ${fullDay ? 'bg-[var(--swift-red)]' : 'bg-[var(--swift-border-strong)]'}`}><span className={`sw-stock-knob ${fullDay ? 'translate-x-5' : ''}`} /></span>
-        </button>
-      </div>
-      {!fullDay && (
-        <div className="mt-3 grid grid-cols-2 gap-3">
-          <label className="block">
-            <span className="sw-field-label">From</span>
-            <input type="time" className="sw-input" value={blockStart} onChange={(e) => setBlockStart(e.target.value)} />
-          </label>
-          <label className="block">
-            <span className="sw-field-label">Until</span>
-            <input type="time" className="sw-input" value={blockEnd} onChange={(e) => setBlockEnd(e.target.value)} />
-          </label>
+      {/* [BOOK-S5b · owner B2, the app's AppointmentCard] Move it to another free time of the same service. */}
+      {onMove ? (
+        <div className="flex w-full justify-end">
+          <button type="button" className="text-sm font-semibold text-[var(--swift-red)]" aria-label={`Move ${b.serviceName} at ${formatAppointmentClock(b.slotStart)}`} onClick={onMove}>Move</button>
         </div>
-      )}
-      <label className="mt-3 block">
-        <span className="sw-field-label">Note (only you see this)</span>
-        <input className="sw-input" value={note} maxLength={200} placeholder="Optional" onChange={(e) => setNote(e.target.value)} />
-      </label>
-      <MutationNotice errors={[addBlock.error]} className="mt-3" />
-      {/* [#947's grammar] Disabled says the ask. */}
-      <button type="button" className="sw-btn sw-btn-block mt-5" disabled={!blockValid || addBlock.isPending} onClick={() => addBlock.mutate()}>
-        {addBlock.isPending ? 'Blocking…' : blockValid ? 'Block time' : 'Times must be HH:MM, start before end'}
-      </button>
-      <button type="button" className="sw-btn sw-btn-outline sw-btn-block mt-2" onClick={onClose}>Cancel</button>
-    </Modal>
+      ) : null}
+    </li>
   );
 }
 
@@ -160,15 +112,22 @@ export default function SchedulePage() {
   const blocks = useQuery({ queryKey: storeKey(storeId, 'booking-exceptions'), queryFn: getBookingExceptions, enabled, staleTime: 30_000 });
   // A label only: while it is out or if it fails, a one-listing block says 'One listing'.
   const listingNames = useQuery({ queryKey: storeKey(storeId, 'listing-names'), queryFn: getListingNames, enabled, staleTime: 60_000 });
-  const removeBlock = useMutation({
-    mutationFn: (id: string) => deleteBookingException(id),
-    onSuccess: () => {
+  // [size budget] A plain call with the same states, not useMutation: react-query's
+  // mutation code then stays out of this tab's first load (the Block time dialog,
+  // loaded on tap, brings its own).
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<unknown>(null);
+  const removeBlock = (id: string) => {
+    setRemoving(true);
+    setRemoveError(null);
+    deleteBookingException(id).then(() => {
       void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'booking-exceptions') });
       void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'bookings') });
-    },
-  });
+    }, setRemoveError).finally(() => setRemoving(false));
+  };
   const [dayKey, setDayKey] = useState(() => appointmentDayKey(new Date()));
   const [blocking, setBlocking] = useState(false);
+  const [moving, setMoving] = useState<VendorBooking | null>(null);
 
   // The strip follows the market calendar, including near UTC midnight.
   const today = appointmentDayKey(new Date());
@@ -224,7 +183,7 @@ export default function SchedulePage() {
         <div className="sw-empty" role="status"><span className="sw-skeleton h-24 w-full" />Loading your schedule…</div>
       ) : (
         <div className="space-y-3">
-          <MutationNotice errors={[removeBlock.error]} />
+          <MutationNotice errors={[removeError]} />
           {dayBlocks.length > 0 && (
             <ul className="space-y-3" aria-label="Blocked time">
               {dayBlocks.map((e) => (
@@ -234,8 +193,8 @@ export default function SchedulePage() {
                     <p className="text-sm font-semibold">{blockTitle(e, listingNames.data)}</p>
                     {e.reason && <p className="truncate text-xs text-[var(--swift-muted)]">{e.reason}</p>}
                   </div>
-                  <button type="button" className="sw-icon-btn" aria-label={`Remove block, ${blockSpoken(e, listingNames.data)}`} disabled={removeBlock.isPending}
-                    onClick={() => removeBlock.mutate(e.id)}>
+                  <button type="button" className="sw-icon-btn" aria-label={`Remove block, ${blockSpoken(e, listingNames.data)}`} disabled={removing}
+                    onClick={() => removeBlock(e.id)}>
                     <X size={18} aria-hidden />
                   </button>
                 </li>
@@ -250,12 +209,14 @@ export default function SchedulePage() {
             </div>
           ) : dayBookings.length > 0 && (
             <ul className="space-y-3" aria-label="Appointments">
-              {dayBookings.map((b) => <AppointmentRow key={b.id} b={b} />)}
+              {dayBookings.map((b) => <AppointmentRow key={b.id} b={b} onMove={bookingMovable(b) ? () => setMoving(b) : undefined} />)}
             </ul>
           )}
         </div>
       )}
-      {blocking && <BlockTimeDialog dayKey={dayKey} onClose={() => setBlocking(false)} />}
+      {blocking && <Suspense fallback={null}><BlockTimeDialog dayKey={dayKey} onClose={() => setBlocking(false)} /></Suspense>}
+      {/* Mounted only while a booking is being moved (its free-times read runs only then). */}
+      {moving && <Suspense fallback={null}><MoveBookingDialog booking={moving} onClose={() => setMoving(null)} /></Suspense>}
     </div>
   );
 }

@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ authenticated: false, promptLogin: vi.fn(), mutate: vi.fn(), success: vi.fn(), error: vi.fn() }));
+const mocks = vi.hoisted(() => ({ authenticated: false, promptLogin: vi.fn(), mutate: vi.fn(), mutateAsync: vi.fn(), success: vi.fn(), error: vi.fn() }));
 vi.mock('react', async (original) => {
   const actual = await original<Record<string, any>>();
-  const hooks = { useCallback: (fn: unknown) => fn, useMemo: (fn: () => unknown) => fn(), useState: (value: unknown) => [value, vi.fn()] };
+  const hooks = { useCallback: (fn: unknown) => fn, useMemo: (fn: () => unknown) => fn(), useState: (value: unknown) => [value, vi.fn()], useRef: (value: unknown) => ({ current: value }) };
   return { ...actual, ...hooks, default: { ...actual['default'], ...hooks } };
 });
 vi.mock('react-native', () => ({ Dimensions: { get: () => ({ width: 390 }) }, FlatList: 'FlatList', Pressable: 'Pressable', RefreshControl: 'RefreshControl', ScrollView: 'ScrollView', View: 'View' }));
@@ -14,7 +14,7 @@ vi.mock('@swift/ui', () => ({ color: { surface: { subtle: '', base: '' }, brand:
 vi.mock('../../../hooks/customer', () => ({
   useDiscoveryCategories: () => ({ data: { categories: [] } }),
   useMarketItems: () => ({ data: { pages: [{ items: [{ id: 'item-a', vendorId: 'vendor-a', name: 'Synthetic item' }] }] }, refetch: vi.fn() }),
-  useAddToCart: () => ({ mutate: mocks.mutate, isPending: false }),
+  useAddToCart: () => ({ mutate: mocks.mutate, mutateAsync: mocks.mutateAsync, isPending: false }),
 }));
 vi.mock('../../../stores/authStore', () => ({ useAuthStore: () => ({ isAuthenticated: mocks.authenticated, promptLogin: mocks.promptLogin }) }));
 vi.mock('../../../hooks/usePullToRefresh', () => ({ usePullToRefresh: () => ({ refreshing: false, onRefresh: vi.fn() }) }));
@@ -39,15 +39,17 @@ function pressAdd() {
 beforeEach(() => {
   vi.clearAllMocks(); mocks.authenticated = false;
   mocks.mutate.mockImplementation(() => { if (!mocks.authenticated) throw new Error('Guest capture refusal'); });
+  mocks.mutateAsync.mockImplementation(async () => { if (!mocks.authenticated) throw new Error('Guest capture refusal'); return {}; });
 });
 describe('Market Add account guard', () => {
   it('guest Add opens sign-in without invoking the mutation or throwing', () => {
     expect(pressAdd).not.toThrow(); expect(mocks.promptLogin).toHaveBeenCalledTimes(1);
-    expect(mocks.mutate).not.toHaveBeenCalled(); expect(mocks.error).not.toHaveBeenCalled();
+    expect(mocks.mutate).not.toHaveBeenCalled(); expect(mocks.mutateAsync).not.toHaveBeenCalled(); expect(mocks.error).not.toHaveBeenCalled();
   });
-  it('signed-in Add keeps the existing cart payload and success feedback', () => {
+  it('signed-in Add keeps the existing cart payload and success feedback', async () => {
     mocks.authenticated = true; pressAdd(); expect(mocks.promptLogin).not.toHaveBeenCalled();
-    expect(mocks.mutate).toHaveBeenCalledWith({ vendorId: 'vendor-a', itemId: 'item-a', quantity: 1 }, expect.any(Object));
-    mocks.mutate.mock.calls[0]![1].onSuccess(); expect(mocks.success).toHaveBeenCalledWith('Synthetic item added');
+    // [TAP-AUDIT] Sent through the card's own hold (its promise answers for it): the same payload, the same words.
+    expect(mocks.mutateAsync).toHaveBeenCalledWith({ vendorId: 'vendor-a', itemId: 'item-a', quantity: 1 });
+    await vi.waitFor(() => expect(mocks.success).toHaveBeenCalledWith('Synthetic item added'));
   });
 });

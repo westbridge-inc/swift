@@ -7,6 +7,7 @@ import { mmgDispatchBlocked, mmgDispatchEligibleWhere } from '../modules/order/m
 import { drainCheckoutOutbox, persistDispatchCommandInTransaction } from '../modules/order/checkout-outbox';
 import { readOfferItinerary } from '../modules/rides/taxi-stops-read';
 import { offerCardAddresses } from '../modules/dispatch/board-privacy';
+import { assignmentLogWhere } from '../modules/order/store-handover-log';
 
 // Execute production method bodies, not copies of the algorithm. Isolating the
 // class from module wiring makes accidental provider/service boot impossible.
@@ -42,7 +43,7 @@ const context = vm.createContext({
   customerTrustSummaries: async () => new Map(), cashMathForOffer: () => null,
   estimateLoad: () => 'small',
   // [owner #20] The enforced load gate's size read (a food order with no bulky line needs no vehicle size).
-  requiredPackageSizeForOrder: () => null, totalBulkUnits: () => 0, DEFAULT_LOAD_BANDS: { small: 4, medium: 12, large: 30 },
+  requiredPackageSizeForOrder: () => null, offerLoadFields: () => ({ loadSize: null, oversize: false }), totalBulkUnits: () => 0, DEFAULT_LOAD_BANDS: { small: 4, medium: 12, large: 30 },
   dispatchSearchesCounter: { inc: noop }, dispatchTimeToAssign: { observe: noop },
   poolForOrder: (o: { orderType: string }) => o.orderType === 'TAXI' ? 'DRIVER' : 'RIDER',
   verticalForOrder: () => 'DELIVERY',
@@ -53,6 +54,9 @@ const context = vm.createContext({
   // [ORDER-SPINE S1-6] dispatchOrder's direct-MMG offer gate — the production
   // predicate itself, not a copy (these orders are CASH, so it lets them by).
   mmgDispatchBlocked,
+  // [O-2] the assignment-episode count's predicate — the production one itself (the store's
+  // "Handed to rider" row never counts as an assignment).
+  assignmentLogWhere,
   // [PAYMENT-SIMPLIFY] the stuck reconciler's MMG filter — the production predicate itself (these orders are CASH).
   mmgDispatchEligibleWhere,
   // [TAXI multi-stop 3/8] the offer card's stops — the production reader itself
@@ -1256,7 +1260,7 @@ describe('R11 truthful dispatch responses', () => {
 describe('[Q10] every offer is pushed by default, in every pool', () => {
   const pools = [
     { mover: 'delivery rider', orderType: 'FOOD_DELIVERY', status: 'READY_FOR_PICKUP', title: '\u{1F6F5} Order available nearby' },
-    { mover: 'courier', orderType: 'COURIER', status: 'READY_FOR_PICKUP', title: '\u{1F6F5} Order available nearby' },
+    { mover: 'courier', orderType: 'COURIER', status: 'READY_FOR_PICKUP', title: '\u{1F6F5} Parcel available nearby' },
     { mover: 'taxi driver', orderType: 'TAXI', status: 'PENDING', title: '\u{1F695} Someone nearby needs a pickup' },
   ];
 

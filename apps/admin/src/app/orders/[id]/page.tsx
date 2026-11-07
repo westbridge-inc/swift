@@ -4,17 +4,18 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
-import { statusClass } from '@/lib/status';
+import { fetchOrderDetail, cancelOrder, closeStoreRefund, endStuckRide, resetDeliveryPin, resetRideCode, sendStepUpCode, settleOrderRefund, revealOrderPartyPhone, openOrderProofPhoto, verifyStepUpCode, type OrderContactParty, type OrderProofPhoto } from '@/lib/api';
+import { StatusBadge } from '@/components/mc/StatusBadge';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { PaymentDispute } from '@/components/mc/PaymentDispute';
 import { HeldDoorCash } from '@/components/mc/HeldDoorCash';
 import { useActionRunner } from '@/components/mc/useActionRunner';
+import { gyDateTime, gyTime } from '@/lib/dates';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
 const clock = (iso: string | null | undefined) =>
-  iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+  iso ? gyTime(iso) : '';
 
 /** [TAXI multi-stop 8/8] One stop of a ride, as the server reports it. */
 type RideStop = {
@@ -32,23 +33,37 @@ function stopProgress(stop: RideStop, next: number | null): string {
 }
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
 
+/** [M2] Where the server's delivery PIN reset goes through (handover-reveal.ts): a goods delivery by a Swift rider, the PIN issued, on its way or at the door. */
+const DELIVERY_PIN_WINDOW = ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'];
+const deliveryPinResettable = (o: { orderType?: string; fulfillment?: string; fulfillmentMode?: string | null; status?: string; handover?: { ridePinIssued?: boolean } | null }) =>
+  o.fulfillment === 'DELIVERY' && o.orderType !== 'TAXI' && o.orderType !== 'COURIER' && o.fulfillmentMode !== 'VENDOR_DELIVERY'
+  && !!o.handover?.ridePinIssued && DELIVERY_PIN_WINDOW.includes(o.status ?? '');
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6">
-      <h2 className="text-sm font-semibold text-[var(--muted)] tracking-widest mb-4">{title.toUpperCase()}</h2>
+    <div className="mc-card">
+      <h2 className="mc-label mb-3">{title}</h2>
       {children}
     </div>
   );
 }
 
-function Party({ label, name, phone, href }: { label: string; name?: string | null; phone?: string | null; href?: string }) {
+/**
+ * [O-1] A party on the order. The server sends the phone MASKED; "Show number"
+ * reads the full one through the audited door (a reason, recorded before the
+ * number is sent), and only for this page view.
+ */
+function Party({ label, name, phone, href, revealed, onReveal }: {
+  label: string; name?: string | null; phone?: string | null; href?: string;
+  revealed?: string; onReveal?: () => void;
+}) {
   if (!name) return null;
   return (
-    <div className="flex items-center justify-between p-3 rounded-lg bg-white/5">
+    <div className="flex items-center justify-between rounded-[var(--mc-radius-sm)] bg-[var(--mc-surface)] p-3">
       <div>
-        <p className="text-xs text-[var(--muted)]">{label}</p>
+        <p className="mc-muted text-xs">{label}</p>
         {href ? (
-          <Link href={href} className="text-sm font-medium hover:text-[var(--accent)] transition-colors">
+          <Link href={href} className="text-sm font-medium text-[var(--mc-accent)] font-semibold">
             {name}
           </Link>
         ) : (
@@ -56,7 +71,18 @@ function Party({ label, name, phone, href }: { label: string; name?: string | nu
         )}
       </div>
       {/* [MC shell] No click-to-call: calls are not a console feature (owner ruling, 6 Oct). */}
-      {phone ? <span className="text-xs text-[var(--muted)]">{phone}</span> : null}
+      {phone ? (
+        <div className="flex flex-col items-end gap-1">
+          <span className="mc-muted mc-numbers text-xs">{revealed ?? phone}</span>
+          {revealed ? (
+            <span className="mc-muted text-[11px]">Read recorded in the audit log</span>
+          ) : onReveal ? (
+            <button type="button" onClick={onReveal} className="mc-link-button text-xs">
+              Show number
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -73,18 +99,21 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   // the panel: the order is named, a refusal stays in the panel with what was
   // typed, and a 202 (a refund close is C4) reads as queued, never a failure.
   const [refundCloseQueued, setRefundCloseQueued] = useState(false);
+  // [O-1] Full numbers read through the audited door, for this page view only.
+  const [revealed, setRevealed] = useState<Partial<Record<OrderContactParty, string>>>({});
+  const [proofLinks, setProofLinks] = useState<Partial<Record<OrderProofPhoto, string>>>({});
   const o: any = data?.data;
   // [TAXI waiting charge] The ride's frozen breakdown, when the server sends one.
   const waiting: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null =
     o?.fareBreakdown && typeof o.fareBreakdown.total === 'number' ? o.fareBreakdown : null;
 
   if (isLoading) {
-    return <div className="h-40 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />;
+    return <div className="mc-page"><div className="mc-loading" aria-busy="true">Loading the order…</div></div>;
   }
   if (isError || !o) {
     return (
-      <div>
-        <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
+      <div className="mc-page">
+        <Link href="/orders" className="mc-back mb-2">
           <ArrowLeft size={16} /> Orders
         </Link>
         <QueryFailed error={error ?? new Error('The order response was empty.')} what="this order" onRetry={() => void refetch()} retrying={isFetching} />
@@ -93,15 +122,40 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   }
 
   const isRide = o.orderType === 'TAXI';
+  // [BUG-HUNT-2 G01] From the verified code on the passenger is in the car: the server refuses a cancel, and the driver
+  // holds the only exits.
+  const rideUnderway = isRide && !TERMINAL.includes(o.status) && (o.status === 'RIDE_IN_PROGRESS' || o.ridePinVerified === true || Boolean(o.ridePinVerifiedAt));
   const mover = o.rider?.user ?? o.driver?.user;
   const moverLabel = o.rider ? 'Rider' : o.driver ? 'Driver' : null;
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   const refundingStore = o.vendor?.name ?? 'the store';
   const timeline: any[] = o.statusHistory ?? [];
+  const revealFor = (party: OrderContactParty, who: string) => () => void actions.run({
+    title: `Show the ${who}'s full number for order ${o.orderNumber}?`,
+    body: <p>Your reason and this read are recorded in the audit log before the number is shown.</p>,
+    confirmLabel: 'Show number',
+    submit: ({ reason }) => revealOrderPartyPhone(id, party, reason),
+    success: (result) => {
+      setRevealed((now) => ({ ...now, [party]: result.data.phone }));
+      return `The ${who}'s number is shown. The read is recorded.`;
+    },
+  });
+
+  // [BUG-HUNT-2 G11] The stored value is an opaque key, never a link: the server signs one, for this page view, on a reason.
+  const openProof = (photo: OrderProofPhoto, name: string) => () => void actions.run({
+    title: `Open the ${name.toLowerCase()} for order ${o.orderNumber}?`,
+    body: <p>Your reason and this read are recorded in the audit log before the photo opens.</p>,
+    confirmLabel: 'Open photo',
+    submit: ({ reason }) => openOrderProofPhoto(id, photo, reason),
+    success: (result) => {
+      setProofLinks((now) => ({ ...now, [photo]: result.data.url }));
+      return `The ${name.toLowerCase()} is ready for ${Math.round(result.data.expiresInSeconds / 60)} minutes. The read is recorded.`;
+    },
+  });
 
   return (
-    <div>
-      <Link href="/orders" className="inline-flex items-center gap-2 text-sm text-[var(--muted)] hover:text-white mb-4">
+    <div className="mc-page">
+      <Link href="/orders" className="mc-back mb-2">
         <ArrowLeft size={16} /> Orders
       </Link>
 
@@ -111,22 +165,38 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
 
       {/* Header — identity + the actions an operator actually has */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
-        <h1 className="text-2xl font-bold font-mono">#{o.orderNumber}</h1>
-        <span className={`px-2.5 py-1 rounded-full text-xs ${statusClass(o.status)}`}>{label('OrderStatus', o.status)}</span>
-        <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">
+        <h2 className="mc-numbers text-2xl font-semibold" style={{ letterSpacing: '-0.02em' }}>#{o.orderNumber}</h2>
+        <StatusBadge group="OrderStatus" value={o.status} />
+        <span className="mc-badge">
           {label('OrderType', o.orderType)}
         </span>
         {isMmg ? (
           o.paymentStatus === 'CAPTURED' ? (
-            <span className="px-2.5 py-1 rounded-full text-xs bg-emerald-500/15 text-emerald-400">MMG paid</span>
+            <span className="mc-badge mc-tone-good">MMG paid</span>
           ) : (
-            <span className="px-2.5 py-1 rounded-full text-xs bg-amber-500/15 text-amber-400">MMG awaiting confirmation</span>
+            <span className="mc-badge mc-tone-warn">MMG awaiting confirmation</span>
           )
         ) : (
-          <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">cash</span>
+          <span className="mc-badge">cash</span>
         )}
         <div className="ml-auto flex gap-2">
-          {!TERMINAL.includes(o.status) && (
+          {rideUnderway && (
+            <button
+              type="button"
+              onClick={() => void actions.run({
+                title: `End ride ${o.orderNumber}?`,
+                body: <p>For a ride that cannot finish, such as a driver who is gone. Call both sides first. The passenger and the driver are told. No fare is recorded and no money moves.</p>,
+                confirmLabel: 'End this ride',
+                dismissLabel: 'Keep the ride',
+                submit: ({ reason }) => endStuckRide(id, reason),
+                success: () => `Ride ${o.orderNumber} closed. Both sides are told.`,
+              })}
+              className="mc-btn mc-btn-primary"
+            >
+              End this ride
+            </button>
+          )}
+          {!TERMINAL.includes(o.status) && !rideUnderway && (
             <>
               <button
                 type="button"
@@ -141,10 +211,27 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   submit: ({ reason }) => cancelOrder(id, { refund: false }, reason),
                   success: () => `Order ${o.orderNumber} cancelled.`,
                 })}
-                className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                className="mc-btn"
               >
                 Cancel order
               </button>
+              {/* [BUG-HUNT-2 G08] A paid MMG order that cannot be fulfilled has one close, and it had no button. Two people. */}
+              {o.canCloseStoreRefund === true && (
+                <button
+                  type="button"
+                  onClick={() => void actions.run({
+                    title: `Close ${o.orderNumber} as refund handled by the store?`,
+                    body: <p>{refundingStore} owes the customer what it received by MMG. Swift records that and moves no money. The customer and the store are told, and the refund shows under MMG refunds until it is confirmed.</p>,
+                    confirmLabel: 'Close it',
+                    dismissLabel: 'Keep the order',
+                    submit: ({ reason }) => closeStoreRefund(id, Number(o.mmgClaimRevision ?? 0), reason),
+                    success: () => `Order ${o.orderNumber} closed. The refund is recorded as owed by ${refundingStore}.`,
+                  })}
+                  className="mc-btn mc-btn-primary"
+                >
+                  Close: store refunds
+                </button>
+              )}
               {o.paymentMethod === 'CASH' && (
                 <button
                   type="button"
@@ -156,7 +243,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                     submit: ({ reason }) => cancelOrder(id, { refund: true }, reason),
                     success: () => `Order ${o.orderNumber} cancelled; a refund is recorded as owed.`,
                   })}
-                  className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+                  className="mc-btn mc-btn-primary"
                 >
                   Record refund owed
                 </button>
@@ -169,11 +256,11 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       {/* [A-14] An obligation nobody has settled is money the customer is still
           waiting for. It says so, with its age, until evidence closes it. */}
       {o.refundOwedAt && !o.refundSettledAt && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
-          <p className="text-sm text-amber-300 font-medium">Refund owed — not yet settled</p>
-          <p className="mt-1 text-sm text-[var(--muted)]">
+        <div className="rounded-[var(--mc-radius)] border border-[var(--mc-warn)]/30 bg-[var(--mc-warn-soft)] p-4">
+          <p className="text-sm mc-text-warn font-medium">Refund owed — not yet settled</p>
+          <p className="mt-1 text-sm mc-muted">
             GY${Number(o.refundOwedAmount ?? 0).toLocaleString()} recorded as owed on{' '}
-            {new Date(o.refundOwedAt).toLocaleString()}. Nothing here says the money moved.
+            {gyDateTime(o.refundOwedAt)}. Nothing here says the money moved.
           </p>
           <button
             type="button"
@@ -191,7 +278,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
               success: () => 'Refund recorded as handed back.',
             }).then((outcome) => { if (outcome?.tone === 'queued') setRefundCloseQueued(true); })}
             disabled={refundCloseQueued}
-            className="mt-3 px-4 py-2 rounded-lg text-sm bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
+            className="mt-3 px-4 py-2 rounded-lg text-sm bg-[var(--mc-accent)] disabled:opacity-50"
           >
             {refundCloseQueued ? 'Waiting for approval' : 'Record refund handed back'}
           </button>
@@ -199,11 +286,11 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       )}
 
       {o.refundSettledAt && (
-        <div className="rounded-xl border border-[var(--border)] p-4">
+        <div className="rounded-[var(--mc-radius)] border border-[var(--mc-line)] p-4">
           <p className="text-sm font-medium">Refund settled</p>
-          <p className="mt-1 text-sm text-[var(--muted)]">
+          <p className="mt-1 text-sm mc-muted">
             GY${Number(o.refundPaidAmount ?? 0).toLocaleString()} — reference {o.refundRef} —{' '}
-            {new Date(o.refundSettledAt).toLocaleString()}
+            {gyDateTime(o.refundSettledAt)}
           </p>
         </div>
       )}
@@ -217,67 +304,67 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             {isRide ? (
               <div className="space-y-2 text-sm">
                 <div className="flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full border-2 border-[var(--muted)]" />
+                  <span className="w-2.5 h-2.5 rounded-full border-2 border-[var(--mc-muted)]" />
                   <span>{o.pickupAddress ?? '—'}</span>
                 </div>
                 {/* [TAXI multi-stop 8/8] The stops in the passenger's order, each with where the ride stands. */}
                 {Array.isArray(o.stops) &&
                   (o.stops as RideStop[]).map((stop) => (
                     <div key={stop.sequence} className="flex items-start gap-2" data-testid={`ride-stop-${stop.sequence}`}>
-                      <span className="mt-0.5 w-4 text-center text-xs font-semibold text-[var(--muted)]">{stop.sequence}</span>
+                      <span className="mt-0.5 w-4 text-center text-xs font-semibold mc-muted">{stop.sequence}</span>
                       <div>
                         <p>{stop.address}</p>
-                        <p className="text-xs text-[var(--muted)]">{stopProgress(stop, o.nextStopSequence ?? null)}</p>
-                        {stop.evidenceNote ? <p className="text-xs text-[var(--muted)]">{stop.evidenceNote}</p> : null}
+                        <p className="mc-muted text-xs">{stopProgress(stop, o.nextStopSequence ?? null)}</p>
+                        {stop.evidenceNote ? <p className="mc-muted text-xs">{stop.evidenceNote}</p> : null}
                       </div>
                     </div>
                   ))}
                 <div className="flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-sm bg-[var(--accent)]" />
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[var(--mc-accent)]" />
                   <span>{o.deliveryAddress ?? '—'}</span>
                 </div>
-                {o.rideClass ? <p className="text-[var(--muted)] text-xs pt-1">Class: {o.rideClass}</p> : null}
+                {o.rideClass ? <p className="mc-muted text-xs pt-1">Class: {o.rideClass}</p> : null}
               </div>
             ) : (
               <div className="space-y-2">
                 {(o.items ?? []).map((it: any) => (
-                  <div key={it.id} className="flex items-start justify-between p-3 rounded-lg bg-white/5 text-sm">
+                  <div key={it.id} className="flex items-start justify-between p-3 rounded-lg bg-[var(--mc-surface)] text-sm">
                     <div>
                       <p>
                         {it.quantity}× {it.name}
                       </p>
                       {(it.selectedOptions ?? []).length > 0 && (
-                        <p className="text-xs text-[var(--muted)] mt-0.5">
+                        <p className="text-xs mc-muted mt-0.5">
                           {(it.selectedOptions ?? []).map((op: any) => op.optionName ?? op.name).filter(Boolean).join(', ')}
                         </p>
                       )}
                       {it.specialInstructions ? (
-                        <p className="text-xs text-amber-400/90 mt-0.5">“{it.specialInstructions}”</p>
+                        <p className="text-xs mc-text-warn mt-0.5">“{it.specialInstructions}”</p>
                       ) : null}
                     </div>
                     <span className="font-medium">{gyd(it.totalCustomer)}</span>
                   </div>
                 ))}
-                {(o.items ?? []).length === 0 && <p className="text-sm text-[var(--muted)]">No items.</p>}
+                {(o.items ?? []).length === 0 && <p className="text-sm mc-muted">No items.</p>}
               </div>
             )}
           </Section>
 
           <Section title="Timeline">
             {timeline.length === 0 ? (
-              <p className="text-sm text-[var(--muted)]">No events recorded.</p>
+              <p className="text-sm mc-muted">No events recorded.</p>
             ) : (
               <div className="space-y-0">
                 {timeline.map((ev: any, i: number) => (
                   <div key={ev.id ?? i} className="flex gap-3">
                     <div className="flex flex-col items-center">
-                      <span className={`w-2.5 h-2.5 rounded-full mt-1 ${i === 0 ? 'bg-[var(--accent)]' : 'bg-[var(--border)]'}`} />
-                      {i < timeline.length - 1 && <span className="w-px flex-1 bg-[var(--border)]" />}
+                      <span className={`w-2.5 h-2.5 rounded-full mt-1 ${i === 0 ? 'bg-[var(--mc-accent)]' : 'bg-[var(--mc-line-strong)]'}`} />
+                      {i < timeline.length - 1 && <span className="w-px flex-1 bg-[var(--mc-line-strong)]" />}
                     </div>
                     <div className={`pb-4 ${i === 0 ? '' : 'opacity-80'}`}>
                       <p className="text-sm font-medium">{label('OrderStatus', ev.status)}</p>
-                      {ev.note ? <p className="text-xs text-[var(--muted)] mt-0.5">{ev.note}</p> : null}
-                      <p className="text-xs text-[var(--muted)]/70 mt-0.5">{new Date(ev.createdAt).toLocaleString()}</p>
+                      {ev.note ? <p className="text-xs mc-muted mt-0.5">{ev.note}</p> : null}
+                      <p className="text-xs mc-muted mt-0.5">{gyDateTime(ev.createdAt)}</p>
                     </div>
                   </div>
                 ))}
@@ -294,14 +381,18 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 label="Customer"
                 name={[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || null}
                 phone={o.customer?.phone}
+                revealed={revealed.customer}
+                onReveal={revealFor('customer', 'customer')}
               />
-              <Party label="Vendor" name={o.vendor?.name} phone={o.vendor?.phone} />
+              <Party label="Vendor" name={o.vendor?.name} phone={o.vendor?.phone} revealed={revealed.store} onReveal={revealFor('store', 'store')} />
               <Party
                 label={moverLabel ?? 'Mover'}
                 name={mover ? [mover.firstName, mover.lastName].filter(Boolean).join(' ') : null}
                 phone={mover?.phone}
+                revealed={revealed.mover}
+                onReveal={revealFor('mover', (moverLabel ?? 'mover').toLowerCase())}
               />
-              {!o.vendor && !mover && !o.customer && <p className="text-sm text-[var(--muted)]">—</p>}
+              {!o.vendor && !mover && !o.customer && <p className="text-sm mc-muted">—</p>}
             </div>
           </Section>
 
@@ -309,25 +400,25 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
             <div className="space-y-1.5 text-sm">
               {!isRide && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Subtotal</span>
+                  <span className="mc-muted">Subtotal</span>
                   <span>{gyd(o.subtotalCustomer ?? o.subtotalBase)}</span>
                 </div>
               )}
               {Number(o.deliveryFee) > 0 && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Delivery fee</span>
+                  <span className="mc-muted">Delivery fee</span>
                   <span>{gyd(o.deliveryFee)}</span>
                 </div>
               )}
               {Number(o.tipAmount) > 0 && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Tip</span>
+                  <span className="mc-muted">Tip</span>
                   <span>{gyd(o.tipAmount)}</span>
                 </div>
               )}
               {Number(o.discount) > 0 && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Discount{o.promoCode?.code ? ` (${o.promoCode.code})` : ''}</span>
+                  <span className="mc-muted">Discount{o.promoCode?.code ? ` (${o.promoCode.code})` : ''}</span>
                   <span>-{gyd(o.discount)}</span>
                 </div>
               )}
@@ -335,20 +426,20 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
               {waiting && (
                 <>
                   <div className="flex justify-between">
-                    <span className="text-[var(--muted)]">Trip fare</span>
+                    <span className="mc-muted">Trip fare</span>
                     <span>{gyd(waiting.routeFare)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[var(--muted)]">Waiting ({waiting.waitingMinutes} min)</span>
+                    <span className="mc-muted">Waiting ({waiting.waitingMinutes} min)</span>
                     <span>{gyd(waiting.waitingCharge)}</span>
                   </div>
                 </>
               )}
-              <div className="flex justify-between pt-2 mt-1 border-t border-[var(--border)] font-semibold">
+              <div className="flex justify-between pt-2 mt-1 border-t border-[var(--mc-line)] font-semibold">
                 <span>Total</span>
                 <span>{gyd(waiting ? waiting.total : isRide ? (o.taxiFareTotal ?? o.totalAmount) : o.totalAmount)}</span>
               </div>
-              <p className="text-xs text-[var(--muted)] pt-1">
+              <p className="text-xs mc-muted pt-1">
                 {isMmg ? 'Paid to the vendor’s MMG account — Swift moves no money.' : 'Cash at handover — Swift moves no money.'}
               </p>
             </div>
@@ -357,18 +448,18 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
           <Section title="Details">
             <div className="space-y-1.5 text-sm">
               <div className="flex justify-between">
-                <span className="text-[var(--muted)]">Placed</span>
-                <span>{o.placedAt ? new Date(o.placedAt).toLocaleString() : '—'}</span>
+                <span className="mc-muted">Placed</span>
+                <span>{o.placedAt ? gyDateTime(o.placedAt) : '—'}</span>
               </div>
               {o.deliveredAt && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Delivered</span>
-                  <span>{new Date(o.deliveredAt).toLocaleString()}</span>
+                  <span className="mc-muted">Delivered</span>
+                  <span>{gyDateTime(o.deliveredAt)}</span>
                 </div>
               )}
               {o.fulfillment && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Fulfillment</span>
+                  <span className="mc-muted">Fulfillment</span>
                   <span>{o.fulfillment}</span>
                 </div>
               )}
@@ -379,8 +470,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   order has been locked out by wrong guesses. */}
               {o.handover?.pickupCodeIssued && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Pickup code</span>
-                  <span className={o.handover.locked ? 'text-[var(--danger)]' : ''}>
+                  <span className="mc-muted">Pickup code</span>
+                  <span className={o.handover.locked ? 'mc-text-bad' : ''}>
                     {o.handover.locked
                       ? `Locked — ${o.handover.attempts} wrong tries`
                       : `Issued to the customer${o.handover.attempts > 0 ? ` · ${o.handover.attempts} wrong tries` : ''}`}
@@ -391,25 +482,95 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   the door. Same rule as the pickup code: never the value, only whether it
                   exists and whether wrong tries have locked the door (support reset). */}
               {o.handover?.ridePinIssued && !isRide && (
-                <div className="flex justify-between">
-                  <span className="text-[var(--muted)]">Delivery PIN</span>
-                  <span className={o.handover.ridePinLocked ? 'text-[var(--danger)]' : ''}>
+                <div className="flex justify-between gap-4">
+                  <span className="mc-muted">Delivery PIN</span>
+                  <span className={o.handover.ridePinLocked ? 'mc-text-bad' : ''}>
                     {o.handover.ridePinLocked
                       ? `Locked — ${o.handover.ridePinAttempts} wrong tries (support reset)`
                       : `Issued to the customer${(o.handover.ridePinAttempts ?? 0) > 0 ? ` · ${o.handover.ridePinAttempts} wrong tries` : ''}`}
+                    {deliveryPinResettable(o) && (
+                      <>
+                        {' '}
+                        <button
+                          type="button"
+                          className="mc-btn"
+                          onClick={async () => {
+                            // [M2] The ride code's door: the code to your phone goes first, so the one panel takes both.
+                            await sendStepUpCode().catch(() => undefined);
+                            void actions.run({
+                              title: `Give ${o.orderNumber} a new delivery PIN?`,
+                              body: <p>The customer reads the new PIN on their order screen and gives it to the rider. Swift does not message them, so tell them or have the rider ask, and give it a few seconds to reach their screen. The old PIN stops working. Nobody here sees the new one.</p>,
+                              confirmLabel: 'Give a new PIN',
+                              dismissLabel: 'Keep it',
+                              fields: [{ kind: 'text', name: 'code', label: 'Code sent to your phone', required: true }],
+                              submit: async ({ reason, values }) => {
+                                await verifyStepUpCode(String(values['code']).trim());
+                                return resetDeliveryPin(id, reason);
+                              },
+                              success: () => `${o.orderNumber} has a new delivery PIN. Ask the customer to give it a few seconds, then read it from their order to the rider.`,
+                            });
+                          }}
+                        >
+                          New delivery PIN
+                        </button>
+                      </>
+                    )}
+                  </span>
+                </div>
+              )}
+              {/* [BUG-HUNT-2 G11] "Proof photo captured", and nobody could open one. These are what support checks. */}
+              {([['pickup', 'Pickup photo', o.courierPickupProofPhotoUrl], ['door', 'Door photo', o.courierProofPhotoUrl], ['return', 'Return photo', o.courierReturnProofPhotoUrl]] as const).map(([photo, name, stored]) => (stored ? (
+                <div key={photo} className="flex justify-between gap-4">
+                  <span className="mc-muted shrink-0">{name}</span>
+                  {proofLinks[photo] ? (
+                    <a href={proofLinks[photo]} target="_blank" rel="noreferrer" className="text-[var(--mc-accent)] font-semibold">Open photo</a>
+                  ) : (
+                    <button type="button" onClick={openProof(photo, name)} className="mc-link-button text-xs">Open</button>
+                  )}
+                </div>
+              ) : null))}
+              {/* [BUG-HUNT-2 G05] A ride's code. The driver is told to ask support after five wrong tries: this is what support does. */}
+              {isRide && o.handover?.ridePinIssued && ['DRIVER_ASSIGNED', 'DRIVER_EN_ROUTE', 'DRIVER_ARRIVED'].includes(o.status) && !o.ridePinVerified && !o.ridePinVerifiedAt && (
+                <div className="flex justify-between gap-4">
+                  <span className="mc-muted">Ride code</span>
+                  <span className={o.handover.ridePinLocked ? 'mc-text-bad' : ''}>
+                    {o.handover.ridePinLocked ? `Locked — ${o.handover.ridePinAttempts} wrong tries` : 'Issued to the passenger'}
+                    {' '}
+                    <button
+                      type="button"
+                      className="mc-btn"
+                      onClick={async () => {
+                        // The door asks for a code to your phone: it is sent first, so the one panel takes both.
+                        await sendStepUpCode().catch(() => undefined);
+                        void actions.run({
+                          title: `Give ${o.orderNumber} a new ride code?`,
+                          body: <p>The passenger reads the new code in their app and is told to. The old code stops working. Nobody here sees it.</p>,
+                          confirmLabel: 'Give a new code',
+                          dismissLabel: 'Keep it',
+                          fields: [{ kind: 'text', name: 'code', label: 'Code sent to your phone', required: true }],
+                          submit: async ({ reason, values }) => {
+                            await verifyStepUpCode(String(values['code']).trim());
+                            return resetRideCode(id, reason);
+                          },
+                          success: () => `${o.orderNumber} has a new ride code. The passenger was told.`,
+                        });
+                      }}
+                    >
+                      New ride code
+                    </button>
                   </span>
                 </div>
               )}
               {o.deliveryAddress && !isRide && (
                 <div className="flex justify-between gap-4">
-                  <span className="text-[var(--muted)] shrink-0">Address</span>
+                  <span className="mc-muted shrink-0">Address</span>
                   <span className="text-right">{o.deliveryAddress}</span>
                 </div>
               )}
               {o.cancellationReason && (
                 <div className="flex justify-between gap-4">
-                  <span className="text-[var(--muted)] shrink-0">Cancelled</span>
-                  <span className="text-right text-red-400">{o.cancellationReason}</span>
+                  <span className="mc-muted shrink-0">Cancelled</span>
+                  <span className="text-right mc-text-bad">{o.cancellationReason}</span>
                 </div>
               )}
             </div>

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { PortalShell } from './portal-shell';
 import { LegalAcceptanceGate } from '@/components/legal-acceptance-gate';
+import { LazyPrelaunchPartnerNote } from '@/components/prelaunch-partner-note-lazy';
 
 /**
  * [DS273 F3] The earner portal (earnings, history, documents, account) is one
@@ -15,5 +16,6 @@ export const metadata: Metadata = {
 
 export default function PortalLayout({ children }: { children: React.ReactNode }) {
   // [Legal research G2 · R26] a material change to the Terms is accepted with a fresh tick
-  return <><PortalShell>{children}</PortalShell><LegalAcceptanceGate /></>;
+  // [OPEN-EARLY] Before launch, every portal page (earnings, documents, ...) says approvals come on launch day.
+  return <><PortalShell><LazyPrelaunchPartnerNote className="mb-5" />{children}</PortalShell><LegalAcceptanceGate /></>;
 }

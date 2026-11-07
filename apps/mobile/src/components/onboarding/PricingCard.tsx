@@ -5,7 +5,8 @@ import { Card, T } from '../../kit';
 import { usePartnerPricing } from '../../hooks/verification';
 import { useAuthStore } from '../../stores/authStore';
 import { moneyIn } from '../../lib/money';
-import { moverQuote, vendorQuote, type MoverTier, type PartnerVendorType } from '../../lib/partnerPricing';
+import { afterBirthWords, bandTrialDays, catalogueRetierOf, moverQuote, vehicleQuote, vendorQuote, type MoverTier, type PartnerVendorType } from '../../lib/partnerPricing';
+import { isHirePlate } from '../../lib/taxiPlate';
 
 /** Who the rate is for, in the partner's own words. */
 const MOVER_RATE_LABEL: Record<MoverTier, string> = {
@@ -15,7 +16,8 @@ const MOVER_RATE_LABEL: Record<MoverTier, string> = {
 };
 
 export type PricingCardProps =
-  | { kind: 'mover'; vehicleType: string | null | undefined }
+  /** [CARS-PLATES] `plate`: the plate typed so far — a private (P) plate car is priced as a delivery rider. */
+  | { kind: 'mover'; vehicleType: string | null | undefined; plate?: string }
   | { kind: 'vendor'; vendorType: PartnerVendorType };
 
 /** The SaaS pitch, price on the door: partners see exactly what Swift costs
@@ -35,7 +37,7 @@ export function PricingCard(props: PricingCardProps) {
   let rate: number;
   let detail: string;
   if (props.kind === 'mover') {
-    const quote = moverQuote(p, props.vehicleType);
+    const quote = props.plate !== undefined ? vehicleQuote(p, props.vehicleType, props.plate, isHirePlate) : moverQuote(p, props.vehicleType);
     if (!quote) return null;
     rate = quote.rate;
     detail = `${MOVER_RATE_LABEL[quote.tier]} rate · Keep 100% of every fare, fee and tip — no commission on orders.`;
@@ -43,15 +45,27 @@ export function PricingCard(props: PricingCardProps) {
     const quote = vendorQuote(p, props.vendorType);
     if (!quote) return null;
     rate = quote.rate;
-    // The steps above the one a new store starts on, exactly as the server
-    // bounds them; the weekly re-tier moves a store between them on its own.
-    const steps = quote.ladder
+    // [RETIER PR-A · owner 30 Oct 2026] A store signs up before it has a catalogue, so the card quotes the first step.
+    // Its fee is born when Swift approves it, on the step its OWN catalogue reaches then, and above the first step its
+    // owner sees that exact fee and ticks it before anything is charged (api partner/store-fee.ts). [RETIER PR-C ·
+    // REVIEW-M N3] What happens after that is the server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing
+    // moves it; on, a rise is told in the app ahead with how to stop it and a fall applies after two weekly counts;
+    // no word, no claim. The larger steps' fees are not quoted as this store's.
+    // [DEPT-PRICE · owner 29 Oct 2026] A step with its own free trial (7 days for a NEW department store) says so,
+    // from the server's number: the headline keeps the trial every new store starts on.
+    const trials = quote.ladder
       .slice(1)
-      .map((step, i) => `${step.minItems.toLocaleString()}+${i === 0 ? ' active items' : ''} ${fee(step.rate)}/week`);
+      .filter((step) => bandTrialDays(step, p.trialDays) !== p.trialDays)
+      .map((step) => ` A new store with ${step.minItems.toLocaleString()}+ items when Swift approves it gets ${bandTrialDays(step, p.trialDays)} days free.`);
+    const next = quote.ladder[1];
+    const sizeLine = next
+      ? ` This is the rate for a store with under ${next.minItems.toLocaleString()} items. If yours has more by the time Swift approves the store (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged.${afterBirthWords(p)}`
+      // One step only: no other rate to move to. Said only while the server says its re-tier is off.
+      : catalogueRetierOf(p)?.on === false ? ' Today this rate does not change as your catalogue grows.' : '';
     detail =
       quote.tier === 'service'
         ? 'Service provider rate · Keep 100% of every booking — no commission on orders.'
-        : `Keep 100% of every sale — no commission on orders.${steps.length ? ` Your rate moves automatically as your catalogue grows: ${steps.join(' · ')}.` : ''}`;
+        : `Keep 100% of every sale — no commission on orders.${sizeLine}${trials.join('')}`;
   }
 
   return (

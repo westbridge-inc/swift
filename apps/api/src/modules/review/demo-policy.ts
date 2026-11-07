@@ -114,7 +114,8 @@ export async function refuseReviewAccountRoleGrant(prisma: Pick<PrismaClient, 'u
   for (const userId of userIds) if (await isReviewAccount(prisma, userId)) throw new ReviewDemoRoleRefusedError();
 }
 
-/** [REVIEW-PARTNER] Does this weekly-fee subscription belong to the store-review fiction? (Its rider, driver or store.) */
+/** [REVIEW-PARTNER] Does this weekly-fee subscription belong to the store-review fiction? (Its rider, driver, store or,
+ *  [BILL-PRO · REVIEW-G #2217 S3-1], pro: a pro owns a weekly fee too, so the seal must see their tenant.) */
 export async function isReviewSubscription(prisma: Pick<PrismaClient, 'subscription'>, subscriptionId: string): Promise<boolean> {
   const sub = await runWithoutTenant(
     () => prisma.subscription.findUnique({
@@ -123,10 +124,12 @@ export async function isReviewSubscription(prisma: Pick<PrismaClient, 'subscript
         rider: { select: { user: { select: { tenant: { select: { kind: true } } } } } },
         driver: { select: { user: { select: { tenant: { select: { kind: true } } } } } },
         vendor: { select: { tenant: { select: { kind: true } } } },
+        serviceProvider: { select: { user: { select: { tenant: { select: { kind: true } } } } } },
       },
     }),
     'review-fee-seal',
   );
-  const kind = sub?.rider?.user?.tenant?.kind ?? sub?.driver?.user?.tenant?.kind ?? sub?.vendor?.tenant?.kind;
+  const kind = sub?.rider?.user?.tenant?.kind ?? sub?.driver?.user?.tenant?.kind ?? sub?.vendor?.tenant?.kind
+    ?? sub?.serviceProvider?.user?.tenant?.kind;
   return kind === 'REVIEW';
 }

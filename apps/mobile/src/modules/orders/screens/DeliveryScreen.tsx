@@ -1,5 +1,7 @@
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
+import { CallParty } from '../../../components/CallParty';
+import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
 import MapView, { Marker } from 'react-native-maps';
@@ -20,6 +22,7 @@ import { readOrderFresh, useOrder, useDecideSubstitution, useClaimMmgPayment } f
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
+import { orderVatLine } from '../../../lib/storeVat';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
@@ -32,13 +35,21 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
+import { orderPrepFacts, orderStepState, orderTimelineIndex } from '../timeline-states';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { MmgRefundCard } from '../MmgRefundCard';
+import { MMG_REFUND_WORDS, parseMmgRefundView } from '../mmgRefund';
+import { errorMessage } from '../../../lib/apiError';
 import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
 import { isTaxiOrder } from '../../../lib/orderTrackRoute';
+import { rideIsOver } from '../../../lib/rideAfterTrip';
+import { pickupShowsCode, pickupWords } from '../pickup-words';
+import { BookingRescheduleCard } from '../BookingRescheduleCard';
+import { appointmentBookingView } from '../../../lib/appointmentBooking';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -90,30 +101,11 @@ function humanStatus(status: string): string {
   return status.toLowerCase().replace(/_/g, ' ').replace(/^\w/, (letter) => letter.toUpperCase());
 }
 
-function timelineIndex(order: any, holdActive: boolean, releasePending: boolean): number | null {
-  if (holdActive) return 1;
-  if (releasePending) return 1;
-  const status = String(order.status ?? '').toUpperCase();
-  const pickup = order.fulfillment === 'PICKUP';
-  const courier = order.orderType === 'COURIER';
-  // [E17 · DS231 F3] On its way back: the travel step, relabelled below. A
-  // RETURNED parcel has no step — the forward timeline would promise a
-  // delivery — so it falls to the plain status line.
-  if (courier && status === 'RETURNING') return 3;
-  if (['DELIVERED', 'COMPLETED'].includes(status) || (pickup && status === 'PICKED_UP')) return 4;
-  if (pickup && status === 'READY_FOR_PICKUP') return 3;
-  if (['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RIDE_IN_PROGRESS'].includes(status)) return 3;
-  if (courier && status === 'RIDER_ASSIGNED') return 2;
-  if (courier && ['RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) return 3;
-  if (status === 'DRIVER_ASSIGNED') return 2;
-  if (['DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(status)) return 3;
-  if (['ACCEPTED', 'PREPARING'].includes(status) || (!courier && status === 'READY_FOR_PICKUP')) return 2;
-  if (['PENDING', 'READY_FOR_PICKUP'].includes(status)) return 1;
-  return null;
-}
+// [#2252 REVIEW-F S4-1] The step the order is at and the kitchen's facts live in ../timeline-states.ts (pure),
+// shared with the website's status rail so the two cannot drift.
 
 function TrackingTimeline({ order, holdActive, releasePending }: { order: any; holdActive: boolean; releasePending: boolean }) {
-  const currentIndex = timelineIndex(order, holdActive, releasePending);
+  const currentIndex = orderTimelineIndex(order, holdActive, releasePending);
   const pickup = order.fulfillment === 'PICKUP';
   const appointment = order.fulfillment === 'APPOINTMENT';
   const courier = order.orderType === 'COURIER';
@@ -126,17 +118,14 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
     : releasePending
       ? courier ? 'Sending to nearby riders' : appointment ? 'Sending to the provider' : 'Sending to the store'
       : courier ? 'Sent to nearby riders' : appointment ? 'Sent to the provider' : 'Sent to the store';
-  const acceptedRecorded = !!(order.acceptedAt || eventTime(['ACCEPTED']));
-  const preparationStarted = !!(order.preparingAt || eventTime(['PREPARING']));
-  const preparationFinished = !!(order.readyAt || eventTime(['READY_FOR_PICKUP']))
-    || ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'DELIVERED', 'COMPLETED'].includes(status);
+  const { acceptedRecorded, preparationStarted, preparationFinished } = orderPrepFacts(order);
   let transitLabel = 'On the way';
   let transitDescription = order.rider
     ? `${order.rider.firstName ?? 'Your rider'} is handling this delivery.`
     : 'Live rider tracking appears after assignment and a GPS fix.';
   if (pickup) {
     transitLabel = 'Ready';
-    transitDescription = 'Show the pickup code at the counter.';
+    transitDescription = pickupWords(order.pickupCodeRequired).timeline;
   } else if (appointment) {
     transitLabel = 'In progress';
     transitDescription = 'The booked work is underway.';
@@ -278,23 +267,20 @@ function TrackingTimeline({ order, holdActive, releasePending }: { order: any; h
           override rather than something the primitive infers: rider dispatch
           runs alongside kitchen preparation, so a rider status must not tick
           off Preparing unless a server prep fact did. The primitive is told;
-          it never guesses. */}
+          it never guesses.
+          [PICKUP · owner 30 Oct 2026] A store order's step turns green the
+          moment the server says it is reached (Preparing on accept, Ready on
+          ready); the rules live in ../timeline-states.ts. */}
       <View style={{ marginTop: space.lg }}>
         <Timeline
           currentIndex={currentIndex}
+          doneTone="success"
           steps={steps.map((step, index) => {
-            let done = currentIndex == null ? index === 0 : index < currentIndex;
-            let current = currentIndex === index;
-            if (step.key === 'preparing' && !courier && !appointment && currentIndex != null && currentIndex >= 2) {
-              if (currentIndex === 2) {
-                done = false;
-                current = true;
-              } else {
-                done = preparationFinished;
-                current = !done && (preparationStarted || acceptedRecorded);
-              }
-            }
-            return { ...step, state: done ? ('done' as const) : current ? ('current' as const) : ('upcoming' as const) };
+            const { state, live } = orderStepState(step.key, index, {
+              currentIndex, storeOrder: !courier && !appointment, holdActive, releasePending, status,
+              preparationStarted, preparationFinished, acceptedRecorded,
+            });
+            return { ...step, state, live };
           })}
         />
       </View>
@@ -363,6 +349,12 @@ export function DeliveryScreen() {
   // a cancel is free or refused, so no amount is ever shown.
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
   const qc = useQueryClient();
+  // [BUG-HUNT-2 G08] "It arrived", or it did not. The order is read again whatever the answer: the server's words follow.
+  const refundAnswer = useMutation<unknown, unknown, { sendId: string; received: boolean }>({
+    mutationFn: ({ sendId, received }) => customerApi.answerMmgRefund(orderId, sendId, received),
+    meta: { silent: true },
+    onSettled: () => { void qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }); },
+  });
   const cancelOrder = useMutation<any, any, { targetOrderId: string; orderType: string }>({
     mutationFn: ({ targetOrderId, orderType }: { targetOrderId: string; orderType: string }) =>
       orderType === 'COURIER' ? courierApi.cancel(targetOrderId) : customerApi.cancelOrder(targetOrderId),
@@ -428,7 +420,9 @@ export function DeliveryScreen() {
   useEffect(() => {
     if (!isTaxiOrder(o) || rideHandedOn.current) return;
     rideHandedOn.current = true;
-    navigation.replace('Taxi');
+    // [BUG-HUNT-2 G06] A ride that is over has its own screen: "Rate your ride" landed on an empty booking form.
+    if (rideIsOver(o?.status)) navigation.replace('RideDetail', { rideId: o.id });
+    else navigation.replace('Taxi');
   }, [navigation, o]);
   const orderStatus = String(o?.status ?? '').toUpperCase();
   const liveTrackingAllowed = LIVE_TRACKING_STATUSES.has(orderStatus)
@@ -725,6 +719,7 @@ export function DeliveryScreen() {
 
   const cancelled = o.status === 'CANCELLED' || o.status === 'REFUNDED';
   const failed = o.status === 'FAILED';
+  const mmgRefund = parseMmgRefundView(o.mmgRefund);
   const complete = ['DELIVERED', 'COMPLETED'].includes(o.status)
     || (o.fulfillment === 'PICKUP' && o.status === 'PICKED_UP');
   // [E17 · DS231 F3] A parcel returned to its sender is over: no live-rider
@@ -732,6 +727,8 @@ export function DeliveryScreen() {
   // identity card stays, exactly as it does on a delivered order.
   const returned = o.status === 'RETURNED';
   const terminal = cancelled || failed || complete || returned;
+  // [BOOK-S6a · owner B2] The live booking the server projected (null from an older server or the switch off).
+  const bookingView = o.fulfillment === 'APPOINTMENT' && !terminal ? appointmentBookingView(o) : null;
   const verticalTint = o.orderType === 'COURIER'
     ? SEND_TINT
     : o.fulfillment === 'APPOINTMENT' ? SERVICES_TINT : ORDER_TINT;
@@ -832,7 +829,7 @@ export function DeliveryScreen() {
     ? 'rider'
     : o.fulfillment === 'APPOINTMENT' ? 'provider' : 'seller or rider';
   const mmgPayee = mmgPaymentAction?.recipientName
-    ?? (o.orderType === 'COURIER' ? 'the named payee' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
+    ?? (o.orderType === 'COURIER' ? 'the rider' : o.fulfillment === 'APPOINTMENT' ? 'the provider' : 'the store');
   // The last two food sentences a booking could reach on this screen were both
   // cancellation copy on the MMG rail — the one rail where the money may have
   // already moved. They name the party who holds it from the fulfillment, the
@@ -1032,6 +1029,8 @@ export function DeliveryScreen() {
               <T variant="body" weight="semibold">{formatAppointmentSlot(o.appointmentSlot)}</T>
             </View>
           ) : null}
+          {/* [BOOK-S6a · owner B2] Change time: only what the server projected (an older server sends nothing). */}
+          {bookingView ? <BookingRescheduleCard key={bookingView.bookingId} orderId={orderId} booking={bookingView} /> : null}
           {holdTimingUnavailable ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
               <Feather name="refresh-cw" size={18} color={color.info} />
@@ -1237,26 +1236,34 @@ export function DeliveryScreen() {
               >
                 <Feather name="message-circle" size={18} color={color.white} />
               </Pressable>
-              {rider.phone ? (
-                <Pressable
-                  onPress={() => void openExternal(`tel:${rider.phone}`, "Couldn't start the call — dial your rider directly.")}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Call ${rider.firstName ?? 'your rider'}`}
-                  accessibilityHint="Opens the phone dialer"
-                  style={{
-                    width: space['5xl'],
-                    height: space['5xl'],
-                    borderRadius: radius.full,
-                    backgroundColor: color.brand[500],
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <Feather name="phone" size={18} color={color.white} />
-                </Pressable>
-              ) : null}
+              {/* [O-1] Bridge off: today's dialler. Bridge on: Swift connects the call (no number on this phone). */}
+              <CallParty orderId={o?.id ?? orderId} target="rider" phone={rider.phone} dialFailText="Couldn't start the call — dial your rider directly.">
+                {(call) => (
+                  <Pressable
+                    onPress={call.onPress}
+                    disabled={call.busy}
+                    accessibilityRole="button"
+                    accessibilityLabel={call.viaSwift ? `${call.label}: ${rider.firstName ?? 'your rider'}` : `Call ${rider.firstName ?? 'your rider'}`}
+                    accessibilityHint={call.hint}
+                    style={{
+                      width: space['5xl'],
+                      height: space['5xl'],
+                      borderRadius: radius.full,
+                      backgroundColor: color.brand[500],
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      opacity: call.busy ? 0.7 : 1,
+                    }}
+                  >
+                    <Feather name="phone" size={18} color={color.white} />
+                  </Pressable>
+                )}
+              </CallParty>
             </View>
           ) : null}
+
+          {/* [O-1] While calls go through Swift: the number Swift calls from, to save. Nothing while off. */}
+          {!terminal && rider ? <SwiftCallNumberTip /> : null}
 
           {/* EMERGENCY. Above this sits a button to phone the stranger walking
               up your path, and further down one to file a support ticket.
@@ -1358,7 +1365,9 @@ export function DeliveryScreen() {
               while the kitchen works; at READY it becomes the signature
               moment [pickup spec 2.2]: "It's ready." + the code + the way
               there. The push never carries the code — this screen does. */}
-          {o.fulfillment === 'PICKUP' && o.pickupCode && !cancelled && !failed && !complete ? (
+          {/* [PICKUP · owner 30 Oct 2026] The store's code off: the name + order-number check and the order
+              number, never a code; the store taps "Handed to customer". */}
+          {o.fulfillment === 'PICKUP' && (pickupShowsCode(o) || o.pickupCodeRequired === false) && !cancelled && !failed && !complete ? (
             o.status === 'READY_FOR_PICKUP' ? (
               <View
                 style={{
@@ -1373,11 +1382,11 @@ export function DeliveryScreen() {
                 }}
               >
                 <T variant="title" tone="deep">It’s ready.</T>
-                <T variant="micro" tone="muted" style={{ marginTop: space.md }}>
-                  Show this code at the counter
+                <T variant="micro" tone="muted" style={{ marginTop: space.md, textAlign: 'center' }}>
+                  {pickupWords(o.pickupCodeRequired).ready}
                 </T>
-                <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
-                  {o.pickupCode}
+                <T variant={pickupShowsCode(o) ? 'displayXl' : 'title'} tone="brand" style={{ marginTop: space.xs, letterSpacing: pickupShowsCode(o) ? space.sm : 0, textAlign: 'center' }}>
+                  {pickupShowsCode(o) ? o.pickupCode : o.orderNumber}
                 </T>
                 {o.pickupAddress ? (
                   <Pressable
@@ -1410,11 +1419,11 @@ export function DeliveryScreen() {
                   marginTop: space.xl,
                 }}
               >
-                <T variant="micro" tone="muted">
-                  Pickup code — show at the counter
+                <T variant="micro" tone="muted" style={{ textAlign: 'center' }}>
+                  {pickupWords(o.pickupCodeRequired).waiting}
                 </T>
-                <T variant="displayXl" tone="brand" style={{ marginTop: space.xs, letterSpacing: space.sm }}>
-                  {o.pickupCode}
+                <T variant={pickupShowsCode(o) ? 'displayXl' : 'title'} tone="brand" style={{ marginTop: space.xs, letterSpacing: pickupShowsCode(o) ? space.sm : 0, textAlign: 'center' }}>
+                  {pickupShowsCode(o) ? o.pickupCode : o.orderNumber}
                 </T>
               </View>
             )
@@ -1476,6 +1485,12 @@ export function DeliveryScreen() {
             {Number(o.discount ?? 0) > 0 ? <InfoRow label="Discount" value={`−${money(o.discount)}`} /> : null}
             <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: color.border.subtle, marginVertical: space.sm }} />
             <InfoRow label="Total" value={money(o.totalAmount ?? o.total)} strong />
+            {/* [STORE-VAT · owner O-5] The VAT a person-approved VAT store's goods included, frozen on the order (inside the total). */}
+            {orderVatLine(o) ? (
+              <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                {orderVatLine(o)}
+              </T>
+            ) : null}
           </View>
           {o.paymentMethod === 'CASH' ? (
             <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.surface.sunken }}>
@@ -1484,7 +1499,7 @@ export function DeliveryScreen() {
                 {terminal
                   ? `Cash is handled directly with the ${directPayee}. Swift has not held ${money(o.totalAmount ?? o.total)}.`
                   : o.orderType === 'COURIER'
-                  ? 'Cash is paid directly to the rider by the named payer. Swift does not hold this money.'
+                  ? 'Cash is paid directly to the rider. Swift does not hold this money.'
                   : `Cash — have ${money(o.totalAmount ?? o.total)} ready for the ${directPayee}. Swift does not hold this money.`}
               </T>
             </View>
@@ -1555,6 +1570,16 @@ export function DeliveryScreen() {
               the server's sentence says who is handling it and what happens. */}
           {partyCaseWorthShowing(custodyRecovery) ? <CustodyRecoveryNotice view={custodyRecovery} /> : null}
 
+          {/* [BUG-HUNT-2 G08] A closed order can still owe a refund: this one is on the cancelled screen too. */}
+          {mmgRefund ? (
+            <MmgRefundCard
+              view={mmgRefund}
+              pending={refundAnswer.isPending}
+              error={refundAnswer.isError ? errorMessage(refundAnswer.error, MMG_REFUND_WORDS.fallback) : null}
+              onAnswer={(sendId, received) => refundAnswer.mutate({ sendId, received })}
+            />
+          ) : null}
+
           {mmgClaim && !cancelled && !failed ? (
             <MmgPaymentClaimCard
               view={mmgClaim}
@@ -1603,7 +1628,7 @@ export function DeliveryScreen() {
           />
 
           {/* [owner #46/#50] No Cancel once the store (or the driver, rider or
-              provider five minutes after accepting) has the order: the server's
+              provider once its free-cancel window after accepting has passed) has the order: the server's
               reason, and the store's published number to call instead. */}
           {!o.canCancel && !terminal && o.cancelUnavailable?.message ? (
             <View

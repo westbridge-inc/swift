@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { getSessionPrincipal, subscribeSession } from '@/lib/auth';
-import { AGREEMENT_LINKS, acceptLegal, getLegalAcceptance, type LegalAcceptance } from '@/lib/legal-acceptance';
+import { AGREEMENT_LINKS, acceptLegal, getLegalAcceptance, LEGAL_ACCEPTED_EVENT, LEGAL_RECHECK_EVENT, type LegalAcceptance } from '@/lib/legal-acceptance';
 
 /**
  * [Legal research G2 · R26 · Terms "Changes"] When the legal texts change materially, a signed-in person is shown
@@ -22,8 +22,11 @@ export function LegalAcceptanceGate() {
     setStatus(null); setTicked(false); setError(null);
     if (!principal) return;
     let cancelled = false;
-    getLegalAcceptance().then((s) => { if (!cancelled) setStatus(s); }).catch(() => { /* not signed in, or offline: ask next time */ });
-    return () => { cancelled = true; };
+    const ask = () => { getLegalAcceptance().then((s) => { if (!cancelled) setStatus(s); }).catch(() => { /* not signed in, or offline: ask next time */ }); };
+    ask();
+    // [BILL-PRO PR6] A page's "Review the agreement" asks the server again, and the gate comes up if it is owed.
+    window.addEventListener(LEGAL_RECHECK_EVENT, ask);
+    return () => { cancelled = true; window.removeEventListener(LEGAL_RECHECK_EVENT, ask); };
   }, [principal]);
 
   if (!status?.needsAcceptance) return null;
@@ -33,6 +36,7 @@ export function LegalAcceptanceGate() {
     setBusy(true); setError(null);
     try {
       setStatus(await acceptLegal(status.currentVersion));
+      window.dispatchEvent(new Event(LEGAL_ACCEPTED_EVENT));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'That did not go through. Please try again.');
       // The words may have changed while they read: show the new ones, unticked.

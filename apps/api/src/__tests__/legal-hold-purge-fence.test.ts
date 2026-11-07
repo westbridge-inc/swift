@@ -79,7 +79,7 @@ async function personWithDocument(extra: Record<string, unknown>) {
   return { userId: u.id, docId: doc.id, key: url };
 }
 
-const holdInput = (userId: string) => ({ subjectUserId: userId, placedBy: userId, ownerId: userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
+const holdInput = (userId: string) => ({ subjectUserId: userId, placedBy: 'legal-hold-test-placer' /* [SEC-PII] never the subject (recusal) */, ownerId: userId, reason: 'Synthetic preservation case', reviewBy: new Date(Date.now() + 2 * 86_400_000) });
 
 /** A hold placement that holds the person's lock until released. */
 async function holdingTheLock(userId: string) {

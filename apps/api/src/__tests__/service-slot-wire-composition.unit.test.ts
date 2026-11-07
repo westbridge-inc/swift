@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { PrismaClient } from '@prisma/client';
 import { GUYANA_TZ as SHARED_GUYANA_TZ } from '@swift/types';
 import { GUYANA_TZ } from '../modules/prep/prep-time';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { BookingService } from '../modules/booking/booking.service';
-import { computeDaySlots, fmtSlotTime, slotFitsConfig } from '../modules/booking/availability';
+import { computeDaySlots, fmtSlotTime, MAX_BUFFER_MINUTES, slotFitsConfig } from '../modules/booking/availability';
 import { VERY_LATE_AFTER_MIN, freeCancellationExpiresAt, isFreeCancellation } from '../modules/order/cancel-policy';
 import { sendBookingReminders } from '../modules/services/services.service';
 import { hostRoutes, orderStore, prismaDouble, recordingIo, recordingRedis } from './helpers/service-vertical-doubles';
@@ -67,6 +68,8 @@ describe('09:00 Guyana appointment slot across the API wire', () => {
       },
       bookingException: { findMany: async () => [] },
       booking: { findMany: async () => [] },
+      // [BOOK-S1] the business's capacity: one at a time
+      vendor: { findUnique: async () => ({ bookingCapacity: 1 }) },
     });
     const host = await hostRoutes(customerRoutes, { prisma, redis: recordingRedis(), io: recordingIo() });
     const response = await host.call('get /items/:id/slots', {
@@ -82,7 +85,11 @@ describe('09:00 Guyana appointment slot across the API wire', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-24T10:00:00.000Z')); // 06:00 in Guyana
     let storedSlot: Date | undefined;
-    const prisma = prismaDouble(orderStore([]), {
+    // [BOOK-S1] The reservation runs in its own transaction, under the business's lock.
+    const prisma: PrismaClient = prismaDouble(orderStore([]), {
+      $transaction: async (fn: (tx: PrismaClient) => Promise<unknown>) => fn(prisma),
+      $executeRaw: async () => 1,
+      vendor: { findUnique: async () => ({ bookingCapacity: 1 }) },
       item: {
         findUnique: async () => ({
           id: 'item-haircut', vendorId: 'vendor-svc', fulfillment: 'APPOINTMENT', isAvailable: true,
@@ -93,10 +100,13 @@ describe('09:00 Guyana appointment slot across the API wire', () => {
         }),
       },
       bookingException: { findMany: async () => [] },
-      booking: { create: async ({ data }: { data: { slotStart: Date } }) => {
-        storedSlot = data.slotStart;
-        return data;
-      } },
+      booking: {
+        findMany: async () => [],
+        create: async ({ data }: { data: { slotStart: Date } }) => {
+          storedSlot = data.slotStart;
+          return data;
+        },
+      },
     });
 
     const service = new BookingService(prisma);
@@ -112,7 +122,7 @@ describe('09:00 Guyana appointment slot across the API wire', () => {
     const config = { durationMinutes: 15, slots: [{ dayOfWeek: 4, start: '23:30', end: '23:59' }] };
     const slots = computeDaySlots({
       itemId: 'late', config, year: 2026, month: 9, day: 24,
-      exceptions: [], takenStarts: [], now: new Date('2026-09-24T10:00:00.000Z'),
+      exceptions: [], busy: [], now: new Date('2026-09-24T10:00:00.000Z'),
     });
     expect(slots.map((s) => s.toISOString())).toEqual(['2026-09-25T03:30:00.000Z']);
     expect(slotFitsConfig(slots[0]!, config, new Date('2026-09-24T10:00:00.000Z'))).toBe('OK');
@@ -123,14 +133,18 @@ describe('09:00 Guyana appointment slot across the API wire', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-24T10:00:00.000Z'));
     const taken = new Date('2026-09-25T03:30:00.000Z');
-    let query: { where: { slotStart: { gte: Date; lte: Date } } } | undefined;
+    let query: { where: { vendorId: string; slotStart: { lt: Date }; slotEnd: { gt: Date } } } | undefined;
     let exceptionDate: Date | undefined;
     const prisma = prismaDouble(orderStore([]), {
       item: { findUnique: async () => ({
         id: 'late', vendorId: 'vendor-svc', fulfillment: 'APPOINTMENT', isAvailable: true,
         bookingConfig: { durationMinutes: 15, slots: [{ dayOfWeek: 4, start: '23:30', end: '23:59' }] },
       }) },
-      booking: { findMany: async (args: typeof query) => { query = args; return [{ slotStart: taken }]; } },
+      booking: { findMany: async (args: typeof query) => {
+        query = args;
+        return [{ slotStart: taken, slotEnd: new Date(taken.getTime() + 15 * 60_000), item: { bookingConfig: { durationMinutes: 15 } } }];
+      } },
+      vendor: { findUnique: async () => ({ bookingCapacity: 1 }) },
       bookingException: { findMany: async ({ where }: { where: { date: Date } }) => {
         exceptionDate = where.date;
         return [];
@@ -141,8 +155,12 @@ describe('09:00 Guyana appointment slot across the API wire', () => {
       user: { userId: 'user-customer', role: 'CUSTOMER' },
       params: { id: 'late' }, query: { date: '2026-09-24' },
     }) as { data: { slots: string[] } };
-    expect(query?.where.slotStart.gte.toISOString()).toBe('2026-09-24T04:00:00.000Z');
-    expect(query?.where.slotStart.lte.toISOString()).toBe('2026-09-25T03:59:59.999Z');
+    // [BOOK-S1] The business's bookings (every listing) whose held time can reach the GUYANA day
+    // 2026-09-24 (04:00Z to 03:59:59.999Z next day): starting before its end plus this listing's
+    // 15 minutes and the longest gap, ending after its start minus the longest gap.
+    expect(query?.where.vendorId).toBe('vendor-svc');
+    expect(query?.where.slotEnd.gt.toISOString()).toBe(new Date(Date.parse('2026-09-24T04:00:00.000Z') - MAX_BUFFER_MINUTES * 60_000).toISOString());
+    expect(query?.where.slotStart.lt.toISOString()).toBe(new Date(Date.parse('2026-09-25T03:59:59.999Z') + (15 + MAX_BUFFER_MINUTES) * 60_000).toISOString());
     expect(response.data.slots).toEqual([]);
     await new BookingService(prisma).validateSlot('late', taken);
     expect(exceptionDate?.toISOString()).toBe('2026-09-24T00:00:00.000Z');

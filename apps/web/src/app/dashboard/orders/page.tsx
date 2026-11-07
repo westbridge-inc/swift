@@ -8,19 +8,24 @@ import { mmgDisputePaused } from '@/lib/mmg-dispute';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useFeedPollInterval } from '@/lib/store-live-feed';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
-import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
+import { BoardQuiet, LoadedBoard, ManageGrid, OrderCardActions, PickupCodeCard, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
 import { useStoreRole } from '@/lib/store-role';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import { getOrders, money, type VendorOrder } from '@/lib/vendor-api';
 import { preloadedPart } from '@/lib/preloaded-part';
-import { statusChip, timeAgo } from './order-chip';
+import { BoardNames, statusChip, timeAgo } from './order-chip';
+import { DeliveryStatusNotice } from '../delivery-status-notice';
 
 // [PERF · UI-FIX-WEB note 05:18Z] The order window is its own chunk, fetched as soon as this page
 // mounts and drawn without Suspense once here: the page's first load is lighter and the tap that
 // opens an order still draws it in the same frame.
 const orderDetail = preloadedPart(() => import('./order-detail').then((module) => module.OrderDetail));
+
+// [PERF · 6 Nov 2026] The first-steps cards show only while a store has no order yet: their own chunk, fetched
+// from mount like the order window (perf budget).
+const firstSteps = preloadedPart(() => import('@/components/orders-home-guides'));
 
 /** Only if the tap beats the background fetch: the same view as an order still loading. */
 function OrderWindowLoading({ onClose }: { onClose: () => void }) {
@@ -104,8 +109,9 @@ export default function OrdersPage() {
     <button data-order-id={o.id} onClick={() => setSelected(o.id)} className="block w-full text-left">
       <div className="flex flex-wrap items-center justify-between gap-2"><p className="sw-label">#{o.orderNumber}</p>{statusChip((o.status || '').toUpperCase(), mmgDisputePaused(o))}</div>
       <p className="sw-caption mt-1">{timeAgo(o.placedAt)}</p>
+      <BoardNames order={o} />
       <div className="my-3 space-y-1">{o.items.slice(0, 3).map(item => <p key={item.id} className="sw-label">{item.quantity}× {item.name}</p>)}{o.items.length > 3 && <p className="sw-caption">+{o.items.length - 3} more</p>}</div>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--swift-border)] pt-3"><span className="sw-caption">{[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ')} · {o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'}</span><span className="sw-title text-[17px]">{money(o.totalAmount)}</span></div>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--swift-border)] pt-3"><span className="sw-caption">{o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'}</span><span className="sw-title text-[17px]">{money(o.totalAmount)}</span></div>
       {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot && <p className="sw-caption mt-2">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p>}
       {o.vendor?.name && <p className="sw-caption mt-1">{o.vendor.name}</p>}
       <span className="mt-2 block text-[13px] font-semibold text-[var(--swift-red)]">View order</span>
@@ -118,9 +124,13 @@ export default function OrdersPage() {
   // build does not know may still be open, so it keeps the board up.
   const openOrUnknown = activeCount + (byBucket.get('unknown')?.length ?? 0);
   const storeLive = store.data?.status == null || store.data.status === 'ACTIVE';
+  const guides = firstSteps.usePart(!!orders.data && !orders.isError && openOrUnknown === 0
+    && (store.data?.status === 'PENDING_APPROVAL' || (store.data?._count?.orders === 0 && storeLive)));
   const lastOrderAt = all.map((o) => o.placedAt).filter(Boolean).sort().at(-1);
   return <div className="space-y-6">
     <NewOrderTakeover orders={all} onOpenOrder={setSelected} />
+    {/* [RIDER-SAFE 4/5] Why customers cannot order delivery right now (pickup stays open). */}
+    <DeliveryStatusNotice storeId={storeId} />
     <StoreHeader store={store.data} action={<button onClick={() => orders.refetch()} className="sw-btn sw-btn-md sw-btn-outline"><RefreshCw size={16} className={orders.isFetching ? 'animate-spin' : ''} aria-hidden />Refresh</button>} />
     {manager ? <RevenuePulse newOrders={newOrders} /> : <LoadedBoard loading={orders.isLoading} unavailable={orders.isError && !orders.data} total={activeCount} newCount={newOrders.length} progressCount={activeCount - newOrders.length} />}
     <div>
@@ -135,9 +145,13 @@ export default function OrdersPage() {
         the calm "nothing here" texts need the last read to have succeeded. */}
     {orders.data && <>
       {!orders.isError && openOrUnknown === 0 ? (
-        store.data?._count?.orders === 0
-          ? <FirstOrderGuide store={store.data} manager={manager} listening={!orders.isError} />
-          : <BoardQuiet lastOrderAt={lastOrderAt} />
+        // [WEB-ONBOARDING] a store never approved yet is told what is left, never "The board is live."
+        store.data?.status === 'PENDING_APPROVAL'
+          ? guides && <guides.NotLiveGuide store={store.data} manager={manager} owner={role === 'OWNER'} />
+          // [REVIEW S4] the first-order guide says the board is live: only a live store gets it
+          : store.data?._count?.orders === 0 && storeLive
+            ? guides && <guides.FirstOrderGuide store={store.data} manager={manager} listening={!orders.isError} />
+            : <BoardQuiet lastOrderAt={lastOrderAt} />
       ) : <div className="sw-order-board">{board.map(c => <section key={c.key} aria-label={`${c.label} orders`} className="min-w-0 space-y-3">
         <div className="flex items-baseline gap-2"><h2 className="sw-heading">{c.label}</h2><span className="sw-caption">{byBucket.get(c.key)?.length ?? 0}</span></div><p className="sw-caption">{c.hint}</p>
         {(byBucket.get(c.key) ?? []).map(row)}
@@ -154,8 +168,10 @@ export default function OrdersPage() {
     </>}
     {manager ? <ManageGrid store={store.data} owner={role === 'OWNER'} onOrderHistory={() => setBucket('done')} /> : <StaffAvailability />}
     {store.data && <div className="grid gap-4 wide:grid-cols-2">
-      <StoreStatusCard store={store.data} manager={manager} readFailed={store.isError} onRetryRead={() => void store.refetch()} />
+      <StoreStatusCard store={store.data} manager={manager} owner={role === 'OWNER'} readFailed={store.isError} onRetryRead={() => void store.refetch()} />
       {manager && storeLive && <SelfDeliveryCard store={store.data} readFailed={store.isError} onRetryRead={() => void store.refetch()} />}
+      {/* [STORE-DASH · O-2] Shown once the server serves the setting. */}
+      {manager && storeLive && typeof store.data.requirePickupCode === 'boolean' && <PickupCodeCard store={store.data} readFailed={store.isError} onRetryRead={() => void store.refetch()} />}
     </div>}
     <p className="text-center text-[13px] text-[var(--swift-muted)]">You keep 100% of every order — Swift takes no commission.</p>
     {selected && <div ref={dialog} className="sw-scrim items-start overflow-y-auto p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] wide:items-center" role="dialog" aria-modal="true" aria-label="Order details" onKeyDown={e => { if (e.key === 'Escape') setSelected(null); else trapTab(e); }}>

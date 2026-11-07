@@ -1,22 +1,29 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import Link from 'next/link';
 import { Section } from '@/components/site';
+import { PrelaunchPartnerNote } from '@/components/prelaunch-partner-note';
+import { partnerSignupHref, type PartnerDoor } from '@/lib/signup-roles';
 import { fetchPricing, type CataloguePriceBand, type CountryPricing, type MoverPriceQuote } from '@/lib/api';
 import { formatAmount, parseAmount } from '@/lib/money';
+import { catalogueRetierOf } from '@/lib/catalogue-retier';
 import { site } from '@/site.config';
 
 export const metadata: Metadata = { title: 'Pricing' };
 
 // Every number on this page is the server's quote — resolved by the same
-// function signup and the weekly re-tier bill through — so what a partner reads
-// here is what they are billed. A mover reads the rate of the role their
+// function signup prices through — so what a partner reads here is what they
+// are billed. [RETIER PR-A/C] A NEW store's fee and trial follow the step its own
+// catalogue reaches when Swift approves it (its owner ticks the fee first);
+// whether Swift moves a store between steps after that is the server's word
+// (`catalogueRetier`): the paragraph under the cards says so. A mover reads the rate of the role their
 // vehicle provisions: a taxi driver and a delivery rider never share a figure.
 // Only vehicles a mover can register today are shown (the server's `offered`
 // flag): heavy delivery — canters and box trucks — is off at launch (owner,
 // 13 Oct 2026), so its card appears only once the server offers them again.
 const MOVER_CLASSES: ReadonlyArray<{ tier: MoverPriceQuote['tier']; label: string; blurb: string }> = [
-  { tier: 'courier', label: 'Delivery & courier riders', blurb: 'Deliveries and parcels — every delivery fee and tip is yours.' },
-  { tier: 'taxi', label: 'Taxi drivers', blurb: 'One taxi rate, whatever you drive — every fare and tip is yours.' },
+  { tier: 'courier', label: 'Delivery & courier riders', blurb: 'Deliveries and parcels. Every delivery fee and tip is yours.' },
+  { tier: 'taxi', label: 'Taxi drivers', blurb: 'One rate, whatever you drive. Every fare and tip is yours.' },
   { tier: 'courierHeavy', label: 'Heavy delivery', blurb: 'Canters and box trucks for large and bulky loads.' },
 ];
 
@@ -56,24 +63,116 @@ function typedList(pricing: CountryPricing | null) {
 function itemRange(catalogue: CataloguePriceBand[], i: number): string {
   const band = catalogue[i]!;
   const next = catalogue[i + 1];
-  if (!next) return i === 0 ? 'Any number of active items' : `${band.minItems.toLocaleString()}+ active items`;
-  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} active items`;
-  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} active items`;
+  if (!next) return i === 0 ? 'Any number of items' : `${band.minItems.toLocaleString()}+ items`;
+  if (i === 0) return `For fewer than ${next.minItems.toLocaleString()} items`;
+  return `${band.minItems.toLocaleString()}–${(next.minItems - 1).toLocaleString()} items`;
 }
 
-function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number }) {
+/** A catalogue step's own free trial (a NEW store at that step when Swift approves it), else the list's. A value that
+ *  is not a whole number of days above zero is not shown: the list's own trial stands. */
+const bandTrialDays = (band: CataloguePriceBand, fallback: number) =>
+  typeof band.trialDays === 'number' && Number.isInteger(band.trialDays) && band.trialDays > 0 ? band.trialDays : fallback;
+
+// [ENTERPRISE-PAGE · owner 31 Oct 2026] What a chain gets today, each line true on main: one login runs every branch
+// and a person approves each new one (partner.service addBranch, personApprovalRequired); one MMG checkout pays every
+// branch fee DUE now (a branch in its free trial or not yet due is left out), or each pays its own
+// (billing/chain-checkout.ts); a monthly fee statement (billing/chain-statement.ts);
+// a weekly rate per branch agreed with Swift that never raises a branch's fee and ends or rises only after the
+// 14-day notice (vendor/chain-deal.ts, billing/fee-rise-notice.ts); a branch limit per account (branchLimit). No
+// chain rate is quoted and no discount promised: the rate is negotiated (owner, 29 Oct 2026; decision 49 stays).
+const CHAIN_POINTS = [
+  'One login runs all your branches. A person at Swift checks and approves each new branch before it goes live.',
+  'Pay every branch fee that is due in one MMG checkout, or pay each branch on its own.',
+  'A monthly fee statement lists every branch, the weeks it paid and its receipts.',
+  "Swift agrees a weekly rate per branch with you. A branch never pays more than its own fee, and the rate ends or goes up only after 14 days' notice.",
+  'Need more branches than one account allows? Contact sales.',
+];
+const SALES_SUBJECT = 'Chain / enterprise enquiry';
+/** The chains enquiry, the same address and subject wherever Contact sales appears on this page. */
+const salesMailto = () => `mailto:${site.salesEmail}?subject=${encodeURIComponent(SALES_SUBJECT)}`;
+
+function ChainsAndEnterprise() {
+  return (
+    <Section>
+      <div className="grid gap-8 md:grid-cols-[1fr_auto] md:items-start">
+        <div>
+          <h2 className="text-2xl font-extrabold tracking-tight">Chains and enterprise</h2>
+          <p className="mt-3 max-w-2xl text-[var(--swift-muted)]">
+            Run several stores or restaurants? Talk to us about a rate for all your branches.
+          </p>
+          <ul className="mt-5 max-w-3xl list-disc space-y-2 pl-5 text-sm leading-relaxed text-[var(--swift-muted)]">
+            {CHAIN_POINTS.map((point) => (
+              <li key={point}>{point}</li>
+            ))}
+          </ul>
+        </div>
+        <div className="flex flex-col items-start gap-2">
+          <a
+            href={salesMailto()}
+            className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+          >
+            Contact sales
+          </a>
+          <p className="text-sm text-[var(--swift-muted)]">{site.salesEmail}</p>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+/** [OPEN-EARLY · owner 31 Oct 2026] The pricing page's own way in: Join Swift, and each partner door opening on
+ *  its own sign-up option (the same names as the sign-up page's tiles). */
+const JOIN_DOORS: ReadonlyArray<{ door: PartnerDoor; label: string }> = [
+  { door: 'business', label: 'Put my business on Swift' },
+  { door: 'rider', label: 'Deliver with Swift' },
+  { door: 'driver', label: 'Drive a taxi with Swift' },
+];
+
+function JoinSwift() {
+  return (
+    <Section>
+      <h2 className="text-2xl font-extrabold tracking-tight">Join Swift</h2>
+      <p className="mt-3 max-w-2xl text-[var(--swift-muted)]">
+        Sign up with your phone and send your documents. A person checks them before you go live, and your free trial
+        starts the day you are approved.
+      </p>
+      <div className="mt-6 flex flex-wrap gap-3">
+        <Link
+          href="/signup"
+          className="rounded-full bg-[var(--swift-red)] px-6 py-3 font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+        >
+          Join Swift
+        </Link>
+        {JOIN_DOORS.map(({ door, label }) => (
+          <Link
+            key={door}
+            href={partnerSignupHref(door)}
+            className="rounded-full border border-[var(--swift-border-strong)] px-6 py-3 font-semibold transition-colors hover:bg-[var(--swift-subtle)]"
+          >
+            {label}
+          </Link>
+        ))}
+      </div>
+      <PrelaunchPartnerNote className="mt-6 max-w-3xl" />
+    </Section>
+  );
+}
+
+/** A weekly price card. [ENTERPRISE-CARD] `trialDays` null = no figure per week and no trial line (the custom rate). */
+function PriceCard({ title, price, children, trialDays }: { title: string; price: string; children: ReactNode; trialDays: number | null }) {
   return (
     <div className="rounded-2xl bg-[var(--swift-card)] p-7 shadow-[var(--swift-elevation-card)]">
       <h3 className="font-bold">{title}</h3>
       <p className="mt-3 text-3xl font-extrabold">
         {price}
-        <span className="text-base font-medium text-[var(--swift-muted)]"> / week</span>
+        {trialDays !== null && <span className="text-base font-medium text-[var(--swift-muted)]"> / week</span>}
       </p>
       {children}
-      <p className="mt-4 text-sm font-semibold text-[var(--swift-red)]">{trialDays}-day free trial</p>
+      {trialDays !== null && <p className="mt-4 text-sm font-semibold text-[var(--swift-red)]">{trialDays}-day free trial</p>}
     </div>
   );
 }
+
 
 // Live from the same endpoint the app's signup shows — never a hardcoded table.
 export default async function PricingPage({ searchParams }: { searchParams: Promise<{ country?: string }> }) {
@@ -86,8 +185,8 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
       <Section>
         <h1 className="text-4xl font-extrabold tracking-tight">Simple, flat pricing</h1>
         <p className="mt-3 max-w-2xl text-lg text-[var(--swift-muted)]">
-          One weekly subscription. Zero commission. Customers pay nothing to Swift — partners keep
-          100% of every sale, fare and tip.
+          One flat weekly fee and no commission. Partners keep 100% of every sale, fare and tip, and customers pay
+          Swift nothing.
         </p>
       </Section>
       <Section tint>
@@ -117,29 +216,66 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
               })}
               <PriceCard title="Services" price={amount(list.service)} trialDays={list.pricing.trialDays}>
                 <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                  Plumbers, electricians, mechanics, barbers — trades that book work rather than sell a catalogue.
+                  Plumbers, electricians, mechanics, tutors and other trades that book work.
                 </p>
               </PriceCard>
-              {list.catalogue.map((band, i) => (
-                <PriceCard key={band.tier} title={CATALOGUE_CLASSES[band.tier]?.label ?? 'Businesses'} price={amount(band.rate)} trialDays={list.pricing.trialDays}>
-                  <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                    {CATALOGUE_CLASSES[band.tier]?.blurb} {itemRange(list.catalogue, i)}.
-                  </p>
-                </PriceCard>
-              ))}
+              {list.catalogue.map((band, i) => {
+                const trialDays = bandTrialDays(band, list.pricing.trialDays);
+                return (
+                  <PriceCard key={band.tier} title={CATALOGUE_CLASSES[band.tier]?.label ?? 'Businesses'} price={amount(band.rate)} trialDays={trialDays}>
+                    <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                      {CATALOGUE_CLASSES[band.tier]?.blurb} {itemRange(list.catalogue, i)}.
+                    </p>
+                    {trialDays !== list.pricing.trialDays && (
+                      <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                        A new store with this many items when Swift approves it gets {trialDays} days free.
+                      </p>
+                    )}
+                  </PriceCard>
+                );
+              })}
+              {/* [ENTERPRISE-CARD · owner 31 Oct 2026] Last in the list: a custom rate, never a figure or a discount
+                  (decision 49), and no trial line: a chain's branches share the owner's trial end date or pay from
+                  day 1, so "14-day free trial" would not be true for them. The section below says the rest. */}
+              <PriceCard title="Enterprise and chains" price="Custom rate" trialDays={null}>
+                <p className="mt-2 text-sm text-[var(--swift-muted)]">
+                  For chains and large groups with several branches. Swift agrees a weekly rate per branch with you.
+                </p>
+                <a
+                  href={salesMailto()}
+                  className="mt-4 inline-block rounded-full bg-[var(--swift-red)] px-5 py-2.5 text-sm font-semibold text-[var(--swift-white)] transition-colors hover:bg-[var(--swift-red-600)]"
+                >
+                  Contact sales
+                </a>
+              </PriceCard>
             </div>
-            <p className="mt-6 text-sm text-[var(--swift-muted)]">
-              A taxi driver pays the taxi rate whatever the vehicle; a delivery rider&apos;s rate follows the
-              vehicle they register.{' '}
+            {/* [WEBSITE 30 Oct · owner] The note is short: the taxi and rider rules already sit on their cards. */}
+            <p className="mt-6 max-w-3xl text-sm leading-relaxed text-[var(--swift-muted)]">
               {/* Said only when the server confirms it bills no multi-store
                   discount (franchise: null, owner ruling of 13 Oct 2026). A
                   server that still sends the old rule bills it, so the page
                   must not claim otherwise; it shows no discount either way. */}
               {list.pricing.franchise == null && (
-                <>Every store is its own account and pays the rate for its own catalogue, however many stores its owner runs. </>
+                <>Each store pays its own weekly fee, however many stores its owner runs. </>
               )}
-              A business moves between catalogue tiers automatically as its active items change — nothing to apply
-              for. A rate agreed with Swift stays as agreed.
+              {/* [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on the step its
+                  OWN catalogue reaches then; above the first step its owner sees that exact fee and ticks it before
+                  anything is charged (api partner/store-fee.ts). [RETIER PR-C · REVIEW-M N3] What happens after that
+                  is the server's word (`catalogueRetier`, WEEKLY_RETIER_ON): off, nothing moves a store; on, a rise is
+                  told in the app ahead with how to stop it and a fall applies after two weekly counts (api
+                  billing.service recalculateVendorTiers + fee-rise-notice.ts); no word, no claim. */}
+              {/* [WEBSITE 30 Oct · owner] The note is three short sentences at most: the same words, joined. */}
+              When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). The store
+              sees that exact fee, and its owner ticks it
+              before anything is charged
+              {(() => {
+                const retier = catalogueRetierOf(list.pricing);
+                if (!retier) return null;
+                return retier.on
+                  ? <>; after that, Swift counts each store&apos;s items every week and tells the store in the app at least {retier.noticeDays} days before a higher rate applies, with how to stop it (a lower rate applies after two weekly counts a week apart, with a notice)</>
+                  : <>; after that, Swift does not move a store to another rate as its items change</>;
+              })()}
+              , and a rate agreed with Swift stays as agreed.
             </p>
           </>
         ) : (
@@ -148,19 +284,20 @@ export default async function PricingPage({ searchParams }: { searchParams: Prom
              something true and actionable — and must not point at an app that
              does not exist yet [AC-10]. */
           <p className="text-[var(--swift-muted)]">
-            We could not load this week&apos;s exact rates just now. The model does not change:{' '}
-            <b>one flat weekly fee</b>, a free trial that starts the day you are approved, and{' '}
-            <b>zero commission</b> on anything you sell or earn. Email{' '}
+            We could not load this week&apos;s rates just now. The model stays the same: <b>one flat weekly fee</b>, a
+            free trial from the day you are approved, and <b>zero commission</b> on anything you sell or earn. Email{' '}
             <a
               className="font-medium text-[var(--swift-red)] underline underline-offset-2"
               href={`mailto:${site.supportEmail}`}
             >
               {site.supportEmail}
             </a>{' '}
-            and we will send the current rate card for your market.
+            for the current rates.
           </p>
         )}
       </Section>
+      <JoinSwift />
+      <ChainsAndEnterprise />
     </>
   );
 }

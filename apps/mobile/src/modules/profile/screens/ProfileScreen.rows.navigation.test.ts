@@ -109,7 +109,8 @@ describe('[UI-SWEEP U-P1] Profile lists: one row shape per list', () => {
     const account = lists().find((l) => l.rows.some((r) => r.dataset['row'] === 'Personal data'));
     expect(account, 'the YOUR ACCOUNT list').toBeDefined();
     const labels = account!.rows.map((r) => r.dataset['row']);
-    expect(labels).toEqual(['Personal data', 'My addresses', 'Emergency contacts', 'Blocked people', 'Your ID', 'Your rating']);
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b) — a DELIBERATE change] no "Your ID" row: Swift asks a customer for no ID
+    expect(labels).toEqual(['Personal data', 'My addresses', 'Emergency contacts', 'Blocked people', 'Your rating']);
     for (const row of account!.rows) {
       expect(row.dataset['plain'], `${row.dataset['row']} has its icon tile`).toBe('false');
       expect(row.dataset['icon'], `${row.dataset['row']} names its icon`).not.toBe('');

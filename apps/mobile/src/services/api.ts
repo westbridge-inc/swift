@@ -1,3 +1,4 @@
+import { OWN_NAME_DECLARATION_VERSION } from '../lib/ownNameCopy';
 import axios, { type AxiosRequestConfig } from 'axios';
 import {
   SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
@@ -15,11 +16,13 @@ import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthRefreshOutcome, type AuthSessionSnapshot } from '../lib/authSession';
 import { noticeSessionEnded } from '../lib/sessionEndedNotice';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
+import { CHAIN_FEE_PATH } from '../lib/chain-fee';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
 } from './apiOrigin';
 import { explainDemoEnded, isReviewSessionClosed } from '../lib/reviewSessionClosed';
+import { CALL_BRIDGE_HEADER, CALL_BRIDGE_VERSION, type CallConfig, type CallTarget } from '../lib/callBridge';
 
 // Build-time override (set per EAS build profile, e.g. preview→staging,
 // production→prod). Development follows the current Expo/Metro bundle host so
@@ -130,6 +133,9 @@ api.interceptors.request.use((config) => {
     config.timeout = 20000;
   }
   if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
+  // [O-1] This app knows the Swift call bridge. With the bridge on, the server then sends no other
+  // person's personal number; with it off (the launch state) nothing changes (lib/callBridge.ts).
+  config.headers[CALL_BRIDGE_HEADER] = CALL_BRIDGE_VERSION;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);
   const authorization = config.headers.get('Authorization');
@@ -443,6 +449,9 @@ export const customerApi = {
   claimOrderPayment: (id: string, claim: { paid: boolean; reference?: string }) =>
     api.post(`/customer/orders/${id}/payment-claim`, claim.paid && claim.reference ? { paid: true, reference: claim.reference } : { paid: claim.paid })
       .then((res) => (res.data?.data ?? {}) as { orderId?: string; paymentStatus?: string; mismatch?: boolean; replayed?: boolean; mmgClaim?: unknown }),
+  // [BUG-HUNT-2 G08] The customer's word on a "Refund sent": it arrived, or it did not.
+  answerMmgRefund: (id: string, sendId: string, received: boolean) =>
+    api.post(`/customer/orders/${id}/mmg-refunds/${sendId}/answer`, { received }).then((res) => res.data?.data ?? {}),
   // Redeem a referral code (writes referredBy). `token` lets a just-registered
   // user redeem before the auth store has propagated.
   redeemReferral: (code: string, token?: string) =>
@@ -466,13 +475,19 @@ export const customerApi = {
     api.get('/search', { params: { q, ...opts } }),
   searchSuggestions: (q: string) => api.get('/search/suggestions', { params: { q } }),
   searchTrending: () => api.get('/search/trending'),
-  getVendor: (id: string) => api.get(`/customer/vendors/${id}`),
+  /** [CHAINS PR3] With the customer's place, the storefront's branch switcher says which branch delivers to them. */
+  getVendor: (id: string, point?: { lat: number; lng: number } | null) =>
+    api.get(`/customer/vendors/${id}`, point ? { params: { lat: point.lat, lng: point.lng } } : undefined),
   getVendorReviews: (id: string) => api.get(`/customer/vendors/${id}/reviews`),
   getItemSlots: (itemId: string, date: string, config?: AxiosRequestConfig) =>
     api.get(`/customer/items/${itemId}/slots`, {
       ...config,
       params: { ...config?.params, date },
     }),
+  // [BOOK-S6a · owner B2] Move my appointment to another free time of the same service. The server
+  // judges the time and the two-hour cut-off; the app shows its answer.
+  rescheduleBooking: (bookingId: string, newSlotStart: string) =>
+    api.post(`/customer/bookings/${bookingId}/reschedule`, { newSlotStart }),
   getFavorites: () => api.get('/customer/favorites'),
   addFavorite: (vendorId: string) => api.post(`/customer/favorites/${vendorId}`, {}),
   removeFavorite: (vendorId: string) => api.delete(`/customer/favorites/${vendorId}`),
@@ -491,7 +506,9 @@ export const customerApi = {
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   // This client renders the server's swap permissions and refusal guidance.
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v2' } }), // [O-4] v2 = renders the removal question
+  // [O-4] v2 = renders the removal question. [PICKUP · owner 30 Oct 2026] pickupHandover=v1 = tells the customer the
+  // first name + order number when the store's code is off (the server then sends no code).
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v2', pickupHandover: 'v1' } }),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message } } inside the axios body — reading one
   // level short silently discarded the authoritative cancellation outcome.
@@ -511,7 +528,7 @@ export const customerApi = {
     scheduledFor?: string;
     promoCode?: string;
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
-    /** Priority delivery: 1.5x delivery fee, dispatched first */
+    /** Priority delivery: the server's flat premium on the fee (the quote's expressSurcharge), dispatched first */
     express?: boolean;
     /** [L09 · price lock] The quote's total and line prices the customer saw. */
     expectedTotal?: number;
@@ -554,6 +571,9 @@ export const customerApi = {
   // Cart
   getCart: (lat?: number, lng?: number, choices?: CartQuoteChoices) =>
     api.get('/customer/cart', { params: { lat, lng, ...cartQuoteParams(choices) } }),
+  // [RIDER-SAFE 1] Whether delivery from this store can be ordered now, for this basket and address.
+  getDeliveryAvailability: (vendorId: string, paymentMethod: 'CASH' | 'MOBILE_MONEY') =>
+    api.get('/customer/delivery-availability', { params: { vendorId, paymentMethod } }),
   addToCart: (data: {
     vendorId: string;
     itemId: string;
@@ -624,6 +644,8 @@ export interface RideRequestBody {
   stops?: TaxiStopInput[];
   /** The fare of the chosen class from the latest quote of exactly this itinerary. */
   expectedFare?: number;
+  /** [TAXI waiting charge · quote proof] The waiting terms shown beside that fare, when any were. */
+  waiting?: { chargePerBlock: number; blockMinutes: number };
 }
 /** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
  *  over the ONE safety engine; zero safety logic lives on the phone. */
@@ -664,6 +686,12 @@ export const safetyApi = {
   /** Wrong person/car at the kerb: releases the ride, re-dispatches, locks
    *  the driver pending identity review, opens the incident. */
   notMyDriver: (rideId: string) => api.post(`/safety/rides/${rideId}/not-my-driver`, {}),
+  /** [DRILL-STORM · S-19] The pages (SOS, operations pages, drills) waiting for a responder to
+   *  acknowledge them, and the acknowledgement that stops their re-pages. The server decides who
+   *  may — the admin role the account HOLDS, whatever mode the app is in — and the phone shows
+   *  what it is given. */
+  opsAlerts: () => api.get('/safety/ops-alerts'),
+  acknowledgeOpsAlert: (id: string) => api.post(`/safety/ops-alerts/${encodeURIComponent(id)}/ack`, {}),
   /**
    * §7.1 shift identity check — multipart selfie in, the outcome ladder out
    * ({ outcome: PASS|BORDERLINE|FAIL|…, allowedOnline, attemptsLeft? }).
@@ -896,6 +924,14 @@ function serviceJobLifecycleConfig(): AxiosRequestConfig {
   };
 }
 
+// [BILL-PRO PR5] A pro's own weekly fee (API /api/v1/provider, BILL-PRO PR4): the fee view (with where it stands and
+// the words to tick) and "I understand the weekly fee". Paying uses weeklyFeeApi('provider', ...).
+export const providerFeeApi = {
+  subscription: (session?: AuthSessionSnapshot) => api.get('/provider/subscription', capturedAuthConfig(session)),
+  acknowledge: (body: { version: string; amount: number; currencyCode: string }, session?: AuthSessionSnapshot) =>
+    api.post('/provider/weekly-fee-ack', body, capturedAuthConfig(session)),
+};
+
 export const servicesApi = {
   providers: (trade: string) => api.get('/services/providers', { params: { trade } }),
   providerMe: (session?: AuthSessionSnapshot) =>
@@ -914,7 +950,8 @@ export const servicesApi = {
   removePortfolioPhoto: (file: string) => api.delete(`/services/providers/me/portfolio/${encodeURIComponent(file)}`),
   addQualification: (
     data: {
-      type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
+      // [ROLE-DOCS · owner 21 Oct 2026] no GEI_LICENCE: an electrician's GEI licence is a required checklist document
+      type: 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
       referenceNumber?: string;
     },
     session?: AuthSessionSnapshot,
@@ -943,7 +980,29 @@ export const servicesApi = {
     api.post(`/services/jobs/${id}/start`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
   completeJob: (id: string, expectedUpdatedAt: string) =>
     api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
+  // [BOOK-P3] Book a pro from their list of services (behind INSTANT_BOOKING on the server: off = 404).
+  proOfferings: (providerId: string) => api.get(`/services/providers/${providerId}/offerings`),
+  proSlots: (providerId: string, offeringId: string, date: string) =>
+    api.get(`/services/providers/${providerId}/slots`, { params: { offeringId, date } }),
+  bookPro: (input: { providerId: string; offeringId: string; scheduledFor: string; expectedPrice: number; note?: string }) =>
+    api.post('/services/jobs/book', input, serviceJobLifecycleConfig()),
+  // The free times to move a booked service to (its booked length), and the move itself.
+  jobSlots: (id: string, date: string) => api.get(`/services/jobs/${id}/slots`, { params: { date } }),
+  rescheduleJob: (id: string, input: { scheduledFor: string; expectedUpdatedAt: string; expectedScheduledFor: string }) =>
+    api.post(`/services/jobs/${id}/reschedule`, input, serviceJobLifecycleConfig()),
+  // The pro's own list of services, weekly hours and time off.
+  myBookable: () => api.get('/services/providers/me/bookable'),
+  addOffering: (input: { name: string; durationMinutes: number; price: number }) => api.post('/services/providers/me/offerings', input),
+  updateOffering: (id: string, input: { name?: string; durationMinutes?: number; price?: number; active?: boolean }) =>
+    api.patch(`/services/providers/me/offerings/${id}`, input),
+  saveHours: (slots: Array<{ dayOfWeek: number; start: string; end: string }>) => api.put('/services/providers/me/hours', { slots }),
+  addTimeOff: (input: { date: string; start?: string; end?: string }) => api.post('/services/providers/me/time-off', input),
+  removeTimeOff: (id: string) => api.delete(`/services/providers/me/time-off/${id}`),
 };
+
+/** [DOC-CONSENT S4] How the person gave the document tick for this upload: ticked on this visit, shown from their own
+ *  grant on record, or the prompt a police clearance asks first. The API records it as the ledger row's evidence. */
+export type UploadConsentVia = 'checkbox' | 'record' | 'prompt';
 
 // Verification (mounted at /api/v1/verification)
 export const verificationApi = {
@@ -957,14 +1016,19 @@ export const verificationApi = {
     fileUrl: string;
     consent: true;
     privacyNoticeVersion: string;
-    /** [R17] the tick shown before the upload (recorded in the consent ledger). */
-    consentTick?: 'document_v1';
+    /** [R17] the tick shown before the upload (recorded in the consent ledger); a police clearance's own tick. */
+    consentTick?: 'document_v1' | 'police_clearance_v1';
+    /** [POLICE-CLEARANCE CONSENT] the version of the police-clearance words shown (the API refuses changed words). */
+    consentVersion?: string;
+    /** [DOC-CONSENT S4] how that tick was given (an older API ignores it). */
+    consentVia?: UploadConsentVia;
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
-  submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
-    session?: AuthSessionSnapshot,
-  ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
+  /** [POLICE-CLEARANCE CONSENT] withdraw this checklist's police clearance: erased now, only a note kept. */
+  withdrawPoliceClearance: (role: string, session?: AuthSessionSnapshot) =>
+    api.post('/verification/police-clearance/withdraw', { role }, capturedAuthConfig(session)),
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] No customer ID any more: the app never sends one (the server answers
+  // 410 CUSTOMER_ID_NOT_NEEDED to the builds that still do).
 };
 
 // The mover vehicle taxonomy — mirrors the server's VehicleType enum
@@ -1055,7 +1119,20 @@ export const riderApi = {
   // without it) — an empty body 400s.
   handover: (
     id: string,
-    body: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; ridePin?: string },
+    body: {
+      outcome: 'paid' | 'no_show' | 'refused' | 'short_payment';
+      gps: { lat: number; lng: number };
+      photoUrl?: string;
+      ridePin?: string;
+      /** [L02 · row 56] The cash taken at the door, whole GYD (api cash/door-cash.ts decides what it means). */
+      collectedAmount?: number;
+      /** 'short_payment' with partial cash only: true = handed back; false = the rider still holds it (operations follow up). */
+      cashReturned?: boolean;
+      /** 'paid' only: the goods were already handed over for less than due. */
+      handedOverShort?: true;
+      /** The door authority version the screen rendered; a stale one is refused. */
+      handoverVersion?: string;
+    },
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
@@ -1076,7 +1153,7 @@ export const riderApi = {
   earningsToday: () => api.get('/rider/earnings/today'),
   earningsSummary: () => api.get('/rider/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/rider/earnings', { params }),
-  /** [DOC-1 §31.4] The rider's guarantee claims with the evidence bundle and the pay-out SLA. */
+  /** [DOC-1 §31.4] The rider's unpaid cash orders with the evidence bundle. */
   claims: () => api.get('/rider/claims'),
   earningsDaily: (days = 7) => api.get('/rider/earnings/daily', { params: { days } }),
   earningsStatement: (session?: AuthSessionSnapshot) =>
@@ -1152,6 +1229,12 @@ export const driverApi = {
   updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/driver/profile/mmg-pay-url/pending'),
+  // [CARS-DELIVER] "Deliveries too": can this taxi car also take store deliveries, and is it set up?
+  // { available, enabled, reason, vehicle }. An older server answers 404 (the card stays hidden).
+  carDeliveries: () => api.get('/driver/deliveries'),
+  addCarDeliveries: () => api.post('/driver/deliveries'),
+  // [CARS-DELIVER PR4] "Taxi rides and deliveries": store delivery offers also come while the taxi is online and free.
+  setCarDeliveriesMode: (takesDeliveries: boolean) => api.put('/driver/deliveries/mode', { takesDeliveries }),
   // [TAXI multi-stop] `capabilities` is sent ONLY when the caller passes it —
   // that is, only when the server has advertised rides with stops (CONTRACT
   // §6.4). Without it the body is exactly today's { latitude, longitude }.
@@ -1232,15 +1315,35 @@ export interface VendorItemInput {
   bulk?: 'normal' | 'bulky' | 'very_bulky';
   stockQuantity?: number;
   imageUrl?: string;
+  /** [STORE-VAT · owner O-5] The store's VAT class for the item; omitted = unchanged (STANDARD for a new item). */
+  vatClass?: 'STANDARD' | 'ZERO_RATED' | 'EXEMPT';
 }
 
 export const vendorApi = {
   profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
+  /** [ROLE-DOCS · owner 21 Oct 2026] Sign "I trade under my own name" (in place of a business registration). */
+  signOwnName: () => api.post('/vendor/onboarding/own-name', { accept: true, attestationVersion: OWN_NAME_DECLARATION_VERSION }),
+  /** [ROLE-DOCS] Use a registered business name instead: the store asks for its registration again. */
+  dropOwnName: () => api.delete('/vendor/onboarding/own-name'),
+  /** [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant's owner ticks, for ONE store (named by its id, so the tick
+   *  never lands on whichever store happens to be selected): everyone who handles food there holds a current food
+   *  handler's certificate. `version` is the server's (GET /verification/status → foodHandlerAttestation). */
+  tickFoodHandlers: (vendorId: string, version: string) =>
+    api.post('/vendor/onboarding/food-handlers', { accept: true, attestationVersion: version }, { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
+  /** [RETIER PR-A2] The selected store's weekly fee as it would be born now (its catalogue's step), and whether its
+   *  owner must tick it before the store goes live. */
+  storeWeeklyFee: (vendorId: string) => api.get('/vendor/onboarding/weekly-fee', { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
+  /** [RETIER PR-A2] The owner ticks that exact fee for ONE store, named by its id in the header and the body (the server
+   *  refuses a mismatch, and any amount, currency or version that is not its quote now). */
+  tickStoreWeeklyFee: (tick: { vendorId: string; weeklyFeeAck: { version: string; amount: number; currencyCode: string } }) =>
+    api.post('/vendor/onboarding/weekly-fee', tick, { headers: { [VENDOR_STORE_HEADER]: tick.vendorId } }),
   // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
   toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
   toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
+  // [RIDER-SAFE 4/5] Whether customers can order DELIVERY from this store now, and if not, why (double-prefixed like toggle-orders).
+  deliveryStatus: () => api.get('/vendor/vendor/delivery-status'),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
   order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
@@ -1254,8 +1357,17 @@ export const vendorApi = {
     api.post(`/vendor/orders/${orderId}/items/${lineId}/substitute`, { substituteItemId }),
   refundLine: (orderId: string, lineId: string) =>
     api.post(`/vendor/orders/${orderId}/items/${lineId}/refund-line`, {}),
-  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }) =>
-    api.post(`/vendor/items/${itemId}/adjust`, body),
+  /** [MASTER-025] `commandKey` names ONE adjustment: a retry with the same key
+   *  returns the committed movement instead of moving stock again. */
+  adjustStock: (itemId: string, body: { delta: number; reason: string; note?: string }, commandKey?: string) =>
+    api.post(`/vendor/items/${itemId}/adjust`, body, commandKey ? { headers: { 'Idempotency-Key': commandKey } } : undefined),
+  /** [IN-STORE-SALE] One sold in person ("Sold in store −1"). `tapKey` names that ONE tap: a resend is answered with
+   *  its receipt, never taken twice. */
+  inStoreSale: (itemId: string, tapKey: string) =>
+    api.post(`/vendor/items/${itemId}/in-store-sale`, {}, { headers: { 'Idempotency-Key': tapKey } }),
+  /** [IN-STORE-SALE] Undo of that tap: the server puts the one back (a new ledger row), once per sale. */
+  undoInStoreSale: (itemId: string, saleKey: string) =>
+    api.post(`/vendor/items/${itemId}/in-store-sale/undo`, { saleKey }),
   lowStock: () => api.get('/vendor/items/low-stock'),
   // MMG cash ledger — delivery fees this store owes riders
   cashSettlements: () => api.get('/vendor/cash-settlements'),
@@ -1275,7 +1387,15 @@ export const vendorApi = {
   setFulfillmentMode: (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY') =>
     api.put(`/vendor/orders/${id}/fulfillment-mode`, { mode }),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
+  /** [O-2] The store handed the order to the Swift rider (one status-log row; custody stays the rider's "Picked up"). */
+  handedToRider: (id: string) => api.put(`/vendor/orders/${id}/handed-to-rider`, {}),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
+  /** [BOOK-NS-APP · owner B3] "Customer didn't come": the server closes the started appointment and records it. */
+  markNoShow: (id: string) => api.put(`/vendor/orders/${id}/no-show`),
+  /** [BUG-HUNT-2 G08] The store's "Refund sent": its MMG reference and the amount it sent. */
+  markRefundSent: (id: string, body: { reference: string; amount: string }) => api.post(`/vendor/orders/${id}/mmg-refunds/send`, body),
+  /** [BUG-HUNT-2 G20] A ready pickup nobody came for. */
+  markNotCollected: (id: string) => api.put(`/vendor/orders/${id}/not-collected`),
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
   retryDispatch: (id: string) => api.post(`/vendor/orders/${id}/retry-dispatch`),
@@ -1283,6 +1403,13 @@ export const vendorApi = {
   returnReceived: (id: string) => api.post(`/vendor/orders/${id}/recovery/return-received`, {}),
   items: () => api.get('/vendor/items'),
   subscription: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/subscription', capturedVendorAuthConfig(session, storeId)),
+  /** [STORE-VAT · owner O-5] The store's VAT (OWNER only): its answer, its certificate, and what a person decided. */
+  vat: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/vat', capturedVendorAuthConfig(session, storeId)),
+  updateVat: (data: { registered: boolean; vatRegistrationNumber?: string | null; mode?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.put('/vendor/vat', data, capturedVendorAuthConfig(session, storeId)),
+  /** The certificate file was uploaded first (/verification/upload); this files it for a PERSON's check. */
+  sendVatCertificate: (data: { fileUrl: string; consent: true; privacyNoticeVersion: string; consentTick: 'document_v1'; vatRegistrationNumber?: string; mode?: 'PRICES_INCLUDE_VAT' | 'ADD_VAT_AT_CHECKOUT' }, session?: AuthSessionSnapshot, storeId?: string | null) =>
+    api.post('/vendor/vat/certificate', data, capturedVendorAuthConfig(session, storeId)),
   /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee. */
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot, storeId?: string | null) =>
     api.put('/vendor/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedVendorAuthConfig(session, storeId)),
@@ -1334,7 +1461,8 @@ export const vendorApi = {
     api.delete(`/vendor/option-groups/${id}`, capturedAuthConfig(session)),
   addOption: (
     groupId: string,
-    data: { name: string; additionalPrice?: number; isDefault?: boolean },
+    // [VAT-DOCS] vatListedAdditionalPrice: the extra price as the store typed it (before VAT where VAT is added).
+    data: { name: string; additionalPrice?: number; vatListedAdditionalPrice?: number; isDefault?: boolean },
     session?: AuthSessionSnapshot,
   ) => api.post(`/vendor/option-groups/${groupId}/options`, data, capturedAuthConfig(session)),
   updateOption: (id: string, data: { name?: string; additionalPrice?: number; isDefault?: boolean }) =>
@@ -1352,6 +1480,8 @@ export const vendorApi = {
     api.get('/vendor/sales-statement', capturedAuthConfig(session, { params: { link: 1 } })),
   hours: () => api.get('/vendor/hours'),
   bookings: (params?: { from?: string; to?: string }) => api.get('/vendor/bookings', { params }),
+  // [BOOK-S5a · owner B2] The business moves a booking to another free time of the same service.
+  rescheduleBooking: (bookingId: string, newSlotStart: string) => api.post(`/vendor/bookings/${bookingId}/reschedule`, { newSlotStart }),
   // Block time (scheduling 2.1): one-off exceptions — full day or a window.
   bookingExceptions: (params?: { from?: string; to?: string }) => api.get('/vendor/bookings/exceptions', { params }),
   createBookingException: (data: { date: string; start?: string; end?: string; reason?: string; itemId?: string }) =>
@@ -1360,7 +1490,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; requirePickupCode?: boolean; latitude?: number; longitude?: number; bookingCapacity?: number; maxConcurrentOrders?: number | null }) =>
     api.put('/vendor/profile', data),
   // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
   // redraws it without location or camera data, and serves it to customers), or taken down.
@@ -1423,14 +1553,45 @@ export const vendorApi = {
   deletePromo: (id: string) => api.delete(`/vendor/promos/${id}`),
   // Staff & roles (owner-only)
   staff: () => api.get('/vendor/staff'),
-  addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),
+  /** [CHAINS PR2] `vendorIds`: add one person to several of the owner's branches in one step (one daily add). */
+  addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF'; vendorIds?: string[] }) => api.post('/vendor/staff', data),
   updateStaff: (id: string, role: 'MANAGER' | 'STAFF') => api.put(`/vendor/staff/${id}`, { role }),
   removeStaff: (id: string) => api.delete(`/vendor/staff/${id}`),
   /** [Row 55] Take back every unanswered team invite from this store (none is ever listed). */
   withdrawStaffInvites: () => api.post('/vendor/staff/invites/withdraw', {}),
+  // [CHAINS PR2 · owner 29 Oct 2026] One owner, many branches.
+  /** Every store this account works in; a store not live yet has `awaitingApproval` and `goLive` (whose turn it is). */
+  stores: () => api.get('/vendor/stores'),
+  /** What the add-a-branch screen shows first: the branch's weekly fee and its words, the shared trial, the deal. */
+  branchTerms: (vendorType: string) => api.get('/vendor/stores/branch-terms', { params: { vendorType } }),
+  /** Add a branch (owner; confirm-it's-you; the weekly fee ticked for this branch), with what go-live needs from the
+   *  owner: the number customers can call (required) and, for a restaurant, the food handlers tick (optional). */
+  addBranch: (data: {
+    business: Record<string, unknown>; weeklyFeeAck: { version: string; amount: number; currencyCode: string };
+    publicPhone: string; foodHandlers?: { accept: true; attestationVersion: string };
+  }) =>
+    api.post('/vendor/stores', data),
+  /** Sales per branch and in all (owner: every branch; a manager: the branches they manage). */
+  storesSummary: () => api.get('/vendor/stores/summary'),
+  /** Every branch's orders on one board, whichever store is selected; each order names its store. */
+  allBranchOrders: () => api.get('/vendor/orders', { params: { scope: 'all', limit: 100 } }),
+  /** Copy another branch's menu into `toStoreId` (named by its id, never the selected store by accident). */
+  copyMenu: (toStoreId: string, fromStoreId: string, copyKey: string) =>
+    api.post('/vendor/menu/copy', { fromStoreId, copyKey }, { headers: { [VENDOR_STORE_HEADER]: toStoreId } }),
+  /** One branch's own switches and hours, named by its id (bulk actions run these one branch at a time). */
+  toggleOrdersAt: (vendorId: string, acceptingOrders: boolean) =>
+    api.put('/vendor/vendor/toggle-orders', { acceptingOrders }, { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
+  setHoursAt: (vendorId: string, hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
+    api.put('/vendor/hours', { hours }, { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging
+/** [O-1] The Swift call bridge (lib/callBridge.ts). */
+export const callsApi = {
+  config: () => api.get<{ success: boolean; data: CallConfig }>('/calls/config'),
+  bridge: (orderId: string, target: CallTarget) => api.post<{ success: boolean; data: { callId: string; status: string } }>('/calls/bridge', { orderId, target }),
+};
+
 export const chatApi = {
   room: (orderId: string) => api.post('/chat/rooms', { orderId }),
   messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),
@@ -1483,7 +1644,7 @@ export const adsApi = {
 /** Checkout calls capture the paying principal and selected store across retries. */
 export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, session: AuthSessionSnapshot | null, storeId?: string | null) {
   const base = `/${family}/subscription/mmg-checkout`;
-  if (!session) return { start: async () => { throw new Error('Sign in to pay.'); }, read: async () => { throw new Error('Sign in to view payment.'); } };
+  if (!session) return { start: async () => { throw new Error('Sign in to pay.'); }, reopen: async () => { throw new Error('Sign in to pay.'); }, read: async () => { throw new Error('Sign in to view payment.'); } };
   const current = () => {
     const now = getAuthSessionSnapshot();
     if (!now || now.userId !== session.userId || now.generation !== session.generation || (family === 'vendor' && useStoreSwitcher.getState().selectedStoreId !== storeId)) throw new Error('The paying account changed.');
@@ -1493,12 +1654,47 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
     ? capturedVendorAuthConfig(current(), storeId, { headers })
     : capturedAuthConfig(current(), { headers });
   return {
-    start: async (key: string): Promise<import('../lib/weeklyFee').CheckoutStart> => {
-      const response = await api.post(base, {}, config({ 'Idempotency-Key': key }));
+    start: async (key: string, weeks?: number): Promise<import('../lib/weeklyFee').CheckoutStart> => {
+      // [owner 6 Nov 2026] `weeks` only when the server offered a choice; an older API takes one week.
+      const response = await api.post(base, weeks === undefined ? {} : { weeks }, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    /** Back to MMG's page: only the named checkout's open page, never a new checkout. */
+    reopen: async (ref: string, key: string): Promise<import('../lib/weeklyFee').CheckoutStart> => {
+      const response = await api.post(`${base}/${encodeURIComponent(ref)}/reopen`, {}, config({ 'Idempotency-Key': key }));
       current(); return response.data.data;
     },
     read: async (ref: string): Promise<import('../lib/weeklyFee').CheckoutStatus> => {
       const response = await api.get(`${base}/${encodeURIComponent(ref)}`, config());
+      current(); return response.data.data;
+    },
+  };
+}
+
+/** [ENTERPRISE E1b] "Pay all my branches" (MMG-CHECKOUT-API section 12), the store owner's: the same captured principal
+ *  and store as weeklyFeeApi. The list the owner was shown goes back as the server sent it; the server prices it again
+ *  and never takes an amount from it. */
+export function chainFeeApi(session: AuthSessionSnapshot | null, storeId?: string | null) {
+  const base = CHAIN_FEE_PATH;
+  const signedOut = async (): Promise<never> => { throw new Error('Sign in to pay.'); };
+  if (!session) return { list: signedOut, start: signedOut, read: signedOut };
+  const current = () => {
+    const now = getAuthSessionSnapshot();
+    if (!now || now.userId !== session.userId || now.generation !== session.generation || useStoreSwitcher.getState().selectedStoreId !== storeId) throw new Error('The paying account changed.');
+    return now;
+  };
+  const config = (headers?: Record<string, string>) => capturedVendorAuthConfig(current(), storeId, { headers });
+  return {
+    list: async (): Promise<import('../lib/chain-fee').ChainFees> => {
+      const response = await api.get(base, config());
+      current(); return response.data.data;
+    },
+    start: async (key: string, confirmed: import('../lib/chain-fee').ChainConfirmed): Promise<import('../lib/chain-fee').ChainCheckoutStart> => {
+      const response = await api.post(`${base}/mmg-checkout`, confirmed, config({ 'Idempotency-Key': key }));
+      current(); return response.data.data;
+    },
+    read: async (ref: string): Promise<import('../lib/chain-fee').ChainCheckout> => {
+      const response = await api.get(`${base}/mmg-checkout/${encodeURIComponent(ref)}`, config());
       current(); return response.data.data;
     },
   };

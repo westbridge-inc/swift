@@ -1,10 +1,11 @@
 import { lockFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 import type { PrismaClient } from '@prisma/client';
-import type { NotificationService } from '../notification/notification.service';
+import type { NotificationAudience, NotificationService } from '../notification/notification.service';
 import { payInfo } from './agent-cash.service';
 import { feeCoveredLine, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
 import { feePauseHoldsBilling, feePauseSpanOpen } from './mmg-pause';
+import { PAYER_INCLUDE, payerUserIdOf } from '../subscription/subscription-owner';
 
 // Trial first-payment funnel [san spec 21.4]: the first fee, told before the
 // first bill ever exists. Day 10 (trial end − 4d) and day 13 (− 1d): the exact
@@ -35,18 +36,14 @@ export async function sweepTrialFeeEducation(
       feeWaived: false,
       trialEndDate: { gt: now, lte: new Date(now.getTime() + 4 * DAY_MS) },
     },
-    include: {
-      rider: { select: { userId: true } },
-      driver: { select: { userId: true } },
-      vendor: { select: { owner: { select: { userId: true } } } },
-    },
+    include: PAYER_INCLUDE,
     take: 500,
   });
 
   for (const sub of trials) {
     const daysLeft = Math.ceil((sub.trialEndDate!.getTime() - now.getTime()) / DAY_MS);
     const stage = daysLeft <= 1 ? 'd13' : 'd10';
-    const userId = sub.rider?.userId ?? sub.driver?.userId ?? sub.vendor?.owner.userId;
+    const userId = payerUserIdOf(sub);
     if (!userId) continue;
     try {
       const allowed = await prisma.$transaction(async (tx) => {
@@ -72,16 +69,20 @@ export async function sweepTrialFeeEducation(
     const payLine = fee.amountDueGyd <= 0
       ? feeCoveredLine(fee.weeklyFeeGyd, sub.currencyCode, { first: true })
       : await mmgCheckoutLive(prisma, sub, 'unknown')
-        ? mmgPayLine(checkoutAmountGyd(fee))
+        ? mmgPayLine(checkoutAmountGyd(fee), { alsoWebsite: !!sub.serviceProviderId })
         : feeDueLine(fee.amountDueGyd, sub.currencyCode, sub.trialEndDate, { first: true });
-    const audience = sub.vendor ? 'VENDOR' : 'MOVER';
+    // [BILL-PRO] A pro's fee is neither a store's nor a mover's: no shipped build opens a fee screen for it.
+    // [REVIEW-M #2217 N1] The audience names NotificationService knows ('business' / 'earner'); the old 'VENDOR' /
+    // 'MOVER' spellings were cast past the type. Builds 9-12 route this notice the same with either spelling (it
+    // carries no orderId; build 12's feeFamilyOf reads both), and the customer inbox hides both.
+    const audience: NotificationAudience = sub.vendor ? 'business' : sub.serviceProvider ? 'provider' : 'earner';
     if (stage === 'd10') {
       await notifications.send({
         userId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your trial ends soon',
         body: `Your trial ends on ${sub.trialEndDate!.toISOString().slice(0, 10)}. ${payLine}`,
-        audience: audience as never,
+        audience,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
         feeStageKey: `trial:${stage}`,
       });
@@ -92,7 +93,7 @@ export async function sweepTrialFeeEducation(
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your trial ends soon',
         body: `Your trial ends on ${sub.trialEndDate!.toISOString().slice(0, 10)}. ${payLine}`,
-        audience: audience as never,
+        audience,
         data: { kind: 'trial_fee_education', subscriptionId: sub.id, stage },
         feeStageKey: `trial:${stage}`,
       });

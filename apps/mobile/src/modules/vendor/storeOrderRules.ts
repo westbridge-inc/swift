@@ -22,7 +22,7 @@
 
 export const MMG_MONEY_MOVED = ['CAPTURED', 'CLAIMED'] as const;
 
-type OrderLike = { status?: unknown; paymentMethod?: unknown; paymentStatus?: unknown; items?: unknown } | null | undefined;
+type OrderLike = { status?: unknown; paymentMethod?: unknown; paymentStatus?: unknown; items?: unknown; fulfillment?: unknown } | null | undefined;
 type LineLike = { subStatus?: unknown; substituteName?: unknown } | null | undefined;
 
 const linesOf = (order: OrderLike): LineLike[] => (Array.isArray(order?.items) ? (order!.items as LineLike[]) : []);
@@ -50,9 +50,10 @@ export function nothingToAccept(order: OrderLike): boolean {
   return waiting(order) && lines.length > 0 && lines.every((l) => l?.subStatus === 'REFUNDED' || l?.subStatus === 'REJECTED');
 }
 
-/** "Out of stock" is one tap on a line of a waiting order that has not been asked about yet. */
+/** "Out of stock" is one tap on a line of a waiting order that has not been asked about yet. A booking
+ *  (fulfillment APPOINTMENT) is a service at a time, not goods: it has no stock, so it is accepted or declined. */
 export function canMarkOutOfStock(order: OrderLike, line: LineLike): boolean {
-  if (!waiting(order)) return false;
+  if (!waiting(order) || order?.fulfillment === 'APPOINTMENT') return false;
   const sub = line?.subStatus;
   return sub == null || sub === 'NONE';
 }

@@ -40,6 +40,15 @@ describe('[R3] the store page seller block', () => {
     expect(sellerPaymentLine({ cash: true, storeMmg: false })).toBe('Cash at handover');
   });
 
+  // [FOOD-PERMIT · owner 24 Oct 2026] A restaurant's food handler's certificate is optional; one on file is a trust badge.
+  it('names a food handler’s certificate on file, after payment; nothing when the server says none (or an older server)', () => {
+    const facts = sellerFacts({ ...full, foodHandlerCertificate: true });
+    expect(facts.map((f) => f.label)).toEqual(['Legal name', 'Business address', 'Phone', 'How payment works', 'Food handler’s certificate', 'Refunds']);
+    expect(facts.find((f) => f.label === 'Food handler’s certificate')?.value).toBe('On file with Swift');
+    expect(sellerFacts({ ...full, foodHandlerCertificate: false }).some((f) => f.label === 'Food handler’s certificate')).toBe(false);
+    expect(sellerFacts(full).some((f) => f.label === 'Food handler’s certificate')).toBe(false);
+  });
+
   it('the store screen renders the server’s block (none from an older API), with the statutory sentence the server sent', () => {
     expect(src('src/modules/shop/screens/RestaurantScreen.tsx')).toContain('{v.seller ? <SellerInfo seller={v.seller} gutter={GUTTER} /> : null}');
     const card = src('src/components/SellerInfo.tsx');

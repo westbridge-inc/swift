@@ -77,5 +77,7 @@ it('only the permission-aware client opts into the swap response', async () => {
   await customerApi.getOrder('order-7');
   expect(seen[0]?.url).toBe('/customer/orders/order-7');
   // [O-4] v2: this build renders the pre-accept removal question too (a v1 client is served a legacy line).
-  expect(seen[0]?.params).toEqual({ swapDecisions: 'v2' });
+  // [PICKUP · owner 30 Oct 2026] pickupHandover=v1: this build tells the customer the name + order number when the
+  // store's code is off, so the server sends it no code then.
+  expect(seen[0]?.params).toEqual({ swapDecisions: 'v2', pickupHandover: 'v1' });
 });

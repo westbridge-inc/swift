@@ -46,17 +46,25 @@ describe('[human-only identity] the Privacy Policy names only what production ca
     expect(PRIVACY).toContain('No outside identity-verification provider receives them.');
   });
 
-  it('a customer ID is described as it is handled: on file at once unless an automatic check holds it — never as checked by a person', () => {
-    expect(aiParagraph).toContain("A customer's ID goes on file at once unless a simple automatic check holds it for a person");
-    expect(aiParagraph).toContain('these checks never read the ID or compare faces');
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change, LEGAL_VERSION 2026-11-01.1] Swift no longer
+  // takes a customer's ID, so the paragraph describes no customer-ID check at all; partner documents are still a person's.
+  it('no customer ID is described, because none is taken; every partner document is a person\'s decision', () => {
+    expect(aiParagraph).not.toMatch(/customer's ID|customer ID/i);
+    expect(aiParagraph).not.toMatch(/goes on file at once/);
+    expect(aiParagraph).toContain('Swift uses no automated document-reading or face-matching service');
     expect(aiParagraph).toContain('A person on our verification team then reviews each partner document and decides whether to accept it.');
   });
 });
 
 describe('[customers take no photos] the words say a customer never needs a photo, and no partner rule changed', () => {
-  it('Terms: no profile photo for taxi; the ID on file stays', () => {
+  // [Owner ruling 24 Oct 2026 — NO CUSTOMER ID GATE] Since 2026-10-25 taxi rides and larger Orders need no ID either.
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change, LEGAL_VERSION 2026-11-01.1] and the app never
+  // asks a customer for one at all (no strike or promo exception left).
+  it('Terms: no profile photo for taxi, and no ID for anything', () => {
     expect(TERMS).not.toMatch(/taxi rides also need a profile photo/);
-    expect(TERMS).toContain('higher-value Orders and all taxi rides additionally require a government-issued ID on file, requested in the app when it becomes necessary. A customer never needs a photo.');
+    expect(TERMS).not.toMatch(/higher-value Orders and all taxi rides additionally require/);
+    expect(TERMS).not.toMatch(/asks for a government-issued ID on file/);
+    expect(TERMS).toContain('An account requires a phone number verified by SMS code. A customer never needs an ID or a photo to use Swift, and Swift does not ask a customer for either.');
   });
 
   it('Privacy: the registration selfie is for partners and advertisers; a customer is never shown by photo', () => {

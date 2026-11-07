@@ -45,14 +45,16 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
   ring_offer: ['dispatch_offer'],
 
   // A job already in hand needs the person now.
-  job_update: ['prep_ready', 'booking_to_confirm', 'guardian_driver_confirm', 'liveness_midshift_prompt'],
+  // [O-1] 'Swift is calling you about your order': the phone rings within seconds, so it travels now and loud.
+  job_update: ['prep_ready', 'booking_to_confirm', 'guardian_driver_confirm', 'liveness_midshift_prompt', 'call_incoming'],
 
   // Nothing is lost if these land an hour late and silently.
   quiet: [
     'RATING_REMINDER',
     'ad_weekly_report', 'ad_invoice_receipt',
     'ad_campaign_scheduled', 'ad_campaign_live', 'ad_campaign_completed', 'ad_campaign_resumed',
-    'vendor_tier_nudge', 'trial_fee_education',
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] vendor_tier_nudge and vendor_tier_promoted are gone with the tier.
+    'trial_fee_education', 'provider_fee_trial',
   ],
 
   standard: [
@@ -79,8 +81,18 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_unattested_cancellation', 'supply_returned',
     // [owner 18 Oct 2026] the customer says they paid; the store is asked to check its MMG (standard, like its MMG peers)
     'mmg_customer_says_paid',
+    // [BUG-HUNT-2 G14c] the same moment, the customer: Swift support is checking (standard, like its MMG peers)
+    'mmg_store_silent',
+    // [BUG-HUNT-2 G22] the rider at the door: the payment is disputed, keep the order (standard, like pickup_overdue)
+    'mmg_dispute_hold',
     // [O-4] the customer answered an out-of-stock question asked before acceptance; the store may accept now
     'vendor_customer_answered',
+    // [BUG-HUNT-2 G08] the MMG refund rail, each side told once per step (standard, like its MMG peers)
+    'mmg_refund_sent', 'mmg_refund_confirmed', 'mmg_refund_disputed', 'mmg_refund_overdue', 'mmg_refund_resolved',
+    // [BUG-HUNT-2 G22] a paid order came back: each side told what is owed, once
+    'mmg_refund_owed', 'mmg_refund_owed_store', 'mmg_refund_checking',
+    // [BUG-HUNT-2 G20] the store, once: a pickup has been ready for a day and nobody came
+    'pickup_not_collected',
     // Rides
     'ride_queue_matched', 'ride_queue_expired', 'ride_released_no_drivers',
     // [VERIFY-DOCS · owner ruling 9] A queued ride whose class is no longer offered
@@ -88,7 +100,13 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'ride_queue_unavailable',
     // Bookings and service jobs, other than the two that ring or need action now
     'booking_quoted', 'booking_confirmed', 'booking_slot_declined', 'booking_started',
-    'booking_completed', 'booking_cancelled', 'booking_reminder', 'booking_rescheduled',
+    'booking_completed', 'booking_cancelled', 'booking_reminder',
+    // [S4] A store appointment's 24h reminder, to the customer and the business (standard, like booking_reminder)
+    'appointment_reminder',
+    // [BOOK-FU2] A store appointment moved, to the other side (standard, as booking_rescheduled was before it)
+    'appointment_moved',
+    // [BOOK-P2] A time booked from a pro's menu moved, to the other side (standard, like its booking_ peers)
+    'booking_moved',
     // Safety of the person receiving it (the driver confirm is a job update)
     'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',
@@ -100,45 +118,65 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // [F2] A weekly fee change, told before it applies
     'billing_rate_change',
     'usd_migration_notice',
-    'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
+    // [BILL-PRO PR4] A pro's own weekly-fee notices (notification/provider-fee-kinds.ts): as loud as the fee kinds they
+    // mirror. The trial notice stays quiet like trial_fee_education (below with the nudges).
+    'provider_fee_mmg_pending', 'provider_fee_success', 'provider_fee_failed', 'provider_fee_final_warning',
+    'provider_fee_suspended', 'provider_fee_suspended_nudge', 'provider_fee_reminder', 'provider_fee_banked',
+    'provider_fee_churned', 'provider_fee_topup', 'provider_fee_mmg_checkout', 'provider_fee_card_action_required',
+    'provider_fee_fx_change', 'provider_fee_rate_change', 'provider_fee_usd_migration', 'provider_fee_notice',
+    // [REVIEW-M #2229 N2] The store fee that covered a pro ended: their own fee applies again.
+    'provider_fee_cover_ended',
+    'claim', 'claim_update', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
     // [PAYMENT-SIMPLIFY] the store's MMG NUMBER change notices, exactly like the link's (ALG-34 parity)
     'mmg_number_change_staged', 'mmg_number_change_applied', 'mmg_number_change_cancelled',
+    // [first-number rule hardened] a number that was WAITING to go live was removed: as loud as the change notices
+    'mmg_number_pending_removed',
     // Verification and trust
     'verification_approved', 'verification_rejected', 'verification_expired',
     'verification_expiry_reminder', 'verification_application_abandoned', 'verification_forced_offline', 'verification_vehicle_lapsed',
-    'verification_l2', 'trust_l3', 'compliance_review_failed',
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] verification_l2 is gone with the customer ID (nothing sends it).
+    'trust_l3', 'compliance_review_failed',
+    // [SEC-PII] A person's own deletion request: delayed by an open review (why and when), then done. Informational,
+    // standard like the other account notices; never a loud class.
+    'erasure_delayed', 'erasure_completed',
     // Account security: the email or password changed (other devices signed out on a password change);
     // password sign-in paused after many wrong attempts
     'email_changed', 'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
-    'low_stock', 'staff_added', 'staff_invite', 'staff_joined', 'review_response', 'rating_removed', 'category_request_resolved',
-    'category_backfill_review', 'vendor_tier_promoted', 'vendor_needs_public_phone', 'support_update', 'store_pin_moved',
+    'low_stock', 'staff_added', 'staff_invite', 'staff_joined', 'ad_team_invite', 'review_response', 'rating_removed', 'category_request_resolved',
+    'category_backfill_review', 'vendor_needs_public_phone', 'vendor_needs_food_handler_tick', 'vendor_needs_weekly_fee_tick', 'support_update', 'store_pin_moved',
     'ad_campaign_paused', 'ad_campaign_cancelled', 'ad_campaign_killed', 'ad_campaign_auto_cancelled',
-    'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture',
+    'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture', 'ad_mmg_checkout',
     // Operations pages (admins)
     'support_ticket', 'sos_active', 'sos_marked_safe', 'guardian_deescalation',
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',
     'safety_escrow_review', 'not_my_driver_discrepancy', 'ops_alert_escalated', 'ops_alert_drill',
+    // [DRILL-STORM] a drill nobody acknowledged was closed as FAILED: told to platform operators once
+    'ops_alert_drill_failed',
     // [R19] a child-safety (CSAE) report: an ops page, as loud as an SOS page
     'csae_report',
-    'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old', 'ops_rider_no_show', 'ops_rider_waiting', 'ops_rider_waiting_long',
-    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
-    'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_reaper_stale', 'ops_reaper_failed',
+    'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_riders_short', 'ops_food_too_old', 'ops_rider_no_show', 'ops_rider_waiting', 'ops_rider_waiting_long',
+    'ops_taxi_driver_dropped', 'ops_mmg_refund_overdue', 'ops_ride_overdue', 'ops_pickup_uncollected', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_error_sustained', 'ops_collusion_affinity', 'ops_billing_failures',
+    'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_malware_scan_bypass', 'ops_evidence_unscanned', 'ops_evidence_held', 'ops_upload_quarantined', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     // [PLACES-LOUD] address search (Google) failing: customers cannot search a place
     'ops_places_failing',
-    'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low', 'rlp_reserve_provisioned',
+    // [COORD R1 · #1997 S4-1] a flood of wrong answers to the texted safety check-in link (the high ceiling tripped)
+    'ops_checkin_link_flood',
+    // [REVIEW-G23 S3-2] the Swift-wide daily cap on calls through Swift was hit (new calls refused, Swift pays per minute): platform operators, once a UTC day, like the ops_ pages
+    'call_daily_cap',
+    'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_review_overdue',
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
     // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)
     'vat_threshold',
-    'billing_unknown_intents_sla', 'reconcile_mismatch', 'settlement_trailer_mismatch',
+    'ops_fee_refund_overdue', 'billing_unknown_intents_sla', 'reconcile_mismatch', 'settlement_trailer_mismatch',
     'settlement_deposit_mismatch', 'earnings_missing', 'agent_cash_sla',
     'incident_new', 'incident_sla_breach', 'incident_weekly_digest', 'incident_pattern_cross_reporter',
     'liveness_outage', 'liveness_review', 'compliance_violation', 'verification_pending',
     'verification_sla_breach', 'verification_legal_hold_overdue', 'audit_chain_broken',
     'audit_chain_anchor', 'integrity_appeal', 'dup_doc', 'vendor_pending', 'advertiser_application',
-    'ad_review_sla_risk', 'ad_campaign_killed_ops', 'ad_refund_payout_task', 'ad_campaign_paid',
+    'ad_review_sla_risk', 'ad_campaign_killed_ops', 'ad_house_link_off', 'ad_refund_payout_task', 'ad_campaign_paid',
   ],
 };
 
@@ -189,13 +227,21 @@ export function pushOptionsFor(data: Record<string, unknown> | null | undefined)
   const alertClass = alertClassOf(data?.['kind']);
   const policy = POLICY[alertClass];
   const deadlineMs = policy.deadlineField ? deadlineOf(data?.[policy.deadlineField]) : undefined;
+  const collapse = collapseKeyOf(data?.['collapseKey']);
   return {
     alertClass,
     priority: policy.priority,
     ...(policy.sound ? { sound: policy.sound } : {}),
     ...(policy.ttlSeconds !== undefined ? { ttlSeconds: policy.ttlSeconds } : {}),
     ...(deadlineMs !== undefined ? { deadlineMs } : {}),
+    ...(collapse ? { collapseId: collapse, tag: collapse } : {}),
   };
+}
+
+/** [DRILL-STORM] A payload's collapseKey, trusted only as a short plain key:
+ *  anything else is ignored, so a malformed key can never silence a push. */
+function collapseKeyOf(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9:_-]{0,63}$/.test(value) ? value : undefined;
 }
 
 /** [RINGER] The DeviceToken.alertsVersion of the first app build that has the

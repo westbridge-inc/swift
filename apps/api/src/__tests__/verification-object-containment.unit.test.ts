@@ -18,10 +18,10 @@ import { createOpaqueStorageName, LocalStorageProvider } from '../providers/stor
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import * as consent from '../modules/legal/consent.service';
-import * as declaration from '../modules/vendor/unregistered-declaration';
+import * as ownName from '../modules/vendor/own-name';
 import * as kyc from '../providers/kyc/kyc-provider';
 import { decryptBuffer, getKeyProvider } from '../providers/storage/envelope';
-import { DECLARATION_DOC_TYPE } from '../modules/verification/doc-registry';
+import { OWN_NAME_DOC_TYPE } from '../modules/verification/doc-registry';
 import { openEscrow } from '../modules/safety/deletion-hold';
 import { REAL_JPEG, REAL_PNG, REAL_WEBP } from './helpers/real-image';
 
@@ -102,7 +102,8 @@ function harness() {
   const orphans = new Map<string, any>();
   // [VERIFY-DOCS V3] The admin who mints a view link; the render route re-reads
   // their document reviewer grant on every load (same tenant as subject A).
-  const reviewer = { id: 'reviewer', tenantId: 'tenant-a', status: 'ACTIVE', activeRole: 'ADMIN', admin: { permissions: ['documents.review'] } };
+  // [ADMIN-ROLE] The staff role counts when the account HOLDS it (users.roles), as every real admin row does.
+  const reviewer = { id: 'reviewer', tenantId: 'tenant-a', status: 'ACTIVE', activeRole: 'ADMIN', roles: ['ADMIN'], admin: { permissions: ['documents.review'] } };
   const db: any = {
     user: {
       findUnique: vi.fn(async ({ where }: any) => (where.id === reviewer.id ? reviewer : people.get(where.id))),
@@ -118,6 +119,9 @@ function harness() {
         .sort((a, b) => a.id.localeCompare(b.id))
         .slice(0, take)),
     },
+    // [Row 312 · G S3-1 (a)] The viewer asks whether a document is still owed a malware scan; nothing
+    // in this suite was stored under the bypass, so no debt row exists.
+    uploadScanDebt: { findMany: vi.fn(async () => []) },
     encryptedObject: {
       findUnique: vi.fn(async ({ where }: any) => objects.get(where.fileKey) ?? null),
       // [#1449 follow-up] The upload route first asks for the uploader's own identical recent upload (a lost-reply retry).
@@ -187,13 +191,15 @@ function harness() {
   };
   // Account erasure also drops the browser-basket upload receipts that ride
   // with the cart (POST /customer/cart/merge replay records).
-  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox']) {
+  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'callSession', 'verificationDecisionOutbox']) {
     db[name] = { deleteMany: vi.fn() };
   }
   // [Row 331] Erasure reads the shift selfie rows before deleting them (no rows in this harness),
   // and an unclaimed upload is kept while the person is under a legal hold (none here).
   db.livenessCheck.findMany = vi.fn(async () => []);
   db.docLegalHold = { count: vi.fn(async () => 0), findFirst: vi.fn(async () => null) };
+  // [SEC-PII] Erasure's lock-time backstop reads the person's identity group (none in this harness).
+  db.identityClusterMember.findUnique = vi.fn(async () => null);
   // [erasure covers every person table] The owed rows, cards, profiles, case text and safety records the
   // erasure now covers (erasure-coverage.ts): none exist for these subjects.
   for (const name of ['notification', 'moneySurfaceCommand', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin', 'cardSession', 'sosRetrigger', 'evidenceItem']) {
@@ -259,7 +265,8 @@ afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllEnvs(); 
 // are not the subject of these tests; the input principal is explicitly bound.
 async function handlers(h: ReturnType<typeof harness>, routes: typeof verificationRoutes) {
   const registered = new Map<string, (...args: any[]) => any>();
-  const app: any = { prisma: h.db, redis: { exists: vi.fn(async () => 1) }, io: {}, log: h.log, prefix: '', addHook: vi.fn() };
+  // [FLOW-QA F15] createRateLimit: the auth routes build their per-number sign-in ceiling from the limiter; this stand-in lets all through
+  const app: any = { prisma: h.db, redis: { exists: vi.fn(async () => 1) }, io: {}, log: h.log, prefix: '', addHook: vi.fn(), createRateLimit: () => async () => ({ isAllowed: true, key: '' }) };
   h.db.$extends = () => h.db;
   for (const verb of ['get', 'post', 'put', 'patch', 'delete']) {
     app[verb] = (path: string, ...args: any[]) => { registered.set(`${verb} ${path}`, args.at(-1)); };
@@ -269,7 +276,9 @@ async function handlers(h: ReturnType<typeof harness>, routes: typeof verificati
 }
 
 describe('verification object containment at real service boundaries', () => {
-  it.each(['same-tenant', 'cross-tenant'].flatMap((tenancy) => ['checklist', 'id', 'selfie'].map((input) => [tenancy, input])))('%s B upload cannot enter A %s processing', async (tenancy, input) => {
+  // [ROLE-DOCS · owner 21 Oct 2026] no 'selfie' input any more. [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] nor an 'id' input:
+  // the customer-ID intake is gone (POST /identity answers 410), so the checklist is the only processing door.
+  it.each(['same-tenant', 'cross-tenant'].flatMap((tenancy) => ['checklist'].map((input) => [tenancy, input])))('%s B upload cannot enter A %s processing', async (tenancy) => {
     const h = harness();
     if (tenancy === 'same-tenant') h.people.get(B)!.tenantId = 'tenant-a';
     // B really uploads through the existing handler before A supplies its key.
@@ -278,8 +287,7 @@ describe('verification object containment at real service boundaries', () => {
     h.objects.delete(key(B));
     await routes.get('post /upload')!(uploadRequest(B));
     expect(h.db.encryptedObject.create).toHaveBeenCalledOnce();
-    const attempt = input === 'checklist' ? h.service.submitDocument(A, 'MOVER', 'vehicle_registration', key(B), '1')
-      : h.service.submitIdentity(A, key(input === 'id' ? B : A), key(input === 'selfie' ? B : A), '1');
+    const attempt = h.service.submitDocument(A, 'MOVER', 'vehicle_registration', key(B), '1');
     await expect(attempt).rejects.toMatchObject(unavailable);
     expect(h.provider.verifyDocument).not.toHaveBeenCalled();
     expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
@@ -420,15 +428,11 @@ describe('verification object containment at real service boundaries', () => {
     expect(h.db.verificationDocument.create).toHaveBeenCalledOnce();
   });
 
-  // [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] "no face match": a customer's ID reaches the
-  // document check alone, even with the biometric switch on. An owned selfie (store build 9 still
-  // sends one) is still proven to be the caller's own upload, and then never compared or sent.
-  it('owned identity (with an owned selfie) reaches the document check — never a face match', async () => {
-    const h = harness(); vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
-    const selfie = key(A, 's'); h.objects.set(selfie, { ...h.objects.get(key(A))!, fileKey: selfie });
-    await expect(h.service.submitIdentity(A, key(A), selfie, '1')).resolves.toMatchObject({ userId: A, fileUrl: key(A) });
-    expect(h.provider.verifyDocument).toHaveBeenCalledWith({ userId: A, docType: 'national_id', fileUrl: key(A) });
-    expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] No customer-ID intake is left to reach a document check or a face
+  // match: the service has no such method any more.
+  it('there is no customer-ID intake to process an upload', () => {
+    const h = harness();
+    expect((h.service as unknown as Record<string, unknown>)['submitIdentity']).toBeUndefined();
   });
 
   it('server-persisted signup selfie keeps the checklist face-match path working', async () => {
@@ -1264,7 +1268,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     // The due obligation must commit WITH the account cutoff, before it can
     // lose authentication. Verify actual transaction ordering, not a bypass.
     expect(h.db.verificationDocument.updateMany.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
-    for (const table of ['session', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
+    for (const table of ['session', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'callSession', 'verificationDecisionOutbox', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
     // [REVIEW-G S4-1] No driver profile, so no own money surface to delete: every command the person staged is
     // kept in its entity's chain and de-identified, exactly once.
     expect(h.db.moneySurfaceCommand.deleteMany).not.toHaveBeenCalled();
@@ -1348,14 +1352,17 @@ describe('review corrections: deletion obligations and retry progress', () => {
   });
 });
 
-describe('generated declaration envelope contract', () => {
+// [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] The self-declaration route is gone with its tier (it answers 410,
+// unregistered-tier-removed.test.ts); the same envelope contract is held by the route that still generates a signed
+// declaration: the own-name declaration.
+describe('generated declaration envelope contract (own-name declaration)', () => {
   async function declarationHarness(vendorType = 'RESTAURANT') {
     const h = harness(); h.objects.clear();
-    const vendor = { id: 'store-a', name: 'Synthetic store', vendorType, tier: 'REGISTERED' };
+    const vendor = { id: 'store-a', name: 'Subject', vendorType, ownerId: 'owner-a', tradesUnderOwnName: false };
     h.db.vendor.findUniqueOrThrow = vi.fn(async () => vendor);
     h.db.vendor.update = vi.fn(async ({ data }: any) => Object.assign(vendor, data));
     h.db.user.findUniqueOrThrow = vi.fn(async () => ({ ...h.people.get(A), firstName: 'Synthetic', lastName: 'Subject' }));
-    h.db.vendorOwner.findUnique.mockImplementation(async ({ select }: any) => ({ id: 'owner-a', vendors: !select || vendor.tier === 'UNREGISTERED' ? [vendor] : [] }));
+    h.db.vendorOwner.findUnique.mockImplementation(async () => ({ id: 'owner-a', vendors: [vendor] }));
     h.db.documentRecord = { findFirst: vi.fn(async () => null) };
     h.db.requirementSet = { findFirst: vi.fn(async () => null) };
     h.db.countryConfig = { findUnique: vi.fn(async () => ({ documentChecklists: {} })) };
@@ -1364,7 +1371,7 @@ describe('generated declaration envelope contract', () => {
     const published = vi.spyOn(consent, 'publishLegalDocumentOnce').mockResolvedValue(undefined as never);
     const signed = vi.spyOn(consent, 'recordConsent').mockResolvedValue(undefined as never);
     const plaintext = Buffer.from('synthetic signed PDF');
-    const render = vi.spyOn(declaration, 'renderDeclarationPdf').mockResolvedValue(plaintext);
+    const render = vi.spyOn(ownName, 'renderOwnNamePdf').mockResolvedValue(plaintext);
     vi.spyOn(kyc, 'getKycProvider').mockReturnValue(h.provider as never);
     const prototype = VerificationService.prototype as any;
     for (const name of ['externalProcessingSubject', 'validatorContextFor']) vi.spyOn(prototype, name).mockResolvedValue({});
@@ -1374,20 +1381,20 @@ describe('generated declaration envelope contract', () => {
       const doc = { id: 'declaration-a', ...data }; h.documents.push(doc); return doc;
     });
     vi.spyOn(prototype, 'recordDecision').mockResolvedValue(undefined);
-    vi.spyOn(prototype, 'getStatus').mockResolvedValue({ required: [DECLARATION_DOC_TYPE] });
+    vi.spyOn(prototype, 'getStatus').mockResolvedValue({ required: [OWN_NAME_DOC_TYPE] });
     const routes = await handlers(h, vendorRoutes);
     const reply = { code: vi.fn() };
-    const invoke = () => routes.get('post /onboarding/declaration')!({ user: { userId: A }, headers: { 'x-vendor-id': vendor.id }, ip: '127.0.0.1', body: {
-      tradingName: 'Synthetic store', activityClass: 'snackette', declaredAddress: 'Synthetic address', attestationVersion: declaration.DECLARATION_VERSION,
+    const invoke = () => routes.get('post /onboarding/own-name')!({ user: { userId: A }, headers: { 'x-vendor-id': vendor.id }, ip: '127.0.0.1', body: {
+      accept: true, attestationVersion: ownName.OWN_NAME_DECLARATION_VERSION,
     } }, reply);
     return { ...h, vendor, published, signed, render, plaintext, invoke, reply };
   }
 
-  it.each(['', 'invalid'])('no usable KEK (%s) refuses before legal publish, tier, consent, rendering or storage', async (keyValue) => {
+  it.each(['', 'invalid'])('no usable KEK (%s) refuses before legal publish, the store flag, consent, rendering or storage', async (keyValue) => {
     vi.stubEnv('MASTER_KEK', keyValue); resetKeyProviderForTests();
     const h = await declarationHarness();
     await expect(h.invoke()).rejects.toMatchObject({ code: 'VERIFICATION_UPLOAD_UNAVAILABLE', statusCode: 503 });
-    expect(h.vendor.tier).toBe('REGISTERED');
+    expect(h.vendor.tradesUnderOwnName).toBe(false);
     for (const sideEffect of [h.published, h.signed, h.render, h.db.vendor.update, storage.upload, h.db.encryptedObject.create, h.provider.verifyDocument]) expect(sideEffect).not.toHaveBeenCalled();
     expect(h.documents).toHaveLength(0);
   });
@@ -1395,8 +1402,8 @@ describe('generated declaration envelope contract', () => {
   it('unsupported SERVICE declaration refuses before side effects without inventing a checklist', async () => {
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
     const h = await declarationHarness('SERVICE');
-    await expect(h.invoke()).rejects.toMatchObject({ code: 'DECLARATION_UNSUPPORTED' });
-    expect(h.vendor.tier).toBe('REGISTERED');
+    await expect(h.invoke()).rejects.toMatchObject({ code: 'OWN_NAME_NOT_APPLICABLE' });
+    expect(h.vendor.tradesUnderOwnName).toBe(false);
     for (const sideEffect of [h.published, h.signed, h.render, h.db.vendor.update, storage.upload, h.db.encryptedObject.create]) expect(sideEffect).not.toHaveBeenCalled();
     expect(h.documents).toHaveLength(0);
   });
@@ -1404,7 +1411,7 @@ describe('generated declaration envelope contract', () => {
   it('the owned encrypted declaration is decryptable and accepted by real intake', async () => {
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
     const h = await declarationHarness();
-    await expect(h.invoke()).resolves.toMatchObject({ success: true, data: { tier: 'UNREGISTERED', declaration: { status: 'PENDING', docType: DECLARATION_DOC_TYPE } } });
+    await expect(h.invoke()).resolves.toMatchObject({ success: true, data: { nameBasis: 'OWN_NAME', declaration: { status: 'PENDING', docType: OWN_NAME_DOC_TYPE } } });
     expect(h.reply.code).toHaveBeenCalledWith(201);
     expect(h.published).toHaveBeenCalledOnce(); expect(h.signed).toHaveBeenCalledOnce();
     expect(h.provider.verifyDocument).toHaveBeenCalledWith(expect.objectContaining({ userId: A, fileUrl: key(A) }));

@@ -18,7 +18,7 @@ const SHOWN: Record<EnumName, string> = {
   UserStatus: 'users list and detail, store owner card, mover detail',
   VendorStatus: 'vendors list and detail, sibling stores, user detail',
   VendorType: 'vendors list and detail',
-  VendorTier: 'vendor detail (registration)',
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] VendorTier is no longer shown: the self-declared tier is removed.
   OrderStatus: 'orders list and detail, recent orders, live feed, live map',
   OrderType: 'orders list and detail, user detail, ⌘K search',
   RideClass: 'order detail, drivers list, mover detail, live map',
@@ -49,6 +49,10 @@ const SHOWN: Record<EnumName, string> = {
   CashSettlementStatus: 'finance cash ledger',
   AdvertiserStatus: 'ads review',
   AdCreativeStatus: 'ads review',
+  SosStatus: 'Safety board',
+  SosTriggerSource: 'Safety board',
+  SosResolutionCode: 'Safety board',
+  IncidentStatus: 'Safety board',
 };
 
 function prismaEnums(): Map<string, string[]> {

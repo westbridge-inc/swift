@@ -1,22 +1,27 @@
 import { apiFetch } from './auth';
 
-/** The server's switches the web reads before offering a door. Advertising is
- *  off at launch; anything but a literal `true` reads as off. */
-export async function getCapabilities(): Promise<{ adsEnabled: boolean }> {
-  const r = await apiFetch('/api/v1/public/capabilities');
-  return { adsEnabled: r.data?.adsEnabled === true };
-}
+// The server's switches live in lib/capabilities (the Switch app sheet in every shell imports only that; CI perf #2220).
+export { getCapabilities } from './capabilities';
 
 export interface Advertiser { id: string; companyName: string; status: string; memberRole: string }
 export interface Campaign {
   id: string; name: string; status: string; statusReason: string | null;
   placement: { name: string; key: string; tier: string; mediaKind: string };
   cities: string[]; startWeek: string; endWeek: string; totalAmount: number | null; currency: string;
-  invoices: { id: string; number: string; status: string; amount: number }[];
+  invoices: { id: string; number: string; status: string; amount: number; payable?: boolean; paymentConfirming?: boolean }[];
   creatives: { id: string; status: string; transcodeStatus: string | null }[];
   bookings: { weekStart: string; city: string; status: string }[];
 }
 export const getAdvertisers = (): Promise<Advertiser[]> => apiFetch('/api/v1/ads/advertiser/me').then(r => r.data);
+/** [ADS-ON] Open MMG's page for one invoice. The server prices it; the key makes a retry the same tap. */
+export interface AdCheckoutStart { ref: string; status: string; checkoutUrl: string | null }
+export const startAdCheckout = (invoiceId: string, key: string): Promise<AdCheckoutStart> =>
+  apiFetch(`/api/v1/ads/invoices/${encodeURIComponent(invoiceId)}/mmg-checkout`, { method: 'POST', body: '{}', headers: { 'Idempotency-Key': key, 'x-client-platform': 'web' } }).then(r => r.data);
+/** [ADS-ON] An open invitation to an advertiser team. Only its own invited person ever reads it. */
+export interface TeamInvite { advertiserId: string; companyName: string; role: string; invitedAt: string }
+export const getTeamInvites = (): Promise<TeamInvite[]> => apiFetch('/api/v1/ads/advertiser/invites').then(r => r.data);
+export const answerTeamInvite = (advertiserId: string, choice: 'accept' | 'decline') =>
+  apiFetch(`/api/v1/ads/advertiser/${encodeURIComponent(advertiserId)}/members/${choice}`, { method: 'POST', body: '{}' });
 export const getCampaigns = (advertiserId: string): Promise<Campaign[]> =>
   apiFetch(`/api/v1/ads/advertiser/${encodeURIComponent(advertiserId)}/campaigns`).then(r => r.data);
 export interface Notice { id: string; title: string; body: string; isRead: boolean; createdAt: string }

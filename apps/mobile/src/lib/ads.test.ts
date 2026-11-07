@@ -278,3 +278,42 @@ describe('principal-bound ad event runtime', () => {
     });
   });
 });
+
+// [ADS-ON] The last word on the phone. The server only serves approved links; a served value that is not a
+// secure web page or a Swift link is never handed to another app.
+describe('openAdDestination', () => {
+  async function load() {
+    vi.resetModules();
+    const { Linking } = await import('react-native');
+    const open = Linking.openURL as unknown as ReturnType<typeof vi.fn>;
+    open.mockClear();
+    const ads = await import('./ads');
+    return { open, openAdDestination: ads.openAdDestination };
+  }
+
+  it.each([
+    ['URL', 'http://example.gy/'],
+    ['URL', 'tel:+5926000000'],
+    ['URL', 'javascript:alert(1)'],
+    ['URL', 'intent://x'],
+    ['DEEPLINK', 'tel:+5926000000'],
+    ['DEEPLINK', 'https://example.gy/'],
+    ['DEEPLINK', 'sms:+5926000000'],
+  ] as const)('%s %s opens nothing', async (type, value) => {
+    const { open, openAdDestination } = await load();
+    await openAdDestination({ type, value });
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('a Swift link opens', async () => {
+    const { open, openAdDestination } = await load();
+    await openAdDestination({ type: 'DEEPLINK', value: 'swift://store/a-store' });
+    expect(open).toHaveBeenCalledWith('swift://store/a-store');
+  });
+
+  it('a secure page opens', async () => {
+    const { open, openAdDestination } = await load();
+    await openAdDestination({ type: 'URL', value: 'https://example.gy/' });
+    expect(open).toHaveBeenCalledWith('https://example.gy/');
+  });
+});

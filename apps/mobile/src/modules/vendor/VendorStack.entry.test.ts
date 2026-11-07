@@ -207,6 +207,9 @@ const fx = vi.hoisted(() => {
       invalidateQueries: vi.fn(async () => undefined),
       removeQueries: vi.fn(),
       resetQueries: vi.fn(async () => undefined),
+      // [SPEED 6 Nov] The tab bar's quiet-moment wait (navigation/warmTabs) reads these.
+      isFetching: vi.fn(() => 0),
+      getQueryCache: () => ({ subscribe: () => () => undefined }),
     },
     switchRole: vi.fn(),
     toastError: vi.fn(),
@@ -282,7 +285,7 @@ vi.mock('@swift/ui', () => ({ color: fx.token, font: fx.token, fontSize: fx.toke
 vi.mock('expo-crypto', () => ({ randomUUID: () => `scope-${Math.random().toString(36).slice(2)}` }));
 vi.mock('../../kit', async () => ({
   ...Object.fromEntries(
-    ['Card', 'Chip', 'DecorativeIcon', 'ErrorState', 'LabeledInput', 'LoadingBlock', 'Pictogram', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'T', 'TonePill']
+    ['BrandCheckbox', 'Card', 'Chip', 'DecorativeIcon', 'ErrorState', 'LabeledInput', 'LoadingBlock', 'Pictogram', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'T', 'TonePill']
       .map((name) => [name, name]),
   ),
   // The header's Log out asks through the real shared confirm; only its
@@ -337,6 +340,7 @@ vi.mock('../../components/onboarding/WentLive', () => ({
 vi.mock('../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('../profile/screens/GetHelpScreen', () => ({ GetHelpScreen: 'GetHelpScreen' }));
 vi.mock('./NewOrderTakeover', () => ({ NewOrderTakeover: 'NewOrderTakeover' }));
+vi.mock('./VatDocumentRow', () => ({ VatDocumentRow: 'VatDocumentRow' })); // [VAT-DOCS] the Documents list's optional VAT row (its camera picker needs a device)
 vi.mock('./screens/VendorAccountScreen', () => ({ VendorAccountScreen: 'VendorAccountScreen' }));
 vi.mock('./screens/VendorBulkImportScreen', () => ({ VendorBulkImportScreen: 'VendorBulkImportScreen' }));
 vi.mock('./screens/VendorCategoryReviewScreen', () => ({ VendorCategoryReviewScreen: 'VendorCategoryReviewScreen' }));
@@ -349,6 +353,7 @@ vi.mock('./screens/VendorOrderDetailScreen', () => ({ VendorOrderDetailScreen: '
 vi.mock('./screens/VendorOrderHistoryScreen', () => ({ VendorOrderHistoryScreen: 'VendorOrderHistoryScreen' }));
 vi.mock('./screens/VendorScheduleScreen', () => ({ VendorScheduleScreen: 'VendorScheduleScreen' }));
 vi.mock('./screens/VendorSwiftNumberScreen', () => ({ VendorSwiftNumberScreen: 'VendorSwiftNumberScreen' }));
+vi.mock('./screens/VendorPayAllScreen', () => ({ VendorPayAllScreen: 'VendorPayAllScreen' }));
 // WeeklyFee is now a family router; keep both leaf screens native-free in this entry-gate harness.
 vi.mock('../mover/screens/MoverSwiftNumberScreen', () => ({ MoverSwiftNumberScreen: 'MoverSwiftNumberScreen' }));
 vi.mock('./screens/VendorTierScreen', () => ({ VendorTierScreen: 'VendorTierScreen' }));
@@ -1057,6 +1062,7 @@ describe('the store tabs pause while hidden (every store type)', () => {
     for (const screen of screens) {
       expect(screen.props.options?.freezeOnBlur, `${screen.props.name} is not exempt from the pause`).not.toBe(false);
       expect(screen.props.options?.unmountOnBlur, `${screen.props.name} keeps its state`).toBeUndefined();
+      // [SPEED 6 Nov] At first paint; the other tabs mount hidden later, once Swift is quiet (VendorStack.warmTabs.navigation.test).
       expect(screen.props.options?.lazy, `${screen.props.name} mounts on first visit`).not.toBe(false);
     }
     // The new-order layer is a sibling of the tabs, not inside one.

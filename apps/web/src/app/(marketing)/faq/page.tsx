@@ -2,6 +2,8 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Section } from '@/components/site';
 import { BrowserOrderingNote } from '@/components/browser-ordering-note';
+import { ReviewTime } from '@/components/prelaunch-partner-note';
+import { AppStoreSentence } from '@/components/app-store-links';
 import { site, launch, SITE_ORIGIN } from '@/site.config';
 import { CANCEL_ORDER_ANSWER } from '@/lib/cancel-policy-copy';
 
@@ -37,9 +39,24 @@ const FAQ: QA[] = [
     q: 'Then how does Swift make money?',
     a: (
       <>
-        Businesses and movers pay a flat weekly subscription for the software. That is the entire
+        Businesses, riders and drivers pay a flat weekly subscription for the software. That is the entire
         revenue line. Swift takes <b>no commission</b> on any sale, fare or tip — not a reduced
         rate, not an introductory offer. There is no percentage anywhere in the model.
+      </>
+    ),
+  },
+  {
+    // [OWNER 5 Nov 2026] MMG checkout stays; in person is recorded by a person, directly to the company.
+    q: 'How do businesses, riders and drivers pay the weekly fee?',
+    a: (
+      <>
+        In the Swift app or on swiftgy.com, on MMG&apos;s checkout page. Or in person, directly to {site.legalEntityName}, by
+        cash, cheque or bank transfer:{' '}
+        <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/contact">
+          contact Swift
+        </Link>{' '}
+        to arrange it. A cheque counts once it clears, a payment counts once Swift records it, and you get a receipt.
+        Never give it to anyone else.
       </>
     ),
   },
@@ -76,8 +93,8 @@ const FAQ: QA[] = [
     a: (
       <>
         <BrowserOrderingNote open="Store ordering and order tracking work in your phone's browser." /> Taxi rides
-        require the Swift mobile app
-        during the pilot, including the safety PIN and SOS. Store download links will appear here when available.
+        require the Swift mobile app,
+        including the safety PIN and SOS. <AppStoreSentence />
       </>
     ),
   },
@@ -113,9 +130,14 @@ const FAQ: QA[] = [
     q: 'I run a business. What do I need to sign up?',
     a: (
       <>
-        Owner ID, business registration, a photo of your storefront, and any licence your kind of
-        business needs (a restaurant adds its GRA licence and food handler&apos;s permit). A person reviews them —
-        most businesses clear within a day — and your free trial starts the day you are{' '}
+        {/* [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] no seller without a registration: a registered business name,
+            or the own-name declaration; [(d)] the licence carries the GRA's own name */}
+        Owner ID, a business registration (or, if your store&apos;s name is your own name, a short signed declaration
+        instead), a photo of your storefront, and any licence your kind of business needs (a restaurant adds its GRA
+        Food Restaurant Licence and confirms that everyone who handles its food holds a current food handler&apos;s
+        certificate). A person reviews them.{' '}
+        {/* [OPEN-EARLY] The review time is true only once Swift is open; before launch, approval is on launch day. */}
+        <ReviewTime live="We review documents Monday to Saturday, 8:00–16:00 Guyana time." /> Your free trial starts the day you are{' '}
         <i>approved</i>, so review time never eats into it. The{' '}
         <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/vendors">
           business page

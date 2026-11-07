@@ -34,6 +34,14 @@ export interface CatalogueBand {
   minItems: number;
   tier: CatalogueTier;
   rate: number;
+  /** The free trial, in days, of a NEW store at this step when Swift approves it (7 at the department step, owner
+   *  29 Oct 2026). Absent from a server that predates it: the list's own `trialDays` stands. */
+  trialDays?: number;
+}
+
+/** A step's own free trial when the server sends a whole number of days above zero, else the list's. */
+export function bandTrialDays(band: CatalogueBand, fallback: number): number {
+  return typeof band.trialDays === 'number' && Number.isInteger(band.trialDays) && band.trialDays > 0 ? band.trialDays : fallback;
 }
 
 export interface PartnerPricing {
@@ -51,6 +59,39 @@ export interface PartnerPricing {
   weekly?: Record<string, number | null>;
   /** [row 628] The weekly fee words shown before sign-up, and the tick. Absent from an API that predates the tick. */
   feeTerms?: FeeTerms;
+  /** [RETIER PR-C] Whether existing stores move between catalogue steps, and the notice a rise gets. */
+  catalogueRetier?: { on?: unknown; noticeDays?: unknown };
+  /** [CARS-PLATES · owner 6 Nov 2026] A private (P) plate car: deliveries only, at the delivery rider's fee. `on` is the
+   *  server's CAR_DELIVERIES switch. Absent from an API that predates it (a car is a taxi there). */
+  privateCars?: { on?: unknown; quotes?: MoverQuote[] };
+}
+
+/** [CARS-PLATES] Private (P) plate cars deliver today: only for exactly `on: true` from the server. */
+export function privateCarsOpen(pricing: Pick<PartnerPricing, 'privateCars'> | null | undefined): boolean {
+  return pricing?.privateCars?.on === true;
+}
+
+/** [RETIER PR-C · owner 30 Oct 2026 · REVIEW-M N3] Whether Swift moves an existing store between catalogue steps
+ *  (GET /auth/pricing `catalogueRetier`, the server's WEEKLY_RETIER_ON) and the notice a rise gets. ON only for exactly
+ *  `on: true` with a whole notice of 14 days or more; OFF only for exactly `on: false`; anything else (an older server, a
+ *  malformed answer) is null, and no claim either way is made. */
+export function catalogueRetierOf(pricing: Pick<PartnerPricing, 'catalogueRetier'> | null | undefined): { on: true; noticeDays: number } | { on: false } | null {
+  const r = pricing?.catalogueRetier;
+  if (!r || typeof r !== 'object') return null;
+  if (r.on === false) return { on: false };
+  if (r.on === true && typeof r.noticeDays === 'number' && Number.isInteger(r.noticeDays) && r.noticeDays >= 14) return { on: true, noticeDays: r.noticeDays };
+  return null;
+}
+
+/** What happens to a store's rate after it is born, in the partner's words (empty when the server says nothing).
+ *  ON is true to the server's weekly re-tier (api billing.service recalculateVendorTiers + fee-rise-notice.ts): a rise
+ *  is decided on the items for sale and told in the app at least `noticeDays` before the new fee, with how to stop it;
+ *  a fall is judged on the week's count (the same 7-day rule as the sign-up count) on two passes a week apart. */
+export function afterBirthWords(pricing: Pick<PartnerPricing, 'catalogueRetier'> | null | undefined): string {
+  const r = catalogueRetierOf(pricing);
+  if (!r) return '';
+  if (!r.on) return ' After that, the rate does not change as your catalogue grows.';
+  return ` After that, Swift counts your items every week. If your items for sale reach a higher rate, Swift tells you in the app at least ${r.noticeDays} days before the new fee applies, and how to stop it. If your items, counting items taken off sale, changed or removed in the last 7 days, fit a lower rate on two weekly counts a week apart, your fee goes down and you are told.`;
 }
 
 /** [COORD ruling 22 Oct 2026 · row 628] The server's own words about the weekly fee — what it
@@ -181,6 +222,20 @@ export function moverQuote(pricing: PartnerPricing | null | undefined, vehicleTy
   const quote = pricing.movers.find((q) => q?.vehicleType === vehicleType);
   if (!quote || !isRate(quote.rate) || !MOVER_TIERS.includes(quote.tier)) return null;
   return quote.role === 'RIDER' || quote.role === 'DRIVER' ? quote : null;
+}
+
+/**
+ * [CARS-PLATES · owner 6 Nov 2026] The quote for THIS car: a private (P, any non-H) plate car while private cars
+ * deliver is quoted as a delivery rider (the server's `privateCars`); anything else as `moverQuote`. Null when the
+ * server has no valid private-car quote (the fee gate then says it cannot show a price, never a taxi price).
+ */
+export function vehicleQuote(pricing: PartnerPricing | null | undefined, vehicleType: string | null | undefined, plate: string, isHire: (plate: string) => boolean): MoverQuote | null {
+  const base = moverQuote(pricing, vehicleType);
+  if (!base || base.role !== 'DRIVER' || !privateCarsOpen(pricing) || isHire(plate)) return base;
+  const quotes = pricing?.privateCars?.quotes;
+  const quote = Array.isArray(quotes) ? quotes.find((q) => q?.vehicleType === vehicleType) : undefined;
+  if (!quote || !isRate(quote.rate) || !MOVER_TIERS.includes(quote.tier) || quote.role !== 'RIDER') return null;
+  return quote;
 }
 
 /** A usable catalogue ladder: starts at 0 items, whole-number steps strictly

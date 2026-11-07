@@ -38,6 +38,7 @@ FROM deps AS build
 # Which API the browser calls, and which release the build is for. The origin
 # law (src/lib/browser-api-origin.ts) refuses any other pairing:
 #   public site: NEXT_PUBLIC_API_URL=https://api.<site domain>, no SWIFT_WEB_CHANNEL
+#                or https://api-live.<site domain> (the pre-launch production name)
 #   staging:     NEXT_PUBLIC_API_URL=https://api-staging.<site domain>, SWIFT_WEB_CHANNEL=staging
 ARG NEXT_PUBLIC_API_URL
 ARG SWIFT_WEB_CHANNEL
@@ -68,8 +69,13 @@ COPY apps/mobile/src/kit apps/mobile/src/kit
 # anything but @swift/types (packages/, copied above), so exactly these files.
 COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# [BOOK-WEB #2206] ...and its after-placing copy and MMG pay action, loaded with the booking success panel (types only).
+COPY apps/mobile/src/modules/cart/cartPlaced.ts apps/mobile/src/modules/cart/cartPlaced.ts
 # [PAYMENT-SIMPLIFY] The order page reads the store's MMG number with the phone's own parser (pure; types only).
 COPY apps/mobile/src/lib/mmgStorePayment.ts apps/mobile/src/lib/mmgStorePayment.ts
+# [#2252 REVIEW-F S4-1] ...and its status rail reads the phone's timeline rule (which step is done, the step it is at, the
+# travel step's words): pure, imports nothing.
+COPY apps/mobile/src/modules/orders/timeline-states.ts apps/mobile/src/modules/orders/timeline-states.ts
 # [UI-SWEEP U14 / U17] The order pages speak the phone's status words and its
 # reorder notice (src/lib/order-words.ts imports them by path). Both are pure:
 # orderStatus.ts imports only types from @swift/types, reorderNotice.ts nothing.
@@ -83,11 +89,41 @@ COPY apps/api/src/modules/order/options.ts apps/api/src/modules/order/options.ts
 # role matrix, the accept clock, the MMG-dispute pause, the store-delivery rule
 # and the market-calendar helpers. None imports anything but @swift/types.
 COPY apps/mobile/src/lib/vendorRbac.ts apps/mobile/src/lib/vendorRbac.ts
+COPY apps/mobile/src/lib/bulkWords.ts apps/mobile/src/lib/bulkWords.ts
 COPY apps/mobile/src/lib/appointmentTime.ts apps/mobile/src/lib/appointmentTime.ts
 COPY apps/mobile/src/modules/vendor/acceptClock.ts apps/mobile/src/modules/vendor/acceptClock.ts
 COPY apps/mobile/src/modules/vendor/order-dispute.ts apps/mobile/src/modules/vendor/order-dispute.ts
 COPY apps/mobile/src/modules/vendor/storeOrderRules.ts apps/mobile/src/modules/vendor/storeOrderRules.ts
+COPY apps/mobile/src/modules/vendor/storeHandover.ts apps/mobile/src/modules/vendor/storeHandover.ts
 COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/modules/vendor/screens/delivery-owner.ts
+# [REVIEW-LIGHT2 #2306 S3 · #2311] The Orders home's store status card reads a held store's hold the app's way (storeHoldOf; imports nothing).
+COPY apps/mobile/src/lib/vendorProfile.ts apps/mobile/src/lib/vendorProfile.ts
+# [TAP-AUDIT] The Products page's item editor uses the app's own words for the store's pick tick (imports nothing).
+COPY apps/mobile/src/lib/storePick.ts apps/mobile/src/lib/storePick.ts
+# [IN-STORE-SALE] ... and the app's "Sold in store" line of taps and its words (imports nothing).
+COPY apps/mobile/src/lib/inStoreSale.ts apps/mobile/src/lib/inStoreSale.ts
+# [BOOK-S6b] Web booking says what the phone says: its booking words and outcome rules (imports nothing).
+COPY apps/mobile/src/lib/appointmentBooking.ts apps/mobile/src/lib/appointmentBooking.ts
+# [BOOK-S5b] The Products editor's booking hours, gap, notice and confirm-automatically rules (imports nothing).
+COPY apps/mobile/src/lib/bookingHours.ts apps/mobile/src/lib/bookingHours.ts
+# [OPEN-EARLY PR-2] A store's Documents page speaks the phone's checklist: its document names, list rules, consent and
+# own-name words, and the food handlers step's code (src/lib/store-documents.ts). Each imports nothing.
+COPY apps/mobile/src/components/onboarding/docLabels.ts apps/mobile/src/components/onboarding/docLabels.ts
+COPY apps/mobile/src/components/onboarding/documentChecklistPresentation.ts apps/mobile/src/components/onboarding/documentChecklistPresentation.ts
+COPY apps/mobile/src/components/onboarding/documentConsentRecord.ts apps/mobile/src/components/onboarding/documentConsentRecord.ts
+COPY apps/mobile/src/components/onboarding/foodHandlers.ts apps/mobile/src/components/onboarding/foodHandlers.ts
+COPY apps/mobile/src/lib/uploadConsentCopy.ts apps/mobile/src/lib/uploadConsentCopy.ts
+COPY apps/mobile/src/lib/ownNameCopy.ts apps/mobile/src/lib/ownNameCopy.ts
+# [WEB-SETTINGS] The store's MMG number card speaks the phone's hold sentence and its "takes effect" time (each imports nothing).
+COPY apps/mobile/src/lib/mmgHold.ts apps/mobile/src/lib/mmgHold.ts
+COPY apps/mobile/src/lib/stepUp.ts apps/mobile/src/lib/stepUp.ts
+# [WEB-SETTINGS PR-B] Seller status speaks the phone's tier words (modules/vendor/tier-view.ts, pure), which reads
+# the Guyana day of a declaration (lib/documentExpiry.ts -> lib/storeVat.ts -> lib/money.ts; appointmentTime.ts is
+# copied above).
+COPY apps/mobile/src/modules/vendor/tier-view.ts apps/mobile/src/modules/vendor/tier-view.ts
+COPY apps/mobile/src/lib/documentExpiry.ts apps/mobile/src/lib/documentExpiry.ts
+COPY apps/mobile/src/lib/storeVat.ts apps/mobile/src/lib/storeVat.ts
+COPY apps/mobile/src/lib/money.ts apps/mobile/src/lib/money.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

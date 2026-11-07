@@ -13,8 +13,8 @@
 #   store, materialized at /run/swift-rehearsal-secrets. Never production's.
 # - Its own volumes: the base file's named volumes are scoped by the project
 #   name, so swift-rehearsal_swift-pgdata is not production's swift-pgdata.
-# - Its own upload malware scanner (clamd), on its own network, with freshclam
-#   off (no route out).
+# - Its own upload malware scanner (clamd), on the copy's own internal scanner
+#   network only (no egress network), with freshclam off.
 # - Nothing public: Caddy, the website and the console are in a profile that
 #   is never enabled, and no service publishes a port.
 # - Postgres is healthy only once it answers over TCP (the image's first start
@@ -41,6 +41,7 @@ services:
   clamd:
     environment:
       CLAMAV_NO_FRESHCLAMD: "true"
+    networks: !override [scanner]
   migrate:
     volumes: !override
       - /run/swift-rehearsal-secrets:/run/secrets:ro

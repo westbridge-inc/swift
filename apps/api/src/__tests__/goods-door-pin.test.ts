@@ -9,7 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { loginWithOtp } from './helpers/otp';
 import { grantStepUp } from './helpers/step-up';
 import { registerErrorHandler } from '../middleware/error-handler';
@@ -276,7 +276,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
 
@@ -350,7 +350,8 @@ describe('MKT-F057 — the PIN is minted at checkout for every delivery rail', (
     expect(res.statusCode).toBe(200);
     const order = res.json().data.order;
     createdOrderIds.push(order.id);
-    expect(order.pickupCode).toMatch(/^\d{6}$/);
+    // [PICKUP · owner 30 Oct 2026] The code is minted (below); the answer carries it only when the store asks for it.
+    expect(order.pickupCode).toBeNull();
 
     const db = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(db.fulfillment).toBe('PICKUP');

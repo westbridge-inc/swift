@@ -97,9 +97,10 @@ const TENANT_QUERY_EXTENSIONS = {
   // [M-18] The provider-transaction identity behind every agent-cash observation.
   providerPayment: scoped,
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it.
-  mmgCheckoutIntent: scoped, mmgCheckoutKey: scoped, mmgCheckoutObservation: scoped,
+  mmgCheckoutIntent: scoped, mmgCheckoutKey: scoped, mmgCheckoutObservation: scoped, mmgCheckoutPart: scoped,
   // [MMG REVERSAL] A fee payment returned to the payer: their operator's money.
   mmgFeeReversal: scoped,
+  feeRefundCase: scoped,
   billingDunningClock: scoped, billingObligationTransition: scoped, paymentConfirmationHold: scoped, billingFeeNotice: scoped, billingNoticeHandoff: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
   moverFeeAuthority: scoped, moverFeeSubscription: scoped,
@@ -112,6 +113,8 @@ const TENANT_QUERY_EXTENSIONS = {
   advertiser: scoped, adPlacement: scoped, adCampaign: scoped, adInvoice: scoped,
   adRefundIntent: scoped, adRefundItem: scoped, adRefundOutbox: scoped,
   adEvent: scoped, houseAd: scoped, adsSettings: scoped, adsAuditLog: scoped,
+  // [ADS-ON] The allow-list of outside websites an ad may open is each operator's own.
+  adLinkDomain: scoped,
   // Ratings.
   actorRatingStat: scoped, ratingReport: scoped, itemFeedback: scoped, ratingTagDef: scoped,
   // [STORE-002] Who a person refuses contact with is theirs and their
@@ -140,6 +143,10 @@ const TENANT_QUERY_EXTENSIONS = {
   custodyRecoveryCase: scoped,
   // [TAXI waiting charge] A ride's waiting terms and frozen charge belong to its operator, like the ride.
   taxiRideWaiting: scoped,
+  // [O-1] A call-bridge attempt belongs to its order's operator, like the order.
+  callSession: scoped,
+  // [BOOK-FU2 · owner B3] A missed-appointment record belongs to its order's operator, like the order.
+  appointmentNoShow: scoped,
   // [REPORT-014 F-014-03] Supply watches are tenant rows: demand counts and
   // recovery notifications must never see another operator's watchers.
   supplyWatch: scoped,
@@ -161,6 +168,7 @@ const TENANT_QUERY_EXTENSIONS = {
   // [MKT-2] The stock ledger is tenant-owned: one operator's inventory
   // history must never be readable through another's session.
   stockMovement: scoped,
+  posImport: scoped,
   // [STA-1 Part 4] the reviewer fiction: one tenant's sessions, credentials, fixtures.
   reviewSession: scoped,
   reviewCredential: scoped,
@@ -168,6 +176,11 @@ const TENANT_QUERY_EXTENSIONS = {
   // [STA-1 §4 lineage] child tables now walled on the row itself.
   item: scoped,
   category: scoped,
+  // [BOOK-S1] A booking is one operator's business time, walled like its listing.
+  booking: scoped,
+  // [BOOK-P1] A pro's bookable services and time off, walled like the jobs they book.
+  serviceOffering: scoped,
+  serviceProviderTimeOff: scoped,
   // [STA-1 §4 lineage · money]
   transaction: scoped,
   earning: scoped,
@@ -290,8 +303,13 @@ export class SystemWorkOutsideTransactionError extends Error {
 export class TenantContextRequiredError extends Error {
   readonly code = 'TENANT_CONTEXT_REQUIRED';
   readonly statusCode = 500;
+  /** [VIEWER-FIX] Named on the error itself so the 5xx log line can say which read was refused. */
+  readonly model: string;
+  readonly operation: string;
   constructor(model: string, operation: string, mode: TenantMode) {
     super(`[TEN-01] ${model}.${operation} reached the database with no tenant bound (${mode}); bind a tenant or use runAsSystem(capability)`);
+    this.model = model;
+    this.operation = operation;
   }
 }
 let unscopedLogBudget = 200;

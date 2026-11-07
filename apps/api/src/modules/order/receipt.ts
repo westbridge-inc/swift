@@ -1,3 +1,4 @@
+import { color } from '@swift/ui';
 import { formatMoney } from '../../utils/currency-amount';
 /**
  * Order receipt (marketplace-mechanics spec §12) — the artifact people keep.
@@ -16,10 +17,14 @@ type ReceiptOrder = {
   status: string;
   orderType: string;
   fulfillment: string | null;
+  fulfillmentMode?: string | null;
   paymentMethod: string | null;
   paymentStatus: string;
   subtotalCustomer: unknown;
   deliveryFee: unknown;
+  /** [owner 1 Nov 2026] An express order's delivery row says so (the fee includes the express premium, which a
+   *  free-delivery code never covers), read from the order's own flag, never recomputed. */
+  isExpress?: boolean | null;
   /** [ALG-18] The frozen billable distance, when the order carries one. */
   billableKm?: unknown;
   billableKmSource?: string | null;
@@ -34,13 +39,27 @@ type ReceiptOrder = {
    *  receipt names the store by its trading name and address only (never a guess). */
   seller?: { legalName: string | null; address: string | null; phone: string | null } | null;
   customer: { firstName: string | null; lastName: string | null } | null;
-  items: Array<{ name: string; quantity: number; totalCustomer: unknown; subStatus?: string | null }>;
+  items: Array<{ name: string; quantity: number; totalCustomer: unknown; subStatus?: string | null; vatClass?: string | null }>;
+  /** [STORE-VAT · owner O-5] The VAT frozen at checkout (store-vat/order-vat.ts). vatRateBps null = no VAT on this order,
+   *  and the receipt is exactly what it was before VAT existed. */
+  vatRateBps?: number | null;
+  vatAmount?: unknown;
+  vatStandardGoods?: unknown;
+  vatZeroRatedGoods?: unknown;
+  vatExemptGoods?: unknown;
+  /** The standard-rated goods the VAT was taken from (after the store's OWN discount only). */
+  vatBase?: unknown;
+  vatSellerNumber?: string | null;
+  vatSellerName?: string | null;
   /** [M-36] The currency every amount on the order is in; stamped at checkout. */
   currencyCode?: string | null;
   /** [TAXI waiting charge] A ride's frozen waiting, when it was charged one. */
   fareBreakdown?: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null;
   /** [TAXI multi-stop 8/8] A ride's stops in order (absent for a ride without them). */
   stops?: Array<{ sequence: number; address: string; skipped: boolean }> | null;
+  /** [BUG-HUNT-2 G16] A ride's or a parcel's own facts. A store order leaves them out and its receipt does not change. */
+  pickupAddress?: string | null;
+  driver?: { firstName: string | null; vehicle: string | null; licensePlate: string | null } | null;
   /** [L02 · row 34] The cash the rider stated at the door, and how far short a
    *  handover was made (the rider bore the difference). */
   doorCashCollectedAmount?: unknown;
@@ -58,6 +77,48 @@ function soldBy(vendor: NonNullable<ReceiptOrder['vendor']>, seller: ReceiptOrde
   return `Sold by ${esc(name)} — ${esc(address)}${phone}`;
 }
 
+/** "14", "12.5": a rate in basis points as the percent people read. */
+function ratePercentLabel(bps: number): string {
+  return (bps / 100).toFixed(2).replace(/\.?0+$/, '');
+}
+
+/**
+ * [STORE-VAT · owner O-5] The VAT a person-approved VAT store charged, inside the prices above (VAT Act s.90).
+ * Swift is not the registered supplier: this receipt is never headed or called a tax invoice (s.28(3)-(4), an offence
+ * otherwise, s.67(4)); it names the store as the one charging the VAT, with the number a person checked on its
+ * certificate, and says the store issues its own tax invoice. Zero-rated and exempt goods get their own totals
+ * (VAT Regulations reg. 10(d)). Swift's fees are never in it.
+ *
+ * [REVIEW-F #2085 S3-1] A SUMMARY UNDER the Total, never rows in the totals column: VAT is inside the prices, and a
+ * row above the Total reads as added on top. [REVIEW-M S3-1 · REVIEW-F S4] It shows the amount the VAT was taken from
+ * (vatBase: the standard-rated goods less the store's OWN discount; a Swift-funded discount does not lower it), so the
+ * two figures reconcile. An order without VAT renders nothing here: its receipt is byte-identical to before VAT existed.
+ */
+function vatSummary(order: ReceiptOrder, money: (n: unknown) => string): string {
+  if (order.vatRateBps == null || !order.vatSellerName || !order.vatSellerNumber) return '';
+  const rate = ratePercentLabel(order.vatRateBps);
+  const zero = Number(order.vatZeroRatedGoods ?? 0);
+  const exempt = Number(order.vatExemptGoods ?? 0);
+  const standard = Number(order.vatStandardGoods ?? 0);
+  const base = order.vatBase == null ? standard : Number(order.vatBase);
+  const name = esc(order.vatSellerName);
+  const rows = [
+    '<tr><td colspan="2"><strong>VAT summary</strong></td></tr>',
+    `<tr><td>${base < standard ? 'Standard-rated goods, after the store’s own discount (incl. VAT)' : 'Standard-rated goods (incl. VAT)'}</td><td class="num">${money(base)}</td></tr>`,
+    zero > 0 ? `<tr><td>Zero-rated goods (no VAT)</td><td class="num">${money(zero)}</td></tr>` : '',
+    exempt > 0 ? `<tr><td>Exempt goods (no VAT)</td><td class="num">${money(exempt)}</td></tr>` : '',
+    `<tr><td>VAT included (${rate}%)</td><td class="num">${money(order.vatAmount ?? 0)}</td></tr>`,
+  ].filter(Boolean).join('\n    ');
+  return `<table>
+    ${rows}
+  </table>
+  <div class="foot">
+    VAT charged by ${name} · VAT reg. no. ${esc(order.vatSellerNumber)}. The prices of the goods include VAT at ${rate}%. The VAT is worked out on the store’s price for its standard-rated goods, less any discount the store itself gave; delivery pay, tips and Swift’s fees carry no VAT. ${name} issues its own tax invoice for these goods.
+  </div>`;
+}
+
+const VAT_CLASS_TAG: Readonly<Record<string, string>> = { ZERO_RATED: ' (zero-rated)', EXEMPT: ' (exempt)' };
+
 export function renderReceiptHtml(order: ReceiptOrder): string {
   // [M-36] The order names its currency; the receipt renders it through the
   // registry (symbol, exponent, ISO code) — never a hard-coded "GYD".
@@ -71,6 +132,9 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   // legacy terminal can reach DELIVERED with paymentStatus still PENDING, and
   // "Paid in cash" there asserts a collection nobody recorded. Say what the
   // ledger can prove: captured → paid; otherwise → due.
+  // [FIXES-4] Not where the business takes the cash itself. A receipt is issued once the order
+  // is complete, and completing a pickup, an appointment or a store's own delivery writes the
+  // status only: the customer owes nothing that Swift knows of, and Swift cannot say it was paid.
   const cashCaptured = order.paymentStatus === 'CAPTURED';
   // [review S3-2] A delivery handed over short is CAPTURED with less cash than
   // the total: say the cash actually taken and what was not collected, never
@@ -78,20 +142,27 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const shortfall = order.doorCashShortfallAmount == null ? 0 : Number(order.doorCashShortfallAmount);
   const shortCash = cashCaptured && order.paymentMethod !== 'MOBILE_MONEY' && Number.isFinite(shortfall) && shortfall > 0
     && order.doorCashCollectedAmount != null;
-  const paidHow =
-    order.paymentMethod === 'MOBILE_MONEY'
+  const isRide = order.orderType === 'TAXI';
+  const isParcel = order.orderType === 'COURIER';
+  const paidHow = isRide
+    ? (cashCaptured ? 'Paid to your driver' : 'To your driver, not recorded by Swift')
+    : isParcel
+      ? (cashCaptured ? 'Paid in cash to your rider' : 'Cash to your rider, not recorded by Swift')
+      : order.paymentMethod === 'MOBILE_MONEY'
       ? (order.paymentStatus === 'CAPTURED'
         ? 'Paid by MMG — directly to the store'
         : order.paymentStatus === 'CLAIMED'
           ? 'MMG payment reported received by the store — not confirmed by the provider'
           : 'MMG payment to the store — confirmation pending')
       : order.fulfillment === 'PICKUP'
-        ? (cashCaptured ? 'Paid in cash at the store' : 'Cash due at the store')
+        ? (cashCaptured ? 'Paid in cash at the store' : 'Cash to the store, not recorded by Swift')
         : order.fulfillment === 'APPOINTMENT'
-          ? (cashCaptured ? 'Paid at the appointment' : 'Due at the appointment')
+          ? (cashCaptured ? 'Paid at the appointment' : 'Cash to the business, not recorded by Swift')
           : shortCash
             ? `Paid ${formatMoney(order.doorCashCollectedAmount, currency, { whole: true })} in cash on delivery (${formatMoney(shortfall, currency, { whole: true })} not collected)`
-            : (cashCaptured ? 'Paid in cash on delivery' : 'Cash due on delivery');
+            : cashCaptured
+              ? 'Paid in cash on delivery'
+              : order.fulfillmentMode === 'VENDOR_DELIVERY' ? 'Cash to the store, not recorded by Swift' : 'Cash due on delivery';
   // [SUBSTITUTION · owner 17 Oct] A line that came off the order (the store
   // removed it, the customer declined the swap, or nobody answered in time)
   // was never charged: the receipt says so and prices it at nothing, so the
@@ -100,7 +171,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const rows = order.items
     .map(
       (i) => `<tr>
-        <td>${i.quantity}× ${esc(i.name)}${removed(i) ? ' (removed, not charged)' : ''}</td>
+        <td>${i.quantity}× ${esc(i.name)}${order.vatRateBps != null ? VAT_CLASS_TAG[i.vatClass ?? ''] ?? '' : ''}${removed(i) ? ' (removed, not charged)' : ''}</td>
         <td class="num">${money(removed(i) ? 0 : i.totalCustomer)}</td>
       </tr>`,
     )
@@ -111,6 +182,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   const deliveryFee = Number(order.deliveryFee ?? 0);
   const distance = billableDistance(order);
   const waiting = order.fareBreakdown ?? null;
+  const vat = vatSummary(order, money);
 
   return `<!doctype html>
 <html lang="en">
@@ -121,7 +193,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
 <style>
   body { font-family: -apple-system, system-ui, sans-serif; color: #111; margin: 0; background: #f6f6f6; }
   .sheet { max-width: 560px; margin: 24px auto; background: #fff; border-radius: 16px; padding: 32px; }
-  .brand { color: #e8192c; font-weight: 800; font-size: 22px; }
+  .brand { color: ${color.brand[500]}; font-weight: 800; font-size: 22px; }
   h1 { font-size: 16px; margin: 4px 0 0; font-weight: 600; color: #555; }
   .meta { margin: 16px 0; font-size: 14px; color: #555; line-height: 1.6; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -140,23 +212,26 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   <div class="meta">
     ${customerName ? `${esc(customerName)}<br>` : ''}
     ${order.vendor ? `${soldBy(order.vendor, order.seller ?? null)}<br>` : ''}
-    ${new Date(order.placedAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })}<br>
+    ${new Date(order.placedAt).toLocaleString('en-GB', { timeZone: 'America/Guyana', dateStyle: 'long', timeStyle: 'short' })}<br>
     ${esc(paidHow)}
+    ${isRide && order.driver ? `<br>Driver: ${esc(order.driver.firstName ?? 'Your driver')}${order.driver.vehicle ? ` · ${esc(order.driver.vehicle)}` : ''}${order.driver.licensePlate ? ` · ${esc(order.driver.licensePlate)}` : ''}` : ''}
+    ${(isRide || isParcel) && order.pickupAddress ? `<br>From: ${esc(order.pickupAddress)}` : ''}
+    ${(isRide || isParcel) && order.deliveryAddress ? `<br>To: ${esc(order.deliveryAddress)}` : ''}
     ${order.stops && order.stops.length > 0 ? `<br>Stops: ${order.stops.map((st) => `${st.sequence}. ${esc(st.address)}${st.skipped ? ' (skipped)' : ''}`).join(' · ')}` : ''}
   </div>
   <table>
     ${rows}
-    <tr class="totals"><td>Items</td><td class="num">${money(order.subtotalCustomer)}</td></tr>
-    ${deliveryFee > 0 ? `<tr class="totals"><td>Delivery pay for your rider</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
+    ${isRide ? `<tr class="totals"><td>Fare</td><td class="num">${money(waiting ? waiting.routeFare : order.subtotalCustomer)}</td></tr>` : isParcel ? '' : `<tr class="totals"><td>Items</td><td class="num">${money(order.subtotalCustomer)}</td></tr>`}
+    ${deliveryFee > 0 ? `<tr class="totals"><td>${isParcel ? 'Delivery fee' : 'Delivery pay for your rider'}${order.isExpress ? ' (express)' : ''}</td><td class="num">${money(deliveryFee)}</td></tr>` : ''}
     ${distance ? `<tr class="totals"><td>Distance (${esc(distance.sourceLabel)})</td><td class="num">${esc(distance.label)}</td></tr>` : ''}
     ${discount > 0 ? `<tr class="totals"><td>Discount</td><td class="num">−${money(discount)}</td></tr>` : ''}
     ${tip > 0 ? `<tr class="totals"><td>Rider tip</td><td class="num">${money(tip)}</td></tr>` : ''}
     ${waiting && waiting.waitingCharge > 0 ? `<tr class="totals"><td>Waiting (${waiting.waitingMinutes} min)</td><td class="num">${money(waiting.waitingCharge)}</td></tr>` : ''}
     <tr class="grand"><td>Total</td><td class="num">${money(order.totalAmount)}</td></tr>
   </table>
-  <div class="foot">
-    Swift charges no commission and never takes custody of order money. Order payment and any
-    delivery-pay handoff happen directly between the parties shown above. Questions? Support
+${vat ? `  ${vat}\n` : ''}  <div class="foot">
+    ${isRide ? 'Swift charges no commission and never takes custody of the fare. You paid your driver directly.' : isParcel ? 'Swift charges no commission and never takes custody of the fee. You paid your rider directly.' : `Swift charges no commission and never takes custody of order money. Order payment and any
+    delivery-pay handoff happen directly between the parties shown above.`} Questions? Support
     lives in the Swift app.
   </div>
 </div>

@@ -8,11 +8,13 @@
 import { isProduction } from '../../utils/runtime-mode';
 import { firstInvalidTwilioConfig, isTwilioMessageSid } from '../../utils/twilio-identity';
 import { SmtpEmailProvider } from './smtp-email';
+import { ResendEmailProvider } from './resend-email';
 import { pushOptionsFor, type AlertClass } from './alert-class';
 import { sealReviewChannels } from './review-seal';
 import { guardNonProductionSms } from './sms-recipient-allowlist';
 import { SMS_REF_HANDOFF_SUPPRESSED } from './sms-outcome';
 import { expoErrorClass, httpFailureReason, recordPushFailure, recordPushFailureClasses } from './push-outcome';
+import { gsm7Sms } from '../../utils/sms-text';
 
 export type NotificationHandoff = <T>(part: string, effect: () => Promise<T>) => Promise<T | undefined>;
 export interface SmsOptions { handoff?: NotificationHandoff }
@@ -58,6 +60,14 @@ export interface PushOptions {
    *  response window closed). It is never sent at or after this moment, its
    *  ttl never reaches past it, and it is never retried past it. */
   deadlineMs?: number;
+  /** [DRILL-STORM] A push that REPLACES the last one sent under the same key
+   *  (Expo collapseId: iOS apns-collapse-id replaces the shown notification,
+   *  FCM collapse_key coalesces in transit). Set from the payload's
+   *  collapseKey (alert-class.ts); the operating system does the work, so it
+   *  needs no app change. */
+  collapseId?: string;
+  /** [DRILL-STORM] Android: replaces a notification already shown under the same tag (Expo `tag`). */
+  tag?: string;
 }
 
 /** The options a push gets when a caller passes none: the standard class. */
@@ -129,7 +139,8 @@ class DevSms implements SmsProvider {
   readonly supportsHandoff = true;
   async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
     if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
-    devChannelLog.push({ channel: 'sms', to, body, at: new Date() });
+    // [SMS-COST] What the log holds is what Twilio would be sent: the same GSM-7 body.
+    devChannelLog.push({ channel: 'sms', to, body: gsm7Sms(body), at: new Date() });
     return { ref: `dev_sms_${++seq}` };
   }
 }
@@ -204,8 +215,12 @@ class TwilioSmsProvider implements SmsProvider {
     if (invalidConfig) throw new Error(`${invalidConfig} for the twilio provider`);
   }
 
-  async sendSms(to: string, body: string, options?: SmsOptions): Promise<{ ref: string }> {
-    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, body)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
+  async sendSms(to: string, rawBody: string, options?: SmsOptions): Promise<{ ref: string }> {
+    if (options?.handoff) return await options.handoff('message', () => this.sendSms(to, rawBody)) ?? { ref: SMS_REF_HANDOFF_SUPPRESSED };
+    // [SMS-COST · owner ruling 2 Nov 2026] Every text leaves Swift as GSM-7: one
+    // character outside it (×, an em dash, a curly quote) bills the whole message
+    // as UCS-2, 67 characters a part instead of 153. A GSM-7 body goes as written.
+    const body = gsm7Sms(rawBody);
     const auth = Buffer.from(`${this.keySid}:${this.keySecret}`).toString('base64');
     // Bound the WHOLE call, body read included: a hung Twilio must not hang
     // the login request or the ops page behind it. Abort releases the
@@ -288,6 +303,8 @@ function expoMessage(
     ...(options.sound ? { sound: options.sound } : {}),
     ...(options.channelId ? { channelId: options.channelId } : {}),
     ...(options.interruptionLevel ? { interruptionLevel: options.interruptionLevel } : {}),
+    ...(options.collapseId ? { collapseId: options.collapseId } : {}),
+    ...(options.tag ? { tag: options.tag } : {}),
     ...(window.ttl !== undefined ? { ttl: window.ttl } : {}),
   };
 }
@@ -537,8 +554,10 @@ export function withPushRetry(inner: PushProvider, delays: number[] = PUSH_RETRY
 /**
  * Email is chosen on its own axis: `EMAIL_PROVIDER=smtp` sends through the
  * founder's mailbox (GoDaddy / Microsoft 365 over SMTP, see smtp-email.ts);
- * unset or `dev` keeps DevEmail, which REFUSES in production so a missing
- * sender is loud at the first send rather than silent forever.
+ * `EMAIL_PROVIDER=resend` sends over HTTPS through Resend's email API
+ * (resend-email.ts; the droplets cannot reach SMTP); unset or `dev` keeps
+ * DevEmail, which REFUSES in production so a missing sender is loud at the
+ * first send rather than silent forever.
  */
 function getEmailProvider(): EmailProvider {
   const provider = process.env['EMAIL_PROVIDER'] ?? 'dev';
@@ -547,6 +566,8 @@ function getEmailProvider(): EmailProvider {
       return new DevEmail();
     case 'smtp':
       return new SmtpEmailProvider();
+    case 'resend':
+      return new ResendEmailProvider();
     default:
       throw new Error(`Unknown EMAIL_PROVIDER: ${provider}`);
   }

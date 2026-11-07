@@ -48,6 +48,16 @@ export function lineOptionsAsMade(line: { subStatus: string; selectedOptions: re
 export const MMG_SWAP_SETTLES_DIRECTLY =
   'MMG order totals can’t change in-app — the store settles item changes with you directly until in-app MMG adjustments arrive.';
 
+/** [REVIEW-M S4-1 on #2043] The same answer on any other prepaid rail (card, bank transfer: both
+ *  OFF today, checkout takes cash or MMG only), in words true for that rail. */
+export const PREPAID_TOTAL_SETTLES_DIRECTLY =
+  'This order’s total can’t change in-app once the store has accepted it or a payment exists — the store settles item changes with you directly.';
+
+/** What the customer (and the store's refused request) is told when this order's total is fixed in-app. */
+export function totalFixedCopy(order: { paymentMethod: string | null }): string {
+  return order.paymentMethod === 'MOBILE_MONEY' ? MMG_SWAP_SETTLES_DIRECTLY : PREPAID_TOTAL_SETTLES_DIRECTLY;
+}
+
 /**
  * The swap as the customer decides it. While it is open: the line as ordered
  * (unit price with its options, and those options), the proposal, the exact
@@ -88,18 +98,24 @@ export type AdjustableOrder = {
 
 /**
  * [O-4 · owner 22 Oct 2026] May this order's TOTAL change in-app — a line
- * removed, a swap at another price? On cash (and every rail but MMG): yes, the
- * handover collects the total the customer confirmed. On MMG the money goes
- * straight to the store, so the total stays fixed in-app once any payment can
- * exist (REPORT-006 F-006-02) — and it CAN'T exist yet before the store
- * accepts: the store's MMG number is shown only after acceptance, so the total
- * may change only while ALL of this holds: the order still waits for the store
- * (PENDING, never accepted), no pay link was issued, nobody (store or
- * customer) has said money moved, and no disagreement is open. Then the
- * customer pays only the total they confirmed. Anything not projected = no.
+ * removed, a swap at another price? On cash: yes, the handover collects the
+ * total the customer confirmed. On MMG the money goes straight to the store,
+ * so the total stays fixed in-app once any payment can exist (REPORT-006
+ * F-006-02) — and it CAN'T exist yet before the store accepts: the store's MMG
+ * number is shown only after acceptance, so the total may change only while
+ * ALL of this holds: the order still waits for the store (PENDING, never
+ * accepted), no pay link was issued, nobody (store or customer) has said money
+ * moved, and no disagreement is open. Then the customer pays only the total
+ * they confirmed. Anything not projected = no.
+ *
+ * [REVIEW-M S4-1 on #2043 · card switch-on prerequisite] Every rail but cash
+ * gets exactly that rule: card and bank transfer are prepaid (both OFF today),
+ * so their total may change only before acceptance and before any payment
+ * (paymentStatus still PENDING), never after. Only CASH is named; a rail added
+ * later fails closed until someone decides otherwise.
  */
 export function orderTotalAdjustable(order: AdjustableOrder): boolean {
-  if (order.paymentMethod !== 'MOBILE_MONEY') return true;
+  if (order.paymentMethod === 'CASH') return true;
   return order.status === 'PENDING'
     && order.acceptedAt === null
     && order.paymentStatus === 'PENDING'
@@ -132,13 +148,16 @@ export function substitutionDecideMinutes(raw: string | undefined = process.env[
 /**
  * What happens when nobody answers in time — the SAFE default, never a silent
  * swap: the line is REMOVED (it comes off the order and the total drops). An
- * MMG order's total can't change in-app, so there the question is WITHDRAWN and
+ * order whose total can't change in-app (MMG, or any prepaid rail, once the
+ * store accepted or a payment may exist) has the question WITHDRAWN instead:
  * the store settles the item with the customer directly; no money moves.
  */
 export function substitutionNoAnswer(order: AdjustableOrder): 'REMOVE' | 'WITHDRAW' {
-  // [O-4] Before the store accepts and before any MMG payment can exist, an MMG
-  // total may still change, so no answer removes the item there too.
-  return order.paymentMethod === 'MOBILE_MONEY' && !orderTotalAdjustable(order) ? 'WITHDRAW' : 'REMOVE';
+  // [O-4] Before the store accepts and before any payment can exist, the total
+  // may still change, so no answer removes the item there too.
+  // [REVIEW-M S4-1 on #2043] On every rail, not only MMG: a removal the total
+  // can't take would only be refused by the money guard.
+  return orderTotalAdjustable(order) ? 'REMOVE' : 'WITHDRAW';
 }
 
 /**
@@ -181,8 +200,8 @@ export function substitutionView(line: ViewLine, order: ViewOrder, ctx: { onlyIt
   if (line.subStatus === 'NONE') return null;
   if (line.subStatus !== 'PENDING') return { state: line.subStatus, original: null, proposed: null, priceDelta: null, decisions: null, settlementGuidance: null, decideBy: null, ifNoAnswer: null };
   const delta = substitutionLineChange(line).delta;
-  // [O-4] On cash, and on MMG before the store accepts and before any payment
-  // can exist, the total may change; otherwise only a same-price swap may.
+  // [O-4] On cash, and on any other rail before the store accepts and before
+  // any payment can exist, the total may change; otherwise only a same-price swap may.
   const adjustable = orderTotalAdjustable(order);
   // Use the existing approval guard verbatim: a proposal may outlive the
   // customer's payment denial. Required context prevents a missing projection
@@ -222,14 +241,14 @@ export function substitutionView(line: ViewLine, order: ViewOrder, ctx: { onlyIt
       proposed: null,
       priceDelta: -Math.min(Number(line.totalCustomer), Number(order.totalAmount)),
       decisions: { approve: !approvalHold && adjustable, reject: false },
-      settlementGuidance: approvalHold ?? (adjustable ? null : MMG_SWAP_SETTLES_DIRECTLY),
+      settlementGuidance: approvalHold ?? (adjustable ? null : totalFixedCopy(order)),
       decideBy,
       ifNoAnswer: substitutionNoAnswer(order),
     };
   }
   const negativeTotal = Number(order.totalAmount) + delta < 0;
   const settlementGuidance = approvalHold
-    ?? (!adjustable ? MMG_SWAP_SETTLES_DIRECTLY : negativeTotal
+    ?? (!adjustable ? totalFixedCopy(order) : negativeTotal
       ? 'That substitute would drop the order total below zero — refund the line instead.' : null);
   return {
     state: line.subStatus,

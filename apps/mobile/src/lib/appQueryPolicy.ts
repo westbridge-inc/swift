@@ -2,6 +2,12 @@ import { hashKey, onlineManager, type Query, type QueryClient } from '@tanstack/
 
 export const BROWSE_FRESH_MS = 60_000;
 export const QUERY_GC_MS = 5 * 60_000;
+/** [SPEED 30 Oct · owner] How long a business screen's last answers stay in memory after it
+ * closes. A store's, earner's or pro's screens are opened again and again through the day: they
+ * open with what they showed and re-read behind it (these families stay at zero freshness, so
+ * money and live work are always re-read), instead of a spinner after five minutes away. */
+export const BUSINESS_KEEP_MS = 30 * 60_000;
+const BUSINESS_FAMILIES = new Set(['mover', 'vendor', 'provider', 'services/jobs', 'services/provider-me']);
 export const RECONNECT_COOLDOWN_MS = 10_000;
 
 /** Failures remain stale, but bouncing Wi-Fi must not restart a full retry
@@ -79,9 +85,9 @@ export function installQueryFreshness(client: QueryClient): void {
     ['customer', 'vendors'], ['customer', 'vendor'], ['customer', 'favorites'],
     ['customer', 'search'], ['market', 'items'],
     ['mover'], ['vendor'], ['rides'], ['courier'], ['payments'], ['wallet'],
-    ['verification'], ['safety'], ['chat'], ['services', 'jobs'], ['services', 'provider-me'],
+    ['verification'], ['safety'], ['chat'], ['services', 'jobs'], ['services', 'provider-me'], ['provider'],
     ['ads', 'invoices'], ['ads', 'advertiser'], ['ads', 'availability'],
-  ]) client.setQueryDefaults(key, { staleTime: 0 });
+  ]) client.setQueryDefaults(key, { staleTime: 0, ...(BUSINESS_FAMILIES.has(key.join('/')) ? { gcTime: BUSINESS_KEEP_MS } : {}) });
 }
 
 interface CacheScope {

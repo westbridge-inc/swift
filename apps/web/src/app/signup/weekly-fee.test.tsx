@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
+import { WeeklyFee } from './weekly-fee';
 import { FEE_TERMS_V1, SIGNUP_PRICING } from '@/test/weekly-fee-fixture';
 
 // ---------------------------------------------------------------------------
@@ -16,6 +17,7 @@ import { FEE_TERMS_V1, SIGNUP_PRICING } from '@/test/weekly-fee-fixture';
 const fx = vi.hoisted(() => ({ send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(), replace: vi.fn(), probe: vi.fn(), fetch: vi.fn(), api: vi.fn(), search: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: fx.api }));
+vi.mock('@/lib/otp-send', () => ({ sendOtp: fx.send }));
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become }));
 vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: fx.search, placeDetails: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
@@ -54,18 +56,45 @@ const button = (name: string) => screen.getByRole('button', { name }) as HTMLBut
 const feeBox = () => screen.findByRole('checkbox', { name: 'I understand the weekly fee.' }) as Promise<HTMLInputElement>;
 const ACK = (amount: number) => ({ version: 'v1', amount, currencyCode: 'GYD' });
 
+describe('[FLOW-QA2 NEW-10] the line under the button names an unticked weekly fee', () => {
+  const ask = () => document.querySelector('[data-signup-ask]')?.textContent ?? null;
+  it('a rider: the fee tick first, then the agreement, then nothing', async () => {
+    const user = await throughName(/Deliver with Swift/);
+    const box = await feeBox();
+    await waitFor(() => expect(ask()).toBe('Tick “I understand the weekly fee” to continue.'));
+    expect(button('Create rider account').disabled).toBe(true);
+    await user.click(box);
+    expect(ask()).toBe('Tick the Mover Agreement to continue');
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
+    expect(ask()).toBeNull();
+    expect(button('Create rider account').disabled).toBe(false);
+  });
+
+  it('a taxi driver: the vehicle details first, then the fee tick', async () => {
+    const user = await throughName(/Drive a taxi with Swift/);
+    await feeBox();
+    expect(ask()).toBe('Add the make');
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Allion'], ['Year', '2016'], ['Colour', 'Silver'], ['Licence plate', 'HC 1234']]) {
+      fireEvent.change(screen.getByLabelText(label!), { target: { value } });
+    }
+    await waitFor(() => expect(ask()).toBe('Tick “I understand the weekly fee” to continue.'));
+    await user.click(await feeBox());
+    expect(ask()).toBe('Tick the Mover Agreement to continue');
+  });
+});
+
 describe('[row 628] the weekly fee is on the page before a partner signs up', () => {
   it('a rider sees the fee for THEIR vehicle, every one of the server’s lines, and an unticked tick; the button waits for it', async () => {
     const user = await throughName(/Deliver with Swift/);
     const box = await feeBox();
     expect(box.checked).toBe(false);
     const fee = screen.getByRole('region', { name: 'Your weekly fee' });
-    expect(fee.textContent).toContain('Your weekly fee: $6,000/week');
+    expect(fee.textContent).toContain('Your weekly fee: GY$6,000 a week');
     for (const item of FEE_TERMS_V1.items) expect(fee.textContent).toContain(`${item.heading}: ${item.text}`);
     // The price is read fresh from the API, never a cached page's figure.
     expect(fx.fetch).toHaveBeenCalledWith(expect.stringMatching(/\/api\/v1\/auth\/pricing$/), expect.objectContaining({ cache: 'no-store' }));
 
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create rider account').disabled).toBe(true);
     await user.click(button('Create rider account'));
     expect(fx.become).not.toHaveBeenCalled();
@@ -79,9 +108,9 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
   it('another vehicle is another fee: the amount changes and the tick is cleared, then sent with the new amount', async () => {
     const user = await throughName(/Deliver with Swift/);
     await user.click(await feeBox());
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     fireEvent.change(screen.getByLabelText('Vehicle'), { target: { value: 'BICYCLE' } });
-    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('Your weekly fee: $5,000/week');
+    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('Your weekly fee: GY$5,000 a week');
     expect((await feeBox()).checked).toBe(false);
     expect(button('Create rider account').disabled).toBe(true);
     await user.click(await feeBox());
@@ -91,11 +120,11 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
 
   it('a taxi driver is quoted the taxi fee; a business its own type’s fee', async () => {
     const user = await throughName(/Drive a taxi with Swift/);
-    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('$8,000/week');
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('GY$8,000 a week');
     for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create driver account').disabled).toBe(true);
     await user.click(await feeBox());
     await user.click(button('Create driver account'));
@@ -105,18 +134,39 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
   it('a business sees the first step of its catalogue fee, or the services fee', async () => {
     await throughName(/Put my business on Swift/);
     const region = await screen.findByRole('region', { name: 'Your weekly fee' });
-    expect(region.textContent).toContain('$9,000/week');
+    expect(region.textContent).toContain('GY$9,000 a week');
     fireEvent.change(screen.getByLabelText('Business type'), { target: { value: 'SERVICE' } });
-    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('$7,000/week');
+    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('GY$7,000 a week');
     expect(button('Create business').disabled).toBe(true);
   });
 
   it('[REVIEW-F S3-2] a catalogue store is told, beside the amount, that it is the starting rate; a services business is not', async () => {
-    const LADDER = 'This is the starting rate; it steps up as you list more items.';
+    // [RETIER PR-A · R27] priced for its size when approved, ticked first; never "it steps up as you list more items"
+    const LADDER = 'This is the starting rate. If your store has more items by the time Swift approves it (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. After that, the rate does not change as your catalogue grows.';
     await throughName(/Put my business on Swift/);
-    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain(`Your weekly fee: $9,000/week${LADDER}`);
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain(`Your weekly fee: GY$9,000 a week${LADDER}`);
     fireEvent.change(screen.getByLabelText('Business type'), { target: { value: 'SERVICE' } });
     expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).not.toContain(LADDER);
+  });
+
+  it('[RETIER PR-C] the server switched the re-tier on: the line says a rise is told 14 days ahead with how to stop it, a fall comes after two weekly counts', async () => {
+    fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, catalogueRetier: { on: true, noticeDays: 14 } }));
+    await throughName(/Put my business on Swift/);
+    const on = (await screen.findByRole('region', { name: 'Your weekly fee' })).textContent!;
+    expect(on).toContain('tick it before anything is charged. After that, Swift counts your items every week. If your items for sale reach a higher rate, Swift tells you in the app at least 14 days before the new fee applies, and how to stop it. '
+      + 'If your items, counting items taken off sale, changed or removed in the last 7 days, fit a lower rate on two weekly counts a week apart, your fee goes down and you are told.');
+    expect(on).not.toContain('does not change');
+  });
+
+  it('[RETIER PR-C] a server that says nothing about the re-tier (older, malformed): the line makes no claim about later moves', async () => {
+    for (const catalogueRetier of [undefined, { on: 'yes' }, { on: true, noticeDays: 3 }]) {
+      fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, catalogueRetier }));
+      const view = render(<WeeklyFee role="VENDOR" type="STORE" onChange={() => {}} />);
+      const none = (await view.findByRole('region', { name: 'Your weekly fee' })).textContent!;
+      expect(none, JSON.stringify(catalogueRetier)).toContain('tick it before anything is charged.');
+      expect(none, JSON.stringify(catalogueRetier)).not.toContain('After that');
+      view.unmount();
+    }
   });
 
   it('[REVIEW-F S3-2] a price list with one catalogue step has nothing to step up to, and a rider has no catalogue', async () => {
@@ -136,10 +186,10 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     fx.api.mockResolvedValue({ data: { address: 'Store entrance, Georgetown' } });
     const user = await throughName(/Put my business on Swift/);
     fireEvent.change(await screen.findByLabelText('Business name'), { target: { value: 'Test shop' } });
-    for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
+    for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region (optional)', 'Demerara-Mahaica']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Business Agreement/ }));
     const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
     await user.click(button('Place your store on the map'));
     await user.click(await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ }));
@@ -157,18 +207,18 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     fx.fetch.mockImplementationOnce(() => Promise.reject(new TypeError('Failed to fetch')));
     const user = await throughName(/Deliver with Swift/);
     expect((await screen.findByRole('alert')).textContent).toMatch(/Couldn’t load your weekly fee/);
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create rider account').disabled).toBe(true);
     await user.click(button('Try again'));
     expect((await feeBox()).checked).toBe(false);
-    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('$6,000/week');
+    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('GY$6,000 a week');
   });
 
   it('no fee for the choice keeps the button waiting', async () => {
     fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, movers: [] }));
     const first = await throughName(/Deliver with Swift/);
     expect((await screen.findByText('No weekly fee is set for this choice yet.'))).toBeTruthy();
-    await first.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await first.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create rider account').disabled).toBe(true);
   });
 
@@ -177,16 +227,16 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     const user = await throughName(/Deliver with Swift/);
     expect((await screen.findByText('Couldn’t load the weekly fee terms — try again later.'))).toBeTruthy();
     expect(screen.queryByRole('checkbox', { name: /weekly fee/ })).toBeNull();
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     expect(button('Create rider account').disabled).toBe(true);
   });
 
   it('an API older than the tick (an amount, no words): the amount is shown, nothing is ticked or sent', async () => {
     fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, feeTerms: undefined }));
     const user = await throughName(/Deliver with Swift/);
-    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('$6,000/week');
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain('GY$6,000 a week');
     expect(screen.queryByRole('checkbox', { name: /weekly fee/ })).toBeNull();
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     await user.click(button('Create rider account'));
     expect(fx.become.mock.calls[0]![0]).toEqual({ role: 'MOVER', acceptAgreement: true, vehicleType: 'MOTORCYCLE' });
   });
@@ -194,13 +244,13 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
   it('the server refusing the tick because the fee changed: its words are shown, the price is read again, the tick is cleared', async () => {
     const user = await throughName(/Deliver with Swift/);
     await user.click(await feeBox());
-    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Mover Agreement/ }));
     const changed = Object.assign(new Error('The weekly fee is now $6,500 a week. Check it and tick “I understand the weekly fee” again.'), { code: 'WEEKLY_FEE_CHANGED' });
     fx.become.mockRejectedValueOnce(changed);
     fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, movers: [{ vehicleType: 'MOTORCYCLE', rate: 6500 }, { vehicleType: 'BICYCLE', rate: 5000 }] }));
     await user.click(button('Create rider account'));
     expect((await screen.findByText(/The weekly fee is now \$6,500 a week/)).getAttribute('role')).toBe('alert');
-    await waitFor(() => expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('$6,500/week'));
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('GY$6,500 a week'));
     expect((await feeBox()).checked).toBe(false);
     expect(fx.replace).not.toHaveBeenCalled();
   });

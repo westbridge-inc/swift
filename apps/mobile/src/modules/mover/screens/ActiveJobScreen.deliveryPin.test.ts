@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // MKT-F057 — the rider asks for the customer's delivery PIN at the door on
-// BOTH goods rails (MMG "Mark delivered" and cash "Confirm payment & hand
-// over"), and never displays the value it verifies.
+// BOTH goods rails (MMG "Mark delivered" and cash "Record cash & hand over",
+// the DoorCash flow since row 56), and never displays the value it verifies.
 //
 // Read as source (the mobile Vitest harness has no RN renderer, same as
 // pin-gate.test.ts). The server is the authority: MISSING_PIN / INVALID_PIN /
@@ -15,6 +15,8 @@ import { readFileSync } from 'node:fs';
 
 const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 const SCREEN = strip(readFileSync(new URL('./ActiveJobScreen.tsx', import.meta.url), 'utf8'));
+// [L02 · row 56] The cash door's statement flow (amount, review, confirm).
+const DOOR_CASH = strip(readFileSync(new URL('../DoorCash.tsx', import.meta.url), 'utf8'));
 
 describe('the rider door PIN ceremony [MKT-F057]', () => {
   it('asks for the customer code with the same 6-digit CodeInput the driver ceremony uses', () => {
@@ -30,17 +32,28 @@ describe('the rider door PIN ceremony [MKT-F057]', () => {
   it('sends the entered PIN with both completion actions', () => {
     // MMG: PUT /delivered
     expect(SCREEN).toMatch(/action: 'delivered', pin/);
-    // Cash: POST /handover (the paid outcome)
-    expect(SCREEN).toMatch(/action: 'handover', pin/);
+    // Cash: POST /handover (the paid outcomes) — the screen hands the typed code
+    // to the cash door, which sends it with every hand-over statement
+    // (behaviour: ActiveJobScreen.doorCash.navigation.test.ts).
+    expect(SCREEN).toMatch(/<DoorCash[^>]*\bpin=\{pin\}/);
+    expect(SCREEN).toMatch(/submit=\{\(fields, handlers\) => riderAct\.mutate\(\{ id: job\.id, action: 'handover', \.\.\.fields, handoverVersion: door\.version \?\? undefined \}, handlers\)\}/);
+    expect(DOOR_CASH).toMatch(/\{ \.\.\.fields, \.\.\.\(fields\.outcome === 'paid' && pin \? \{ pin \} : \{\}\) \}/);
   });
 
   it('never disables the door on an empty PIN — the server answers MISSING_PIN, and legacy orders complete', () => {
     expect(SCREEN).toMatch(/bigButton\(deliverLabel, markDelivered, \{ loading: riderAct\.isPending \|\| courierProof\.isPending, disabled: busy \}\)/);
-    expect(SCREEN).toMatch(/bigButton\('Confirm payment & hand over', \(\) => riderAct\.mutate\(\{ id: job\.id, action: 'handover', pin \}, \{ onError: onPinRefused \}\), \{ loading: riderAct\.isPending, disabled: busy \}\)/);
+    // Cash: the door opens on busy only (never on the code); its refusals of
+    // the code come back through the screen's onPinRefused.
+    expect(DOOR_CASH).toMatch(/label="Record cash & hand over"\s+testID="door-cash-paid"\s+disabled=\{busy\}/);
+    expect(SCREEN).toMatch(/onDoorRefused=\{onPinRefused\}/);
   });
 
   it('surfaces PIN refusals through the input error state', () => {
-    expect(SCREEN).toMatch(/error=\{riderAct\.isError\}/);
+    // [L02 · row 56] Only a refusal OF THE CODE marks the boxes; a cash-amount
+    // refusal at the same door is answered in its own popup (behaviour:
+    // ActiveJobScreen.doorCash.navigation.test.ts).
+    expect(SCREEN).toMatch(/error=\{pinRefused\}/);
+    expect(SCREEN).toMatch(/const pinRefused = riderAct\.isError && DOOR_CODE_REFUSALS\.has\(/);
   });
 
   it('surfaces the server refusal words as a toast — MISSING_PIN / INVALID_PIN / MAX_ATTEMPTS', () => {

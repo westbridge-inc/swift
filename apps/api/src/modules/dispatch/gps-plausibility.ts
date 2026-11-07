@@ -51,7 +51,7 @@ const MIN_DISTANCE_M = 50;
 const PERFECT_ACCURACY_M = 1;
 // [ALG-16] Long enough to hold a whole delivery at one fix per 8 s (~96 min).
 const TRACE_LENGTH = 720;
-const TRACE_TTL_S = 3 * 60 * 60;
+export const TRACE_TTL_S = 3 * 60 * 60;
 const FLAG_COOLDOWN_S = 10 * 60;
 export const CORROBORATION_WINDOW_MS = 10 * 60 * 1000;
 export const CORROBORATION_MIN_FIXES = 2;

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The onboarding price card is role-specific: a taxi driver, a delivery rider,
@@ -48,14 +50,17 @@ const GY = {
   vendors: {
     service: 8000,
     catalogue: [
-      { minItems: 0, tier: 'small', rate: 15000 },
-      { minItems: 1000, tier: 'large', rate: 20000 },
-      { minItems: 10000, tier: 'department', rate: 60000 },
+      { minItems: 0, tier: 'small', rate: 15000, trialDays: 14 },
+      { minItems: 1000, tier: 'large', rate: 20000, trialDays: 14 },
+      // [DEPT-PRICE · owner 29 Oct 2026] 45,000 (was 60,000); a NEW department-store signup gets 7 days free.
+      { minItems: 10000, tier: 'department', rate: 45000, trialDays: 7 },
     ],
   },
   franchise: { minLocations: 5, discountPct: 50 },
+  // [RETIER PR-C] what the server sends while its weekly re-tier is off (WEEKLY_RETIER_ON = false)
+  catalogueRetier: { on: false, noticeDays: 14 } as { on?: unknown; noticeDays?: unknown } | null | undefined,
   // What an older app reads: the safe, conflated legacy numbers.
-  weekly: { mover: 9000, moverHeavy: 9000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000 },
+  weekly: { mover: 9000, moverHeavy: 9000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 45000 },
 };
 
 beforeEach(() => {
@@ -93,7 +98,7 @@ describe('PricingCard — movers see the rate for the vehicle they register', ()
   });
 });
 
-describe('PricingCard — vendors see their own tier and the automatic ladder', () => {
+describe('PricingCard — vendors see the rate a new store starts on, and that it does not move with the catalogue', () => {
   it('a service provider is quoted 8,000 and no catalogue ladder', () => {
     const text = textOf(card({ kind: 'vendor', vendorType: 'SERVICE' }));
     expect(text).toContain('14 days free, then $8,000/week');
@@ -101,23 +106,92 @@ describe('PricingCard — vendors see their own tier and the automatic ladder', 
     expect(text).not.toContain('items');
   });
 
-  it('a restaurant, grocery or shop starts at 15,000 and sees the 1,000 / 10,000 steps from the server', () => {
+  // [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on its own catalogue's step;
+  // above the first step its owner sees that exact fee and ticks it first. [R27] The weekly re-tier is OFF on the
+  // server (apps/api/src/modules/billing/weekly-retier.ts): after that nothing moves it. The card must not promise a
+  // move, nor show the larger steps' fees as if they were this store's.
+  it('[RETIER PR-A · R27] a restaurant, grocery or shop is quoted 15,000 under 1,000 items, told a bigger catalogue at approval is priced for its size and ticked first, and that nothing moves it after', () => {
     for (const vendorType of ['RESTAURANT', 'SUPERMARKET', 'STORE']) {
       const text = textOf(card({ kind: 'vendor', vendorType }));
       expect(text).toContain('14 days free, then $15,000/week');
-      expect(text).toContain('1,000+ active items $20,000/week');
-      expect(text).toContain('10,000+ $60,000/week');
-      expect(text).toContain('automatically');
+      expect(text).toContain('Keep 100% of every sale — no commission on orders. This is the rate for a store with under 1,000 items. '
+        + 'If yours has more by the time Swift approves the store (counting items taken off sale, changed or removed in the last 7 days), its weekly fee is the rate for its size: you see that exact fee and tick it before anything is charged. '
+        + 'After that, the rate does not change as your catalogue grows.');
+      expect(text).not.toMatch(/automatic/i);
+      expect(text).not.toContain('$20,000');
+      expect(text).not.toContain('$45,000');
+    }
+  });
+
+  // [RETIER PR-C · REVIEW-M N3] The server's weekly re-tier (api billing.service recalculateVendorTiers + fee-rise-notice.ts):
+  // a rise is decided on the items for sale and told in the app at least 14 days ahead with how to stop it; a fall is
+  // judged on the week's count (the same 7-day rule) on two passes a week apart, and the store is told.
+  const ON_WORDS = 'After that, Swift counts your items every week. If your items for sale reach a higher rate, Swift tells you in the app at least 14 days before the new fee applies, and how to stop it. '
+    + 'If your items, counting items taken off sale, changed or removed in the last 7 days, fit a lower rate on two weekly counts a week apart, your fee goes down and you are told.';
+
+  it('[RETIER PR-C] the server switched the re-tier on: the card says a rise is told 14 days ahead with how to stop it, a fall comes after two weekly counts', () => {
+    state.pricing = { ...GY, catalogueRetier: { on: true, noticeDays: 14 } };
+    const text = textOf(card({ kind: 'vendor', vendorType: 'SUPERMARKET' }));
+    expect(text).toContain(`you see that exact fee and tick it before anything is charged. ${ON_WORDS}`);
+    expect(text).not.toContain('does not change');
+    expect(text).not.toMatch(/automatic/i);
+  });
+
+  it('[RETIER PR-C] a server that says nothing (older, or malformed) gets no claim either way about later moves', () => {
+    for (const catalogueRetier of [undefined, null, {}, { on: 'yes' }, { on: true }, { on: true, noticeDays: 7 }, { on: true, noticeDays: 14.5 }]) {
+      state.pricing = { ...GY, catalogueRetier };
+      const text = textOf(card({ kind: 'vendor', vendorType: 'STORE' }));
+      expect(text, JSON.stringify(catalogueRetier)).toContain('you see that exact fee and tick it before anything is charged.');
+      expect(text, JSON.stringify(catalogueRetier)).not.toContain('After that');
+      expect(text, JSON.stringify(catalogueRetier)).not.toContain('does not change');
+    }
+  });
+
+  it('[RETIER PR-C] one catalogue step: "does not change" only while the server says its re-tier is off', () => {
+    const one = { ...GY.vendors, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }] };
+    state.pricing = { ...GY, vendors: one };
+    expect(textOf(card({ kind: 'vendor', vendorType: 'STORE' }))).toContain('Today this rate does not change as your catalogue grows.');
+    for (const catalogueRetier of [{ on: true, noticeDays: 14 }, undefined]) {
+      state.pricing = { ...GY, vendors: one, catalogueRetier };
+      expect(textOf(card({ kind: 'vendor', vendorType: 'STORE' })), JSON.stringify(catalogueRetier)).not.toContain('does not change');
+    }
+  });
+
+  // [R27 · RETIER PR-C] What happens after a store is approved is the server's word: the API serves `catalogueRetier.on`
+  // from its own switch (WEEKLY_RETIER_ON), so switching the re-tier on (the owner's go) changes this card with it.
+  it('[R27 · RETIER PR-C] the card follows the server\'s switch: the API serves it from WEEKLY_RETIER_ON, the card reads only that', () => {
+    const api = (...p: string[]) => readFileSync(join(__dirname, '..', '..', '..', '..', 'api', 'src', 'modules', ...p), 'utf8');
+    expect(api('billing', 'weekly-retier.ts')).toMatch(/^export const WEEKLY_RETIER_ON = (false|true);$/m);
+    expect(api('auth', 'auth.routes.ts')).toContain('catalogueRetier: { on: WEEKLY_RETIER_ON, noticeDays: FEE_RISE_NOTICE_DAYS }');
+    expect(readFileSync(join(__dirname, 'PricingCard.tsx'), 'utf8')).toContain('${afterBirthWords(p)}');
+  });
+
+  it('[DEPT-PRICE] a shop is told, from the server, that a new store at department size gets 7 days free; the headline keeps 14', () => {
+    const text = textOf(card({ kind: 'vendor', vendorType: 'SUPERMARKET' }));
+    expect(text).toContain('14 days free, then $15,000/week');
+    expect(text).toContain('A new store with 10,000+ items when Swift approves it gets 7 days free.');
+    expect(text).not.toContain('1,000+ items when Swift approves it');
+    // A service provider and a mover are never told it.
+    for (const props of [{ kind: 'vendor', vendorType: 'SERVICE' }, { kind: 'mover', vehicleType: 'CAR' }]) {
+      expect(textOf(card(props))).not.toContain('when Swift approves it');
+    }
+  });
+
+  it('[DEPT-PRICE] a server that predates the per-step trial, or sends a value that is not whole days, adds no trial line', () => {
+    for (const trialDays of [undefined, 0, 2.5, '7']) {
+      state.pricing = { ...GY, vendors: { ...GY.vendors, catalogue: GY.vendors.catalogue.map((band) => ({ ...band, trialDays })) } };
+      expect(textOf(card({ kind: 'vendor', vendorType: 'STORE' })), String(trialDays)).not.toContain('when Swift approves it');
     }
   });
 
   it('the steps are the server boundaries, not copy frozen into the app', () => {
     state.pricing = {
       ...GY,
-      vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }, { minItems: 500, tier: 'large', rate: 20000 }] },
+      vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 12000 }, { minItems: 500, tier: 'large', rate: 20000, trialDays: 7 }] },
     };
     const text = textOf(card({ kind: 'vendor', vendorType: 'STORE' }));
-    expect(text).toContain('500+ active items $20,000/week');
+    expect(text).toContain('14 days free, then $12,000/week');
+    expect(text).toContain('A new store with 500+ items when Swift approves it gets 7 days free.');
     expect(text).not.toContain('1,000');
   });
 });

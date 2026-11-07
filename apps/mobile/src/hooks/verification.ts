@@ -1,6 +1,6 @@
 import { prepareUploadImage } from '../lib/uploadImage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, vendorApi, type UploadConsentVia, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
@@ -63,6 +63,8 @@ export function useBecomePartner() {
         addressLine1: string;
         city: string;
         region?: string;
+        /** [ROLE-DOCS · owner 21 Oct 2026] the store trades under its owner's own name (checked by the server) */
+        nameBasis?: 'OWN_NAME' | 'REGISTERED';
         latitude: number;
         longitude: number;
       };
@@ -93,6 +95,15 @@ export function useBecomePartner() {
         }
       }
       requireAuthSessionForPrincipal(owner);
+      // [ROLE-DOCS · owner 21 Oct 2026] The owner ticked the own-name declaration before the store existed: it is
+      // signed now, in the same turn as the session check above, so it is this account's. Here, not on the screen:
+      // the store's creation swaps the navigator, and a callback on an unmounted screen never runs. A failure never
+      // fails the store; its Documents checklist offers the same signature again.
+      if (data.role === 'VENDOR' && data.business?.nameBasis === 'OWN_NAME') {
+        let signing: Promise<unknown>;
+        try { signing = Promise.resolve(vendorApi.signOwnName()); } catch { signing = Promise.resolve(); }
+        await signing.catch(() => undefined);
+      }
       // The store exists: its List-your-business draft is done. Cleared here,
       // not by the screen — a per-call observer callback never runs once the
       // screen has unmounted — and only for the account that submitted it.
@@ -176,36 +187,18 @@ export function useUploadFile() {
   });
 }
 
-/** Consumer L2: submit a government ID. [Owner ruling 8 Oct 2026] It goes on file at once unless the
- *  server's automatic checks hold it for a person; no selfie, no face match. The result carries
- *  `idCheck` (ON_FILE · WAITING · NOT_ACCEPTED) — read it through lib/customerIdCopy. */
-export function useSubmitIdentity() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (data: { idDocumentUrl: string; selfieUrl?: string }) => {
-      const owner = requireAuthSessionSnapshot();
-      const result = await unwrap(verificationApi.submitIdentity(
-        // [R17 · in-app ¶15] the screen's tick (build 12) is recorded in the consent ledger
-        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'customer_id_v1' },
-        owner,
-      ));
-      requireAuthSessionForPrincipal(owner);
-      void qc.invalidateQueries({ queryKey: ['verification'] });
-      // The Profile row reads the new idCheck from /customer/profile.
-      void qc.invalidateQueries({ queryKey: ['customer', 'profile'] });
-      return result;
-    },
-  });
-}
-
 /** Upload a picked file to storage, then submit it as a checklist document. */
 export function useUploadDocument(role: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ docType, file, authSession }: {
+    mutationFn: async ({ docType, file, authSession, consentVia, consent }: {
       docType: string;
       file: { uri: string; name: string; type: string };
       authSession?: AuthSessionSnapshot;
+      /** [DOC-CONSENT S4] how the checklist's tick was given for this upload (the ledger records it). */
+      consentVia?: UploadConsentVia;
+      /** [POLICE-CLEARANCE CONSENT] a police clearance's own tick and the version of the words shown. */
+      consent?: { tick: 'police_clearance_v1'; version: string };
     }) => {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
@@ -221,10 +214,35 @@ export function useUploadDocument(role: string) {
           fileUrl: uploaded.url,
           consent: true,
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
-          // [R17] the checklist's tick (build 12) is recorded in the consent ledger
-          consentTick: 'document_v1',
+          // [R17] the checklist's tick (build 12) is recorded in the consent ledger; a police clearance sends its own
+          ...(consent ? { consentTick: consent.tick, consentVersion: consent.version } : { consentTick: 'document_v1' }),
+          ...(consentVia ? { consentVia } : {}),
         }, current),
       );
+      requireAuthSessionForPrincipal(owner);
+      void qc.invalidateQueries({ queryKey: ['verification', role] });
+      return result;
+    },
+    // [DOC-CONSENT S4 · REVIEW-F] A consent the API refused — no longer on record (withdrawn meanwhile), or words that
+    // changed — re-reads the checklist, so the box shows the truth instead of a tick that no longer stands.
+    onError: (error) => {
+      const code = (error as { response?: { data?: { error?: { code?: string } } } } | null)?.response?.data?.error?.code;
+      if (code === 'CONSENT_NOT_ON_RECORD' || code === 'CONSENT_WORDS_CHANGED') void qc.invalidateQueries({ queryKey: ['verification', role] });
+    },
+  });
+}
+
+/**
+ * [POLICE-CLEARANCE CONSENT] Withdraw this checklist's police clearance (POST /verification/police-clearance/withdraw):
+ * the API erases it now, keeps only a note, and records the withdrawal; the checklist refreshes.
+ */
+export function useWithdrawPoliceClearance(role: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const owner = requireAuthSessionSnapshot();
+      // [REVIEW-F #2111 S3-1] The API's answer as it is: the card says what happened from it.
+      const result = await unwrap<{ withdrawn: number; keptForLegalHold: number; deletionPending: number }>(verificationApi.withdrawPoliceClearance(role, owner));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['verification', role] });
       return result;

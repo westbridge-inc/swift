@@ -100,7 +100,9 @@ class RehearsalComposeRendered(unittest.TestCase):
 
     def test_its_own_internal_network_volumes_and_secrets_and_nothing_public(self):
         model = compose_render(*self.FILES, project='swift-rehearsal', profiles=('web', 'admin'))
-        self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True}})
+        # [Row 312] Plus the copy's own internal scanner network (its clamd has no egress network here).
+        self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True},
+                                             'scanner': {'name': 'swift-rehearsal_scanner', 'ipam': {}, 'internal': True}})
         for volume in model['volumes'].values():
             self.assertTrue(volume['name'].startswith('swift-rehearsal_'), volume)
         # [Row 312] The copy's own upload malware scanner (no secret: it reads none).
@@ -108,7 +110,8 @@ class RehearsalComposeRendered(unittest.TestCase):
         for name, service in model['services'].items():
             with self.subTest(service=name):
                 self.assertNotIn('ports', service)
-                self.assertEqual(list(service['networks']), ['private'])
+                expected = {'clamd': ['scanner'], 'api': ['private', 'scanner'], 'worker': ['private', 'scanner']}.get(name, ['private'])
+                self.assertEqual(sorted(service['networks']), expected)
                 sources = [v['source'] for v in service.get('volumes', []) if v['type'] == 'bind']
                 self.assertNotIn('/run/swift-secrets', sources)
                 if name not in ('redis', 'clamd'):
@@ -174,7 +177,7 @@ sys.exit(0)
 PRODUCTION = {
     'PILOT_ENV': 'production', 'NODE_ENV': 'production', 'API_HOST': 'api.swift-fixture.com', 'MAPS_PROVIDER': 'osrm',
     'OSRM_URL': 'http://osrm:5000', 'BACKUP_BUCKET': 'fixture-backups', 'API_PUBLIC_URL': 'https://api.swift-fixture.com',
-    'APP_PUBLIC_URL': 'https://swift-fixture.com', 'CORS_ORIGIN': 'https://swift-fixture.com', 'STORAGE_PROVIDER': 's3',
+    'APP_PUBLIC_URL': 'https://swiftgy.com', 'CORS_ORIGIN': 'https://swift-fixture.com', 'STORAGE_PROVIDER': 's3',
     'BACKUP_GPG_FINGERPRINT': 'A' * 40, 'BACKUP_GPG_RECIPIENT_FILE': '/etc/swift/backup-recipient.asc',
     'BACKUP_MAX_AGE_HOURS': '3', 'BILLING_TOPUP_HOLD': '1', 'PAYMENT_PROVIDER': 'disabled', 'CARD_RAIL_KILL': '1',
     'TENANT_WALL_EXPAND_ATTESTED': '1',
@@ -197,6 +200,9 @@ class PilotUpHost:
         utils = self.tmp / 'repo' / 'apps' / 'api' / 'src' / 'utils'
         utils.mkdir(parents=True)
         shutil.copy(DEPLOY.parent / 'apps' / 'api' / 'src' / 'utils' / 'secret-files.ts', utils / 'secret-files.ts')
+        # [DEPLOY-GUARD] production checks APP_PUBLIC_URL against the app's link domain.
+        (self.tmp / 'repo' / 'apps' / 'mobile').mkdir(parents=True)
+        shutil.copy(DEPLOY.parent / 'apps' / 'mobile' / 'app.config.ts', self.tmp / 'repo' / 'apps' / 'mobile' / 'app.config.ts')
         shim(self.here, 'backup.sh', 'exit 0')
         shim(self.here, 'rls-logins.sh', 'echo "rls-logins $*" >> "$CALL_LOG"\n'
              'if [ -n "$FAKE_ROLES_HOLD" ]; then echo \'{"status": "hold", "reason": "ROLE_MEMBERSHIP_UNEXPECTED"}\'; exit 1; fi\n'

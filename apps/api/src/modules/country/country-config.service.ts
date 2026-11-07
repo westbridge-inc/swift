@@ -1,10 +1,10 @@
 import type { PrismaClient, CountryConfig, VehicleType, Prisma } from '@prisma/client';
-import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
-import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, OWN_NAME_LIST_SUFFIX, OWN_NAME_TIER } from '../verification/doc-registry';
+import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS, PRIVATE_CAR_PHOTO_DOC } from '../ops/platform-config';
 import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
 import { readDeliveryRates } from './pricing-config';
-import { docProfilesFor, feeBandFor, type MoverRole } from '../../config/vehicle-classes';
+import { docProfilesFor, feeBandFor, isPassengerVehicle, type MoverRole } from '../../config/vehicle-classes';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -313,15 +313,17 @@ export class CountryConfigService {
     // whose every document type is ACTIVE (legal facts verified). Until then
     // the answer is the JSON these lists have always come from: same
     // signature, same lists, no behaviour change (test_checklist_facade_unchanged).
-    // [DOC-1 §3.6 · P3-2] At the UNREGISTERED tier the same role reads its
-    // <ROLE>_UNREGISTERED list (the registry set at that tier, else the JSON key);
-    // a role with no such list is not offered the tier and keeps its standard set.
-    const unregistered = tier === UNREGISTERED_TIER;
-    const fromRegistry = await registryChecklist(db, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : undefined);
+    // [ROLE-DOCS · owner 21 Oct 2026] At the OWN_NAME tier (a store trading under its owner's own name) the role
+    // reads its <ROLE>_OWN_NAME list (the registry set at that tier, else the JSON key); a role with no such list
+    // keeps its standard set. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No other tier exists: the self-declared
+    // (unregistered) tier is removed, so any other tier a caller names reads the standard set, and a stored copy of
+    // the retired lists from an older seed is never read (RETIRED_LIST_KEYS).
+    const ownName = tier === OWN_NAME_TIER;
+    const fromRegistry = await registryChecklist(db, code, roleKey, new Date(), ownName ? OWN_NAME_TIER : undefined);
     if (fromRegistry) return fromRegistry.filter((docType) => !isNeverAcceptedDocType(docType));
     const config = await this.getByCode(code, db);
-    const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
-    if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
+    const lists = withoutRetiredLists(config.documentChecklists);
+    if (ownName && lists[`${roleKey}${OWN_NAME_LIST_SUFFIX}`]) return lists[`${roleKey}${OWN_NAME_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
     return (lists[roleKey] ?? []).filter((docType) => !isNeverAcceptedDocType(docType));
   }
 
@@ -349,30 +351,62 @@ export class CountryConfigService {
    *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, the car photo with
    *                the plate showing, fitness — master plan §3.1)
    * [VERIFY-DOCS · owner rulings 6 Oct 2026] the base itself is empty: police
-   * clearance is optional for every mover, and a licence holder's national ID
-   * is optional (getMoverOptionalDocuments).
+   * clearance is never required of a mover. [ROLE-DOCS · owner 21 Oct 2026] Only a
+   * taxi driver may add one, and a licence holder is not asked for a national ID
+   * (getMoverOptionalDocuments).
    * An unseeded profile key resolves to no extra documents. Used both to display
    * the checklist and to gate live operation.
    */
-  async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
+  async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma, kind: MoverRole | null = null): Promise<string[]> {
     const config = await this.getByCode(code, db);
-    return moverRequiredFrom(config.documentChecklists as Record<string, string[]>, vehicleType);
+    return moverRequiredFrom(moverListsFrom(config.documentChecklists), vehicleType, kind);
   }
 
   /** The documents a mover on this vehicle MAY add (the `_OPTIONAL` lists of the base and
    *  of each profile), minus what the vehicle requires. Display and upload only. [VERIFY-DOCS] */
-  async getMoverOptionalDocuments(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
+  async getMoverOptionalDocuments(code: string, vehicleType: VehicleType, db: Db = this.prisma, kind: MoverRole | null = null): Promise<string[]> {
     const config = await this.getByCode(code, db);
-    const lists = config.documentChecklists as Record<string, string[]>;
-    return optionalFrom(lists, ['MOVER', ...docProfilesFor(vehicleType)], moverRequiredFrom(lists, vehicleType));
+    const lists = moverListsFrom(config.documentChecklists);
+    return optionalFrom(lists, ['MOVER', ...docProfilesFor(vehicleType, kind)], moverRequiredFrom(lists, vehicleType, kind));
   }
 }
 
+/**
+ * [ROLE-DOCS · owner ruling 21 Oct 2026] Lists the owner retired. A stored copy written by an older seed (production
+ * holds the 2026-10-14.5 seed) never brings them back: no optional document for EVERY mover (the optional national ID
+ * and the riders' police clearance are gone) and no customer ID + selfie list.
+ * [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (a)] Nor the self-declared (unregistered) tier's three lists: the tier is
+ * removed (production's stored copy names them until the owner-signed seed of 2026-11-01.1).
+ */
+export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set([
+  'MOVER_OPTIONAL', 'CUSTOMER_L2', 'RESTAURANT_UNREGISTERED', 'SUPERMARKET_UNREGISTERED', 'STORE_UNREGISTERED',
+]);
+
+/** The code's lists UNDER the stored (signed) ones, minus the retired keys: what every checklist reader starts from. */
+export function withoutRetiredLists(stored: unknown): Record<string, string[]> {
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((stored ?? {}) as Record<string, string[]>) };
+  for (const key of RETIRED_LIST_KEYS) delete lists[key];
+  return lists;
+}
+
+/** The mover lists: the code's lists UNDER the stored (signed) ones, minus the retired keys. FAIL CLOSED (security
+ *  review, COORD 21 Oct): a key the stored row lacks — a profile added in code, or a row seeded before the key existed —
+ *  takes the code's list, never "no documents". A key the stored row HAS wins, an explicit [] included: that is a signed
+ *  decision (the MOVER base itself is [] by the owner's rulings of 6 Oct). Production's 2026-10-14.5 row holds every
+ *  profile key a vehicle asks for today (MOVER_NO_LICENCE, MOVER_MOTOR, MOVER_TAXI_EXTRA, MOVER_COMMERCIAL); from the
+ *  code it gains only MOVER_TAXI_EXTRA_OPTIONAL. */
+export function moverListsFrom(stored: unknown): Record<string, string[]> {
+  return withoutRetiredLists(stored);
+}
+
 /** The REQUIRED mover list from a checklist map: the MOVER base plus the vehicle's profiles. */
-export function moverRequiredFrom(lists: Record<string, string[]>, vehicleType: VehicleType): string[] {
+export function moverRequiredFrom(lists: Record<string, string[]>, vehicleType: VehicleType, kind: MoverRole | null = null): string[] {
   const base = lists['MOVER'] ?? [];
-  const extra = docProfilesFor(vehicleType).flatMap((key) => lists[key] ?? []);
-  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
+  // [CARS-PLATES] A car's delivery profile (kind RIDER) reads the delivery rider's list, without the taxi extras.
+  const extra = docProfilesFor(vehicleType, kind).flatMap((key) => lists[key] ?? []);
+  // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] …plus the one car photo with the plate showing (a person matches the letter).
+  const carPhoto = kind === 'RIDER' && isPassengerVehicle(vehicleType) ? [PRIVATE_CAR_PHOTO_DOC] : [];
+  return [...new Set([...base, ...extra, ...carPhoto])].filter((docType) => !isNeverAcceptedDocType(docType));
 }
 
 /** The union of the keys' `_OPTIONAL` lists, without anything already required. */

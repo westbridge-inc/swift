@@ -1,3 +1,4 @@
+import { rideIsOver } from '../lib/rideAfterTrip';
 import { teamInviteKeys } from '../hooks/teamInviteKeys';
 import * as Notifications from 'expo-notifications';
 import { navigationRef, safeNavigate } from '../navigation/navigationRef';
@@ -52,16 +53,17 @@ function feeFamilyOf(audience: string, openApp?: OpenApp): 'vendor' | 'mover' {
 }
 
 /** The documents screen of the role a document belongs to: the mover
- *  checklist, the customer's ID screen, or the store's Account tab (its
- *  Documents section; a store still in onboarding shows its checklist on the
- *  same VendorRoot). The server tag says whose document it is; an untagged
- *  notice (notifyRejection sends none) follows the open app. */
+ *  checklist, or the store's Account tab (its Documents section; a store still
+ *  in onboarding shows its checklist on the same VendorRoot). The server tag
+ *  says whose document it is; an untagged notice (notifyRejection sends none)
+ *  follows the open app. [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] A
+ *  customer has no ID screen any more (Swift asks for no customer ID): the
+ *  app opens normally. */
 function documentsFor(audience: string, openApp?: OpenApp): Destination {
   const who = audience || openApp?.() || 'customer';
   if (who === 'earner' || who === 'mover') return { screen: 'MoverDocuments' };
   if (who === 'business' || who === 'vendor') return { screen: 'VendorRoot', params: { screen: 'Account' } };
-  if (who === 'customer') return { screen: 'IdentityVerification' };
-  return { screen: HOME_SCREEN }; // an advertiser account has no documents screen
+  return { screen: HOME_SCREEN }; // a customer or an advertiser account has no documents screen
 }
 
 /** PURE: payload → destination. The single source of tap-routing truth —
@@ -74,6 +76,22 @@ function documentsFor(audience: string, openApp?: OpenApp): Destination {
  *  `openApp` is consulted only for a payload with no server-tagged audience. */
 export function destinationFor(data: Record<string, unknown> | null | undefined, openApp?: OpenApp): Destination | null {
   if (!data) return null;
+  // [DRILL-STORM · S-19] An OPS PAGE — any payload carrying the ops alert it belongs to (an SOS page, a
+  // platform page, a re-page, the drill, a failed drill) — opens that page on the responder's Ops alerts
+  // screen, where it is acknowledged. Until now these taps opened nothing (or a customer's order screen),
+  // so a page could only be stopped from a computer. Only ops pages carry an opsAlertId.
+  const opsAlertId = data['opsAlertId'];
+  if (typeof opsAlertId === 'string' && opsAlertId) return { screen: 'OpsAlerts', params: { opsAlertId } };
+  // [BILL-PRO · REVIEW-F #2231 S4-2] A pro's checkout notice the delivery rename missed opens the PRO fee screen, on
+  // its checkout: the store/mover WeeklyFee cannot load a pro's fee.
+  if (data['kind'] === 'billing_mmg_checkout' && data['audience'] === 'provider') {
+    return { screen: 'ProviderWeeklyFee', params: typeof data['ref'] === 'string' ? { ref: data['ref'] } : {} };
+  }
+  // [ENTERPRISE E1b] A pay-all payment's notice ({ ref, status, chainCheckout: true }, no subscription: it paid several
+  // branches) opens the owner's "Pay all my branches", which follows that ref. Never a mover's fee screen.
+  if (data['kind'] === 'billing_mmg_checkout' && (data['chainCheckout'] === true || data['chainCheckout'] === 'true')) {
+    return { screen: 'WeeklyFee', params: { feeFamily: 'vendor', payAll: true, ref: typeof data['ref'] === 'string' ? data['ref'] : undefined } };
+  }
   if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined, subscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : undefined, vendorId: typeof data['vendorId'] === 'string' ? data['vendorId'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
   const orderId = typeof data['orderId'] === 'string' ? (data['orderId'] as string) : undefined;
@@ -88,6 +106,21 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // the one place the fee is seen and paid, on the family it is about. The
   // payload names the subscription, not the store, so a store fee opens on the
   // store the owner has selected; it carries no checkout ref to invent.
+  // [BILL-PRO PR5] A pro's own weekly-fee notices (API notification/provider-fee-kinds.ts) open the pro fee screen
+  // (the store and mover fee screens cannot load a pro's fee); a checkout notice opens on its checkout.
+  if (kind.startsWith('provider_fee_')) {
+    const ref = typeof data['ref'] === 'string' ? data['ref'] : undefined;
+    return { screen: 'ProviderWeeklyFee', params: ref ? { ref } : {} };
+  }
+  // [BILL-PRO · REVIEW-G #2217 S4-2] A pro's fee notice under a partner kind (one the delivery rename missed) still
+  // opens the pro fee screen: feeFamilyOf knows only store and mover, and would fall back to the open app's screen.
+  if (PARTNER_FEE_KINDS.has(kind) && audience === 'provider') return { screen: 'ProviderWeeklyFee', params: {} };
+  // [ENTERPRISE E2 · REVIEW-F #2227] A notice that names its store (a chain branch's fee change carries vendorId and
+  // subscriptionId) opens THAT store's fee screen: the same checked switch a checkout push takes (resolveFeeNotification
+  // selects it only when the store's own subscription is the one named, else the selected store's screen).
+  if (PARTNER_FEE_KINDS.has(kind) && typeof data['vendorId'] === 'string' && typeof data['subscriptionId'] === 'string') {
+    return { screen: 'WeeklyFee', params: { vendorId: data['vendorId'], subscriptionId: data['subscriptionId'] } };
+  }
   if (PARTNER_FEE_KINDS.has(kind)) return { screen: 'WeeklyFee', params: { feeFamily: feeFamilyOf(audience, openApp) } };
 
   // [PUSH-ROUTING] DOCUMENTS. "Your document was rejected — fix it and
@@ -96,13 +129,15 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // Taken offline for a lapsed document, a vehicle's papers lapsed, or a
   // routine review wants them re-submitted: renewing them is the way back.
   if (MOVER_DOCUMENT_KINDS.has(kind)) return { screen: 'MoverDocuments' };
-  // "Your ID is on file" — the customer's ID screen shows it.
-  if (kind === 'verification_l2') return { screen: 'IdentityVerification' };
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] "Your ID is on file" is no longer sent (no customer ID): an inbox
+  // row sent before opens the app normally.
+  if (kind === 'verification_l2') return { screen: HOME_SCREEN };
   // Trusted status earned: no screen shows the trust tier; the notice is the
   // whole message. A review of theirs was removed: the payload names no rating
   // and no store. The person a trip was shared with: the trip ended, and they
-  // own no order. Each opens HOME on purpose (census reasons).
-  if (kind === 'trust_l3' || kind === 'rating_removed' || kind === 'trip_share_ended') return { screen: HOME_SCREEN };
+  // own no order. [SEC-PII] A deletion request waiting for a review: the notice says why and when, and is the whole
+  // message. Each opens HOME on purpose (census reasons). (Builds 9-12 open the app normally for erasure_delayed.)
+  if (kind === 'trust_l3' || kind === 'rating_removed' || kind === 'trip_share_ended' || kind === 'erasure_delayed' || kind === 'erasure_completed') return { screen: HOME_SCREEN };
 
   // [Row 55] A store team invite is answered on the inbox, where its Accept /
   // Decline card sits (the invitee joins only by accepting there).
@@ -170,6 +205,8 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // job; ActiveJob is where they pick it up or hand it back. Its orderId would
   // otherwise send it down the generic branch to the CUSTOMER Delivery screen.
   if (kind === 'pickup_overdue') return { screen: 'ActiveJob' };
+  // [BUG-HUNT-2 G22] The rider at the door: the job screen holds the hold and the way to support.
+  if (kind === 'mmg_dispute_hold') return { screen: 'ActiveJob' };
   // [AF-MOB-006] Custody recovery. The holder's live job carries the handoff
   // code; the relay rider's task waits on their dashboard until custody is theirs.
   if (kind === 'custody_handoff_code') return { screen: 'ActiveJob' };
@@ -189,6 +226,20 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // VendorStack never mounts, so "New Order!" opened on whatever was last on
   // screen. orderNumber only rides along when the payload actually carries it
   // (it titles the detail header while the order loads) — never invented.
+  // [O-1] "Swift is calling you about your order": sent just before a Swift-
+  // bridged call rings this person. It names the order as callOrderId (never
+  // orderId), so an older app that has no case here opens itself instead of a
+  // Delivery screen that cannot show a rider's or a store's job. Here it opens
+  // the order where this person works it: a store on its order desk, a mover on
+  // their live job (a driver on the ride), a customer on their tracking screen.
+  if (kind === 'call_incoming') {
+    const callOrderId = typeof data['callOrderId'] === 'string' ? (data['callOrderId'] as string) : undefined;
+    const taxi = data['orderType'] === 'TAXI';
+    if (audience === 'business') return callOrderId ? { screen: 'VendorOrderDetail', params: { orderId: callOrderId } } : { screen: 'VendorRoot' };
+    if (audience === 'earner') return { screen: taxi ? 'Main' : 'ActiveJob' };
+    if (taxi) return { screen: 'Taxi' };
+    return callOrderId ? { screen: 'Delivery', params: { orderId: callOrderId } } : { screen: HOME_SCREEN };
+  }
   if (kind === 'vendor_order_alert' && orderId) {
     const orderNumber = typeof data['orderNumber'] === 'string' ? (data['orderNumber'] as string) : undefined;
     return { screen: 'VendorOrderDetail', params: orderNumber ? { orderId, orderNumber } : { orderId } };
@@ -206,10 +257,40 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // reschedule moves Order.appointmentSlot with the booking [Q12], and that
   // list prints each appointment's slot. An untagged row (the API tags both
   // copies; only an old inbox row has no tag) cannot say whose it is, so it
-  // still opens the app normally.
+  // still opens the app normally. [BOOK-FU2] The API no longer sends it: a
+  // move is now appointment_moved (below), which carries the booking's order:
+  // with only the booking id, builds 9 and 11 opened nothing for the customer
+  // and Schedule for the business, and build 12 the orders list and Schedule.
+  // This case stays for the inbox rows sent before that.
   if (kind === 'booking_rescheduled') {
     if (audience === 'business') return { screen: 'Schedule' };
     return audience === 'customer' ? { screen: 'OrdersHistory' } : null;
+  }
+
+  // [S4 · BOOK-MEASURE R5] A STORE appointment's 24h reminder. It used to be
+  // sent as booking_reminder with the Booking id as refId, and the booking_
+  // prefix below opened ServiceJobs, the marketplace jobs list, which never
+  // shows a store booking. It now has its own kind, outside that prefix on
+  // purpose: builds 9, 11 and 12 send the whole prefix to ServiceJobs, while
+  // this kind reaches their order branches instead (business + orderId → the
+  // order desk, orderId → the booking's order screen), exactly as here. The API
+  // tags both copies. business = the store: the booking's order on its order
+  // desk, where it is completed or cancelled; a booking with no order on file
+  // opens the Schedule agenda, which lists it. customer = the person booked:
+  // the booking's order screen (Delivery renders an appointment's status); with
+  // no order on file, their orders list. An untagged copy cannot say whose it
+  // is, so it opens the app normally rather than guess a stack.
+  // [BOOK-FU2] appointment_moved (a store appointment moved; the other side is
+  // told) takes the same branch: it replaced booking_rescheduled, which carried
+  // no order (builds 9 and 11: customer nothing, business Schedule; build 12:
+  // customer OrdersHistory, business Schedule), and builds 9, 11 and 12 route
+  // this kind through their order branches exactly as here: the booking itself.
+  // A move updates the order's time, so the order screen and the order desk
+  // both show the new time.
+  if (kind === 'appointment_reminder' || kind === 'appointment_moved') {
+    if (audience === 'business') return orderId ? { screen: 'VendorOrderDetail', params: { orderId } } : { screen: 'Schedule' };
+    if (audience === 'customer') return orderId ? { screen: 'Delivery', params: { orderId } } : { screen: 'OrdersHistory' };
+    return null;
   }
 
   // BOOKINGS + SERVICE JOBS [S0: a push landing on a dead screen]. Every other
@@ -225,9 +306,10 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // enumerating it is how three kinds went unrouted in the first place.
   // No params: ServiceJobsScreen takes none — it lists every job — so a jobId
   // here would be an invented route param a screen never reads. A per-job deep
-  // screen does not exist yet, and a booking_reminder whose refId is a vendor
-  // APPOINTMENT rather than a service job lands on the same list without its
-  // row [both reported, neither invented].
+  // screen does not exist yet [reported, not invented]. booking_reminder is a
+  // service job's reminder only: a store appointment's is appointment_reminder
+  // (above) since S4. An inbox row sent before S4 still carries booking_reminder
+  // with a Booking id and still opens this list; its refId cannot say which.
   if (kind.startsWith('booking_')) return { screen: 'ServiceJobs' };
 
   // [E12 §7.2] The identity-check prompts land ON the selfie screen — a timed
@@ -258,7 +340,8 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   }
   // [PAYMENT-SIMPLIFY] The store's MMG NUMBER replaces its link; its change notices land in the same place, where
   // the MMG number card shows the pending change and its "This wasn't me".
-  if (kind === 'mmg_number_change_staged' || kind === 'mmg_number_change_applied' || kind === 'mmg_number_change_cancelled') {
+  if (kind === 'mmg_number_change_staged' || kind === 'mmg_number_change_applied' || kind === 'mmg_number_change_cancelled'
+    || kind === 'mmg_number_pending_removed') {
     return { screen: 'Account' };
   }
   // [Q8 · DS269 F1] Someone on the team moved the store's map pin. The owner
@@ -267,6 +350,12 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // [owner #51] A store whose documents are done waits only for the number
   // customers can call: the vendor root (the waiting store's own screen) asks for it.
   if (kind === 'vendor_needs_public_phone') return { screen: 'Main' };
+  // [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant ticks that everyone who handles its food holds a current
+  // food handler's certificate: the tick is in the store's Documents, on Account.
+  if (kind === 'vendor_needs_food_handler_tick') return { screen: 'VendorRoot', params: { screen: 'Account' } };
+  // [RETIER PR-A · owner 30 Oct 2026] A store whose weekly fee follows its catalogue (above the first step) goes live
+  // once its owner reads and ticks that fee: the store's go-live steps, with its Documents, on Account.
+  if (kind === 'vendor_needs_weekly_fee_tick') return { screen: 'VendorRoot', params: { screen: 'Account' } };
   // [PUSH-ROUTING] STORE SURFACES, on VendorRoot after the router selects the
   // store (go() validates the account and the store first). Stock ran low, or a
   // category the store asked for was added, mapped or declined: the catalogue
@@ -339,12 +428,12 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
     return { screen: 'Claims' };
   }
   if (kind === 'claim_over_gate') {
-    // The body says "Support will follow up" — this is the door for the person
-    // who would rather not wait. PAYMENT, not the orderId default of
-    // ORDER_ISSUE: the dispute is about the guarantee, not the delivery.
+    // An older notice still in someone's inbox: the server no longer sends this kind (a large order is a
+    // case like any other). Its body said "Support will follow up", so it keeps this door. PAYMENT, not the
+    // orderId default of ORDER_ISSUE: the question is about the money, not the delivery.
     return {
       screen: 'GetHelp',
-      params: { category: 'PAYMENT', subject: 'Delivery guarantee claim', ...(orderId ? { orderId } : {}) },
+      params: { category: 'PAYMENT', subject: 'Unpaid cash order', ...(orderId ? { orderId } : {}) },
     };
   }
 
@@ -363,7 +452,8 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // available mover home. Bare historical order ids keep the generic contract.
   if (data['orderType'] === 'TAXI' && orderId && data['rideId'] === orderId) {
     if (audience === 'earner') return { screen: 'Main' };
-    if (audience === 'customer') return { screen: 'Taxi' };
+    // [BUG-HUNT-2 G06] "Ride Complete" opened an empty booking form. A ride that is over opens the ride.
+    if (audience === 'customer') return rideIsOver(data['status']) ? { screen: 'RideDetail', params: { rideId: orderId } } : { screen: 'Taxi' };
   }
 
   // Orders: any payload carrying an orderId lands on that order's tracking

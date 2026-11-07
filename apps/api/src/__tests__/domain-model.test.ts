@@ -75,7 +75,7 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
     expect(Number(gy.idGateThresholdUsd)).toBe(50);
 
     const tiers = await countryConfig.getSubscriptionTiers('GY');
-    expect(tiers).toMatchObject({ mover: 6000, moverHeavy: 9000, taxiDriver: 8000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 60000 });
+    expect(tiers).toMatchObject({ mover: 6000, moverHeavy: 9000, taxiDriver: 8000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 20000, departmentVendor: 45000 });
   });
 
   it('converts the USD ID-gate to local currency from config', async () => {
@@ -90,9 +90,17 @@ describe('CountryConfig — Guyana seeded, everything reads from config', () => 
     // comes with the vehicle (licence, or the national ID on a bicycle); the rest may be added.
     expect(await countryConfig.getDocumentChecklist('GY', 'MOVER')).toEqual([]);
     expect(await countryConfig.getDocumentChecklist('GY', 'MOVER_NO_LICENCE')).toEqual(['national_id']);
-    expect(await countryConfig.getOptionalDocuments('GY', 'MOVER', [])).toEqual(['national_id', 'police_clearance']);
+    // [ROLE-DOCS · owner 21 Oct 2026] no optional document for every mover; a taxi driver may add a police clearance
+    expect(await countryConfig.getOptionalDocuments('GY', 'MOVER', [])).toEqual([]);
+    expect(await countryConfig.getOptionalDocuments('GY', 'MOVER_TAXI_EXTRA', [])).toEqual(['police_clearance']);
     const restaurantDocs = await countryConfig.getDocumentChecklist('GY', 'RESTAURANT');
-    expect(restaurantDocs).toContain('food_handler_cert');
+    // [FOOD-PERMIT · owner ruling 24 Oct 2026 — a DELIBERATE change to this pin] a registered restaurant's food handler's
+    // certificate is optional (its owner ticks for its food handlers instead). [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)
+    // — a DELIBERATE change to this pin] the self-declared tier whose home cook kept it required is removed: its list
+    // is a retired key, read as no list at all
+    expect(restaurantDocs).not.toContain('food_handler_cert');
+    expect(await countryConfig.getDocumentChecklist('GY', 'RESTAURANT_OPTIONAL')).toEqual(['food_handler_cert']);
+    expect(await countryConfig.getDocumentChecklist('GY', 'RESTAURANT_UNREGISTERED')).toEqual([]);
   });
 
   it('scales the mover checklist to the vehicle (no docs a vehicle can\'t have)', async () => {

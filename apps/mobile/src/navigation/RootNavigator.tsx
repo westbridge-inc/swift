@@ -12,6 +12,7 @@ import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 import { SessionHoldScreen } from '../screens/auth/SessionHoldScreen';
 import { QrOutcomeScreen } from '../screens/QrOutcomeScreen';
+import { OpsAlertsScreen } from '../screens/OpsAlertsScreen';
 import { OwnedSafetyPanel } from '../modules/safety/OwnedSafetyPanel';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
@@ -194,6 +195,8 @@ export function RootNavigator() {
           navigationKey={wantsAuth && !isAuthenticated ? 'store-auth' : 'store-browse'}
         />
         <Stack.Screen name="QrOutcome" component={QrOutcomeScreen} />
+        {/* [DRILL-STORM] A responder's pages, reached from the page's own push in any app mode. */}
+        <Stack.Screen name="OpsAlerts" component={OpsAlertsScreen} />
       </Stack.Navigator>
       {/* [R26 · research G2] a material change to the Terms is accepted with a fresh tick (build 12) */}
       <LegalAcceptanceModal />

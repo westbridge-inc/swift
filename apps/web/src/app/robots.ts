@@ -23,6 +23,7 @@ export default function robots(): MetadataRoute.Robots {
           '/pay/mmg/',     // token-bearing payment returns
           '/trip/',        // tokenised trip share — private by construction
           '/track/',       // tokenised parcel tracking — private by construction
+          '/safety-check', // Trip Guardian's texted answer link — a bearer link
           '/s/',           // QR resolver records a scan on GET [AX303 F3]
           '/api/',
         ],

@@ -77,6 +77,8 @@ const UNREMARKABLE: Record<string, string> = {
   documentsVerifiedAt: 'internal verification bookkeeping',
   currentOrderId: 'another customer\u2019s order id — cross-customer linkage, never exposed',
   totalCourierJobs: 'internal volume metric; totalDeliveries is the exposed figure',
+  // [CARS-DELIVER PR4] Dispatch state of a taxi car's delivery profile (goes back to taxi work when done).
+  returnsToTaxi: 'dispatch input (the work mode the account returns to), not counterparty information',
 };
 
 describe('[F-027-07] the counterparty view of a mover', () => {

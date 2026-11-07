@@ -117,10 +117,10 @@ describe('[Item 7 · S1] one switch, read by the server while it runs, failing c
     const { GET } = await load<{ GET: () => Response }>('app/api/launch-state/route.ts');
     let response = GET();
     expect(response.headers.get('cache-control')).toBe('no-store');
-    expect(await response.json()).toEqual({ webOrdering: 'soon' });
+    expect(await response.json()).toEqual({ webOrdering: 'soon', appStores: 'soon' });
     vi.stubEnv('SWIFT_WEB_ORDERING', 'live');
     response = GET();
-    expect(await response.json()).toEqual({ webOrdering: 'live' });
+    expect(await response.json()).toEqual({ webOrdering: 'live', appStores: 'soon' });
   });
 
   it('governs the public hosts only: staging, previews and local runs keep the full marketplace', async () => {
@@ -190,22 +190,28 @@ const ROUTE_CLASS: Record<string, 'ordering' | 'open'> = {
   '/explore': 'ordering', '/market': 'ordering', '/cart': 'ordering', '/checkout': 'ordering', '/selfie': 'ordering',
   '/orders': 'ordering', '/orders/[id]': 'ordering', '/courier': 'ordering', '/taxi': 'ordering',
   '/account': 'ordering', '/account/addresses': 'ordering', '/account/favourites': 'ordering', '/account/help': 'ordering',
-  '/account/profile': 'ordering', '/account/safety': 'ordering',
+  '/account/profile': 'ordering', '/account/safety': 'ordering', '/account/profile/delete': 'ordering', // [WEB-DELETE]
   '/store/[slug]': 'ordering', '/stores': 'ordering', '/stores/[slug]': 'ordering',
   // Public by policy, for the bank and the app stores.
   '/about': 'open', '/contact': 'open', '/faq': 'open', '/how-it-works': 'open', '/pricing': 'open', '/welcome': 'open',
   '/vendors': 'open', '/drivers': 'open', '/legal/child-safety': 'open', '/legal/delivery': 'open', '/legal/privacy': 'open',
   '/legal/refunds': 'open', '/legal/terms': 'open', '/account/delete': 'open', '/launching-soon': 'open', '/offline': 'open',
   '/login': 'open', '/signup': 'open',
+  // [WEB-DELETE] Where a person lands once their account is deleted (signed out by then; partners delete before launch).
+  '/account-deleted': 'open',
   // Partner consoles (stores, riders, drivers, advertisers) work before launch.
-  '/dashboard': 'open', '/dashboard/inventory': 'open', '/dashboard/inventory/import': 'open', '/dashboard/notifications': 'open',
-  '/dashboard/orders': 'open', '/dashboard/insights': 'open', '/dashboard/schedule': 'open', '/dashboard/settings': 'open', '/dashboard/weekly-fee': 'open', '/weekly-fee': 'open',
+  '/dashboard': 'open', '/dashboard/documents': 'open', '/dashboard/inventory': 'open', '/dashboard/inventory/import': 'open', '/dashboard/notifications': 'open',
+  '/dashboard/orders': 'open', '/dashboard/insights': 'open', '/dashboard/qr': 'open', '/dashboard/schedule': 'open', '/dashboard/settings': 'open', '/dashboard/settings/vat-report': 'open', '/dashboard/weekly-fee': 'open', '/dashboard/weekly-fee/statement': 'open', '/dashboard/weekly-fee/pay-all': 'open', '/weekly-fee': 'open',
+  '/dashboard/branches': 'open', '/dashboard/branches/add': 'open', '/dashboard/team': 'open', // [CHAINS PR2]
+  '/dashboard/promotions': 'open', '/dashboard/categories': 'open', // [WEB-SETTINGS PR-B] ([CHECKLIST-LEGAL] no seller status)
+  '/dashboard/settings/delete-account': 'open', // [WEB-DELETE] a store's people delete (or close) their own account
   '/portal': 'open', '/portal/account': 'open', '/portal/documents': 'open', '/portal/history': 'open',
-  '/portal/notifications': 'open', '/portal/weekly-fee': 'open',
+  '/portal/notifications': 'open', '/portal/weekly-fee': 'open', '/portal/account/delete': 'open', // [WEB-DELETE]
+  '/portal/help': 'open', '/dashboard/help': 'open', // [BUG-HUNT F04] a partner's way to a person works before launch
   '/advertiser': 'open', '/advertiser/account': 'open', '/advertiser/notifications': 'open',
   '/advertiser/campaigns/[advertiserId]/[campaignId]': 'open',
   // A link someone was sent (a parcel or trip to follow) and the QR fallback pages: no ordering on them.
-  '/track/[token]': 'open', '/trip/[token]': 'open', '/qr/not-found': 'open', '/qr/retired': 'open', '/qr/unavailable': 'open',
+  '/track/[token]': 'open', '/trip/[token]': 'open', '/safety-check': 'open', '/qr/not-found': 'open', '/qr/retired': 'open', '/qr/unavailable': 'open',
 };
 
 function pageRoutesOnDisk(dir = join(SRC, 'app'), prefix = ''): string[] {

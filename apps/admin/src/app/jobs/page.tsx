@@ -130,58 +130,44 @@ export default function JobsPage() {
   const queuesOffline = errorCode(dlq.error) === 'QUEUES_OFFLINE';
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-2">Background jobs</h1>
-      <p className="text-[var(--muted)] mb-6 text-sm">
+    <div className="mc-page">
+      <p className="mc-muted mb-4 max-w-3xl">
         Jobs that failed every retry and stopped. Billing, settlements, MMG polling, dispatch,
         notifications and search all run here — so a job sitting on this page is work the platform
         believes it did and did not.
       </p>
 
-      {mutationError ? <MutationError error={mutationError} label="job action" /> : null}
+      {mutationError ? <div className="mb-4"><MutationError error={mutationError} label="job action" /></div> : null}
       {actions.banner}
 
       {dlq.isLoading ? (
-        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] divide-y divide-[var(--border)]">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="p-4 animate-pulse">
-              <div className="h-3 w-40 bg-[var(--border)] rounded" />
-              <div className="h-3 w-72 bg-[var(--border)] rounded mt-3" />
-            </div>
-          ))}
-        </div>
+        <div className="mc-loading" aria-busy="true">Loading failed jobs…</div>
       ) : queuesOffline ? (
-        <div className="bg-[var(--panel)] rounded-xl border border-yellow-500/40 p-8 text-sm">
-          <p className="font-semibold text-yellow-400">This server is not running the queues.</p>
-          <p className="text-[var(--muted)] mt-2">
+        <div className="mc-card border-l-4 border-l-[var(--mc-warn)]">
+          <p className="mc-text-warn font-semibold">This server is not running the queues.</p>
+          <p className="mc-muted mt-2">
             The API answered, but background queues are not initialised on it, so it cannot tell you
             whether any job has died. This is not the same as no failures — check the process that
             owns the workers.
           </p>
-          <button
-            onClick={() => dlq.refetch()}
-            className="mt-4 px-3 py-1.5 rounded-lg text-xs bg-[var(--panel)] border border-[var(--border)] text-[var(--muted)]"
-          >
+          <button type="button" onClick={() => dlq.refetch()} className="mc-btn mt-3">
             Check again
           </button>
         </div>
       ) : dlq.isError ? (
-        <div className="bg-[var(--panel)] rounded-xl border border-red-500/40 p-8 text-sm">
-          <p className="font-semibold text-red-400">Could not load the failed jobs.</p>
-          <p className="text-[var(--muted)] mt-2">
+        <div className="mc-card border-l-4 border-l-[var(--mc-bad)]" role="alert">
+          <p className="mc-text-bad font-semibold">Could not load the failed jobs.</p>
+          <p className="mc-muted mt-2">
             {dlq.error instanceof Error ? dlq.error.message : 'Unexpected error'}
           </p>
-          <button
-            onClick={() => dlq.refetch()}
-            className="mt-4 px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white"
-          >
+          <button type="button" onClick={() => dlq.refetch()} className="mc-btn mc-btn-primary mt-3">
             Try again
           </button>
         </div>
       ) : rows.length === 0 ? (
-        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-sm">
-          <p>No jobs have died.</p>
-          <p className="text-[var(--muted)] mt-2 text-xs">
+        <div className="mc-empty">
+          <p className="mc-card-title">No jobs have died.</p>
+          <p className="mt-2 text-xs">
             Each queue keeps only its {RETAINED_PER_QUEUE} most recent failures, so this page shows
             what is still retained rather than everything that has ever failed. Admins are paged when
             a job dies, so an empty page here should follow an empty inbox.
@@ -189,31 +175,12 @@ export default function JobsPage() {
         </div>
       ) : (
         <>
-          <div className="flex gap-2 mb-4 flex-wrap">
-            <button
-              type="button"
-              onClick={() => setQueueFilter(null)}
-              aria-pressed={queueFilter === null}
-              className={`px-3 py-1.5 rounded-lg text-xs ${
-                queueFilter === null
-                  ? 'bg-[var(--accent)] text-white'
-                  : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'
-              }`}
-            >
+          <div className="mc-tabs" role="group" aria-label="Queue">
+            <button type="button" onClick={() => setQueueFilter(null)} aria-pressed={queueFilter === null} className="mc-tab">
               All ({rows.length})
             </button>
             {queues.map((q) => (
-              <button
-                key={q}
-                type="button"
-                onClick={() => setQueueFilter(q)}
-                aria-pressed={queueFilter === q}
-                className={`px-3 py-1.5 rounded-lg text-xs ${
-                  queueFilter === q
-                    ? 'bg-[var(--accent)] text-white'
-                    : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'
-                }`}
-              >
+              <button key={q} type="button" onClick={() => setQueueFilter(q)} aria-pressed={queueFilter === q} className="mc-tab">
                 {q} ({byQueue[q]})
               </button>
             ))}
@@ -223,69 +190,60 @@ export default function JobsPage() {
               written to be idempotent" — of all 53 classes, as a fact nobody
               had established. Retry-safety is a property each class earns, and
               each row below says where its own class stands. */}
-          <p className="text-[var(--muted)] text-xs mb-3">
+          <p className="mc-muted mb-3 text-xs">
             Retrying replays the job. Whether that is safe depends on the job — a class is only
             replayable once someone has established that re-running it cannot repeat an external
             effect, and each row says where its class stands. Discarding is permanent and means the
             work should never happen. Both actions are recorded in the audit log.
           </p>
 
-          <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] divide-y divide-[var(--border)]">
+          <div className="mc-list">
             {visible.map((row) => {
               const key = `${row.queue}:${row.id}`;
               return (
-                <div key={key} className="p-4">
-                  <div className="flex items-start gap-3 flex-wrap">
-                    <span
-                      className={`px-2 py-0.5 rounded text-[11px] ${
-                        MONEY_QUEUES.has(row.queue)
-                          ? 'bg-red-500/20 text-red-400 font-semibold'
-                          : 'bg-[var(--border)] text-[var(--muted)]'
-                      }`}
-                    >
+                <div key={key} className="mc-card">
+                  <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+                    <span className={`mc-badge${MONEY_QUEUES.has(row.queue) ? ' mc-tone-bad' : ''}`}>
                       {row.queue}
                     </span>
-                    <span className="text-sm font-medium">{row.name}</span>
-                    <span className="text-[11px] text-[var(--muted)]">
+                    <span className="mc-card-title mc-mono" style={{ fontSize: '.875rem' }}>{row.name}</span>
+                    <span className="mc-muted text-xs">
                       gave up after {row.attemptsMade} attempt{row.attemptsMade === 1 ? '' : 's'}
                     </span>
-                    <span className="text-[11px] text-[var(--muted)] ml-auto">{ago(row.finishedOn)}</span>
+                    <span className="mc-muted ml-auto text-xs">{ago(row.finishedOn)}</span>
                   </div>
 
-                  <p className="text-xs text-red-400 mt-2 break-words">
+                  <p className="mc-text-bad mt-2 break-words text-xs">
                     {row.failedReason || 'The job failed without recording a reason.'}
                   </p>
 
                   <button
+                    type="button"
                     onClick={() => setExpanded(expanded === key ? null : key)}
-                    className="text-[11px] text-[var(--muted)] underline mt-2"
+                    aria-expanded={expanded === key}
+                    className="mc-link-button mt-2 text-xs"
                   >
                     {expanded === key ? 'Hide payload' : 'Show payload'}
                   </button>
                   {expanded === key ? (
-                    <pre className="text-[11px] text-[var(--muted)] mt-2 whitespace-pre-wrap break-all bg-[var(--bg)] rounded-lg p-3 border border-[var(--border)]">
+                    <pre className="mc-mono mt-2 whitespace-pre-wrap break-all rounded-[var(--mc-radius-sm)] border border-[var(--mc-line)] bg-[var(--mc-surface)] p-3">
                       {row.data}
                     </pre>
                   ) : null}
 
                   {row.recovery?.policy === 'RECONCILE_FIRST' ? (
-                    <p className="mt-2 text-xs text-amber-400">
+                    <p className="mc-note mc-note-warn mt-2 text-xs">
                       Reconcile first: {row.recovery.why}
                     </p>
                   ) : row.recovery && row.recovery.policy !== 'SAFE_REPLAY' ? (
-                    <p className="mt-2 text-xs text-amber-400">
+                    <p className="mc-note mc-note-warn mt-2 text-xs">
                       Not replayable: {row.recovery.why}
                     </p>
                   ) : null}
 
-                  <div className="mt-3 flex gap-2 items-center flex-wrap">
+                  <div className="mc-actions">
                     {row.recovery?.policy === 'RECONCILE_FIRST' ? (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => retryReconciled(row)}
-                        className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white disabled:opacity-50"
-                      >
+                      <button type="button" disabled={busy} onClick={() => retryReconciled(row)} className="mc-btn mc-btn-primary">
                         I have reconciled it: retry
                       </button>
                     ) : (
@@ -294,18 +252,13 @@ export default function JobsPage() {
                         disabled={busy || (row.recovery ? row.recovery.policy !== 'SAFE_REPLAY' : false)}
                         title={row.recovery && row.recovery.policy !== 'SAFE_REPLAY' ? row.recovery.why : undefined}
                         onClick={() => requeue.mutate({ row })}
-                        className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white disabled:opacity-50"
+                        className="mc-btn mc-btn-primary"
                       >
                         Retry this job
                       </button>
                     )}
 
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => discard(row)}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-[var(--panel)] border border-red-500/40 text-red-400 disabled:opacity-50"
-                    >
+                    <button type="button" disabled={busy} onClick={() => discard(row)} className="mc-btn mc-btn-danger">
                       Discard
                     </button>
                   </div>

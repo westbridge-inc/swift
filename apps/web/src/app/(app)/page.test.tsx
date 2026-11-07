@@ -11,7 +11,6 @@ vi.mock('@/lib/geolocate', () => ({ currentCoords: state.coords }));
 vi.mock('@/site.config', () => ({
   site: { legalEntityName: 'Swift Test Company Ltd', supportEmail: 'support@swiftgy.com' },
   launch: { markets: ['Georgetown, Guyana'], webOrdering: 'live' },
-  showAppStoreBadges: false,
   SITE_ORIGIN: 'https://swiftgy.com',
 }));
 

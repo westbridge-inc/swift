@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { useVendorMutation } from '../../../hooks/useVendorMutation';
-import { useState, useEffect, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
+import { insightsHeldView, type InsightsPair } from '../../../lib/insightsHeldView';
 import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
@@ -718,9 +719,14 @@ export function VendorInsightsScreen() {
   }, [readOnly, q.dataUpdatedAt, requestedDays, refetchRevenue]);
   const opsQ = useVendorOps(period);
   const popularQ = usePopularItems(8);
-  const a: any = q.data ?? {};
+  // [SPEED 30 Oct] Opened again after an overview poll: the last figures that agreed, said to be checking, not a spinner.
+  const pair = useRef<InsightsPair | null>(null);
+  const heldView = insightsHeldView(pair.current, { days: requestedDays, analytics: q.data, revenue: revenueQ.data, behind: revenueBehindAnalytics, revenueFailed: revenueQ.isError });
+  pair.current = heldView.held;
+  const checking = heldView.checking;
+  const a: any = (checking ? checking.analytics : q.data) ?? {};
   const v: any = a.vendor ?? {};
-  const daily = reconciledRevenueDays(revenueQ.data, a, requestedDays);
+  const daily = reconciledRevenueDays(checking ? checking.revenue : revenueQ.data, a, requestedDays);
   const shownDays = readOnly ? Math.min(period, daily.length) : period;
   const hasFullWindow = readOnly ? shownDays > 0 : hasTrailingGuyanaDays(daily, period);
   const w = windowTotals(daily, hasFullWindow ? shownDays : 0);
@@ -729,7 +735,7 @@ export function VendorInsightsScreen() {
   const acceptanceRate = numericFact(opsQ.data?.acceptanceRate);
   const cancellationRate = numericFact(opsQ.data?.cancellationRate);
   const placedOrders = numericFact(opsQ.data?.placedOrders);
-  const primaryLoading = (q.isLoading && !q.data) || (revenueQ.isLoading && !revenueQ.data) || (revenueBehindAnalytics && !revenueQ.isError);
+  const primaryLoading = (q.isLoading && !q.data) || (revenueQ.isLoading && !revenueQ.data) || (revenueBehindAnalytics && !revenueQ.isError && !checking);
   const primaryError = (q.isError && !q.data) || (revenueQ.isError && (!revenueQ.data || revenueBehindAnalytics));
   const showingStale = (q.isError && !!q.data) || (revenueQ.isError && !!revenueQ.data);
   // The spinner follows the owner's own pull, never the analytics poll or the
@@ -811,6 +817,10 @@ export function VendorInsightsScreen() {
               {showingStale ? (
                 <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                   Showing the last loaded figures — refresh did not complete.
+                </T>
+              ) : checking ? (
+                <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                  Checking for the latest…
                 </T>
               ) : null}
               {w.curDaily.length > 0 ? <RevenueChart daily={w.curDaily} /> : null}

@@ -25,7 +25,7 @@ function storeOf(status: string) {
   return {
     id: 'vendor-target', name: 'Target Store', status, vendorType: 'RESTAURANT', isFeatured: false, acceptingOrders: false,
     city: 'Georgetown', addressLine1: 'Test address', phone: 'test-phone', averageRating: 5, totalRatings: 0, mmgPayUrl: null,
-    createdAt: '2026-08-01T00:00:00.000Z', recentOrders: [], subscription: null, tier: 'UNREGISTERED',
+    createdAt: '2026-08-01T00:00:00.000Z', recentOrders: [], subscription: null, tier: 'REGISTERED',
     owner: { user: { id: 'owner-1', firstName: 'Store', lastName: 'Owner', phone: 'owner-phone', email: null, status: 'ACTIVE' }, vendors: [] },
     _count: { items: 0, orders: 0 },
   };
@@ -68,6 +68,16 @@ function serve(status: string, checklist: unknown, onWrite?: (_r: ApiRequest) =>
 
 const page = () => renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
 
+/** The store page for a store that trades under its owner's own name (true) or a business registration (false). */
+function renderWithQueryFor(tradesUnderOwnName: boolean) {
+  mockApi((request) => {
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target') return { body: { success: true, data: { ...storeOf('ACTIVE'), tradesUnderOwnName } } };
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target/activation-checklist') return { body: { success: true, data: checklistOf('LIVE', { storeStatus: 'ACTIVE' }) } };
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  });
+  return page();
+}
+
 describe('[MC-PR2] a store waiting for documents', () => {
   it('lists every required document with its state and the rejection note, says what happens next, and links the owner in the Review Center', async () => {
     serve('PENDING_APPROVAL', checklistOf('NEEDS_DOCUMENTS'));
@@ -76,7 +86,8 @@ describe('[MC-PR2] a store waiting for documents', () => {
     expect(within(panel).getByText('1 of 4 approved')).toBeTruthy();
     const rows = within(panel).getAllByRole('listitem').map((li) => li.textContent);
     expect(rows[0]).toMatch(/National ID.*Approved/);
-    expect(rows[1]).toMatch(/GRA restaurant licence.*Waiting for review/);
+    // [CHECKLIST-LEGAL (d) — a DELIBERATE change] the licence carries the GRA's own name
+    expect(rows[1]).toMatch(/GRA Food Restaurant Licence.*Waiting for review/);
     expect(rows[2]).toMatch(/Food handler certificate.*Reviewer: The certificate is for a different person\..*Rejected/);
     expect(rows[3]).toMatch(/Storefront photo.*Not sent yet/);
     expect(within(panel).getByText(/When the last required one is approved in the Review Center, Swift makes Target Store live by itself\./)).toBeTruthy();
@@ -114,7 +125,9 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     const { user } = page();
     await user.click(await screen.findByRole('button', { name: 'Activate now…' }));
     const dialog = screen.getByRole('dialog', { name: 'Activate Target Store now?' });
-    expect(dialog.textContent).toContain("Only this store is activated. A valid business registration also promotes the owner's other stores to registered sellers and lifts their unregistered-seller limits.");
+    expect(dialog.textContent).toContain('Only this store is activated.');
+    // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] no tier is promoted or lifted any more
+    expect(dialog.textContent).not.toMatch(/unregistered|promotes/i);
     await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
     await user.click(within(dialog).getByRole('button', { name: 'Activate store' }));
     expect((await screen.findByRole('status')).textContent).toContain('Target Store is live and can take orders.');
@@ -148,7 +161,7 @@ describe('[MC-PR2] when the server says the rules are met', () => {
   it('a store held for an unpaid weekly fee is not reinstated from here: it comes back when the fee is paid through MMG', async () => {
     serve('SUSPENDED', checklistOf('FEE_UNPAID', { storeStatus: 'SUSPENDED', suspensionSource: 'BILLING', subscriptionStatus: 'SUSPENDED', feeOperable: false, ready: true }));
     page();
-    expect(await screen.findByText(/Suspended, and its weekly fee is unpaid or its billing is stopped\. It comes back by itself when the fee is paid through MMG checkout/)).toBeTruthy();
+    expect(await screen.findByText(/Suspended, and its weekly fee is unpaid or its billing is stopped\. It comes back by itself when the fee is paid, on MMG checkout or recorded in person/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
   });
 
@@ -185,6 +198,17 @@ describe('[MC-PR2] when the server says the rules are met', () => {
     page();
     expect(await screen.findByText(/The owner's account is banned or suspended/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^(Approve|Activate|Reinstate)/ })).toBeNull();
+  });
+
+  // [CHECKLIST-LEGAL · owner 1 Nov 2026 (a) · REVIEW-F S4-2] No tier row: the store stands on a business registration
+  // (a business name or a company) or on its owner's own name.
+  it('the Registration row names the way the store joined, never a tier', async () => {
+    for (const [own, words] of [[false, 'Business registration (business name or company)'], [true, 'Owner’s own name (no business name registration)']] as const) {
+      const view = renderWithQueryFor(own);
+      expect(await screen.findByText(words)).toBeTruthy();
+      expect(screen.queryByText(/Unregistered|Self-declared|tier/i)).toBeNull();
+      view.unmount();
+    }
   });
 
   it('the store of an owner who closed their account offers nothing and says why', async () => {

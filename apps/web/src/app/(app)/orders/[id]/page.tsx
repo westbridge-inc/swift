@@ -3,6 +3,7 @@
 import OrderDetailSkeleton from './loading';
 
 import { OpenSwiftApp } from '@/components/open-swift-app';
+import { CallPartyButton } from '@/components/call-party-button';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 // [UI-SWEEP U14] Cancellation codes read through the one shared plain-words map.
@@ -16,7 +17,6 @@ import {
   ExternalLink,
   MapPin,
   PackageCheck,
-  Phone,
   Star,
   Truck,
 } from 'lucide-react';
@@ -25,16 +25,23 @@ import { money } from '@/lib/customer';
 import { activeRide, getRide, rideCapabilities } from '@/lib/customer-rides';
 import { validPoint } from '@/lib/live-tracking';
 import type { TaxiSafetyFacts } from '@/components/taxi-trip-safety';
-import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
+import { fareBreakdownOf, liveWaiting, type FareBreakdown, type WaitingLive } from '@/lib/taxi-waiting';
+import { answerMmgRefund, cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
-import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, orderPrepFacts, orderStepState, orderTimelineIndex, parseMmgStorePayment } from '@/lib/app-rules';
+import { appointmentBookingView } from '@/lib/booking-rules';
 import styles from './tracking.module.css';
+import { pickupCodeWords } from './pickup-words';
 import { lazyRetry } from '@/lib/chunk-retry';
 
 // [Row 117] A taxi ride's code, driver position and SOS — only while the server
 // says web booking is on; its code (and the map's) loads only for such a ride.
 const TaxiTripSafety = lazyRetry(() => import('@/components/taxi-trip-safety').then((module) => ({ default: module.TaxiTripSafety })));
+// [WEB-TAXI · E4] The live waiting count, only for a ride the server says is waiting.
+// [BOOK-S6b] Only a booking the server says can move (or says why not) needs the time picker.
+const BookingRescheduleCard = lazyRetry(() => import('./booking-reschedule-card').then((module) => ({ default: module.BookingRescheduleCard })));
+const TaxiWaitingCard = lazyRetry(() => import('@/components/taxi-waiting-card').then((module) => ({ default: module.TaxiWaitingCard })));
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -84,6 +91,9 @@ type OrderDetail = {
     url: string;
   } | null;
   pickupCode?: string | null;
+  /** [O-2] false = the store does not ask for the code (it asks for the first name and order number);
+   *  absent on an older server = today's words. */
+  pickupCodeRequired?: boolean;
   /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
   ridePin?: string | null;
   /** [R14] Set (verbatim) while the store delivers this order with its own rider; null otherwise. */
@@ -93,6 +103,9 @@ type OrderDetail = {
   estimatedPrepTime?: number | null;
   /** [Row 117] The ride's own code and the driver's last position (GET /rides/:id, /rides/active). */
   taxiSafety?: TaxiSafetyFacts | null;
+  /** [WEB-TAXI · TAXI waiting charge §8.3/§8.4] The ride's live wait, and a finished ride's itemised fare (GET /rides/:id). */
+  taxiWaiting?: WaitingLive | null;
+  fareBreakdown?: FareBreakdown | null;
   rider?: {
     firstName?: string;
     lastName?: string;
@@ -116,9 +129,14 @@ type OrderDetail = {
   cancellationReason?: string | null;
   /** [owner 18 Oct 2026] Why an unpaid MMG order closed by itself, in the customer's words (null otherwise). */
   cancellationNotice?: string | null;
+  /** [BUG-HUNT-2 G08] Who owes this customer what by MMG, and "Did it arrive?", in the server's words. */
+  mmgRefund?: { state: string; line: string; sendId: string | null; canAnswer: boolean } | null;
   /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Where to send MMG on an ACCEPTED order: the store's number and the
    *  exact total (only this customer, only until the store marks it "Paid by MMG"). Parsed, never trusted raw. */
   mmgPayment?: unknown;
+  /** [BOOK-S6a/S6b · owner B2] With INSTANT_BOOKING on: the live booking and whether it may move now
+   *  ({ id, itemId, slotStart, reschedule: { allowed, message } }). Parsed strictly, never trusted raw. */
+  appointmentBooking?: unknown;
 };
 
 type Stage = { label: string; statuses: string[] };
@@ -179,6 +197,35 @@ function timelineLabel(status: string, order: OrderDetail): string {
 function stageIndex(status: string, stages: Stage[]): number {
   const exact = stages.findIndex((stage) => stage.statuses.includes(status));
   return exact >= 0 ? exact : 0;
+}
+
+/** [#2252 REVIEW-F S4-1] The phone's step for each of the web rail's four store-order steps (the phone also draws
+ *  "Sent", step 1, which the web folds into "Placed"). */
+const PHONE_STEP = [{ key: 'placed', index: 0 }, { key: 'preparing', index: 2 }, { key: 'transit', index: 3 }, { key: 'complete', index: 4 }] as const;
+
+/** Which of the rail's steps are ticked, and its words. A store order (delivery or takeaway) follows the phone's rule
+ *  (apps/mobile/src/modules/orders/timeline-states.ts): Preparing is ticked only on a kitchen fact, never because a
+ *  rider status sits after it. A delivery's travel step, while the order is at it, is named by its status in the one
+ *  status vocabulary (orderStatusLabel: "Rider on the way to the store" ... "On its way to you"), never a bare "On
+ *  the way" before the food is. Rides, bookings and parcels keep the rail by position. */
+function railSteps(order: OrderDetail, stages: Stage[], currentStage: number, holdActive: boolean): Array<{ label: string; reached: boolean }> {
+  const storeOrder = order.orderType !== 'TAXI' && order.orderType !== 'COURIER'
+    && (stages === deliveryStages || stages === pickupStages);
+  if (!storeOrder) return stages.map((stage, index) => ({ label: stage.label, reached: index <= currentStage }));
+  const facts = {
+    currentIndex: orderTimelineIndex(order, holdActive, false),
+    storeOrder: true,
+    holdActive,
+    releasePending: false,
+    status: String(order.status ?? '').toUpperCase(),
+    ...orderPrepFacts(order),
+  };
+  return stages.map((stage, index) => ({
+    label: stages === deliveryStages && PHONE_STEP[index]!.key === 'transit' && currentStage === index
+      ? orderStatusLabel(order.status, presentedVertical(order))
+      : stage.label,
+    reached: orderStepState(PHONE_STEP[index]!.key, PHONE_STEP[index]!.index, facts).state === 'done',
+  }));
 }
 
 function statusHeading(order: OrderDetail): string {
@@ -272,6 +319,7 @@ export default function OrderDetailPage() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cancelResult, setCancelResult] = useState<string | null>(null);
+  const [refundBusy, setRefundBusy] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [openingPayment, setOpeningPayment] = useState(false);
@@ -306,6 +354,8 @@ export default function OrderDetailPage() {
           driverAt: validPoint(activeDriver?.currentLat, activeDriver?.currentLng),
           driverName: typeof driver?.user?.firstName === 'string' ? driver.user.firstName : null,
         };
+        nextOrder.taxiWaiting = liveWaiting(ride);
+        nextOrder.fareBreakdown = fareBreakdownOf(ride);
         if (driver) {
           // Customer order detail omits taxi drivers; normalize the dedicated
           // ride contract into the existing counterparty shape used below.
@@ -412,12 +462,17 @@ export default function OrderDetailPage() {
   const stopped = cancelled || refunded || failed;
   const completed = ['DELIVERED', 'COMPLETED'].includes(order.status)
     || (order.fulfillment === 'PICKUP' && order.status === 'PICKED_UP');
+  // [FIXES-4] The business takes this cash itself: completing a pickup, an appointment or the store's own
+  // delivery writes the status only, so Swift never records it and nothing will ever confirm it.
+  const cashWithBusiness = order.fulfillment === 'PICKUP' || order.fulfillment === 'APPOINTMENT' || Boolean(order.ownRiderNotice);
   const mmgAmbiguous = order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING';
   const holdExpiryMs = holdExpiresAt ? new Date(holdExpiresAt).getTime() : 0;
   const holdActive = !stopped && !order.rider && order.status === 'PENDING' && Number.isFinite(holdExpiryMs) && holdExpiryMs > now;
   const isTaxi = order.orderType === 'TAXI';
-  const taxiCancellationUnknown = isTaxi && ['DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'].includes(order.status);
+  // [BUG-HUNT-2 G04] At the pickup the server decides (nobody aboard, 15 minutes after the arrival): it read the code, this page cannot.
+  const taxiCancellationUnknown = isTaxi && order.status === 'RIDE_IN_PROGRESS';
   const canOfferCancellation = Boolean(order.canCancel) && !stopped && !taxiCancellationUnknown;
+  const bookingView = order.fulfillment === 'APPOINTMENT' ? appointmentBookingView(order) : null;
   const stages = stagesFor(order);
   const currentStage = stageIndex(order.status, stages);
   const vendorName = isTaxi ? 'Swift ride' : order.vendorName ?? order.vendor?.name ?? 'the store';
@@ -504,8 +559,7 @@ export default function OrderDetailPage() {
       const latest = (await getOrder(id)) as OrderDetail;
       setOrder({ ...latest, rider: latest.rider ?? order.rider });
       setLastUpdatedAt(new Date());
-      const latestTaxiCancellationUnknown = latest.orderType === 'TAXI'
-        && ['DRIVER_ARRIVED', 'RIDE_IN_PROGRESS'].includes(latest.status);
+      const latestTaxiCancellationUnknown = latest.orderType === 'TAXI' && latest.status === 'RIDE_IN_PROGRESS';
       if (!latest.canCancel || latestTaxiCancellationUnknown || ['CANCELLED', 'REFUNDED', 'FAILED'].includes(latest.status)) {
         setConfirmingCancel(false);
         setError('This order can no longer be cancelled. Swift refreshed its current status.');
@@ -521,6 +575,20 @@ export default function OrderDetailPage() {
       setError(cancelError instanceof Error ? cancelError.message : 'Could not cancel this order.');
     } finally {
       setCancelling(false);
+    }
+  };
+
+  // [BUG-HUNT-2 G08] "It arrived", or it did not. The order is read again: the server's words follow.
+  const answerRefund = async (sendId: string, received: boolean) => {
+    setRefundBusy(true);
+    setError(null);
+    try {
+      await answerMmgRefund(id, sendId, received);
+      await load();
+    } catch (refundError) {
+      setError(refundError instanceof Error ? refundError.message : 'Could not record that. Try again.');
+    } finally {
+      setRefundBusy(false);
     }
   };
 
@@ -548,6 +616,19 @@ export default function OrderDetailPage() {
         </span>
       </section>
 
+      {/* [BUG-HUNT-2 G08] A closed order can still owe a refund. Swift holds none of this money. */}
+      {order.mmgRefund ? (
+        <section className={styles.cancelConfirm} aria-label="MMG refund">
+          <p>{order.mmgRefund.line}</p>
+          {order.mmgRefund.canAnswer && order.mmgRefund.sendId ? (
+            <>
+              <button type="button" className={styles.secondaryButton} disabled={refundBusy} onClick={() => void answerRefund(order.mmgRefund?.sendId as string, true)}>It arrived</button>
+              <button type="button" className={styles.secondaryButton} disabled={refundBusy} onClick={() => void answerRefund(order.mmgRefund?.sendId as string, false)}>It did not arrive</button>
+            </>
+          ) : null}
+        </section>
+      ) : null}
+
       {isTaxi && webTaxi ? (
         <Suspense fallback={null}>
           <TaxiTripSafety rideId={id} status={order.status} facts={order.taxiSafety ?? null} />
@@ -558,6 +639,12 @@ export default function OrderDetailPage() {
           <p>You cannot start or manage ride safety on the web. Use the app for trip sharing and driver checks too.</p>
           <OpenSwiftApp />
         </section>
+      ) : null}
+
+      {isTaxi && order.taxiWaiting ? (
+        <Suspense fallback={null}>
+          <TaxiWaitingCard waiting={order.taxiWaiting} />
+        </Suspense>
       ) : null}
 
       {/* [R14 · legal research D12] The server's words, shown while the store delivers with its own rider. */}
@@ -686,12 +773,16 @@ export default function OrderDetailPage() {
             {order.estimatedPrepTime ? <span className={styles.estimate}>About {order.estimatedPrepTime} min prep</span> : null}
           </div>
           <ol className={styles.statusRail} style={{ '--swift-stage-count': stages.length } as CSSProperties}>
-            {stages.map((stage, index) => {
-              const reached = index <= currentStage;
+            {railSteps(order, stages, currentStage, holdActive).map((stage, index) => {
+              // [PICKUP · owner 30 Oct 2026] A step is green, with its tick, the moment the server says it is
+              // reached (Preparing on accept, Ready on ready); aria-current still says which step the order is at,
+              // and the leg to the next step stays unlit until that step is reached. [#2252 S4-1] "Reached" is the
+              // phone's rule for a store order (railSteps): never Preparing or the travel step by position alone.
+              const reached = stage.reached;
               const current = index === currentStage && !completed;
               return (
-                <li key={stage.label} className={reached ? styles.stageReached : ''} aria-current={current ? 'step' : undefined}>
-                  <span className={styles.stageDot}>{index < currentStage || completed ? '✓' : index + 1}</span>
+                <li key={index} className={reached ? styles.stageReached : ''} aria-current={current ? 'step' : undefined}>
+                  <span className={styles.stageDot}>{reached ? '✓' : index + 1}</span>
                   <span>{stage.label}</span>
                 </li>
               );
@@ -716,11 +807,14 @@ export default function OrderDetailPage() {
               <div className={styles.riderDetails}>
                 {vehicle ? <p><Truck size={18} aria-hidden="true" /> {vehicle}</p> : null}
                 {order.rider.licensePlate ? <p className={styles.plate}>Plate {order.rider.licensePlate}</p> : null}
-                {order.rider.phone ? (
-                  <a href={`tel:${order.rider.phone}`} className={styles.secondaryButton}>
-                    <Phone size={18} aria-hidden="true" /> {isTaxi ? 'Call driver' : 'Call rider'}
-                  </a>
-                ) : null}
+                {/* [O-1] Bridge off: today's tel: link. Bridge on: "Call via Swift" (no number on this page). */}
+                <CallPartyButton
+                  orderId={order.id}
+                  target={isTaxi ? 'driver' : 'rider'}
+                  phone={order.rider.phone}
+                  label={isTaxi ? 'Call driver' : 'Call rider'}
+                  className={styles.secondaryButton}
+                />
               </div>
             </section>
           ) : null}
@@ -746,9 +840,18 @@ export default function OrderDetailPage() {
                   <h2 id="destination-title" className={styles.cardTitle}>{destination}</h2>
                 </div>
               </div>
-              {order.pickupCode ? (
+              {/* [PICKUP · owner 30 Oct 2026] The store's code off: the name + order-number check, never a code
+                  (not even one an older server still sends); the store taps "Handed to customer". */}
+              {order.fulfillment === 'PICKUP' && order.pickupCodeRequired === false ? (
+                !stopped && !completed ? (
+                  <div className={`${styles.pickupCode} ${styles.pickupCheck}`}>
+                    <span>{pickupCodeWords(false)}</span>
+                    <strong>{order.orderNumber}</strong>
+                  </div>
+                ) : null
+              ) : order.pickupCode ? (
                 <div className={styles.pickupCode}>
-                  <span>Show this pickup code</span>
+                  <span>{pickupCodeWords(order.pickupCodeRequired)}</span>
                   <strong>{order.pickupCode}</strong>
                 </div>
               ) : null}
@@ -794,7 +897,13 @@ export default function OrderDetailPage() {
           </div>
           <div className={styles.breakdown}>
             {order.fulfillment === 'APPOINTMENT' && order.appointmentSlot ? <div className={styles.line}><span>Appointment</span><strong>{formatAppointmentSlot(order.appointmentSlot)}</strong></div> : null}
-            {typeof order.subtotalCustomer === 'number' ? <div className={styles.line}><span>{isTaxi ? 'Fare' : 'Items'}</span><strong>{money(order.subtotalCustomer)}</strong></div> : null}
+            {isTaxi && order.fareBreakdown ? (
+              // [TAXI waiting charge §8.4 · E4] The phone's receipt (RidePostTripSheet): trip + waiting = total.
+              <>
+                <div className={styles.line}><span>Trip</span><strong>{money(order.fareBreakdown.routeFare)}</strong></div>
+                <div className={styles.line}><span>Waiting {order.fareBreakdown.waitingMinutes} min</span><strong>{money(order.fareBreakdown.waitingCharge)}</strong></div>
+              </>
+            ) : typeof order.subtotalCustomer === 'number' ? <div className={styles.line}><span>{isTaxi ? 'Fare' : 'Items'}</span><strong>{money(order.subtotalCustomer)}</strong></div> : null}
             {!isTaxi && typeof order.deliveryFee === 'number'
               ? order.fulfillment === 'PICKUP' && order.deliveryFee === 0
                 ? <div className={styles.line}><span>Pickup</span><strong>No delivery fee</strong></div>
@@ -802,7 +911,7 @@ export default function OrderDetailPage() {
               : null}
             {Number(order.discount ?? 0) > 0 ? <div className={styles.line}><span>Discount</span><strong>−{money(Number(order.discount))}</strong></div> : null}
             {Number(order.tipAmount ?? 0) > 0 ? <div className={styles.line}><span>{isTaxi ? 'Driver tip' : 'Rider tip'}</span><strong>{money(Number(order.tipAmount))}</strong></div> : null}
-            <div className={styles.totalLine}><span>Total</span><strong>{money(order.totalAmount ?? order.total)}</strong></div>
+            <div className={styles.totalLine}><span>Total</span><strong>{money(isTaxi && order.fareBreakdown ? order.fareBreakdown.total : order.totalAmount ?? order.total)}</strong></div>
           </div>
           {showPaymentTruth ? (
             <div className={styles.cashTruth}>
@@ -821,7 +930,7 @@ export default function OrderDetailPage() {
                           : paymentCaptured
                             ? isTaxi ? 'Cash received after the ride' : order.fulfillment === 'DELIVERY' ? 'Cash received at handover' : 'Business confirmed cash received'
                             : completed
-                              ? 'Cash status awaiting confirmation'
+                              ? cashWithBusiness ? 'Cash is handled by the business' : 'Cash status awaiting confirmation'
                               : isTaxi ? 'Cash due to the driver' : order.fulfillment === 'DELIVERY' ? 'Cash due at handover' : 'Cash due to the business'
                         : 'Payment status from Swift'}
                 </strong>
@@ -858,7 +967,7 @@ export default function OrderDetailPage() {
                               ? 'Swift’s order record confirms cash was received directly at handover.'
                               : 'Swift’s order record confirms the business received cash directly.'
                           : completed
-                            ? `${isTaxi ? 'The ride' : order.fulfillment === 'APPOINTMENT' ? 'The appointment' : order.fulfillment === 'PICKUP' ? 'The collection' : 'The handover'} is complete, but this order does not yet show confirmed cash receipt.`
+                            ? `${isTaxi ? 'The ride' : order.fulfillment === 'APPOINTMENT' ? 'The appointment' : order.fulfillment === 'PICKUP' ? 'The collection' : 'The handover'} is complete${cashWithBusiness ? '. Cash goes to the business directly, so Swift has no record of it. Swift did not hold any order money.' : ', but this order does not yet show confirmed cash receipt.'}`
                             : `Pay ${isTaxi ? 'the driver' : order.fulfillment === 'DELIVERY' ? 'the rider' : 'the business'} directly. Swift does not hold your money.`
                         : 'Swift can’t show this order’s payment status. Check again shortly.'}
                 </p>
@@ -876,6 +985,13 @@ export default function OrderDetailPage() {
           ) : null}
 
           {error ? <p className={styles.alert} role="alert">{error}</p> : null}
+
+          {/* [BOOK-S6b · owner B2] Change time: only what the server projected (switch off or an older server: nothing). */}
+          {!stopped && bookingView ? (
+            <Suspense fallback={null}>
+              <BookingRescheduleCard key={bookingView.bookingId} view={bookingView} onMoved={() => void load()} />
+            </Suspense>
+          ) : null}
 
           {/* [owner #46/#50] The server's reason there is no Cancel, and who to
               contact instead — the store's (or provider's) published number. */}

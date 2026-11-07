@@ -47,8 +47,18 @@ const h = vi.hoisted(() => {
     offerSeen: (..._args: unknown[]) => Promise.resolve({}),
     currentOffer: () => Promise.resolve({ data: { data: { offer: null as unknown } } }),
   };
+  // [CARS-DELIVER PR4] The delivery routes, told apart from the taxi routes. Unless a case overrides one, each
+  // answers exactly as the shared stub above, so every case written before this behaves as it did.
+  const riderOverride = {
+    offerSeen: null as null | ((...args: unknown[]) => Promise<unknown>),
+    currentOffer: null as null | (() => Promise<unknown>),
+  };
+  const riderApi = {
+    offerSeen: (...args: unknown[]) => (riderOverride.offerSeen ?? api.offerSeen)(...args),
+    currentOffer: () => (riderOverride.currentOffer ?? api.currentOffer)(),
+  };
   const queryClient = { invalidateQueries: () => undefined };
-  return { rt, handlers, socket, server, api, queryClient };
+  return { rt, handlers, socket, server, api, riderApi, riderOverride, queryClient };
 });
 
 vi.mock('react', () => {
@@ -83,7 +93,7 @@ vi.mock('react', () => {
   return { ...hooks, default: hooks };
 });
 vi.mock('@tanstack/react-query', () => ({ useQueryClient: () => h.queryClient }));
-vi.mock('../services/api', () => ({ driverApi: h.api, riderApi: h.api }));
+vi.mock('../services/api', () => ({ driverApi: h.api, riderApi: h.riderApi }));
 vi.mock('../services/socket', () => ({ connectSocket: () => undefined, getSocket: () => h.socket }));
 vi.mock('../stores/moverPreview', () => ({
   useMoverPreview: (select: (s: { preview: boolean }) => unknown) => select({ preview: false }),
@@ -93,19 +103,19 @@ import { useDispatchOffers, type DispatchOffer } from './dispatchOffers';
 
 /** The mover home screen's use of the hook, as a component: called as a plain
  *  function once per render pass, the kit tests' way (card.test.ts). */
-function OfferHost({ kind, online }: { kind: 'DRIVER' | 'RIDER'; online: boolean }) {
-  return useDispatchOffers(kind, online);
+function OfferHost({ kind, online, alsoDeliveries }: { kind: 'DRIVER' | 'RIDER'; online: boolean; alsoDeliveries?: boolean }) {
+  return useDispatchOffers(kind, online, alsoDeliveries);
 }
 
 /** Render until the state settles: run each effect whose dependencies changed
  *  (its previous cleanup first), re-render while an effect or event set state. */
-function render(kind: 'DRIVER' | 'RIDER' = 'DRIVER', online = true) {
+function render(kind: 'DRIVER' | 'RIDER' = 'DRIVER', online = true, alsoDeliveries = false) {
   let view!: ReturnType<typeof OfferHost>;
   let passes = 0;
   do {
     h.rt.dirty = false;
     h.rt.i = 0;
-    view = OfferHost({ kind, online });
+    view = OfferHost({ kind, online, alsoDeliveries });
     for (const slot of h.rt.slots) {
       if (!slot.pending) continue;
       const run = slot.pending;
@@ -125,6 +135,13 @@ async function settle(kind: 'DRIVER' | 'RIDER' = 'DRIVER') {
   return render(kind);
 }
 
+/** [CARS-DELIVER PR4] The same, for a taxi-mode phone on "taxi rides and deliveries": its recovery may ask two routes
+ *  in turn, so it gets a few more ticks to land. */
+async function settleBoth() {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+  return render('DRIVER', true, true);
+}
+
 const card = (orderId: string, offerAttemptId: string, expiresInSeconds = 20): DispatchOffer => ({ orderId, offerAttemptId, expiresInSeconds });
 let seenCalls: string[] = [];
 const deadlineOf = (offer: DispatchOffer | null) => (offer as (DispatchOffer & { deadlineAt?: number }) | null)?.deadlineAt;
@@ -140,6 +157,8 @@ beforeEach(() => {
     return Promise.resolve({});
   };
   h.api.currentOffer = () => Promise.resolve({ data: { data: { offer: null } } });
+  h.riderOverride.offerSeen = null;
+  h.riderOverride.currentOffer = null;
 });
 
 afterEach(() => {
@@ -270,5 +289,54 @@ describe('[AX299 F2] seen means shown', () => {
     const view = await settle();
     expect([view.offer?.orderId, view.offer?.offerAttemptId]).toEqual(['R', 'r1']);
     expect(seenCalls).toEqual(['R:r1']);
+  });
+});
+
+// [CARS-DELIVER PR4 · REVIEW-F #2139 S4-2] On "taxi rides and deliveries" a taxi-mode phone also gets delivery cards:
+// one is recovered from the DELIVERY route after a reconnect, and every card's render proof goes to its own kind.
+describe('[CARS-DELIVER PR4] taxi rides and deliveries: recovery and render proof by the card’s kind', () => {
+  const delivery = { orderId: 'D', offerAttemptId: 'd1', orderType: 'FOOD_DELIVERY', expiresInSeconds: 12 };
+
+  it('no taxi card to recover: a dual taxi-mode phone recovers its delivery card from the delivery route, and marks it seen there', async () => {
+    const asked: string[] = [];
+    h.api.currentOffer = () => { asked.push('taxi'); return Promise.resolve({ data: { data: { offer: null } } }); };
+    h.riderOverride.currentOffer = () => { asked.push('delivery'); return Promise.resolve({ data: { data: { offer: delivery } } }); };
+    const riderSeen: string[] = [];
+    h.riderOverride.offerSeen = (orderId: unknown, attemptId: unknown) => { riderSeen.push(`${String(orderId)}:${String(attemptId)}`); return Promise.resolve({}); };
+    render('DRIVER', true, true);
+    const view = await settleBoth();
+    expect(asked).toEqual(['taxi', 'delivery']);
+    expect([view.offer?.orderId, view.offer?.orderType]).toEqual(['D', 'FOOD_DELIVERY']);
+    expect(riderSeen).toEqual(['D:d1']);
+    expect(seenCalls).toEqual([]);
+  });
+
+  it('without taxi + deliveries the delivery route is never asked', async () => {
+    const asked: string[] = [];
+    h.api.currentOffer = () => { asked.push('taxi'); return Promise.resolve({ data: { data: { offer: null } } }); };
+    h.riderOverride.currentOffer = () => { asked.push('delivery'); return Promise.resolve({ data: { data: { offer: delivery } } }); };
+    render('DRIVER', true, false);
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    const view = render('DRIVER', true, false);
+    expect(asked).toEqual(['taxi']);
+    expect(view.offer).toBeNull();
+  });
+
+  it('a live TAXI card (or one with no orderType) is marked seen on the taxi route; a live delivery card on the delivery route', async () => {
+    const riderSeen: string[] = [];
+    h.riderOverride.offerSeen = (orderId: unknown, attemptId: unknown) => { riderSeen.push(`${String(orderId)}:${String(attemptId)}`); return Promise.resolve({}); };
+    render('DRIVER', true, true);
+    await settleBoth();
+    h.server('dispatch:offer', { orderId: 'T', offerAttemptId: 't1', orderType: 'TAXI', expiresInSeconds: 10 });
+    let view = render('DRIVER', true, true);
+    expect(view.offer?.orderId).toBe('T');
+    expect(seenCalls).toEqual(['T:t1']);
+    expect(riderSeen).toEqual([]);
+    view.dismiss();
+    h.server('dispatch:offer', { ...delivery, orderId: 'D2', offerAttemptId: 'd2' });
+    view = render('DRIVER', true, true);
+    expect(view.offer?.orderId).toBe('D2');
+    expect(riderSeen).toEqual(['D2:d2']);
+    expect(seenCalls).toEqual(['T:t1']);
   });
 });

@@ -100,7 +100,8 @@ describe('[MC-AD4] held orders', () => {
   it('with nothing held there is no held section at all', async () => {
     serveOrders({ body: { success: true, data: [] } });
     renderWithQuery(<OrdersPage />);
-    await screen.findByRole('heading', { name: 'Orders' });
+    // [ADMIN-UI] The page title is the shell header now; wait for the order list's own answer instead.
+    await screen.findByText('No orders yet.');
     await waitFor(() => expect(screen.queryByRole('region', { name: /Held for review/ })).toBeNull());
   });
 });
@@ -199,6 +200,92 @@ describe('[MC-AD5] an MMG payment dispute', () => {
     expect(panel.textContent).toMatch(/payment claims changed after it/);
     expect(panel.textContent).not.toContain('Decided:');
     expect(within(panel).queryByRole('button')).toBeNull();
+  });
+});
+
+describe('[G11] the proof photos', () => {
+  const stored = { orderType: 'COURIER', mmgClaimMismatchAt: null, courierProofPhotoUrl: 'courier-proof/rider-1/opaque.jpg', courierReturnProofPhotoUrl: null, courierPickupProofPhotoUrl: 'courier-proof/rider-1/pickup.jpg' };
+  const REASON = 'The sender says the parcel never reached the door';
+
+  it('a stored key is never a link: each photo opens through the audited door, on a reason, and shows no empty line', async () => {
+    const seen: ApiRequest[] = [];
+    const signed = 'https://files.example/signed/opaque.jpg?sig=abc';
+    const fetchMock = mockApi((r) => {
+      if (r.method === 'GET' && r.url.pathname === '/api/v1/admin/orders/ord-d-1') return { body: { success: true, data: orderOf(stored) } };
+      if (r.method === 'GET' && r.url.pathname === '/api/v1/admin/orders/ord-d-1/proof-photo') { seen.push(r); return { body: { success: true, data: { url: signed, expiresInSeconds: 300, auditId: 'a1' } } }; }
+      throw new Error(`Unexpected request: ${r.method} ${r.url}`);
+    });
+    const { user } = detail();
+    const door = (await screen.findByText('Door photo')).parentElement!;
+    expect(screen.getByText('Pickup photo')).toBeTruthy();
+    expect(screen.queryByText('Return photo')).toBeNull();
+    expect(door.querySelector('a')).toBeNull();
+    await user.click(within(door).getByRole('button', { name: 'Open' }));
+    const panel = await screen.findByRole('dialog');
+    await user.type(within(panel).getByRole('textbox'), REASON);
+    await user.click(within(panel).getByRole('button', { name: 'Open photo' }));
+    const link = await screen.findByRole('link', { name: 'Open photo' });
+    expect(link.getAttribute('href')).toBe(signed);
+    expect(seen[0]!.url.searchParams.get('photo')).toBe('door');
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes('proof-photo'))!;
+    expect(new Headers(call[1]?.headers).get('x-swift-reason')).toBe(REASON);
+    expect(document.querySelector('a[href*="courier-proof"]')).toBeNull();
+  });
+});
+
+describe('[G05] a ride stuck on wrong codes', () => {
+  const ride = (over: Record<string, unknown> = {}) => orderOf({ orderType: 'TAXI', status: 'DRIVER_ARRIVED', paymentMethod: 'CASH', paymentStatus: 'PENDING', mmgClaimMismatchAt: null, customerMmgClaim: 'UNRECORDED', handover: { ridePinIssued: true, ridePinLocked: true, ridePinAttempts: 5 }, ...over });
+
+  it('asks for the code sent to the phone and a reason, then resets it; the code is never shown', async () => {
+    const paths: string[] = [];
+    const fetchMock = serveOrder(ride(), (request) => { paths.push(request.url.pathname); return { body: { success: true, data: { auditId: 'a1', rotated: true } } }; });
+    const { user } = detail();
+    await user.click(await screen.findByRole('button', { name: 'New ride code' }));
+    await waitFor(() => expect(paths).toEqual(['/api/v1/auth/step-up']));
+    const dialog = await screen.findByRole('dialog', { name: 'Give SW-2002 a new ride code?' });
+    await user.type(within(dialog).getByRole('textbox', { name: 'Code sent to your phone' }), '654321');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Give a new code' }));
+    await waitFor(() => expect(paths).toEqual(['/api/v1/auth/step-up', '/api/v1/auth/step-up/verify', '/api/v1/admin/orders/ord-d-1/handover-secret/reset-ride-pin']));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'POST')[1]![1]?.body))).toEqual({ code: '654321' });
+    expect(await screen.findByText('SW-2002 has a new ride code. The passenger was told.')).toBeTruthy();
+  });
+
+  it.each([
+    ['a passenger aboard', { ridePinVerifiedAt: '2026-10-07T11:00:00.000Z' }],
+    ['a ride under way', { status: 'RIDE_IN_PROGRESS' }],
+    ['a ride with no code', { handover: { ridePinIssued: false } }],
+  ])('is not offered with %s', async (_why, over) => {
+    serveOrder(ride(over));
+    detail();
+    await screen.findByText(/SW-2002/);
+    expect(screen.queryByRole('button', { name: 'New ride code' })).toBeNull();
+  });
+});
+
+describe('[G08] a paid MMG order that cannot be fulfilled', () => {
+  const paid = () => orderOf({ mmgClaimMismatchAt: null, customerMmgClaim: 'PAID', canCloseStoreRefund: true });
+
+  it('has its close on the order, bound to the revision on screen, with a reason, and a second admin is the next step', async () => {
+    const fetchMock = serveOrder(paid(), () => ({ status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this.', details: { approvalId: 'apr_1' } } } }));
+    const { user } = detail();
+    await user.click(await screen.findByRole('button', { name: 'Close: store refunds' }));
+    const dialog = screen.getByRole('dialog', { name: 'Close SW-2002 as refund handled by the store?' });
+    expect(dialog.textContent).toContain('Swift records that and moves no money');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    await user.click(within(dialog).getByRole('button', { name: 'Close it' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(String(url)).toMatch(/\/api\/v1\/admin\/orders\/ord-d-1\/close-store-refund$/);
+    expect(JSON.parse(String(init?.body))).toEqual({ expectedClaimRevision: 4 });
+    expect(new Headers(init?.headers).get('x-swift-reason')).toBe(REASON);
+  });
+
+  it('is not offered when the server says it does not apply', async () => {
+    serveOrder(orderOf({ mmgClaimMismatchAt: null, canCloseStoreRefund: false }));
+    detail();
+    await screen.findByRole('button', { name: 'Cancel order' });
+    expect(screen.queryByRole('button', { name: 'Close: store refunds' })).toBeNull();
   });
 });
 

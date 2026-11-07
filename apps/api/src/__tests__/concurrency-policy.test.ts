@@ -138,7 +138,9 @@ describe('every capacity gate goes through the seam — no fifth one appears qui
     // riderLiveLegCount/reserveRiderLeg — still THIS module's exports, so the
     // capacity answer still has one home. The driver claim now uses SQL to
     // enforce its document deadline at the write; its offer gate uses Prisma.
-    expect((src.match(/capacityPredicateSql\(/g) ?? []).length).toBe(3);
+    // [CARS-DELIVER PR4] +2, both THROUGH the seam: the "taxi + deliveries" candidate branch asks it whether the taxi
+    // is free (DRIVER) and whether its delivery profile holds no leg (RIDER at capacity 1: one job at a time).
+    expect((src.match(/capacityPredicateSql\(/g) ?? []).length).toBe(5);
     expect((src.match(/capacityWhere\(/g) ?? []).length).toBe(1);
     expect((src.match(/riderLiveLegCount\(/g) ?? []).length).toBeGreaterThanOrEqual(1);
     expect((src.match(/reserveRiderLeg\(/g) ?? []).length).toBe(1);

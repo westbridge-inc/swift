@@ -82,6 +82,12 @@ function snapshotFor(state: Pick<
   };
 }
 
+/** [IN-STORE-SALE] A fresh key for ONE command (an Idempotency-Key, e.g. one "Sold in store" tap): a random UUID,
+ *  so two taps never share one. Here because this module already holds the app's random source. */
+export function newCommandKey(): string {
+  return Crypto.randomUUID();
+}
+
 function createAdEventScopeId(): string {
   try {
     return Crypto.randomUUID();

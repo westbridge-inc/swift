@@ -8,10 +8,12 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill, useLogoutConfirm } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { DeliveriesTooCard } from '../DeliveriesTooCard';
 import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
+import { useActiveJobs, useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
+import { moverLogoutBody } from '../../../lib/moverLogoutWords';
 import { StandingCard } from '../../../components/StandingCard';
 import {
   AuthSessionBoundaryError,
@@ -32,14 +34,13 @@ import { useMoverPreview } from '../../../stores/moverPreview';
 export function MoverAccountScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
   const { user } = useAuthStore();
+  const { kind, profile, dual } = useMoverKind();
   // What the server does when a mover logs out (mover-authority.ts): the mover
   // goes offline, and a job not yet picked up is released back to dispatch. A
-  // job already in their hands stays theirs; operations are paged.
-  const { requestLogout, logoutDialog } = useLogoutConfirm({
-    body: 'You’ll go offline, and a job you haven’t picked up yet goes back to dispatch. Your earnings, vehicle and documents stay with your account.',
-  });
+  // job already in their hands stays theirs; operations are paged. The box says
+  // what that means for this person, right now (lib/moverLogoutWords).
+  const { requestLogout, logoutDialog } = useLogoutConfirm({ body: moverLogoutBody(useActiveJobs(kind).legs) });
   const [switcherOpen, setSwitcherOpen] = React.useState(false);
-  const { kind, profile } = useMoverKind();
   const standingQ = useMoverStanding<any>(kind);
   const verified = (useVerificationStatus<any>('MOVER').data as any)?.roleVerified;
   const summaryQ = useEarningsSummary<any>(kind);
@@ -48,6 +49,12 @@ export function MoverAccountScreen({ navigation }: any) {
   const setBilling = useSetMoverBillingMethod(kind, stepUp.withStepUp);
   const allTime = (summaryQ.data as any)?.allTime?.total ?? 0;
   const uploadVehiclePhoto = useUploadVehiclePhoto(kind);
+  // [Row 312 · REVIEW-F S4-1] While the malware scanner is down a new vehicle photo is stored unscanned and
+  // the server withholds it until its rescan answers clean (vehiclePhotoUrl null + vehiclePhotoScan). Say
+  // what happened instead of "Add photo". An older server sends no vehiclePhotoScan: as before.
+  const photoScan = (profile as { vehiclePhotoScan?: unknown } | null | undefined)?.vehiclePhotoScan;
+  const photoWaiting = !profile?.vehiclePhotoUrl && photoScan === 'AWAITING';
+  const photoFailed = !profile?.vehiclePhotoUrl && photoScan === 'FAILED';
   const qc = useQueryClient();
   // [ALG-34] The MMG pay link is where the money goes: the server asks this
   // session to confirm it holds the phone (the code sheet), then STAGES the
@@ -90,6 +97,8 @@ export function MoverAccountScreen({ navigation }: any) {
           : { label: String(sub.status ?? '').toLowerCase() || 'Inactive', tone: 'neutral' as const };
 
   const pickVehiclePhoto = async () => {
+    // One photo at a time: a tap while one is uploading opens nothing.
+    if (uploadVehiclePhoto.isPending) return;
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -174,11 +183,19 @@ export function MoverAccountScreen({ navigation }: any) {
                 </T>
               </View>
               <LinkText
-                label={uploadVehiclePhoto.isPending ? 'Still uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
+                label={uploadVehiclePhoto.isPending ? 'Still uploading…' : profile?.vehiclePhotoUrl || photoWaiting ? 'Change photo' : photoFailed ? 'Upload again' : 'Add photo'}
                 onPress={pickVehiclePhoto}
               />
             </View>
-            {!profile?.vehiclePhotoUrl ? (
+            {photoWaiting ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Photo waiting for a file check. Customers see it once it clears.
+              </T>
+            ) : photoFailed ? (
+              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+                This photo didn’t pass our file check. Upload a new photo.
+              </T>
+            ) : !profile?.vehiclePhotoUrl ? (
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Add a clear photo of your vehicle — customers see it the moment you accept.
               </T>
@@ -186,7 +203,7 @@ export function MoverAccountScreen({ navigation }: any) {
             {uploadVehiclePhoto.isError ? (
               <View style={{ marginTop: space.sm }}>
                 <T variant="caption" tone="error">Upload failed — your selected photo is kept for retry.</T>
-                {uploadVehiclePhoto.variables ? <LinkText label="Retry saved photo" onPress={() => uploadVehiclePhoto.mutate(uploadVehiclePhoto.variables)} /> : null}
+                {uploadVehiclePhoto.variables ? <LinkText label="Retry saved photo" disabled={uploadVehiclePhoto.isPending} onPress={() => !uploadVehiclePhoto.isPending && uploadVehiclePhoto.mutate(uploadVehiclePhoto.variables)} /> : null}
               </View>
             ) : null}
           </Card>
@@ -201,6 +218,7 @@ export function MoverAccountScreen({ navigation }: any) {
             style={{ marginTop: space.md, marginBottom: 0 }}
             value={profile?.mmgPayUrl}
             pending={profile?.mmgPayUrlPending ? { url: profile.mmgPayUrlPending, applyAt: profile.mmgPayUrlApplyAt ?? null } : null}
+            holdHours={profile?.mmgPayUrlHoldHours ?? null}
             saving={saveMmgLink.isPending}
             cancelling={cancelPendingMmgLink.isPending}
             error={mmgError}
@@ -209,10 +227,14 @@ export function MoverAccountScreen({ navigation }: any) {
           />
         ) : null}
 
+        {/* [CARS-DELIVER] "Deliveries too" — shown only when the server says the taxi car can deliver now
+            (CAR_DELIVERIES on) or already does; the work-mode switch for an account with both. */}
+        <DeliveriesTooCard kind={kind ?? null} hasTaxiProfile={isDriver || dual === true} style={{ marginTop: space.md }} />
+
         {/* Ops rows */}
         <Card style={{ marginTop: space.md, paddingVertical: space.sm }}>
           <SettingsRow icon="dollar-sign" label="Earnings" sub={`${money(allTime)} all-time · 100% yours`} onPress={() => navigation?.navigate?.('Earnings')} />
-          <SettingsRow icon="shield" label="Guarantee claims" sub="Cash orders where the customer didn't pay" onPress={() => navigation?.navigate?.('Claims')} />
+          <SettingsRow icon="dollar-sign" label="Unpaid cash orders" sub="Cash orders where the customer didn't pay" onPress={() => navigation?.navigate?.('Claims')} />
           <SettingsRow icon="clock" label="Job history" sub="Every completed and cancelled job" onPress={() => navigation?.navigate?.('JobHistory')} />
           <SettingsRow icon="file-text" label="Documents" sub="Licences, insurance and renewals" onPress={() => navigation?.navigate?.('MoverDocuments')} />
           <SettingsRow icon="truck" label="Change vehicle" sub="A new vehicle is checked before you go online" onPress={() => navigation?.navigate?.('MoverVehicle')} />

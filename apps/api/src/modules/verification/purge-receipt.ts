@@ -9,6 +9,7 @@
  * receipt: callers decide what that means (the reaper leaves the row due and
  * retries; erasure records the failure and files the storage orphan).
  */
+import { identityReviewOpenFor } from './investigation-hold-core';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import type { StorageProvider } from '../../providers/storage/storage-provider';
 import { bindTenantTransaction } from '../../plugins/prisma';
@@ -91,6 +92,9 @@ export async function shredUnlessHeld(
       where: { id: ref.documentId, userId: ref.userId, legalHoldId: null, ...still }, select: { id: true },
     });
     if (!live.some((d) => d.id === ref.documentId)) return null;
+    // [SEC-PII · COORD] Backstop under the person's lock: an identity review open on their LIVE group chain keeps the
+    // bytes even before its hold reaches them (the daily sweep holds every member; a member who joined since waits here).
+    if (await identityReviewOpenFor(tx, ref.userId)) return null;
     // A purge that shredded this key and then could not finish (store unreachable, probe failed)
     // left the person's own envelope keyless: finish destroying it rather than strand it.
     const prior = await tx.encryptedObject.findUnique({ where: { fileKey: ref.fileKey } });

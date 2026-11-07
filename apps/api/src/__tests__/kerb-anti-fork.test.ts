@@ -186,7 +186,8 @@ describe('the map is accurate — it fails if the machinery moves', () => {
     expect(cashRules).toMatch(/gps_far/);
   });
 
-  it('a flagged claim goes to review rather than auto-approving', () => {
-    expect(cashRules).toMatch(/flags\.length === 0 \? 'AUTO_APPROVED' : 'PENDING_REVIEW'/);
+  it('every case goes to review: nothing approves one automatically, flagged or clean', () => {
+    expect(cashRules).toMatch(/status: 'PENDING_REVIEW',\n\s+evidence: evidence as unknown as Prisma\.InputJsonValue/);
+    expect(cashRules).not.toMatch(/status: [^{,\n]*'AUTO_APPROVED'/);
   });
 });

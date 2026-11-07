@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { HANDOVER_POLICY } from '../modules/order/handover-authority';
+import { HANDOVER_POLICY, HANDOVER_POLICY_VERSION } from '../modules/order/handover-authority';
 
 // ---------------------------------------------------------------------------
 // [DOC-INV-48 · F-106-01] THE HANDOVER POLICY IS A CROSS-APP CONTRACT.
@@ -31,48 +31,60 @@ const MOBILE_DOOR = 'apps/mobile/src/lib/handoverAuthority.ts';
 
 const mobileSource = readFileSync(path.join(REPO_ROOT, MOBILE_DOOR), 'utf8');
 
-/** The accepted list, read out of the mobile source rather than imported. */
-function acceptedPoliciesInMobile(): string[] {
-  const decl = /export const ACCEPTED_HANDOVER_POLICIES\s*:\s*readonly string\[\]\s*=\s*\[([^\]]*)\]/.exec(mobileSource);
-  if (!decl) return [];
-  return [...decl[1]!.matchAll(/'([^']+)'|"([^"]+)"/g)].map((m) => m[1] ?? m[2]!);
+/** The minimum the shipped app accepts, read out of the mobile source rather than imported. */
+function mobileMinimum(): number | null {
+  const m = /export const MIN_HANDOVER_POLICY_VERSION\s*=\s*(\d+)/.exec(mobileSource);
+  return m ? Number(m[1]) : null;
 }
 
 describe('[F-106-01] the handover policy binds the API and the rider app', () => {
-  it('the mobile door still declares an accepted-policy list — a census that finds nothing is not a census', () => {
+  it('the mobile door still declares a minimum it will accept — a census that finds nothing is not a census', () => {
     expect(
-      acceptedPoliciesInMobile().length,
-      `${MOBILE_DOOR} no longer declares ACCEPTED_HANDOVER_POLICIES in a shape this test can read. ` +
+      mobileMinimum(),
+      `${MOBILE_DOOR} no longer declares MIN_HANDOVER_POLICY_VERSION in a shape this test can read. ` +
         'It was renamed or restructured — repoint this census, do not delete it.',
-    ).toBeGreaterThan(0);
+    ).not.toBeNull();
   });
 
-  it('the policy the API serves is one the shipped rider app will accept', () => {
-    const accepted = acceptedPoliciesInMobile();
+  it('the API never serves a policy OLDER than the shipped app will accept', () => {
+    // The one direction that is dangerous. A server BEHIND the fleet computed
+    // its authority under fewer rules and can say DELIVER_NO_CASH on a disputed
+    // order. A server AHEAD is strictly safer, so it is deliberately allowed:
+    // that is what lets the API bump without a matching mobile release.
     expect(
-      accepted,
-      `The API serves handover authorities under policy "${HANDOVER_POLICY}", which ${MOBILE_DOOR} does not accept.\n` +
-        'Every mobile-money handover in the fleet would be refused ON THE DEVICE — invisible in server metrics, ' +
-        'while cash orders keep working and the dashboards look normal.\n' +
-        `Fix: add '${HANDOVER_POLICY}' to the FRONT of ACCEPTED_HANDOVER_POLICIES and keep the previous value for one release, ` +
-        'so an app and an API from adjacent releases interoperate during rollout AND rollback.',
-    ).toContain(HANDOVER_POLICY);
+      HANDOVER_POLICY_VERSION,
+      `The API serves handover policy v${HANDOVER_POLICY_VERSION}, below the v${String(mobileMinimum())} minimum ` +
+        `${MOBILE_DOOR} accepts. Every mobile-money handover would be refused ON THE DEVICE — invisible in server ` +
+        'metrics, while cash orders keep working. Raise the API, or lower the app minimum deliberately.',
+    ).toBeGreaterThanOrEqual(mobileMinimum()!);
   });
 
-  it('the app keeps a grace entry, or is explicitly on its first policy', () => {
-    const accepted = acceptedPoliciesInMobile();
-    // One entry is correct only while no policy has ever been superseded. Once a
-    // second exists, dropping back to one removes the rollback window — so this
-    // records the intent rather than silently allowing either.
-    expect(accepted[0], 'the preferred policy must be the newest, listed first').toBe(HANDOVER_POLICY);
-    expect(accepted.length, 'ACCEPTED_HANDOVER_POLICIES should hold the current policy and at most one grace entry').toBeLessThanOrEqual(2);
+  it('the version is monotonic and the bump instruction is safe to follow', () => {
+    expect(Number.isInteger(HANDOVER_POLICY_VERSION)).toBe(true);
+    expect(HANDOVER_POLICY_VERSION).toBeGreaterThan(0);
   });
 
-  it('the mobile door refuses an unknown policy rather than defaulting to permissive', () => {
-    // Grading the shape of the guard, because its absence is what the whole
-    // contract rests on. A parser that stopped checking `policy` would satisfy
-    // every other test in both apps.
+  it('the LEGACY string is still served, so an already-installed app keeps working', () => {
+    // Removing this field is the outage this whole mechanism exists to prevent:
+    // a build in the field matches the string and knows nothing about versions.
+    expect(typeof HANDOVER_POLICY).toBe('string');
+    expect(HANDOVER_POLICY.length).toBeGreaterThan(0);
+    expect(
+      mobileSource.match(/export const ACCEPTED_HANDOVER_POLICIES[^=]*=\s*\[([^\]]*)\]/)?.[1] ?? '',
+      'the app no longer accepts the legacy string the API still serves',
+    ).toContain(`'${HANDOVER_POLICY}'`);
+  });
+
+  it('the mobile door refuses an OLDER server rather than defaulting to permissive', () => {
+    // Grading the shape of the guard, because the whole contract rests on it.
+    expect(mobileSource).toMatch(/servedVersion < MIN_HANDOVER_POLICY_VERSION\)\s*return null;/);
+    // ...and still falls back to the string when no version is served.
     expect(mobileSource).toMatch(/ACCEPTED_HANDOVER_POLICIES\.includes\(h\['policy'\]\)/);
-    expect(mobileSource).toMatch(/return null;/);
+  });
+
+  it('the API actually puts the version on the wire', () => {
+    // A minimum nothing serves is a minimum nothing enforces.
+    const api = readFileSync(path.join(REPO_ROOT, 'apps/api/src/modules/order/handover-authority.ts'), 'utf8');
+    expect(api).toMatch(/policyVersion:\s*HANDOVER_POLICY_VERSION/);
   });
 });

@@ -43,10 +43,12 @@ describe('driver ride handback client/server contract', () => {
 
     expect(success).toContain("if (input.action === 'handback') {");
     expect(success).toContain("void qc.invalidateQueries({ queryKey: ['mover'] });");
-    // [PERF partner #2] Every other step still returns (so awaits) its refresh:
-    // the active job's read; the rest refresh in the background
-    // (mover.jobStepWait.test.ts drives what that promise waits for).
-    expect(success).toContain('return refreshAfterJobStep(qc);');
+    // [PERF partner #2 · TAP-AUDIT 27 Oct] Every other step goes through afterStep: a step that moves the job along
+    // writes the answered status and is free at the answer; one that ends the job (the fare outcome) still returns
+    // (so awaits) its refresh — the active job's read; the rest refresh in the background
+    // (mover.jobStepWait.test.ts and mover.stepAnswer.test.ts drive both).
+    expect(success).toContain('return afterStep(qc, input.id, input.action, _data);');
+    expect(body(HOOK, 'function afterStep(', '\n}')).toContain('return refreshAfterJobStep(qc);');
     expect(success).not.toContain("await qc.invalidateQueries({ queryKey: ['mover'] })");
   });
 
@@ -56,7 +58,7 @@ describe('driver ride handback client/server contract', () => {
     expect(SCREEN).toContain('if (!liveJob?.id || !canDriverHandback) return;');
     expect(SCREEN).toContain("setDriverHandbackFlow({ rideId: liveJob.id, job: liveJob, phase: 'confirm' });");
     expect(SCREEN).toContain("phase: 'confirm' | 'submitting' | 'dismissing';");
-    expect(SCREEN).toContain("['Vehicle problem', 'Road or access blocked', 'Passenger did not arrive']");
+    expect(SCREEN).toContain("['Vehicle problem', 'Road or access blocked', 'GPS not working', 'Passenger did not arrive']");
     expect(SCREEN).toContain('onError: (e: any) =>');
   });
 
@@ -68,7 +70,7 @@ describe('driver ride handback client/server contract', () => {
     expect(SCREEN).toContain("toast.show('Ride updated', 'This ride can no longer be handed back.');");
 
     const popup = body(SCREEN, '<PopupCard\n        visible={!!driverHandbackFlow', '<PopupCard visible={handbackConfirm}');
-    const press = body(popup, 'onPress={() => {\n              if (preview', 'onSuccess: () => {');
+    const press = body(popup, 'onPress={() => {\n              if (preview', 'onSuccess: (answer: unknown) => {');
     expect(press).toContain("!liveJob?.id");
     expect(press).toContain('driverHandbackFlow.rideId !== liveJob.id');
     expect(press).toContain('const rideId = liveJob.id;');
@@ -83,7 +85,7 @@ describe('driver ride handback client/server contract', () => {
       '<PopupCard\n        visible={!!driverHandbackFlow',
       '<PopupCard visible={handbackConfirm}',
     );
-    const success = body(popup, 'onSuccess: () => {', 'onError: (e: any) =>');
+    const success = body(popup, 'onSuccess: (answer: unknown) => {', 'onError: (e: any) =>');
     const dismissal = body(
       SCREEN,
       'const finishDriverHandbackDismissal = useCallback(() => {',
@@ -92,6 +94,9 @@ describe('driver ride handback client/server contract', () => {
 
     expect(success).toContain('driverHandbackNavigateAfterDismissRef.current = true;');
     expect(success).toContain("setDriverHandbackFlow((flow) => flow && flow.rideId === rideId ? { ...flow, phase: 'dismissing' } : flow);");
+    // [G03] The server's answer says which it was: "Passenger did not arrive" closes the ride, nothing is matched.
+    expect(success).toContain('const done = driverHandbackDoneWords(answer);');
+    expect(success).toContain('toast.show(done.title, done.body);');
     expect(success).not.toContain('navigation?.goBack?.()');
     expect(success).not.toContain('finishDriverHandbackDismissal');
     expect(popup).toContain('onDismissed={finishDriverHandbackDismissal}');

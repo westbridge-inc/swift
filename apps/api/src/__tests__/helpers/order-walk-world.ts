@@ -42,7 +42,7 @@ import { authPlugin } from '../../plugins/auth';
 import { socketPlugin } from '../../plugins/socket';
 import { registerEmptyJsonBodyParser } from '../../plugins/empty-json';
 import { registerErrorHandler } from '../../middleware/error-handler';
-import { authRoutes } from '../../modules/auth/auth.routes';
+import { registerAuthRoutes } from './auth-routes-harness';
 import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { riderRoutes } from '../../modules/rider/rider.routes';
@@ -173,7 +173,7 @@ export async function buildWalkWorld(): Promise<WalkWorld> {
     dispatchQueue: sched.queue('dispatch'),
     offerQueue: sched.queue('offer'),
   } as never);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });

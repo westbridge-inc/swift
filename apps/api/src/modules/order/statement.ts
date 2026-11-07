@@ -1,4 +1,6 @@
+import { color } from '@swift/ui';
 import { formatMoney } from '../../utils/currency-amount';
+import { endOfGuyanaDay, guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
 import { aggregateSalesComponents, orderComponents } from '../billing/sales-components';
 /**
  * Earnings / sales statements (marketplace-mechanics spec §12, the receipt's
@@ -34,7 +36,8 @@ export type StatementInput = {
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const day = (d: Date) => new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+/** The date a statement prints, a row's or the period's: Guyana's, on any server, so a row never reads outside its label. */
+export const statementDay = (d: Date | string) => new Date(d).toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: '2-digit', month: 'short', year: 'numeric' });
 
 export function renderStatementHtml(input: StatementInput): string {
   // [M-36] Rendered through the registry in the statement's own currency.
@@ -42,7 +45,7 @@ export function renderStatementHtml(input: StatementInput): string {
   const rows = input.lines
     .map(
       (l) => `<tr>
-        <td class="date">${day(l.date)}</td>
+        <td class="date">${statementDay(l.date)}</td>
         <td>${esc(l.label)}</td>
         <td class="num">${money(l.amount)}</td>
       </tr>`,
@@ -58,7 +61,7 @@ export function renderStatementHtml(input: StatementInput): string {
 <style>
   body { font-family: -apple-system, system-ui, sans-serif; color: #111; margin: 0; background: #f6f6f6; }
   .sheet { max-width: 640px; margin: 24px auto; background: #fff; border-radius: 16px; padding: 32px; }
-  .brand { color: #e8192c; font-weight: 800; font-size: 22px; }
+  .brand { color: ${color.brand[500]}; font-weight: 800; font-size: 22px; }
   h1 { font-size: 16px; margin: 4px 0 0; font-weight: 600; color: #555; }
   .meta { margin: 16px 0; font-size: 14px; color: #555; line-height: 1.6; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
@@ -92,13 +95,12 @@ export function renderStatementHtml(input: StatementInput): string {
 }
 
 /** Shared period parsing: explicit from/to or the last 30 days. */
-export function statementPeriod(query: { from?: string; to?: string }): { from: Date; to: Date; label: string } {
-  const to = query.to ? new Date(query.to) : new Date();
-  to.setHours(23, 59, 59, 999);
-  const from = query.from ? new Date(query.from) : new Date(to.getTime() - 30 * 24 * 3600 * 1000);
-  from.setHours(0, 0, 0, 0);
-  const label = `${day(from)} — ${day(to)}`;
-  return { from, to, label };
+export function statementPeriod(query: { from?: string; to?: string }, now = new Date()): { from: Date; to: Date; label: string } {
+  // Whole days in Guyana: a value with a time of day means the Guyana day it falls on.
+  const dayOf = (value: string) => (isDateOnly(value) ? value.trim() : guyanaDayKey(new Date(value)));
+  const to = endOfGuyanaDay(query.to ? dayOf(query.to) : guyanaDayKey(now));
+  const from = startOfGuyanaDay(query.from ? dayOf(query.from) : guyanaDayKey(new Date(to.getTime() - 30 * 24 * 3600 * 1000)));
+  return { from, to, label: `${statementDay(from)} — ${statementDay(to)}` };
 }
 
 // ── Statement builders ───────────────────────────────────────────────────────

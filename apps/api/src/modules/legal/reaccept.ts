@@ -1,6 +1,6 @@
 import { Prisma, type PrismaClient, type UserRole } from '@prisma/client';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from './legal.routes';
-import { publishLegalDocumentOnce, recordConsent, type ConsentDocumentType, type ConsentSubjectType, type ConsentSurface } from './consent.service';
+import { currentConsentDetailed, publishLegalDocumentOnce, recordConsent, type ConsentDocumentType, type ConsentSubjectType, type ConsentSurface } from './consent.service';
 import { OPERATOR } from './operator';
 
 /**
@@ -11,8 +11,15 @@ import { OPERATOR } from './operator';
  * MATERIAL_CHANGES lists every version that needs a fresh tick, newest last, with the short summary shown above the
  * tick. An entry only takes effect once that version is the served LEGAL_VERSION, so a summary can land before its
  * words do. A version not listed here (wording polish) needs no fresh tick.
+ *
+ * [BILL-PRO] An entry with `audience: 'provider'` changes only what an independent service provider (a pro: a person
+ * with a provider profile) agrees to. It asks pros, and nobody else, for a fresh tick, and only a pro sees its summary.
+ *
+ * [PAYAHEAD-4W · 2026-11-06] An entry with `audience: 'partner'` changes only the partner agreements (the Mover and the
+ * Business Agreement): it asks every partner (a rider, a driver, a store owner, or a pro) for a fresh tick, and only a
+ * partner sees its summary. A customer, whose Terms and Privacy Policy changed only by their date, is not asked.
  */
-export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonly string[] }> = [
+export const MATERIAL_CHANGES: ReadonlyArray<MaterialChange> = [
   {
     version: '2026-10-16',
     summary: [
@@ -28,7 +35,9 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
     version: '2026-10-17',
     summary: [
       'Identity checks are done by people on Swift’s verification team: no outside identity-verification provider and no automated face-matching receives your documents or selfie.',
-      'Customers never need a photo, taxi rides included — a ride needs only your ID on file — and a mover or business is never shown a photo of a customer.',
+      // [Owner ruling 24 Oct 2026] "a ride needs only your ID on file" is gone from this line: from 2026-10-25 a ride
+      // needs no ID either, and this summary is still shown to anyone asked to re-accept from before 2026-10-17.
+      'Customers never need a photo, taxi rides included, and a mover or business is never shown a photo of a customer.',
       'Privacy: if a business takes MMG, the MMG payment details it gives Swift are shown to its customer on the order, so the customer pays the business directly.',
       'Privacy: a business or mover handling your order sees your first name and phone number, only to reach you about that order, never your last name.',
     ],
@@ -37,11 +46,72 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
     // [Owner rulings 21 Oct 2026: taxi waiting charge ON at launch; phone crash reports ON · research E4 + B8]
     version: '2026-10-21',
     summary: [
-      'Taxi: a waiting charge of GY$300 for each full 10 minutes the car waits for you, shown before you book. It counts from when your driver arrives at the pickup, never at your final destination; the app shows it as it runs and your receipt lists it separately.',
+      'Taxi: a waiting charge of GY$300 for each full 10 minutes the car waits for you, never more than GY$1,800 for a ride, shown before you book. It counts from when the app has placed the car at your pickup, never at your final destination; the app shows it as it runs and your receipt lists it separately.',
       'Privacy: if the Swift app crashes, it sends a crash report (phone model, app version and the error; never your messages or location) to Swift’s own server. Crash and error reports are kept for 90 days.',
     ],
   },
+  {
+    // [O-1 · owner rulings 22-24 Oct 2026 · COORD 25 Oct 15:20Z: MATERIAL — a new processor flow (Twilio, for calls)]
+    version: '2026-10-25.1',
+    summary: [
+      'Privacy: when Swift’s call service is switched on, you call the other people on an order through Swift. Swift rings your phone from its own number and you press 1; then the person you call presses 1 to connect, and in the current app neither of you sees the other’s number. Twilio connects these calls.',
+      'Privacy: calls through Swift are never recorded. For each call Swift keeps who asked for it (their account and their role on the order), the role they called, when, and whether it connected, never a phone number; the record of a call you asked for is deleted with your account.',
+    ],
+  },
+  {
+    // [EMAIL-HTTPS · owner 27 Oct 2026 · COORD 27 Oct: MATERIAL — a new processor flow (Resend, for email)]
+    version: '2026-10-27',
+    summary: [
+      'Privacy: Swift’s emails (receipts, notices and the link to your data export) are now delivered by Resend, an email service. It receives your email address, if you gave one, and the email itself; it sends them from Brazil and keeps its records in the United States.',
+    ],
+  },
+  {
+    // [BOOK-FU2 · owner B3 28 Oct 2026 · COORD 19:06Z: MATERIAL — a new personal record ("Customer didn't come")]
+    version: '2026-10-28.1',
+    summary: [
+      'Appointments: if a business records in the app that you did not come to an appointment you booked, the booking closes. That record carries no fee and no strike; a person at Swift reviews repeated missed appointments and may contact you about them.',
+      'Privacy: Swift keeps that record (which booking it was, when the business recorded it, and who at the business recorded it) with the order’s record, for as long as the order’s record is kept.',
+    ],
+  },
+  {
+    // [BILL-PRO · owner 28 Oct 2026 B3: MATERIAL, a fresh tick; for Providers only (the Business Agreement s.12)]
+    version: '2026-10-29.2',
+    audience: 'provider',
+    summary: [
+      'Service providers: the Business Agreement now covers you as an independent provider (section 12). Read it and accept it to keep offering your services on Swift.',
+      'The weekly services fee: Swift tells you in the app before it starts for providers. Nothing is charged until you accept this agreement and confirm you understand the fee, and your free trial starts no earlier than the day the fee starts for providers. You pay only on MMG’s checkout page, in the Swift app or on the Swift website. If you also own a Services store, its fee covers you: you pay one fee.',
+      'If you publish a list of services with bookable times, you accept in advance the bookings customers make from it at the times it shows as free. Honour them, or cancel or move them in the app as early as you can.',
+    ],
+  },
+  {
+    // [2026-11-05 batch · owner delegated the wording 5 Nov 2026 · MATERIAL: new terms, a limit on customers, and personal
+    // records the old words did not state (as 2026-10-28.1). The smaller corrections alone would not need a tick]
+    version: '2026-11-05',
+    summary: [
+      'Riders and drivers: the Mover Agreement has a new section on a customer who does not pay at the door. What a customer owes is the customer\u2019s debt, not Swift\u2019s. A person at Swift looks at each case and Swift may choose to help, one order at a time, but you do not have a right to this help, and it is not part of what your weekly fee pays for.',
+      'Privacy: if you pay a business by MMG, your order keeps the references from that payment: any reference you enter, the reference and amount the business records, and the reference of any refund it records.',
+      'Privacy: riders and drivers can now read exactly what is kept of their position: the latest position, a short trail deleted 3 hours after the last position, a job\u2019s distance but never its route, single positions at steps of a job, positions that look false, and positions during an open SOS.',
+      'Orders: you can place at most 6 store orders and parcels in an hour. A store order or a parcel is held for one minute, and you can cancel it free in that minute. A delivery or a parcel can be refused when no rider is near.',
+      'Privacy: order and job chat is deleted one year after the order or job ended, unless it is still needed; resolved support tickets after 3 years; closed safety records after 7 years.',
+      `Partners: the weekly fee can be paid on swiftgy.com, or directly to ${OPERATOR.name}, in person by cash or cheque, or by bank transfer, never through an agent; a payment counts once Swift records it. Each branch of a business pays its own weekly fee.`,
+      'Also: a taxi fare can go directly to the driver\u2019s own MMG where the driver offers it.',
+    ],
+  },
+  {
+    // [PAYAHEAD-4W · owner ruling 6 Nov 2026 "one month at a time" (replaces owner #62) · MATERIAL: what a partner may
+    // pay ahead, and how a price change treats weeks paid ahead, change in the partner agreements' fee section]
+    version: '2026-11-06',
+    audience: 'partner',
+    summary: [
+      'Partners: you can now pay the weekly fee up to four weeks ahead (it was one week at a time). Money received beyond that is returned to you, and if you close your account, every week you paid for that has not started is refunded.',
+      'Partners: if the weekly fee goes up, a week you paid for before we told you keeps the old fee; once we have told you, Swift takes payment only for weeks before the change. If it goes down, the lower fee applies even to weeks you have already paid for, and the difference counts toward your later weekly fees.',
+    ],
+  },
 ];
+
+/** [BILL-PRO · COORD 29 Oct 16:13Z] The first version whose Business Agreement covers a Provider (s.12), including
+ *  the clause that a published list of services with bookable times is their advance acceptance of bookings. */
+export const PRO_AGREEMENT_VERSION = '2026-10-29.2';
 
 /**
  * Versions deliberately classed NOT material: no fresh tick, nobody is asked again. Each says why. Listing a version
@@ -59,23 +129,120 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     version: '2026-10-22',
     why: 'Terms section 7 shortens the free cancel window for a ride, a parcel or a booking from five minutes to one minute after a driver, rider or provider accepts it. It does take time from customers, but it lands before launch: no customer has used Swift under the five-minute window, so nobody is asked again.',
   },
+  {
+    // [ROLE-DOCS · owner 21 Oct 2026; COORD rulings 21 Oct (NON-material) + 23 Oct 00:59Z (stamped above 2026-10-22)]
+    version: '2026-10-22.1',
+    why: 'Swift asks for less: delivery riders are no longer offered a police clearance (only taxi drivers may add one), and the Privacy Policy and the driver agreement now say so. No one loses anything and no one is asked for more.',
+  },
+  {
+    // [Owner ruling 24 Oct 2026 ~05:55Z — NO CUSTOMER ID GATE · non-material: it removes a requirement]
+    version: '2026-10-25',
+    why: 'Swift asks for less: taxi rides and larger orders no longer need a customer\u2019s ID on file. The Terms, the Privacy Policy and the Child Safety page now say so, and say when the app still asks for an ID (after repeated failed deliveries or payments, or for a high-value promotion). No one loses anything and no one is asked for more.',
+  },
+  {
+    // [POLICE-CLEARANCE CONSENT · owner 25 Oct 2026 · COORD 25 Oct 22:17Z: NON-material]
+    version: '2026-10-25.2',
+    why: 'Privacy section 6 now says what Swift keeps of a police clearance (only whether it was clear and the date it was issued), that its image is deleted soon after the check, and that the person can withdraw it at any time in the app. It narrows what is kept and adds a right; it takes nothing from anyone and asks no one for more.',
+  },
+  {
+    // [BOOK-S7 · owner rulings 28 Oct 2026 B1-B3 · PROVISIONAL: non-material PRE-LAUNCH, as 2026-10-22's cancel-window
+    // edit; the owner rules on it. If ruled MATERIAL, move this version to MATERIAL_CHANGES with a summary instead.]
+    version: '2026-10-28',
+    why: 'Appointments booked from a business’s listing: while Swift’s instant appointment booking is switched on, a confirmed appointment cancels free until 2 hours before it starts (never less than one minute after it was confirmed) and the customer can move it until 2 hours before it starts; a booking the app shows as confirmed when it is made was accepted in advance by the business; businesses keep their availability current and honour bookings or cancel them with a reason. With the switch off nothing changes for anyone. It lands before launch, gives customers more time, and asks no one for more, so nobody is asked again.',
+  },
+  {
+    // [TERMS · owner 29 Oct 2026 15:50Z: NON-material, like 2026-10-28 (owner 28 Oct 19:15Z); DRAFT until counsel]
+    version: '2026-10-29',
+    why: 'Terms section 7: an appointment booked from an individual service provider\u2019s list of services follows the same rules as one booked from a business\u2019s listing. While Swift\u2019s instant appointment booking is switched on, it cancels free until 2 hours before it starts (never less than one minute after it was confirmed) and the customer can move it until 2 hours before it starts; the provider can move it too, and the customer is told in the app; if the provider has not started it 30 minutes after its start time, it cancels free. Terms section 5: a booking from such a list that the app shows as confirmed when it is made was accepted in advance by the provider, who published the list. Before this, such a job could not be cancelled in the app once booked. It lands before launch, gives customers more, and asks no one for more, so nobody is asked again.',
+  },
+  {
+    // [BOOK-P3 · COORD ruling 29 Oct 2026 (b): NON-material, customer-favourable, like 2026-10-29; DRAFT until counsel]
+    version: '2026-10-29.1',
+    why: 'Terms section 7: while Swift\u2019s instant appointment booking is switched on, if the business or provider moves a customer\u2019s appointment, the customer can also cancel it free in the app for 60 minutes after being told (or until it starts, if that is sooner), even within 2 hours of its start. Before this, a moved appointment kept only the 2-hour rule. It gives customers more, takes nothing from anyone and asks no one for more, so nobody is asked again.',
+  },
+  {
+    // [EXPRESS-FEE · owner ruling 1 Nov 2026: bump for the Delivery-policy wording; pre-launch, no re-acceptance]
+    version: '2026-11-01',
+    why: 'The Delivery policy now says express delivery adds GYD 1,000 to the standard delivery fee, whatever the distance (before, express was priced as a multiple of the fee). The Terms, the Privacy Policy and the agreements change only their date. It lands before launch, so no customer has used Swift under the old price, and nobody is asked again.',
+  },
+  {
+    // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 17:31Z (b) · COORD: minor, NON-material, no forced re-accept; DRAFT until counsel]
+    version: '2026-11-01.1',
+    why: 'Swift asks for less and keeps less: a customer is never asked for an ID any more, and the IDs customers added before are withdrawn and deleted (unless a legal or safety hold keeps one until it ends). The Terms and the Privacy Policy now say so. No one is asked for more and nothing is taken from anyone, so nobody is asked again.',
+  },
+  {
+    // [owner ruling 4 Nov 2026: passenger-favourable, NON-material like 2026-10-28, no fresh tick; DRAFT until counsel]
+    version: '2026-11-04',
+    why: 'Terms section 4: the taxi waiting charge can only cost less. It is now never more than GY$1,800 for a ride, it starts only when the app has placed the car at the pickup (a passenger confirming the arrival no longer starts it), and it stops when the ride code is verified, not when the trip starts. The other documents change only by their date.',
+  },
 ];
 
-/** The newest material version that is already being served, or null. */
-export function materialVersion(current: string = LEGAL_VERSION): string | null {
-  const live = MATERIAL_CHANGES.filter((c) => c.version <= current);
-  return live.length ? live[live.length - 1]!.version : null;
+/**
+ * [REVIEW-G S4 on #2001] How two legal versions order. A version is 'YYYY-MM-DD', or 'YYYY-MM-DD.N' for the
+ * N-th later bump that day. Compared as plain strings, '2026-10-25.10' sorted before '2026-10-25.9', so a
+ * tenth same-day bump could skip someone's fresh tick. The day compares as a date, the bump as a number (none
+ * = 0). A stored version of any other shape counts as older than every real one, so that person is asked
+ * again (the safe direction); two of them compare equal.
+ */
+const LEGAL_VERSION_SHAPE = /^(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d{0,3}))?$/;
+export function compareLegalVersions(a: string, b: string): number {
+  const x = LEGAL_VERSION_SHAPE.exec(a);
+  const y = LEGAL_VERSION_SHAPE.exec(b);
+  if (!x || !y) return (x ? 1 : 0) - (y ? 1 : 0);
+  if (x[1] !== y[1]) return x[1]! < y[1]! ? -1 : 1;
+  return Number(x[2] ?? 0) - Number(y[2] ?? 0);
+}
+
+type MaterialChange = { version: string; summary: readonly string[]; audience?: 'provider' | 'partner' };
+
+/** The newest material version for everyone that is already being served, or null (provider-only entries excluded). */
+export function materialVersion(current: string = LEGAL_VERSION, changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES): string | null {
+  const live = changes.filter((c) => !c.audience && compareLegalVersions(c.version, current) <= 0);
+  return live.reduce<string | null>((newest, c) => (newest === null || compareLegalVersions(c.version, newest) > 0 ? c.version : newest), null);
+}
+
+/** [PAYAHEAD-4W] Who signs a partner agreement: a mover (legacy RIDER / DRIVER too), a store owner, or a pro. */
+function isPartner(roles: readonly UserRole[], isPro: boolean): boolean {
+  return isPro || roles.some((r) => r === 'MOVER' || r === 'RIDER' || r === 'DRIVER' || r === 'VENDOR_OWNER');
+}
+
+/** [PAYAHEAD-4W] The newest partner-only material version already served, or null. */
+export function partnerMaterialVersion(current: string = LEGAL_VERSION, changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES): string | null {
+  const live = changes.filter((c) => c.audience === 'partner' && compareLegalVersions(c.version, current) <= 0);
+  return live.reduce<string | null>((newest, c) => (newest === null || compareLegalVersions(c.version, newest) > 0 ? c.version : newest), null);
 }
 
 type Agreement = { documentType: ConsentDocumentType; subjectType: ConsentSubjectType; renderedText: string };
 
-/** The partner agreements a person re-accepts with the Terms, by the roles they hold. */
-function agreementsFor(roles: readonly UserRole[]): Agreement[] {
+/** The partner agreements a person re-accepts with the Terms, by the roles they hold. A pro (a person with a
+ *  provider profile, who holds no partner role) accepts the Business Agreement, as a store owner does. */
+function agreementsFor(roles: readonly UserRole[], isPro = false): Agreement[] {
   const out: Agreement[] = [];
   // [REVIEW-F S3-1 on #1763] legacy RIDER / DRIVER accounts are movers too
   if (roles.some((r) => r === 'MOVER' || r === 'RIDER' || r === 'DRIVER')) out.push({ documentType: 'driver_agreement', subjectType: 'driver', renderedText: DRIVER_AGREEMENT });
-  if (roles.includes('VENDOR_OWNER' as UserRole)) out.push({ documentType: 'vendor_agreement', subjectType: 'vendor_user', renderedText: VENDOR_AGREEMENT });
+  if (roles.includes('VENDOR_OWNER' as UserRole) || isPro) out.push({ documentType: 'vendor_agreement', subjectType: 'vendor_user', renderedText: VENDOR_AGREEMENT });
   return out;
+}
+
+/** [BILL-PRO] A pro's Business Agreement: the version they last accepted (null: never, or withdrawn). Null for a
+ *  person with no provider profile. */
+export interface ProAgreementState { acceptedVersion: string | null }
+
+export async function proAgreementState(db: PrismaClient | Prisma.TransactionClient, userId: string): Promise<ProAgreementState | null> {
+  const pro = await db.serviceProvider.findUnique({ where: { userId }, select: { id: true } });
+  if (!pro) return null;
+  const latest = await currentConsentDetailed(db, 'vendor_user', userId, 'vendor_agreement');
+  return { acceptedVersion: latest && latest.action !== 'withdrawn' ? latest.version : null };
+}
+
+/** Has this pro accepted a Business Agreement that covers Providers (PRO_AGREEMENT_VERSION or later)? */
+export function proAgreementAccepted(state: ProAgreementState | null): boolean {
+  return !!state?.acceptedVersion && compareLegalVersions(state.acceptedVersion, PRO_AGREEMENT_VERSION) >= 0;
+}
+
+/** A pro must give the fresh tick while a served version covering Providers is one they have not accepted. */
+function proNeedsAcceptance(pro: ProAgreementState | null | undefined, current: string): boolean {
+  return !!pro && compareLegalVersions(PRO_AGREEMENT_VERSION, current) <= 0 && !proAgreementAccepted(pro);
 }
 
 export interface AcceptanceStatus {
@@ -88,21 +255,36 @@ export interface AcceptanceStatus {
   agreements: Array<'driver_agreement' | 'vendor_agreement'>;
 }
 
-export function acceptanceStatus(user: { tosVersion: string | null; roles: readonly UserRole[] }, current: string = LEGAL_VERSION): AcceptanceStatus {
-  const material = materialVersion(current);
+export function acceptanceStatus(
+  user: { tosVersion: string | null; roles: readonly UserRole[]; pro?: ProAgreementState | null },
+  current: string = LEGAL_VERSION,
+  changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES,
+): AcceptanceStatus {
+  const material = materialVersion(current, changes);
   const accepted = user.tosVersion;
-  const needsAcceptance = accepted === null || (material !== null && accepted < material);
+  const proNeeds = proNeedsAcceptance(user.pro, current);
+  // [PAYAHEAD-4W] A partner-only change asks partners (and pros) alone.
+  const partner = isPartner(user.roles, !!user.pro);
+  const partnerMaterial = partner ? partnerMaterialVersion(current, changes) : null;
+  const needsAcceptance = accepted === null || (material !== null && compareLegalVersions(accepted, material) < 0)
+    || (partnerMaterial !== null && compareLegalVersions(accepted, partnerMaterial) < 0) || proNeeds;
   // Every material change since the version this person accepted, oldest first — someone who skipped
-  // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest.
-  const summary = accepted !== null
-    ? MATERIAL_CHANGES.filter((c) => c.version > accepted && c.version <= current).flatMap((c) => c.summary)
-    : [];
+  // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest. A provider-only change is
+  // shown to a pro who has not accepted it (their own Business Agreement version), and to nobody else.
+  const served = (c: MaterialChange) => compareLegalVersions(c.version, current) <= 0;
+  const proAccepted = user.pro?.acceptedVersion ?? null;
+  const summary = changes.filter((c) => served(c) && (c.audience === 'provider'
+    ? proNeeds && (proAccepted === null || compareLegalVersions(c.version, proAccepted) > 0)
+    : c.audience === 'partner'
+      ? partner && accepted !== null && compareLegalVersions(c.version, accepted) > 0
+      : accepted !== null && compareLegalVersions(c.version, accepted) > 0))
+    .sort((a, b) => compareLegalVersions(a.version, b.version)).flatMap((c) => c.summary);
   return {
     currentVersion: current,
     acceptedVersion: accepted,
     needsAcceptance,
     summary,
-    agreements: agreementsFor(user.roles).map((a) => a.documentType as 'driver_agreement' | 'vendor_agreement'),
+    agreements: agreementsFor(user.roles, !!user.pro).map((a) => a.documentType as 'driver_agreement' | 'vendor_agreement'),
   };
 }
 
@@ -114,10 +296,13 @@ export async function recordReacceptance(
   prisma: PrismaClient,
   input: { userId: string; roles: readonly UserRole[]; hadAccepted: boolean; surface: ConsentSurface; ip?: string | null },
 ): Promise<void> {
+  // [BILL-PRO] A pro accepts the Business Agreement with the tick. (Whether they are a pro is read here, before the lock;
+  // their agreement is re-read inside it. A profile created in between is asked again on the next status read.)
+  const isPro = !!(await prisma.serviceProvider.findUnique({ where: { userId: input.userId }, select: { id: true } }));
   const docs: Agreement[] = [
     { documentType: 'terms_of_service', subjectType: 'customer', renderedText: TERMS },
     { documentType: 'privacy_policy', subjectType: 'customer', renderedText: PRIVACY },
-    ...agreementsFor(input.roles),
+    ...agreementsFor(input.roles, isPro),
   ];
   for (const d of docs) {
     await publishLegalDocumentOnce(prisma, { documentType: d.documentType, version: LEGAL_VERSION, renderedText: d.renderedText });
@@ -126,14 +311,21 @@ export async function recordReacceptance(
     // One acceptance per person at a time; a double tap records once.
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`legal:reaccept:${input.userId}`}, 0))`);
     const now = await tx.user.findUnique({ where: { id: input.userId }, select: { tosVersion: true } });
-    if (now?.tosVersion === LEGAL_VERSION) return;
-    for (const d of docs) {
+    // A person already at the served version records nothing again, except a pro whose Business Agreement is not
+    // yet at it (a pro who signed up at this version as a customer, then opened a provider profile).
+    const agreement = isPro ? await currentConsentDetailed(tx, 'vendor_user', input.userId, 'vendor_agreement') : null;
+    const proAgreementMissing = isPro && !(agreement && agreement.action !== 'withdrawn' && agreement.version === LEGAL_VERSION);
+    if (now?.tosVersion === LEGAL_VERSION && !proAgreementMissing) return;
+    const toRecord = now?.tosVersion === LEGAL_VERSION ? docs.filter((d) => d.documentType === 'vendor_agreement') : docs;
+    for (const d of toRecord) {
+      // A pro's first Business Agreement is a grant, whatever they accepted before as a customer.
+      const firstAgreement = d.documentType === 'vendor_agreement' && isPro && !agreement;
       await recordConsent(tx, {
         subjectType: d.subjectType,
         subjectId: input.userId,
         documentType: d.documentType,
         version: LEGAL_VERSION,
-        action: input.hadAccepted ? 're_granted' : 'granted',
+        action: input.hadAccepted && !firstAgreement ? 're_granted' : 'granted',
         surface: input.surface,
         ip: input.ip ?? null,
         evidence: { control: 'reaccept_checkbox', path: 'auth/legal-acceptance' },

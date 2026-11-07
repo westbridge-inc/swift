@@ -406,7 +406,8 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     expect(board.statusCode, board.body).toBe(200);
     const respondBy = board.json().data.respondBy as string;
     expect(Date.parse(respondBy)).toBeGreaterThan(Date.now());
-    const alertData = { orderId: o2.orderId, orderNumber: o2.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', respondBy, audience: 'business' };
+    // [CHAINS] The alert names its store (vendorId), so a tap opens that branch.
+    const alertData = { orderId: o2.orderId, orderNumber: o2.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', respondBy, audience: 'business', vendorId: store.vendorId };
     const alert = await alertRow(o2.orderId);
     expect({ title: alert.title, isRead: alert.isRead, data: alert.data }).toEqual({
       title: 'New Order!', isRead: false,

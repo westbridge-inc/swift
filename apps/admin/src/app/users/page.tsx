@@ -15,6 +15,7 @@ import { StatusBadge } from '@/components/mc/StatusBadge';
 import { Truncate } from '@/components/mc/Truncate';
 import { DataTable } from '@/components/mc/DataTable';
 import { ListToolbar, Pager } from '@/components/mc/ListControls';
+import { gyDate } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · PR-3] People.
@@ -30,7 +31,16 @@ import { ListToolbar, Pager } from '@/components/mc/ListControls';
 const asOptions = (group: 'UserRole' | 'UserStatus', all: string): Array<[string, string]> =>
   [['', all], ...Object.entries(ENUM_LABELS[group]).map(([v, w]): [string, string] => [v, w])];
 
-const when = (iso: string) => new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+const when = (iso: string) => gyDate(iso);
+
+/** MOVER is one role for rider and driver, so the profile says which. An account that stopped before the vehicle step
+ *  has neither. A row from an API that did not say keeps the role's own words, never a false "not added". */
+function roleWords(u: AdminUser): string {
+  if (u.activeRole !== 'MOVER' || (u.rider === undefined && u.driver === undefined)) return label('UserRole', u.activeRole);
+  if (u.rider && u.driver) return 'Rider and driver';
+  if (u.rider) return 'Rider';
+  return u.driver ? 'Driver' : 'Vehicle not added';
+}
 
 export default function UsersPage() {
   const qc = useQueryClient();
@@ -61,7 +71,6 @@ export default function UsersPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>People</h1>
       <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-4" />
       <ListToolbar
         state={state}
@@ -94,7 +103,7 @@ export default function UsersPage() {
                 ),
               },
               { key: 'phone', header: 'Phone', width: '16%', cell: (u) => <span className="mc-numbers">{maskedPhone(u.phone)}</span> },
-              { key: 'role', header: 'Role', width: '16%', cell: (u) => label('UserRole', u.activeRole) },
+              { key: 'role', header: 'Role', width: '16%', cell: roleWords },
               { key: 'status', header: 'Account', width: '14%', cell: (u) => <StatusBadge group="UserStatus" value={u.status} /> },
               { key: 'joined', header: 'Joined', width: '12%', cell: (u) => when(u.createdAt) },
               {

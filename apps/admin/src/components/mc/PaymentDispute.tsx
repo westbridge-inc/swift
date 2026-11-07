@@ -3,6 +3,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { resolvePaymentDispute, errorCode } from '@/lib/api';
 import type { useActionRunner } from './useActionRunner';
+import { gyDateTime } from '@/lib/dates';
 
 // ---------------------------------------------------------------------------
 // [MISSION CONTROL · AD5] AN MMG PAYMENT DISPUTE ON A STORE ORDER — decided here.
@@ -35,7 +36,7 @@ export interface DisputeFacts {
   vendor?: { name?: string | null } | null;
 }
 
-const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const when = (iso: string) => gyDateTime(iso);
 const CUSTOMER_WORDS: Record<string, string> = { PAID: 'says they paid', NOT_PAID: 'says they did not pay', UNRECORDED: 'has not said' };
 const STORE_WORDS: Record<string, string> = { CLAIMED: 'says the payment arrived', CAPTURED: 'MMG confirmed the payment', PENDING: 'has not confirmed a payment' };
 

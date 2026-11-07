@@ -17,7 +17,7 @@ import { navItemFor } from './nav';
  * browser confirm (owner ruling, 6 Oct: no browser prompts) — and signs out on
  * the server exactly once, however many times the button is pressed.
  */
-export function Header({ onOpenNavigation }: { onOpenNavigation?: () => void }) {
+export function Header({ onOpenNavigation, role }: { onOpenNavigation?: () => void; role?: string | null }) {
   const router = useRouter();
   const pathname = usePathname();
   const dialog = useActionDialog();
@@ -49,10 +49,11 @@ export function Header({ onOpenNavigation }: { onOpenNavigation?: () => void }) 
         <Menu size={18} aria-hidden="true" />
       </button>
       <div className="min-w-0 flex-1">
-        <p className="mc-header-title mc-truncate">{here?.label ?? 'Swift Mission Control'}</p>
+        {/* [ADMIN-UI] The screen's ONE title: pages carry no heading of their own that repeats it. */}
+        <h1 className="mc-header-title mc-truncate">{here?.label ?? 'Swift Mission Control'}</h1>
         {here ? <p className="mc-header-blurb mc-truncate">{here.blurb}</p> : null}
       </div>
-      <SearchLauncher />
+      <SearchLauncher role={role} />
       <button type="button" onClick={handleLogout} aria-label="Sign out" title="Sign out" className="mc-btn mc-btn-quiet">
         <LogOut size={18} aria-hidden="true" />
       </button>

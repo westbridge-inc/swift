@@ -7,13 +7,19 @@ import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
+import { smsAccepted } from '../../providers/notifications/sms-outcome';
+import { sendOnBehalfOf } from '../../providers/notifications/review-seal';
 import { alertClassOf } from '../../providers/notifications/alert-class';
 import { PUSH_DEVICE_SELECT, pushToDevices } from '../../providers/notifications/device-push';
 import { log } from '../../utils/logger';
-import { runWithoutTenant } from '../../plugins/tenant-context';
+import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter, pushNoDeviceCounter } from '../../plugins/observability';
 import { ringRecipients, storeTeam } from './store-team';
 import { vendorAlertSms } from './vendor-alert-sms';
+import { PAYER_INCLUDE, payerUserIdOf } from '../subscription/subscription-owner';
+import { providerFeeNotice } from './provider-fee-kinds';
+import { formatGuyanaTime } from '../../utils/guyana-day';
+import { orderDeliveredWords, orderReadyWords, type OrderReadyFacts } from '../order/order-notice-words';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -70,8 +76,9 @@ type NotificationType =
 /** Which app-within-the-app a notification belongs to. One ACCOUNT spans
  *  roles, but SURFACES are role-scoped: the shopping app must not feed a
  *  driver's operator alerts. Untagged = legacy rows; clients fall back to a
- *  kind deny-list for those. */
-export type NotificationAudience = 'customer' | 'earner' | 'business';
+ *  kind deny-list for those. 'provider' = an independent pro's own fee
+ *  (BILL-PRO); shipped builds show it in no inbox surface. */
+export type NotificationAudience = 'customer' | 'earner' | 'business' | 'provider';
 
 export interface NotificationPayload {
   /** Durable weekly-fee stage and optional SMS, never used by other notices. */
@@ -279,14 +286,14 @@ export async function tenantOfSubscription(prisma: PrismaClient, subscriptionId:
   }
   const sub = await prisma.subscription.findUnique({
     where: { id: subscriptionId },
-    select: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { owner: { select: { userId: true } } } } },
+    select: PAYER_INCLUDE,
   }).catch(err => {
     if (requireResolved) throw err;
     return null;
   });
   // Durable callers cannot acknowledge a platform-only fallback after a failed
   // lookup. Only a successfully resolved user with tenantId=null is platform scoped.
-  return tenantOfUser(prisma, sub?.rider?.userId ?? sub?.driver?.userId ?? sub?.vendor?.owner.userId ?? null, requireResolved);
+  return tenantOfUser(prisma, payerUserIdOf(sub), requireResolved);
 }
 
 /** The tracking row of one deduped ops page to one admin — derived from the
@@ -406,7 +413,7 @@ export async function notifyAdmins(
   const { where: audience } = await adminAudienceFor(prisma, input.tenantId);
   const admins = await runWithoutTenant(() => prisma.user.findMany({
     where: audience,
-    select: { id: true },
+    select: { id: true, tenantId: true },
   }));
   // [REPORT-035 F-035-06 · S0 evidence] Count DELIVERIES, not candidates.
   // send() deliberately swallows a persist failure and returns '' — so
@@ -415,14 +422,19 @@ export async function notifyAdmins(
   // human with an inbox row (the F-024-04 rule, applied at the source).
   let reached = 0;
   for (const admin of admins) {
-    const id = await notifications.send({
+    // [TENANT-WALL] Each admin's notice is written and pushed in THAT admin's
+    // own tenant, never in whatever context raised the page. A page raised by
+    // a request with no tenant bound (a 5xx spike counted on a public route, a
+    // webhook) wrote the inbox row, but the push fan-out's read of the admin
+    // was refused under the tenant wall: nobody's phone rang.
+    const id = await runWithTenant(admin.tenantId, () => notifications.send({
       userId: admin.id,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: input.title,
       body: input.body,
       data: input.data,
       ...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
-    });
+    }));
     if (id) reached += 1;
   }
   // SWIFT-AUD-D7-03: ops pages get the same ack-tracking as vendor/mover
@@ -467,10 +479,21 @@ export class NotificationService {
    * re-sent) and a fee demand (its own handoff ledger) all read `false`.
    */
   async sendReach(payload: NotificationPayload): Promise<{ id: string; pushed: boolean }> {
-    return this.sendAndReport(payload, true);
+    const { id, pushed } = await this.sendAndReport(payload, true);
+    return { id, pushed };
   }
 
-  private async sendAndReport(payload: NotificationPayload, requirePush: boolean): Promise<{ id: string; pushed: boolean }> {
+  /**
+   * The same send, saying whether it wrote a NEW notice: false when the
+   * person's dedupe key already holds one (nothing re-sent) or nothing could
+   * be recorded. For a job that counts what it sent, so a suppressed
+   * duplicate is never reported as a reminder sent.
+   */
+  async sendIfNew(payload: NotificationPayload): Promise<boolean> {
+    return (await this.sendAndReport(payload, false)).fresh;
+  }
+
+  private async sendAndReport(payload: NotificationPayload, requirePush: boolean): Promise<{ id: string; pushed: boolean; fresh: boolean }> {
     if (isFeeDemand(payload)) {
       // A fee demand that cannot be recorded for THIS recipient is logged and
       // counted, never thrown into the caller: an admin fan-out must still
@@ -482,11 +505,15 @@ export class NotificationService {
       } catch (err) {
         log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not recorded for this recipient');
         notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
-        return { id: '', pushed: false };
+        return { id: '', pushed: false, fresh: false };
       }
-      return { id: await this.deliverFeeDemand(notice.id), pushed: false };
+      const id = await this.deliverFeeDemand(notice.id);
+      return { id, pushed: false, fresh: id !== '' };
     }
-    const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
+    // [BILL-PRO PR4] A pro's fee notice is written and pushed under its own kind (provider-fee-kinds.ts). Only the
+    // delivered row changes: everything above (the fee-demand ledger and its stage rules) reads the original kind.
+    const delivered = providerFeeNotice(payload);
+    const data = delivered.audience ? { ...(delivered.data ?? {}), audience: delivered.audience } : delivered.data;
 
     // A notification is best-effort: a persistence/fan-out hiccup must NEVER
     // throw into the caller's request path. An order that reached DELIVERED must
@@ -521,16 +548,16 @@ export class NotificationService {
             where: { userId_dedupeKey: { userId: payload.userId, dedupeKey: payload.dedupeKey! } },
             select: { id: true },
           }));
-          if (existing) return { id: existing.id, pushed: false };
+          if (existing) return { id: existing.id, pushed: false, fresh: false };
         } catch { /* fall through to the failure path below */ }
       }
       log().warn({ err, userId: payload.userId, type: payload.type }, 'notification persist failed');
       notificationFailuresCounter.inc({ channel: 'db', stage: 'persist' });
-      return { id: '', pushed: false };
+      return { id: '', pushed: false, fresh: false };
     }
 
     const pushed = await this.publishPersisted(notification.id, { requirePush });
-    return { id: notification.id, pushed: requirePush && pushed };
+    return { id: notification.id, pushed: requirePush && pushed, fresh: true };
   }
 
   async deliverFeeDemand(noticeId: string): Promise<string> {
@@ -656,6 +683,24 @@ export class NotificationService {
     return pushSubmitted;
   }
 
+  /**
+   * [WEB-TAXI] A direct service text that says whether it LEFT Swift: true only
+   * when the provider accepted it (sms-outcome.ts — an allowlist refusal, the
+   * review seal or a held handoff all read false). Fail-soft like `sms`: a
+   * failure is logged (never the number or the words) and counted, never thrown.
+   * `onBehalfOfTenantId` names whose background send this is (review-seal.ts).
+   */
+  async smsReach(to: string, body: string, onBehalfOfTenantId?: string | null): Promise<boolean> {
+    try {
+      const send = () => this.channels.sms.sendSms(to, body);
+      return smsAccepted(onBehalfOfTenantId ? await sendOnBehalfOf(onBehalfOfTenantId, send) : await send());
+    } catch (err) {
+      log().warn({ err }, 'service SMS delivery failed');
+      notificationFailuresCounter.inc({ channel: 'sms', stage: 'reach' });
+      return false;
+    }
+  }
+
   /** Direct SMS through the interface (OTPs, vendor-alert fallbacks). */
   async sms(to: string, body: string): Promise<void> {
     // SWIFT-100: fail-soft, but never silent — a dropped OTP/fallback SMS is
@@ -727,12 +772,11 @@ export class NotificationService {
     });
   }
 
-  async orderReady(customerId: string, orderNumber: string, orderId: string): Promise<void> {
+  async orderReady(customerId: string, orderNumber: string, orderId: string, order: OrderReadyFacts): Promise<void> {
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
-      title: 'Food Ready!',
-      body: `Your order ${orderNumber} is ready and waiting for a rider.`,
+      ...orderReadyWords(orderNumber, order),
       data: { orderId, orderNumber, status: 'READY_FOR_PICKUP' },
     });
   }
@@ -799,12 +843,12 @@ export class NotificationService {
     });
   }
 
-  async orderDelivered(customerId: string, orderNumber: string, orderId: string, orderType?: string): Promise<void> {
+  async orderDelivered(customerId: string, orderNumber: string, orderId: string, orderType?: string, vendorType?: string | null): Promise<void> {
     await this.send({
       userId: customerId,
       type: 'ORDER_UPDATE',
       title: orderType === 'TAXI' ? 'Ride completed' : 'Delivered!',
-      body: orderType === 'TAXI' ? 'Your ride is complete. Open Swift to view your trip.' : `Your order ${orderNumber} has been delivered. Enjoy your meal!`,
+      body: orderType === 'TAXI' ? 'Your ride is complete. Open Swift to view your trip.' : orderDeliveredWords(orderNumber, vendorType),
       data: orderType === 'TAXI' ? taxiNotificationData(orderId, { status: 'DELIVERED' }) : { orderId, orderNumber, status: 'DELIVERED' },
     });
   }
@@ -832,6 +876,9 @@ export class NotificationService {
     let pushedToSomeone = false;
     const alertIds: string[] = [];
     const recipients = await this.newOrderRecipients(orderId, vendorOwnerId);
+    // [CHAINS · owner 29 Oct 2026] Which branch: named when the owner runs more than one store, and the store's id
+    // rides every alert so a tap opens that branch (the phone router switches to it once the order proves it).
+    const branch = await this.orderBranch(orderId);
     for (const userId of recipients) {
       // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
       // alert; the vendor's accept/reject/ack stamps acknowledgedAt. Tracking
@@ -843,10 +890,11 @@ export class NotificationService {
         userId,
         type: 'ORDER_UPDATE',
         title: 'New Order!',
-        body: `Order ${orderNumber} — ${itemCount} item(s), $${total.toLocaleString()} GYD`,
+        body: `Order ${orderNumber}${branch?.named ? ` at ${branch.name}` : ''} — ${itemCount} item(s), $${total.toLocaleString()} GYD`,
         audience: 'business',
         data: {
           orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert',
+          ...(branch ? { vendorId: branch.vendorId } : {}),
           ...(respondBy ? { respondBy: respondBy.toISOString() } : {}),
         },
       });
@@ -858,6 +906,7 @@ export class NotificationService {
         orderNumber,
         total,
         persistent: true,
+        ...(branch ? { vendorId: branch.vendorId } : {}),
       });
       if (pushed) pushedToSomeone = true;
       if (notificationId) alertIds.push(notificationId);
@@ -870,6 +919,35 @@ export class NotificationService {
     }
 
     return ownerNotificationId || firstNotificationId;
+  }
+
+  /**
+   * [BOOK-S3 · INSTANT_BOOKING] A booking the business's listing confirmed
+   * automatically: the store team is TOLD, never asked. No accept prompt —
+   * no "New Order!" ring, no persistent alert event, no alert-delivery row
+   * and no backup SMS (those exist so a request is answered in time, and
+   * this one is already answered). The payload carries no `kind`: every phone
+   * build (9, 11, 12) opens a business-tagged push with an orderId on the
+   * store's order desk (VendorOrderDetail), where the booking shows as
+   * confirmed. Rings the same team a new order rings (store-team.ts).
+   */
+  async instantBookingForVendor(
+    vendorOwnerId: string,
+    booking: { orderId: string; orderNumber: string; serviceName: string; slot: Date },
+  ): Promise<number> {
+    const when = formatGuyanaTime(booking.slot, { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
+    const recipients = await this.newOrderRecipients(booking.orderId, vendorOwnerId);
+    for (const userId of recipients) {
+      await this.send({
+        userId,
+        type: 'ORDER_UPDATE',
+        title: 'New booking (confirmed)',
+        body: `${booking.serviceName}, ${when} (booking ${booking.orderNumber}). Already confirmed — nothing to accept.`,
+        audience: 'business',
+        data: { orderId: booking.orderId, orderNumber: booking.orderNumber, status: 'ACCEPTED', instantBooking: true },
+      });
+    }
+    return recipients.length;
   }
 
   /** [STORE-ALERT · owner ruling 18 Oct 2026] The new-order alert reached no
@@ -920,6 +998,16 @@ export class NotificationService {
   /** [Owner ruling #15] Who a new order rings: the team of its store as read
    *  now (store-team.ts ringRecipients). A call naming an order with no store
    *  row (legacy callers) rings the named owner, as it always did. */
+  /** [CHAINS] The store an order is for, and whether its owner runs more than one (then the alert names it). */
+  private async orderBranch(orderId: string): Promise<{ vendorId: string; name: string; named: boolean } | null> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { vendor: { select: { id: true, name: true, owner: { select: { _count: { select: { vendors: true } } } } } } },
+    });
+    const vendor = order?.vendor;
+    return vendor ? { vendorId: vendor.id, name: vendor.name, named: vendor.owner._count.vendors > 1 } : null;
+  }
+
   private async newOrderRecipients(orderId: string, vendorOwnerId: string): Promise<string[]> {
     const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { vendorId: true } });
     if (!order?.vendorId) return [vendorOwnerId];

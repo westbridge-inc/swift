@@ -7,24 +7,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { cancellationReasonWords } from '@swift/types';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useIsMutating, useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { mmgDisputePaused, MMG_DISPUTE_NOTICE } from '@/lib/mmg-dispute';
 import { MutationNotice } from '@/components/mutation-notice';
+import { CallPartyButton } from '@/components/call-party-button';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useFeedPollInterval } from '@/lib/store-live-feed';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  confirmedOrderFields, customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, telHref, vendorStatusLabel, whenLabel,
+  confirmedOrderFields, customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, vendorStatusLabel, whenLabel,
 } from '@/lib/vendor-order-view';
 import {
-  acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder,
-  markDelivered, markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
+  acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder, markNotCollected,
+  markDelivered, markPreparing, markReady, markRefundSent, money, proposeSubstitution, refundLine, rejectOrder,
   retryDispatch, setFulfillmentMode, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
 import { statusChip, timeAgo } from './order-chip';
 // The app's own O-4 rules and words (plain file, imported as is).
 import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineStockWords, nothingToAccept } from '../../../../../mobile/src/modules/vendor/storeOrderRules';
+import { HANDOVER_WORDS, canMarkHandedToRider, handoverNeedsNoCode, pickupCheckWords } from '../../../../../mobile/src/modules/vendor/storeHandover';
+import { handedToRider } from '@/lib/store-handover-api';
+import { RiderHandoverLine } from '@/components/rider-handover-line';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
@@ -34,6 +38,30 @@ export function boardOrder(board: unknown, id: string): VendorOrder | undefined 
   return Array.isArray(rows) ? (rows as VendorOrder[]).find((o) => o?.id === id) : undefined;
 }
 const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', ...COURIER_ACTIVE];
+
+/** [BOOK-S5b · owner B3, the phone's orderNoShowOpen (#2201)] "Customer didn't come" is offered only where the server
+ *  would take it: the server's own word on this order (noShow.allowed === true, absent on an older server), an
+ *  appointment the store accepted, not paid by MMG (the server refuses it: no money moves there), its time started.
+ *  The server judges it again on the locked order. */
+export function noShowOffered(o: Pick<VendorOrder, 'status' | 'fulfillment' | 'appointmentSlot' | 'paymentMethod' | 'paymentStatus' | 'noShow'>, now = Date.now()): boolean {
+  if (o.noShow?.allowed !== true) return false;
+  if (o.fulfillment !== 'APPOINTMENT' || (o.status || '').toUpperCase() !== 'ACCEPTED' || !o.appointmentSlot) return false;
+  if (o.paymentMethod === 'MOBILE_MONEY' && mmgMoneyMoved(o.paymentStatus)) return false;
+  const at = Date.parse(o.appointmentSlot);
+  return Number.isFinite(at) && at <= now;
+}
+
+/** [REVIEW-F S3-1 on #2203, the phone's words] A server without the step answers its not-found handler (404 with no
+ *  code, ROUTE_NOT_FOUND, or NOT_FOUND worded "Route PUT ... not found"): one plain line, never its route text. Any
+ *  other refusal (another business's order is a 404 in its own words, the 409s) is shown as the server says it. */
+export const NO_SHOW_NOT_AVAILABLE = 'This isn’t available yet. Contact Swift Support if the customer didn’t come.';
+export function noShowRefusalWords(error: unknown): string {
+  const e = error as { status?: unknown; code?: unknown; message?: unknown } | null;
+  const routeMissing = e?.status === 404 && (e.code === undefined || e.code === null || e.code === 'ROUTE_NOT_FOUND'
+    || (e.code === 'NOT_FOUND' && typeof e.message === 'string' && /^Route [A-Z]+ /.test(e.message)));
+  if (routeMissing) return NO_SHOW_NOT_AVAILABLE;
+  return typeof e?.message === 'string' && e.message.trim() ? e.message : 'Couldn’t record that. Check your connection and try again.';
+}
 
 /** Mirrors the mobile app's orderActions — one source of truth for what a
  *  vendor may do in each state (timestamps keep working after a rider claims). */
@@ -49,6 +77,9 @@ function actionsFor(o: VendorOrder) {
     out.push({ label: isAppt ? 'Decline' : 'Reject', kind: 'reject', tone: 'danger' });
   } else if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) {
     out.push({ label: 'Mark complete', kind: 'complete-appointment' });
+    // [BOOK-S5b · owner B3, #2198] Once the appointment's time has started, the business can close an accepted booking
+    // the customer did not come to. The server is the judge (PUT /orders/:id/no-show); this only offers the button.
+    if (noShowOffered(o)) out.push({ label: 'Customer didn\u2019t come', kind: 'no-show', tone: 'danger' });
   } else if (s === 'ACCEPTED' || s === 'CONFIRMED') {
     // [STORE-DASH · REVIEW-F S4-1 on #2024] An unpaid MMG order's one step is "Paid by MMG" (below);
     // the server refuses Start preparing for it (MMG_PAYMENT_PENDING).
@@ -58,8 +89,15 @@ function actionsFor(o: VendorOrder) {
   } else if (COURIER_ACTIVE.includes(s)) {
     if (!o.preparingAt) out.push({ label: 'Start preparing', kind: 'preparing' });
     else if (!o.readyAt) out.push({ label: 'Ready for delivery', kind: 'ready' });
+    // [STORE-DASH · O-2] The rider is at the counter: one tap records the hand-over.
+    else if (canMarkHandedToRider(o)) out.push({ label: 'Handed to rider', kind: 'handed-to-rider' });
   } else if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) {
-    out.push({ label: 'Mark picked up', kind: 'complete-pickup' });
+    // [STORE-DASH · O-2] With the store's pickup code off: one tap after checking the name and order number.
+    out.push(handoverNeedsNoCode(o) ? { label: 'Handed to customer', kind: 'handed-to-customer' } : { label: 'Mark picked up', kind: 'complete-pickup' });
+    // [BUG-HUNT-2 G20] A day after it was ready, on the server's word (PUT /orders/:id/not-collected).
+    if (o.notCollected?.allowed === true) out.push({ label: 'Not collected', kind: 'not-collected', tone: 'danger' });
+  } else if (canMarkHandedToRider(o)) {
+    out.push({ label: 'Handed to rider', kind: 'handed-to-rider' });
   } else if (
     (s === 'READY' || s === 'READY_FOR_PICKUP')
     && o.fulfillment === 'DELIVERY'
@@ -72,6 +110,10 @@ function actionsFor(o: VendorOrder) {
   return mmgDisputePaused(o) ? out.filter((a) => a.kind === 'reject') : out;
 }
 
+/** [TAP-AUDIT] The pick ticks of one order share this key: the order's step buttons wait while one is still out (a
+ *  "Ready" sent before a tick lands would be refused for an unpicked line). */
+const pickMutationKey = (storeId: string | null, orderId: string) => ['order-pick', storeId, orderId];
+
 function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
@@ -83,10 +125,34 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   const [subFor, setSubFor] = useState<string | null>(null);
 
   const MMG_LINE_LOCK = 'MMG order — settle item changes with the customer directly.';
+  // [TAP-AUDIT] A pick tick shows at the tap and only that line waits for its answer (one tick used to freeze every
+  // box on the order until the write AND a re-read of the order and the whole board had come back). A refusal puts the
+  // box back and says why; the order alone is read again once, after the last tick.
+  const detailKey = storeKey(storeId, 'order', order.id);
+  const pickKey = pickMutationKey(storeId, order.id);
+  const writePick = (lineId: string, picked: boolean) => queryClient.setQueryData<VendorOrder>(detailKey, (o) => (o
+    ? { ...o, items: o.items.map((l) => (l.id === lineId ? { ...l, picked } : l)) }
+    : o));
   const pickedMut = useMutation({
+    mutationKey: pickKey,
     mutationFn: (v: { lineId: string; picked: boolean }) => setPicked(order.id, v.lineId, v.picked),
-    onSettled: refresh,
+    onMutate: async (v) => {
+      await queryClient.cancelQueries({ queryKey: detailKey, exact: true });
+      writePick(v.lineId, v.picked);
+    },
+    onError: (_e, v) => writePick(v.lineId, !v.picked),
+    onSuccess: (answer, v) => {
+      const saved = (answer as { data?: { picked?: unknown } } | undefined)?.data?.picked;
+      if (typeof saved === 'boolean') writePick(v.lineId, saved);
+    },
+    onSettled: () => {
+      if (queryClient.isMutating({ mutationKey: pickKey }) <= 1) void queryClient.invalidateQueries({ queryKey: detailKey, exact: true });
+    },
   });
+  const picksOut = new Set(useMutationState({
+    filters: { mutationKey: pickKey, status: 'pending' },
+    select: (m) => (m.state.variables as { lineId: string } | undefined)?.lineId,
+  }));
   const subMut = useMutation({
     mutationFn: (v: { lineId: string; substituteItemId: string }) => proposeSubstitution(order.id, v.lineId, v.substituteItemId),
     onSettled: () => { setSubFor(null); refresh(); },
@@ -128,7 +194,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
         : removed > 0
           ? `Picked ✓ — ${fulfilled} of ${order.items.length} lines, ${removed} removed`
           : 'All picked ✓';
-  const busy = onBusy || pickedMut.isPending || subMut.isPending || refundMut.isPending;
+  const busy = onBusy || subMut.isPending || refundMut.isPending;
   // [W-27] An MMG order's totals cannot change in-app — the server refuses with
   // MMG_ADJUSTMENT_UNAVAILABLE, because the money went straight to the store
   // and Swift never held it. Saying so beats letting the store click into a 409.
@@ -145,7 +211,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
               <input
                 type="checkbox"
                 checked={!!it.picked}
-                disabled={busy || it.subStatus === 'PENDING' || it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED'}
+                disabled={busy || picksOut.has(it.id) || it.subStatus === 'PENDING' || it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED'}
                 onChange={(e) => pickedMut.mutate({ lineId: it.id, picked: e.target.checked })}
                 aria-label={`Picked: ${it.quantity}× ${it.name}`}
                 className="h-4 w-4 accent-[var(--swift-red)]"
@@ -240,6 +306,12 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   const [error, setError] = useState<string | null>(null);
   const [confirmDelivered, setConfirmDelivered] = useState(false);
   const [confirmReject, setConfirmReject] = useState(false);
+  // [BOOK-S5b · owner B3] "Customer didn't come": asked once, then the server's answer (or its refusal, verbatim).
+  const [confirmNoShow, setConfirmNoShow] = useState(false);
+  const [noShowRecorded, setNoShowRecorded] = useState(false);
+  // [BUG-HUNT-2 G20] "Not collected": asked once, then the server's answer (or its refusal, verbatim).
+  const [confirmNotCollected, setConfirmNotCollected] = useState(false);
+  const [notCollectedDone, setNotCollectedDone] = useState<'closed' | 'support' | null>(null);
   // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
   const [lastOut, setLastOut] = useState(false);
 
@@ -247,6 +319,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
     queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'order', id) });
     queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'orders') });
   };
+  // [TAP-AUDIT] The step buttons wait while a pick tick of this order is still on its way.
+  const picksOut = useIsMutating({ mutationKey: pickMutationKey(storeId, id) }) > 0;
   const act = useMutation({
     mutationFn: async (kind: string) => {
       setError(null);
@@ -256,6 +330,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       if (kind === 'ready') return markReady(id);
       if (kind === 'delivered') return markDelivered(id);
       if (kind === 'complete-pickup') return completePickup(id, pickupCode.trim());
+      if (kind === 'handed-to-customer') return completePickup(id);
+      if (kind === 'handed-to-rider') return handedToRider(id);
       if (kind === 'complete-appointment') {
         const { apiFetch } = await import('@/lib/auth');
         return apiFetch(`/api/v1/vendor/orders/${id}/complete-appointment`, { method: 'PUT', body: '{}' });
@@ -289,6 +365,49 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
     mutationFn: (lineId: string) => refundLine(id, lineId),
     onError: (e) => setError((e as Error).message),
     onSettled: refresh,
+  });
+  const noShow = useMutation({
+    mutationFn: async () => {
+      setError(null);
+      const { apiFetch } = await import('@/lib/auth');
+      return apiFetch(`/api/v1/vendor/orders/${id}/no-show`, { method: 'PUT', body: '{}' });
+    },
+    onSuccess: (answer) => {
+      setNoShowRecorded(true);
+      const confirmed = confirmedOrderFields(answer, id);
+      if (confirmed) queryClient.setQueryData<VendorOrder>(storeKey(storeId, 'order', id), (o) => (o ? { ...o, ...confirmed } : o));
+    },
+    onError: (e) => setError(noShowRefusalWords(e)),
+    onSettled: () => {
+      setConfirmNoShow(false);
+      refresh();
+    },
+  });
+  // [BUG-HUNT-2 G08] "Refund sent": the store sends it from its own MMG, then gives Swift the reference.
+  const [refundReference, setRefundReference] = useState('');
+  const [refundOpen, setRefundOpen] = useState(false);
+  const refundSent = useMutation({
+    mutationFn: () => {
+      setError(null);
+      return markRefundSent(id, refundReference.trim(), order.data?.mmgRefund?.amount ?? '');
+    },
+    onSuccess: () => setRefundOpen(false),
+    onError: (e) => setError((e as Error).message),
+    onSettled: refresh,
+  });
+  const notCollected = useMutation({
+    mutationFn: async () => {
+      setError(null);
+      return markNotCollected(id);
+    },
+    onSuccess: (answer) => {
+      setNotCollectedDone(answer?.sentToSupport === true ? 'support' : 'closed');
+    },
+    onError: (e) => setError((e as Error).message),
+    onSettled: () => {
+      setConfirmNotCollected(false);
+      refresh();
+    },
   });
   const reject = useMutation({
     mutationFn: (why: string) => rejectOrder(id, why),
@@ -353,8 +472,6 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   const payBlockedReason = !paused && isMmg && !attestablePay && o.paymentStatus !== 'CAPTURED' ? mmgPayBlockedReason(o.paymentStatus) : null;
   const customer = [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
   const riderName = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : '';
-  const customerTel = telHref(o.customer?.phone);
-  const riderTel = telHref(o.rider?.user?.phone);
   const recovery = recoveryView(o.custodyRecovery);
   const timeline = [...(o.statusHistory ?? [])].reverse();
   const prepLine = prepTimeLine(o);
@@ -479,11 +596,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
             <p className="text-xs font-bold uppercase tracking-wide text-[var(--swift-muted)]">Customer</p>
             <p className="break-words text-sm font-semibold">{customer}</p>
           </div>
-          {customerTel && (
-            <a href={customerTel} aria-label={`Call ${customer}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
-              Call
-            </a>
-          )}
+          {/* [O-1] Bridge off: today's tel: link. Bridge on: "Call via Swift" (no number on this page). */}
+          <CallPartyButton orderId={o.id} target="customer" phone={o.customer?.phone} label="Call" icon={false} ariaLabel={`Call ${customer}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]" noteClassName="w-full text-xs text-[var(--swift-muted)]" />
         </div>
         {[...customerLines(o), ...(o.fulfillment === 'PICKUP' && o.deliveryInstructions ? [o.deliveryInstructions] : [])].map((line, i) => (
           <p key={i} className="mt-1.5 break-words text-sm text-[var(--swift-muted)]">{line}</p>
@@ -496,11 +610,11 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
             <p className="text-xs font-bold uppercase tracking-wide text-[var(--swift-muted)]">Rider</p>
             <p className="break-words text-sm font-semibold">{riderName || 'Swift rider'}</p>
           </div>
-          {riderTel && (
-            <a href={riderTel} aria-label={`Call ${riderName || 'the rider'}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
-              Call
-            </a>
-          )}
+          <CallPartyButton orderId={o.id} target="rider" phone={o.rider?.user?.phone} label="Call" icon={false} ariaLabel={`Call ${riderName || 'the rider'}`} callerLine={false} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]" noteClassName="w-full text-xs text-[var(--swift-muted)]" />
+          {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider"; then that it went. */}
+          {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside "Handed to rider" (never before ready, never while paused), as on the phone. */}
+          {actions.some((a) => a.kind === 'handed-to-rider') && <div className="w-full"><RiderHandoverLine rider={o.rider} /></div>}
+          {o.handedToRiderAt && <p className="w-full text-sm font-semibold text-[var(--swift-muted)]">{HANDOVER_WORDS.handedToRider}</p>}
         </section>
       )}
 
@@ -559,8 +673,10 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
           by `fulfillment`, which the API does send; every PICKUP order is
           issued a code at creation (order.service.ts). The code itself stays
           off this screen. */}
-      {o.fulfillment === 'PICKUP' && s !== 'COMPLETED' && (
-        <p className="mt-3 text-sm text-[var(--swift-muted)]">Customer collects with a pickup code.</p>
+      {/* [REVIEW-F S4-3 on #2054] Not on a closed order; with the code off, the name and order-number
+          check (never a hand-over prompt while paused — storeHandover.pickupCheckWords). */}
+      {o.fulfillment === 'PICKUP' && !['COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s) && (
+        <p className="mt-3 text-sm text-[var(--swift-muted)]">{pickupCheckWords(o, paused) ?? 'Customer collects with a pickup code.'}</p>
       )}
 
       {/* [STORE-DASH] The lines are ticked on the order's own state, never on the board's copy. */}
@@ -606,7 +722,7 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
         {!paused && isDelivery && !selfDelivery && !riderAssigned && ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(s) && (
           <section aria-label="No rider yet" className="w-full rounded-lg bg-[var(--swift-subtle)] p-3">
             <p className="text-sm font-semibold">No rider yet</p>
-            <p className="mt-1 text-sm text-[var(--swift-muted)]">Swift searches nearby movers automatically — retry if nobody took it.</p>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">Swift searches nearby riders automatically — retry if nobody took it.</p>
             <button
               onClick={() => act.mutate('retry-dispatch')}
               disabled={act.isPending}
@@ -636,9 +752,28 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
         </section>
       )}
       {prepLine && <p className="mt-3 text-xs text-[var(--swift-muted)]">{prepLine}</p>}
+      {o.mmgRefund && (
+        <section aria-label="MMG refund" className="mt-4 rounded-xl border border-[var(--swift-border)] p-4">
+          <h3 className="text-sm font-semibold">MMG refund</h3>
+          <p className="mt-1 text-sm text-[var(--swift-muted)]">{o.mmgRefund.line}</p>
+          {o.mmgRefund.canMarkSent === true && !refundOpen && (
+            <button onClick={() => { setError(null); setRefundOpen(true); }} className="mt-3 rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white">Refund sent</button>
+          )}
+          {refundOpen && (
+            <div role="dialog" aria-label="Confirm refund sent" className="mt-3">
+              <p className="text-sm text-[var(--swift-muted)]">Send the refund from your MMG first. Then enter the reference from your MMG message.</p>
+              <input value={refundReference} onChange={(e) => setRefundReference(e.target.value)} aria-label="MMG reference" className="mt-2 w-full rounded-lg border border-[var(--swift-border)] px-3 py-2 text-sm" />
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button onClick={() => refundSent.mutate()} disabled={refundSent.isPending || refundReference.trim().length === 0} className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{refundSent.isPending ? 'Sending…' : 'I sent it'}</button>
+                <button onClick={() => setRefundOpen(false)} disabled={refundSent.isPending} className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50">Not yet</button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
       {/* [STORE-DASH · owner 22 Oct "fast taps"] The next step is a big button in a bar that stays at the
           bottom of the window while it scrolls, as on the phone (VendorOrderDetailScreen action bar). */}
-      {(actions.length > 0 || confirmDelivered || confirmReject || error) && (
+      {(actions.length > 0 || confirmDelivered || confirmReject || confirmNoShow || noShowRecorded || confirmNotCollected || notCollectedDone !== null || error) && (
         <div data-testid="order-action-bar" className="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 flex flex-wrap items-center gap-2 border-t border-[var(--swift-border)] bg-[var(--swift-card)] px-6 py-4">
           {!paused && customerDeciding(o) && <p role="status" className="w-full text-sm font-semibold text-amber-800">{OUT_OF_STOCK_WORDS.deciding}</p>}
           {!paused && nothingToAccept(o) && <p role="status" className="w-full text-sm font-semibold text-[var(--swift-red)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
@@ -669,9 +804,13 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
                     ? setConfirmDelivered(true)
                     : a.kind === 'reject'
                       ? setConfirmReject(true)
-                      : act.mutate(a.kind)}
-                aria-busy={act.isPending && act.variables === a.kind}
-                disabled={act.isPending || reject.isPending || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
+                      : a.kind === 'no-show'
+                        ? (setError(null), setConfirmNoShow(true))
+                        : a.kind === 'not-collected'
+                          ? (setError(null), setConfirmNotCollected(true))
+                          : act.mutate(a.kind)}
+                aria-busy={(act.isPending && act.variables === a.kind) || (a.kind === 'no-show' && noShow.isPending) || (a.kind === 'not-collected' && notCollected.isPending)}
+                disabled={act.isPending || reject.isPending || noShow.isPending || notCollected.isPending || picksOut || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
                 className={`min-h-12 flex-1 rounded-xl px-5 py-3 text-base font-bold disabled:opacity-50 ${
                   a.tone === 'danger'
                     ? 'border border-[var(--swift-red)]/30 text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5'
@@ -731,6 +870,61 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
                 </button>
               </div>
             </div>
+          )}
+          {confirmNoShow && (
+            <div role="dialog" aria-label="Confirm customer didn't come" className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
+              <p className="text-sm font-semibold text-[var(--swift-red)]">Mark &ldquo;Customer didn&rsquo;t come&rdquo;?</p>
+              <p className="mt-1 text-sm text-[var(--swift-muted)]">
+                This closes the booking and gives you the time back. The customer is told. There is no fee and no strike for them. This can’t be undone.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={() => noShow.mutate()}
+                  disabled={noShow.isPending}
+                  className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {noShow.isPending ? 'Closing…' : 'Yes, they didn’t come'}
+                </button>
+                <button
+                  onClick={() => setConfirmNoShow(false)}
+                  disabled={noShow.isPending}
+                  className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                >
+                  Keep the booking
+                </button>
+              </div>
+            </div>
+          )}
+          {confirmNotCollected && (
+            <div role="dialog" aria-label="Confirm not collected" className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
+              <p className="text-sm font-semibold text-[var(--swift-red)]">Mark as not collected?</p>
+              <p className="mt-1 text-sm text-[var(--swift-muted)]">
+                {o.notCollected?.goesToSupport === true
+                  ? 'It was paid by MMG, so Swift support closes it with you. The order stays open until they do.'
+                  : 'The order closes. No money moves. The customer is told.'}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={() => notCollected.mutate()}
+                  disabled={notCollected.isPending}
+                  className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {notCollected.isPending ? 'Sending…' : 'Yes, nobody came'}
+                </button>
+                <button
+                  onClick={() => setConfirmNotCollected(false)}
+                  disabled={notCollected.isPending}
+                  className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                >
+                  Keep the order
+                </button>
+              </div>
+            </div>
+          )}
+          {notCollectedDone === 'support' && <p role="status" className="w-full text-sm font-semibold">Swift support has this order. They close it and record the refund you owe the customer.</p>}
+          {notCollectedDone === 'closed' && <p role="status" className="w-full text-sm font-semibold">Order closed: recorded as not collected. No money moved.</p>}
+          {noShowRecorded && (
+            <p role="status" className="w-full text-sm font-semibold">Booking closed: you recorded that the customer didn&rsquo;t come. The customer has been told.</p>
           )}
           {error && <p role="alert" className="w-full text-sm text-[var(--swift-red)]">{error}</p>}
         </div>

@@ -10,11 +10,15 @@ import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
 import { VendorTierScreen } from './screens/VendorTierScreen';
+import { VendorBranchesScreen } from './screens/VendorBranchesScreen';
+import { VendorAddBranchScreen } from './screens/VendorAddBranchScreen';
 import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { useVendorProfile, useVendorOrdersLive } from '../../hooks/vendorops';
+import { useVendorTabPrefetch } from '../../hooks/vendorTabPrefetch';
+import { useWarmTabs } from '../../navigation/warmTabs';
 import { track } from '../../lib/analytics';
 import { useStoreSwitcher } from '../../stores/storeSwitcher';
 import { useVendorPreview } from '../../stores/vendorPreview';
@@ -195,11 +199,19 @@ function VendorTabs() {
   const manager = myRole === 'OWNER' || myRole === 'MANAGER';
   const cat = catalogueMeta(store?.vendorType); // R1: the catalogue tab is named for the type
   const isService = store?.vendorType === 'SERVICE';
+  // [SPEED 30 Oct] The other tabs' first reads, once the board's have landed (role-scoped; never in a preview).
+  const preview = useVendorPreview((s) => s.previewType) != null;
+  useVendorTabPrefetch({ storeId: store?.id, role: myRole, isService, preview });
+  // [SPEED 6 Nov] The first tap shows a tab already drawn: once Orders has painted and Swift is
+  // quiet, the other tabs this role sees mount while hidden, one at a time, and stay frozen
+  // (navigation/warmTabs). Not Schedule: it polls its bookings every minute while mounted.
+  const warm = useWarmTabs(manager ? ['Menu', 'Insights', 'Account'] : ['Menu', 'Account']);
   return (
     <VTab.Navigator
       screenOptions={{
         // [SPEED 22 Oct] As the customer tabs (navigation/CustomerStack.tsx): a tab mounts on
-        // its first visit, keeps its state, and stops DRAWING while hidden. The Orders board
+        // its first visit (or earlier, hidden, once Swift is quiet: `warm` above), keeps its
+        // state, and stops DRAWING while hidden. The Orders board
         // no longer re-draws on every poll while the owner is on Products, nor Products on
         // every menu re-read while on Orders; reads keep running, so a tab shows the latest
         // the moment it is opened. New-order alerts are not inside a tab (VendorRoot's
@@ -230,6 +242,7 @@ function VendorTabs() {
         name="Menu"
         component={MenuStackNav}
         options={{
+          lazy: !warm.has('Menu'),
           tabBarLabel: manager ? cat.label : 'Availability',
           tabBarIcon: ({ color: c, size }) => <Feather name={manager ? cat.icon : 'toggle-left'} size={size} color={c} />,
         }}
@@ -238,13 +251,13 @@ function VendorTabs() {
         <VTab.Screen
           name="Insights"
           component={VendorInsightsScreen}
-          options={{ tabBarLabel: 'Insights', tabBarIcon: ({ color: c, size }) => <Feather name="bar-chart-2" size={size} color={c} /> }}
+          options={{ lazy: !warm.has('Insights'), tabBarLabel: 'Insights', tabBarIcon: ({ color: c, size }) => <Feather name="bar-chart-2" size={size} color={c} /> }}
         />
       ) : null}
       <VTab.Screen
         name="Account"
         component={VendorAccountScreen}
-        options={{ tabBarLabel: 'Account', tabBarIcon: ({ color: c, size }) => <Feather name="user" size={size} color={c} /> }}
+        options={{ lazy: !warm.has('Account'), tabBarLabel: 'Account', tabBarIcon: ({ color: c, size }) => <Feather name="user" size={size} color={c} /> }}
       />
     </VTab.Navigator>
   );
@@ -264,8 +277,12 @@ export function VendorStack() {
         {/* [MKT G3] Where the backfill's "review your categories" push lands.
             Accepting a suggestion is what writes the tag the Market feed reads. */}
         <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
-        {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
+        {/* [DOC-1 §3.6] Seller status. [CHECKLIST-LEGAL · owner 1 Nov 2026 (a)] No tier any more: kept only so a notice sent
+            before still opens somewhere true (no limits; where the registration stands). */}
         <Stack.Screen name="VendorTier" component={VendorTierScreen} />
+        {/* [CHAINS PR2] One owner, many branches: every branch at a glance, and adding one. */}
+        <Stack.Screen name="VendorBranches" component={VendorBranchesScreen} />
+        <Stack.Screen name="VendorAddBranch" component={VendorAddBranchScreen} />
       </Stack.Group>
       {/* Keep the notification destination registered across the handoff. Its
           vendor fee editor already remounts with key={storeId}. */}

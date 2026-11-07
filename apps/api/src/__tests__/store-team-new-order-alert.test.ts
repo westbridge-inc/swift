@@ -246,7 +246,8 @@ describe('[#15] an OPEN store rings its whole active team', () => {
     expect(await recipientsOf(order.id)).toEqual(new Set([owner.userId, manager.userId, staff.userId]));
     const expected = {
       title: 'New Order!',
-      data: { orderId: order.id, orderNumber: order.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', respondBy: deadline.toISOString(), audience: 'business' },
+      // [CHAINS] the store's id rides the alert so a tap opens that branch
+      data: { orderId: order.id, orderNumber: order.orderNumber, status: 'PENDING', kind: 'vendor_order_alert', vendorId, respondBy: deadline.toISOString(), audience: 'business' },
       options: { alertClass: 'ring_order', priority: 'high', sound: 'default', deadlineMs: deadline.getTime() },
     };
     for (const member of [owner, manager, staff]) {
@@ -505,8 +506,13 @@ describe('[#15] every publication to a store room goes through the team gate', (
     expect(bypasses).toEqual([]);
     // 12 + the admin store-refund close (#1607) + the MMG acceptance expiry (owner 18 Oct: an accepted MMG
     // order not marked "Paid by MMG" within 30 minutes cancels; the store's room hears it through the gate)
-    // + [O-4] a waiting order cancelled because its only item got no answer (picking.service, through the gate).
-    expect(publishers).toBe(15);
+    // + [O-4] a waiting order cancelled because its only item got no answer (picking.service, through the gate)
+    // + [O-2] the store's "Handed to rider" tap (order:handed_to_rider to the store team, through the gate)
+    // + [BOOK-S3] a booking confirmed at checkout (INSTANT_BOOKING): the store board refreshes on
+    // order:status_changed instead of order:new (which sounds the new-order alarm), through the gate.
+    // + [BOOK-FU2 · owner B3] "Customer didn't come": the store board hears its closed appointment, through the gate.
+    // + [BUG-HUNT-2 G20] a pickup the customer never collected, cancelled free: the store board hears it, through the gate.
+    expect(publishers).toBe(19);
   });
 });
 

@@ -21,7 +21,8 @@ import { renderReceiptHtml } from '../modules/order/receipt';
 // (CONTRACT.md Rev 2 §8.1): 300 per FULL 10 minutes of waiting; the pickup
 // wait (arrival → start) and every stop's wait (arrival → departure, or →
 // skip) summed on the server's timestamps, then floored to whole blocks. Not
-// at the final destination; a negative wait (clock skew) is 0; no cap.
+// at the final destination; a negative wait (clock skew) is 0. The cap, the
+// GPS start and the ride code [owner 4 Nov 2026]: taxi-waiting-cap.unit.test.ts.
 // ---------------------------------------------------------------------------
 
 const GYD: TaxiWaitingTerms = { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD' };
@@ -30,7 +31,7 @@ const at = (seconds: number) => new Date(T0.getTime() + seconds * 1000);
 const MIN = 60;
 
 /** A single-leg ride whose pickup wait lasted `seconds` (closed: the trip started). */
-const pickupOnly = (seconds: number): TaxiWaitClock => ({ status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(seconds), stops: [] });
+const pickupOnly = (seconds: number): TaxiWaitClock => ({ status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(seconds), stops: [] });
 const stop = (sequence: number, extra: Partial<TaxiWaitStopClock>): TaxiWaitStopClock =>
   // [option A] An arrival in these fixtures is one the E19 gate accepted (it counts), unless a case says otherwise.
   ({ sequence, status: 'PENDING', arrivedAt: null, departedAt: null, skippedAt: null, ...extra, arrivalVerified: 'arrivalVerified' in extra ? extra.arrivalVerified : (extra.arrivedAt ? true : null) });
@@ -44,11 +45,11 @@ describe('the edge-case table (the brief, item 5)', () => {
     ['20:00 → two blocks', pickupOnly(20 * MIN), 600, 20],
     ['0 → nothing', pickupOnly(0), 0, 0],
     ['pickup 7 min + stop 4 min = 11 → one block', {
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(7 * MIN),
       stops: [stop(1, { status: 'DEPARTED', arrivedAt: at(20 * MIN), departedAt: at(24 * MIN) })],
     }, 300, 11],
     ['pickup 6 min + stop 2 min + stop 1:59 = 9:59 → nothing', {
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(6 * MIN),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(6 * MIN),
       stops: [
         stop(1, { status: 'DEPARTED', arrivedAt: at(20 * MIN), departedAt: at(22 * MIN) }),
         stop(2, { status: 'DEPARTED', arrivedAt: at(30 * MIN), departedAt: at(32 * MIN - 1) }),
@@ -56,18 +57,18 @@ describe('the edge-case table (the brief, item 5)', () => {
     }, 0, 9],
     ['clock skew: the start reads before the arrival → that leg is 0, never negative', pickupOnly(-5 * MIN), 0, 0],
     ['clock skew on one stop only: the other waits still count', {
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(10 * MIN),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(10 * MIN),
       stops: [stop(1, { status: 'DEPARTED', arrivedAt: at(30 * MIN), departedAt: at(25 * MIN) })],
     }, 300, 10],
     ['a stop skipped AFTER arriving counts arrival → skip (the car waited)', {
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(0),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(0),
       stops: [stop(1, { status: 'SKIPPED', arrivedAt: at(20 * MIN), skippedAt: at(32 * MIN) })],
     }, 300, 12],
     ['a stop skipped without arriving counts nothing', {
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(0),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(0),
       stops: [stop(1, { status: 'SKIPPED', skippedAt: at(32 * MIN) })],
     }, 0, 0],
-    ['no cap (none in the contract): 10 hours at the pickup → 60 blocks', pickupOnly(10 * 3600), 18_000, 600],
+    ['[owner 4 Nov 2026] the cap: 10 hours at the pickup → an hour, six blocks', pickupOnly(10 * 3600), 1800, 60],
   ];
   it.each(cases)('%s', (_label, clock, charge, minutes) => {
     const tally = final(clock);
@@ -77,7 +78,7 @@ describe('the edge-case table (the brief, item 5)', () => {
 
   it('the waits are summed on exact timestamps BEFORE flooring: 300.5 s + 299.5 s is one full block', () => {
     const tally = final({
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: new Date(T0.getTime() + 300_500),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: new Date(T0.getTime() + 300_500),
       stops: [stop(1, { status: 'DEPARTED', arrivedAt: at(20 * MIN), departedAt: new Date(at(20 * MIN).getTime() + 299_500) })],
     });
     expect({ seconds: tally.totalSeconds, charge: tally.waitingCharge }).toEqual({ seconds: 600, charge: 300 });
@@ -92,7 +93,7 @@ describe('the edge-case table (the brief, item 5)', () => {
 
 describe('not counted at the final destination; the frozen figure is the one the driver was shown', () => {
   const trip: TaxiWaitClock = {
-    status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),
+    status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(7 * MIN),
     stops: [stop(1, { status: 'DEPARTED', arrivedAt: at(20 * MIN), departedAt: at(24 * MIN) })],
   };
   it('every wait closed: the charge does not grow while the car drives on or stands at the destination', () => {
@@ -110,7 +111,7 @@ describe('not counted at the final destination; the frozen figure is the one the
 
 describe('the live clock (CONTRACT §8.3)', () => {
   it('at the pickup: the wait runs to now; the next block lands when the summed wait reaches it', () => {
-    const waiting: TaxiWaitClock = { status: 'DRIVER_ARRIVED', driverArrivedAt: T0, pickedUpAt: null, stops: [] };
+    const waiting: TaxiWaitClock = { status: 'DRIVER_ARRIVED', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: null, stops: [] };
     const seven = liveWaitingPayload(GYD, tallyTaxiWaiting(waiting, GYD, at(7 * MIN), 'live'));
     expect(seven).toEqual({
       chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD',
@@ -121,7 +122,7 @@ describe('the live clock (CONTRACT §8.3)', () => {
   });
   it('[option A] an arrival the GPS could not place starts no charged wait: only a verified arrival counts', () => {
     const clock = (arrivalVerified: boolean | null): TaxiWaitClock => ({
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(7 * MIN),
       stops: [stop(1, { status: 'DEPARTED', arrivedAt: at(20 * MIN), departedAt: at(35 * MIN), arrivalVerified })],
     });
     // Verified: 7 min at the pickup + 15 at the stop = 22 → two full blocks.
@@ -134,7 +135,7 @@ describe('the live clock (CONTRACT §8.3)', () => {
     }
     // Live, waiting at an unverified stop: no clock running, nothing accrues.
     const live = tallyTaxiWaiting({
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(7 * MIN),
       stops: [stop(1, { status: 'ARRIVED', arrivedAt: at(20 * MIN), arrivalVerified: false })],
     }, GYD, at(60 * MIN), 'live');
     expect({ charge: live.waitingCharge, running: live.running }).toEqual({ charge: 0, running: 0 });
@@ -142,7 +143,7 @@ describe('the live clock (CONTRACT §8.3)', () => {
 
   it('at an arrived stop: the closed pickup wait counts toward the next block', () => {
     const atStop: TaxiWaitClock = {
-      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: at(7 * MIN),
       stops: [stop(1, { status: 'ARRIVED', arrivedAt: at(20 * MIN) }), stop(2, {})],
     };
     const tally = tallyTaxiWaiting(atStop, GYD, at(24 * MIN), 'live');
@@ -156,12 +157,12 @@ describe('the live clock (CONTRACT §8.3)', () => {
   });
   it('before the arrival, and after a release before pickup (status back to PENDING with the old arrival on the row): no pickup wait', () => {
     for (const status of ['DRIVER_EN_ROUTE', 'PENDING', 'DRIVER_ASSIGNED'] as const) {
-      const tally = tallyTaxiWaiting({ status, driverArrivedAt: T0, pickedUpAt: null, stops: [] }, GYD, at(30 * MIN), 'live');
+      const tally = tallyTaxiWaiting({ status, driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: null, stops: [] }, GYD, at(30 * MIN), 'live');
       expect({ pickup: tally.pickup, charge: tally.waitingCharge, running: tally.running }).toEqual({ pickup: null, charge: 0, running: 0 });
     }
   });
   it('the next block is always in the future while a wait runs, at every second of a block', () => {
-    const waiting: TaxiWaitClock = { status: 'DRIVER_ARRIVED', driverArrivedAt: T0, pickedUpAt: null, stops: [] };
+    const waiting: TaxiWaitClock = { status: 'DRIVER_ARRIVED', driverArrivedAt: T0, pickupArrivalVerified: true, ridePinVerifiedAt: null, pickedUpAt: null, stops: [] };
     for (let s = 0; s <= 25 * MIN; s += 37) {
       const tally = tallyTaxiWaiting(waiting, GYD, at(s), 'live');
       expect(tally.nextChargeAt!.getTime()).toBeGreaterThan(at(s).getTime());
@@ -177,8 +178,8 @@ describe('the terms, the sentence and the switch', () => {
     expect(waitingTermsFromRates({ waitingChargePerBlock: 750, waitingBlockMinutes: 15 }, 'TTD')).toEqual({ chargePerBlock: 750, blockMinutes: 15, currencyCode: 'TTD' });
   });
   it('the disclosure is the contract\'s block and sentence', () => {
-    expect(waitingDisclosure(GYD)).toEqual({ chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', text: 'Waiting: 300 per 10 minutes after your driver arrives' });
-    expect(waitingTermsText({ chargePerBlock: 1000, blockMinutes: 1, currencyCode: 'GYD' })).toBe('Waiting: 1,000 per minute after your driver arrives');
+    expect(waitingDisclosure(GYD)).toEqual({ chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', text: 'Waiting: 300 per 10 minutes after your driver arrives, up to 1,800 a ride' });
+    expect(waitingTermsText({ chargePerBlock: 1000, blockMinutes: 1, currencyCode: 'GYD' })).toBe('Waiting: 1,000 per minute after your driver arrives, up to 60,000 a ride');
   });
   it('TAXI_WAITING_CHARGE is on only when it is exactly "1"', () => {
     expect(taxiWaitingEnabled({ TAXI_WAITING_CHARGE: '1' })).toBe(true);

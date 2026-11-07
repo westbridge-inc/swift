@@ -27,10 +27,13 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { NotificationService } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService, DEFAULT_CASH_RULES } from '../modules/cash/cash-rules.service';
+import { PAY_ASK_ACTION, resolveApproval, type ApprovalOutcome } from '../modules/admin/admin-approval';
+import { lockClaimPaymentAsks } from '../modules/cash/claim-payout';
 import {
-  LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, assembleClaimEvidence, provisionReserveForPreviousMonth, reserveBalance,
-  rlpReserveDdl, sweepLossProtection,
+  LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, assembleClaimEvidence, reserveBalance,
+  moverClaims, rlpReserveDdl, sweepLossProtection,
 } from '../modules/cash/rlp';
+import * as rlpModule from '../modules/cash/rlp';
 import { NO_SHOW_EVIDENCE_MAX_AGE_MS } from '../modules/order/cancel-policy';
 import { issueSyntheticHandoverPhoto, persistSessionFix, syntheticMoverSession } from './helpers/handover-proof';
 import { retainedPhonePrefix } from './helpers/retained-evidence';
@@ -199,7 +202,8 @@ describe('[DOC-1 P31-1] DOC-INV-47 — no loss-protection payout without a compl
     const pair2 = await freshPair(22, door2);
     const order2 = await atDoorOrder({ food: 2000, pair: pair2, door: door2 });
     const admitted = (await file(order2, 'no_show', { pair: pair2, door: door2 })).claim!;
-    expect(admitted).toMatchObject({ status: 'AUTO_APPROVED', evidenceComplete: true, flags: [] });
+    expect(admitted).toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true, flags: [] });
+    await system(() => cash.approveClaim(admitted.id, 'admin-review', 'a person read the bundle'));
     const paid = await system(() => cash.markClaimPaid(admitted.id, 'admin-pay', ref('RLP2'), 2000));
     expect(paid.status).toBe('PAID');
     expect(await balance()).toBe(before - 2000);
@@ -246,14 +250,14 @@ describe('[DOC-1 P31-1] DOC-INV-47 — no loss-protection payout without a compl
 });
 
 describe('[DOC-1 P31-1] the policy: covered amount, caps, review threshold, suspension', () => {
-  it('a real no-show at the door covers the FOOD COST the rider fronted, not the order total; the claim carries its bundle and is auto-approved when clean', async () => {
+  it('a real no-show at the door covers the FOOD COST the rider fronted, not the order total; the claim carries its bundle and waits for a person even when clean', async () => {
     const door = await ownDoor();
     const pair = await freshPair(10, door);
     const order = await atDoorOrder({ food: 3000, fee: 800, pair, door });
     const claim = (await file(order, 'no_show', { pair, door })).claim!;
     expect(Number(claim.amount)).toBe(3000);
     expect(claim.evidenceComplete).toBe(true);
-    expect(claim.status).toBe('AUTO_APPROVED');
+    expect(claim.status).toBe('PENDING_REVIEW');
     expect(claim.flags).toEqual([]);
     expect((claim.evidence as { rail: string }).rail).toBe('DELIVERY');
     // A complete filing strikes, and the dispute trail must not say otherwise.
@@ -303,14 +307,15 @@ describe('[DOC-1 P31-1] the policy: covered amount, caps, review threshold, susp
     expect(clean.claim!.flags).not.toContain(LOSS_PROTECTION_FLAGS.overMonthlyCap);
   });
 
-  it('suspension is stated and told, never silent: the mover is notified, a new claim goes to review, an AUTO_APPROVED claim cannot be paid until a person approves it, and reinstatement is told too', async () => {
+  it('suspension is stated and told, never silent: the mover is notified, a new case goes to a person, an old automatic row cannot be paid until a person decides it, and lifting it is told too', async () => {
     await fund(10_000);
-    // An AUTO_APPROVED claim the platform would pay: a real filing by a clean pair, before the suspension.
+    // A row the old rule approved automatically: a real filing by a clean pair, stamped the way the old rule stamped it.
     const door = await ownDoor();
     const pair = await freshPair(16, door);
     const earlier = await atDoorOrder({ food: 1200, pair, door });
-    const autoApproved = (await file(earlier, 'no_show', { pair, door })).claim!;
-    expect(autoApproved).toMatchObject({ status: 'AUTO_APPROVED', evidenceComplete: true });
+    const filedEarlier = (await file(earlier, 'no_show', { pair, door })).claim!;
+    expect(filedEarlier).toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true });
+    const oldRow = await system(() => app.prisma.reimbursementClaim.update({ where: { id: filedEarlier.id }, data: { status: 'AUTO_APPROVED' } }));
     const facts: Record<string, unknown>[] = [];
     await system(() => cash.suspendLossProtection(pair.riderUserId, 'confirmed collusion finding — case 42', async (_tx, f) => { facts.push(f); }));
     // [C-01b] The facts no longer carry `reason`, and must not: `reason` is a
@@ -334,6 +339,8 @@ describe('[DOC-1 P31-1] the policy: covered amount, caps, review threshold, susp
     expect(facts[0], 'a canonical name in the facts is refused at the audit row').not.toHaveProperty('reason');
     const told = await system(() => app.prisma.notification.findFirst({ where: { userId: pair.riderUserId, data: { path: ['kind'], equals: 'rlp_suspended' } } }));
     expect(told).not.toBeNull();
+    expect(told!.title).toContain('suspended');
+    expect(told!.body).toContain('suspended');
     const door2 = await ownDoor();
     const order = await atDoorOrder({ food: 1000, pair, door: door2 });
     const result = await file(order, 'no_show', { pair, door: door2 });
@@ -342,16 +349,19 @@ describe('[DOC-1 P31-1] the policy: covered amount, caps, review threshold, susp
     expect(result.claim!.status).toBe('PENDING_REVIEW');
     const notice = await system(() => app.prisma.notification.findFirst({ where: { userId: pair.riderUserId, data: { path: ['claimId'], equals: result.claim!.id } }, select: { body: true } }));
     expect(notice?.body).toContain('suspended');
-    expect(await code(system(() => cash.markClaimPaid(autoApproved.id, 'admin-pay', ref('SUSP1'), 1200)))).toBe('RLP_PROTECTION_SUSPENDED');
-    expect((await claimRow(autoApproved.id)).status).toBe('AUTO_APPROVED');
-    // A person approves the reviewed claim — that is the human-review route — and the payout is allowed.
+    expect(await code(system(() => cash.markClaimPaid(oldRow.id, 'admin-pay', ref('SUSP1'), 1200)))).toBe('RLP_PERSON_MUST_DECIDE');
+    expect((await claimRow(oldRow.id)).status).toBe('AUTO_APPROVED');
+    // A person approves the reviewed case — that is the route — and the payment is allowed.
     await system(() => cash.approveClaim(result.claim!.id, 'admin-review', 'reviewed with the bundle'));
     const paid = await system(() => cash.markClaimPaid(result.claim!.id, 'admin-pay', ref('SUSP2'), 1000));
     expect(paid.status).toBe('PAID');
     await system(() => cash.reinstateLossProtection(pair.riderUserId, 'appeal upheld'));
     expect(await system(() => app.prisma.notification.count({ where: { userId: pair.riderUserId, data: { path: ['kind'], equals: 'rlp_reinstated' } } }))).toBe(1);
     expect((await system(() => app.prisma.user.findUniqueOrThrow({ where: { id: pair.riderUserId }, select: { lossProtectionSuspendedAt: true } }))).lossProtectionSuspendedAt).toBeNull();
-    const now = await system(() => cash.markClaimPaid(autoApproved.id, 'admin-pay', ref('SUSP3'), 1200));
+    // Lifting the suspension decides nothing: the old row still waits for a person.
+    expect(await code(system(() => cash.markClaimPaid(oldRow.id, 'admin-pay', ref('SUSP3'), 1200)))).toBe('RLP_PERSON_MUST_DECIDE');
+    await system(() => cash.approveClaim(oldRow.id, 'admin-review', 'read under the case-by-case rule'));
+    const now = await system(() => cash.markClaimPaid(oldRow.id, 'admin-pay', ref('SUSP3'), 1200));
     expect(now.status).toBe('PAID');
   });
 });
@@ -362,14 +372,15 @@ describe('[DOC-1 P31-1] the reserve: a named, funded line — paid from it or no
     const door = await ownDoor();
     const pair = await freshPair(30, door);
     const order = await atDoorOrder({ food: 2500, pair, door });
-    const claim = (await file(order, 'no_show', { pair, door })).claim!;
-    expect(claim).toMatchObject({ status: 'AUTO_APPROVED', evidenceComplete: true });
+    const filed = (await file(order, 'no_show', { pair, door })).claim!;
+    expect(filed).toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true });
+    const claim = await system(() => cash.approveClaim(filed.id, 'admin-review', 'a person read the bundle'));
     // Empty the line from a snapshot taken here: earlier suites and runs leave their own balance.
     const start = await balance();
     if (start > 0) await fund(-start);
     expect(await balance()).toBe(0);
     await expect(system(() => cash.markClaimPaid(claim.id, 'admin-pay', ref('RES1'), 2500))).rejects.toMatchObject({ code: 'RLP_RESERVE_UNFUNDED' });
-    expect((await claimRow(claim.id)).status).toBe('AUTO_APPROVED');
+    expect((await claimRow(claim.id)).status).toBe('APPROVED');
     expect((await claimRow(claim.id)).paymentRef).toBeNull();
     await fund(2000); // still short by 500
     await expect(system(() => cash.markClaimPaid(claim.id, 'admin-pay', ref('RES1'), 2500))).rejects.toMatchObject({ code: 'RLP_RESERVE_UNFUNDED' });
@@ -397,69 +408,397 @@ describe('[DOC-1 P31-1] the reserve: a named, funded line — paid from it or no
     await expect(system(() => cash.adjustLossProtectionReserve(COUNTRY, 0, 'admin-fin', `fixture ${RUN} zero`))).rejects.toMatchObject({ code: 'RLP_AMOUNT_INVALID' });
     const statement = await system(() => cash.lossProtectionReserve(COUNTRY));
     expect(statement.balance).toBe(entry.balanceAfter);
-    expect(statement.floor).toBe(gateLocal * LOSS_PROTECTION_DEFAULTS.rlpReserveFloorMultiple);
+    expect(statement, 'no sum has to be held, so nothing states a floor').not.toHaveProperty('floor');
+    expect(statement).not.toHaveProperty('low');
     expect(statement.entries[0]).toMatchObject({ kind: 'ADJUSTMENT', amount: '700' });
   });
 
-  it('monthly provisioning: the previous month\'s PAID fee revenue times the rate, once per country per month — a replay adds nothing', async () => {
-    // [SAFE-B · retained history] A PROVISION entry is a money record and is never deleted, so each run
-    // provisions a month this database has never provisioned: the first free April from 2031 onward.
+  it('[case by case] fee money never feeds the line: nothing writes a PROVISION row, an older one stays on the record, and company money is still recorded', async () => {
+    expect('provisionReserveForPreviousMonth' in rlpModule, 'the monthly provisioning is gone').toBe(false);
+    expect('rlpReserveRatePct' in LOSS_PROTECTION_DEFAULTS, 'no rate of fees is configured').toBe(false);
+    // History: an entry the old rule wrote is a money record. It keeps counting and is never rewritten.
     let year = 2031;
-    const provisioned = async (y: number) => system(() => app.prisma.rlpReserveEntry.count({ where: { countryCode: COUNTRY, kind: 'PROVISION', periodKey: `${y}-03` } }));
-    while (await provisioned(year) > 0) year += 1;
-    const periodKey = `${year}-03`;
-    const period = new Date(Date.UTC(year, 3, 1)); // a provisioning run on <year>-04-01 covers <year>-03
-    const sub = await system(() => app.prisma.subscription.create({ data: { riderId, type: 'DELIVERY_RIDER', status: 'ACTIVE', weeklyRate: 12000, currentPeriodStart: new Date(Date.UTC(year, 2, 1)), currentPeriodEnd: new Date(Date.UTC(year, 2, 8)), nextBillingDate: new Date(Date.UTC(year, 2, 8)) } as never }));
-    try {
-      await system(() => app.prisma.subscriptionPayment.createMany({ data: [
-        { subscriptionId: sub.id, amount: 12000, status: 'CAPTURED', paymentMethod: 'CASH', periodStart: new Date(Date.UTC(year, 2, 1)), periodEnd: new Date(Date.UTC(year, 2, 8)), paidAt: new Date(Date.UTC(year, 2, 3)) },
-        { subscriptionId: sub.id, amount: 12000, status: 'CAPTURED', paymentMethod: 'CASH', periodStart: new Date(Date.UTC(year, 2, 8)), periodEnd: new Date(Date.UTC(year, 2, 15)), paidAt: new Date(Date.UTC(year, 2, 10)) },
-        { subscriptionId: sub.id, amount: 12000, status: 'FAILED', paymentMethod: 'CASH', periodStart: new Date(Date.UTC(year, 2, 15)), periodEnd: new Date(Date.UTC(year, 2, 22)), paidAt: null },
-        { subscriptionId: sub.id, amount: 12000, status: 'CAPTURED', paymentMethod: 'CASH', periodStart: new Date(Date.UTC(year, 3, 1)), periodEnd: new Date(Date.UTC(year, 3, 8)), paidAt: new Date(Date.UTC(year, 3, 2)) },
-      ] as never }));
-      const before = await balance();
-      const rulesFor = async () => ({ ...LOSS_PROTECTION_DEFAULTS, rlpReserveRatePct: 2 });
-      const first = await system(() => provisionReserveForPreviousMonth(app.prisma, { now: period, rulesFor, notifications }));
-      const mine = first.find((r) => r.countryCode === COUNTRY);
-      expect(mine).toMatchObject({ periodKey, created: true });
-      expect(mine!.revenue).toBeGreaterThanOrEqual(24000); // the two PAID March payments; April and the failed one excluded
-      expect(mine!.provisioned).toBe(Math.round(mine!.revenue * 2) / 100);
-      expect(await balance()).toBe(before + mine!.provisioned);
-      expect(await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'rlp_reserve_provisioned' } } }))).toBeGreaterThanOrEqual(1);
-      const replay = await system(() => provisionReserveForPreviousMonth(app.prisma, { now: period, rulesFor }));
-      expect(replay.find((r) => r.countryCode === COUNTRY)?.created).toBe(false);
-      expect(await balance()).toBe(before + mine!.provisioned);
-    } finally {
-      // The subscription is billing scaffolding, not evidence; its future-dated billing must not reach another suite's cycle.
-      await system(() => app.prisma.subscription.delete({ where: { id: sub.id } }));
-    }
+    while (await system(() => app.prisma.rlpReserveEntry.count({ where: { countryCode: COUNTRY, kind: 'PROVISION', periodKey: `${year}-03` } })) > 0) year += 1;
+    const before = await balance();
+    await system(() => app.prisma.rlpReserveEntry.create({ data: { countryCode: COUNTRY, kind: 'PROVISION', amount: 240, periodKey: `${year}-03`, note: `fixture ${RUN} old rule` } }));
+    expect(await balance()).toBe(before + 240);
+    const entry = await system(() => cash.adjustLossProtectionReserve(COUNTRY, 500, 'admin-fin', `fixture ${RUN} company money`));
+    expect(entry.balanceAfter).toBe(before + 740);
+    const statement = await system(() => cash.lossProtectionReserve(COUNTRY));
+    expect(statement).not.toHaveProperty('provisionedThisPeriod');
+    expect(statement.entries[0]).toMatchObject({ kind: 'ADJUSTMENT', amount: '500' });
   });
 
-  it('the daily sweep flags an approved claim unpaid past the SLA once, tells the admins once a day, and names a reserve below its floor', async () => {
-    // The floor finding is about the line as it stands: bring it below the floor from a snapshot taken here.
-    const floor = gateLocal * LOSS_PROTECTION_DEFAULTS.rlpReserveFloorMultiple;
-    const start = await balance();
-    if (start >= floor) await fund(-(start - floor + 1));
-    expect(await balance()).toBeLessThan(floor);
+  it('the daily sweep flags a decided, unpaid case past the staff deadline once, counted from the decision, and tells the admins once a day; it says nothing about the size of the line', async () => {
     const stale = await atDoorOrder({ food: 900 });
-    const claim = await plantClaim(stale.id, 900, { photoUrl: 'https://cdn.test/stale.jpg', createdAt: new Date(Date.now() - (LOSS_PROTECTION_DEFAULTS.rlpSlaHours + 2) * HOUR) });
+    const claim = await plantClaim(stale.id, 900, { status: 'APPROVED', photoUrl: 'https://cdn.test/stale.jpg', createdAt: new Date(Date.now() - 9 * 24 * HOUR), reviewedAt: new Date(Date.now() - (LOSS_PROTECTION_DEFAULTS.rlpSlaHours + 1) * HOUR) });
     const fresh = await atDoorOrder({ food: 900 });
-    const young = await plantClaim(fresh.id, 900, { photoUrl: 'https://cdn.test/fresh.jpg' });
+    // Filed long ago, decided an hour ago: the deadline runs from the decision.
+    const young = await plantClaim(fresh.id, 900, { status: 'APPROVED', photoUrl: 'https://cdn.test/fresh.jpg', createdAt: new Date(Date.now() - 9 * 24 * HOUR), reviewedAt: new Date(Date.now() - HOUR) });
     const rulesFor = async () => LOSS_PROTECTION_DEFAULTS;
-    const gateFor = async () => gateLocal;
     const noticesBefore = await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'rlp_sla_breached' } } }));
-    const run = await system(() => sweepLossProtection(app.prisma, { notifications, rulesFor, gateFor }));
+    const lowBefore = await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'rlp_reserve_low' } } }));
+    const run = await system(() => sweepLossProtection(app.prisma, { notifications, rulesFor }));
     expect(run.breached.some((b) => b.claimId === claim.id)).toBe(true);
     expect(run.breached.some((b) => b.claimId === young.id)).toBe(false);
     expect((await claimRow(claim.id)).flags).toContain(LOSS_PROTECTION_FLAGS.slaBreached);
-    expect((await claimRow(claim.id)).status).toBe('AUTO_APPROVED'); // the sweep pays nothing and moves nothing
-    expect(run.lowReserve.find((l) => l.countryCode === COUNTRY)).toMatchObject({ floor: gateLocal * LOSS_PROTECTION_DEFAULTS.rlpReserveFloorMultiple });
+    expect((await claimRow(claim.id)).status).toBe('APPROVED'); // the sweep pays nothing and moves nothing
+    expect(run).not.toHaveProperty('lowReserve');
+    expect(await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'rlp_reserve_low' } } }))).toBe(lowBefore);
     const noticesAfter = await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'rlp_sla_breached' } } }));
     expect(noticesAfter).toBeGreaterThanOrEqual(noticesBefore);
-    const again = await system(() => sweepLossProtection(app.prisma, { notifications, rulesFor, gateFor }));
+    const again = await system(() => sweepLossProtection(app.prisma, { notifications, rulesFor }));
     expect(again.newlyFlagged).toBe(0);
     expect((await claimRow(claim.id)).flags.filter((f) => f === LOSS_PROTECTION_FLAGS.slaBreached)).toHaveLength(1);
     expect(await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'rlp_sla_breached' } } }))).toBe(noticesAfter);
     expect(await system(() => app.prisma.auditLog.count({ where: { action: 'RLP_SWEEP', entityId: `daily:${new Date().toISOString().slice(0, 10)}` } }))).toBeGreaterThanOrEqual(2);
+  });
+
+  it('a case still open at 7 days reminds staff once: new or from the old rule, and never as a decided payment', async () => {
+    const rulesFor = async () => LOSS_PROTECTION_DEFAULTS;
+    const days = (n: number) => new Date(Date.now() - n * 24 * HOUR);
+    const waiting = await plantClaim((await atDoorOrder({ food: 800 })).id, 800, { status: 'PENDING_REVIEW', createdAt: days(8) });
+    const oldRule = await plantClaim((await atDoorOrder({ food: 800 })).id, 800, { status: 'AUTO_APPROVED', createdAt: days(8) });
+    const young = await plantClaim((await atDoorOrder({ food: 800 })).id, 800, { status: 'PENDING_REVIEW', createdAt: days(6) });
+    // The notice is once a day across the database: start this test's day clean, so "told" means this run told.
+    await system(() => app.prisma.notification.deleteMany({ where: { data: { path: ['kind'], equals: 'rlp_review_overdue' } } }));
+    const run = await system(() => sweepLossProtection(app.prisma, { notifications, rulesFor }));
+    const ids = run.overdue.map((o) => o.claimId);
+    expect(ids).toEqual(expect.arrayContaining([waiting.id, oldRule.id]));
+    expect(ids).not.toContain(young.id);
+    expect(run.breached.map((b) => b.claimId), 'nobody decided these').not.toEqual(expect.arrayContaining([oldRule.id]));
+    for (const c of [waiting, oldRule]) expect((await claimRow(c.id)).flags).toContain(LOSS_PROTECTION_FLAGS.reviewOverdue);
+    expect((await claimRow(oldRule.id)).flags).not.toContain(LOSS_PROTECTION_FLAGS.slaBreached);
+    expect((await claimRow(waiting.id)).status).toBe('PENDING_REVIEW');
+    const told = await system(() => app.prisma.notification.findFirst({ where: { data: { path: ['kind'], equals: 'rlp_review_overdue' } }, orderBy: { createdAt: 'desc' }, select: { title: true, body: true } }));
+    expect(told?.body).toMatch(/delete/);
+    expect(`${told?.title} ${told?.body}`).not.toMatch(/\bowed\b|approved payments/i);
+    const toldCount = await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'rlp_review_overdue' } } }));
+    expect(toldCount).toBeGreaterThanOrEqual(1);
+    const again = await system(() => sweepLossProtection(app.prisma, { notifications, rulesFor }));
+    expect(await system(() => app.prisma.notification.count({ where: { data: { path: ['kind'], equals: 'rlp_review_overdue' } } })), 'nothing new: told once').toBe(toldCount);
+    expect(again.overdue.map((o) => o.claimId)).toEqual(expect.arrayContaining([waiting.id]));
+    expect((await claimRow(waiting.id)).flags.filter((f) => f === LOSS_PROTECTION_FLAGS.reviewOverdue)).toHaveLength(1);
+  });
+});
+
+// [Coordinator ruling, 5 Nov 2026] Case by case. Swift MAY help a mover who loses money at the door, at its
+// discretion, from general company money. A person decides each case: no advance promise, no entitlement.
+describe('[case by case] every unpaid door goes to a person, and nothing promises payment', () => {
+  const PROMISE = /will pay|pays you|automatic|guarantee|covered|\$\d/i;
+  const noticeOf = async (userId: string, kind: string) => system(() => app.prisma.notification.findFirst({
+    where: { userId, data: { path: ['kind'], equals: kind } }, orderBy: { createdAt: 'desc' }, select: { title: true, body: true } }));
+
+  it('a clean, complete, small filing waits for a person, and the mover is told a person reviews and Swift may help, with no amount', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(40, door);
+    const order = await atDoorOrder({ food: 1500, pair, door });
+    const { claim } = await file(order, 'no_show', { pair, door });
+    expect(claim).toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true, flags: [] });
+    const notice = await noticeOf(pair.riderUserId, 'claim');
+    expect(notice?.body).toMatch(/person/i);
+    expect(notice?.body).toMatch(/may help/i);
+    expect(notice?.body).toMatch(/not a promise/i);
+    expect(`${notice?.title} ${notice?.body}`).not.toMatch(PROMISE);
+  });
+
+  it('a filing at or over the gate is a case too: a row a person can decide, flagged, never a loose promise that support will follow up', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(42, door);
+    const food = Math.ceil(gateLocal) + 500;
+    const order = await atDoorOrder({ food, pair, door });
+    const { claim } = await file(order, 'no_show', { pair, door });
+    expect(claim).toMatchObject({ status: 'PENDING_REVIEW', evidenceComplete: true });
+    expect(claim!.flags).toContain(LOSS_PROTECTION_FLAGS.overGate);
+    expect(Number(claim!.amount)).toBe(food);
+    expect(await noticeOf(pair.riderUserId, 'claim_over_gate')).toBeNull();
+    expect(`${(await noticeOf(pair.riderUserId, 'claim'))?.body}`).toMatch(/may help/i);
+    // The bundle still decides the strike, as it did when no row was written.
+    expect(await system(() => app.prisma.strike.count({ where: { orderId: order.id, userId: pair.customerId } }))).toBe(1);
+  });
+
+  it('a row the old rule approved automatically pays nothing until a person decides it, and a person can decide it either way', async () => {
+    await fund(5_000);
+    const row = async (seed: number, food: number) => {
+      const door = await ownDoor();
+      const pair = await freshPair(seed, door);
+      const order = await atDoorOrder({ food, pair, door });
+      const { claim } = await file(order, 'no_show', { pair, door });
+      return { pair, claim: await system(() => app.prisma.reimbursementClaim.update({ where: { id: claim!.id }, data: { status: 'AUTO_APPROVED' } })) };
+    };
+    const { claim: paidLater } = await row(44, 1100);
+    const before = await balance();
+    await expect(system(() => cash.markClaimPaid(paidLater.id, 'admin-pay', ref('CBC1'), 1100))).rejects.toMatchObject({ code: 'RLP_PERSON_MUST_DECIDE' });
+    expect((await claimRow(paidLater.id)).status).toBe('AUTO_APPROVED');
+    expect(await balance()).toBe(before);
+    expect(await system(() => app.prisma.rlpReserveEntry.count({ where: { claimId: paidLater.id } }))).toBe(0);
+    await system(() => cash.approveClaim(paidLater.id, 'admin-review', 'read under the case-by-case rule'));
+    expect((await system(() => cash.markClaimPaid(paidLater.id, 'admin-pay', ref('CBC1'), 1100))).status).toBe('PAID');
+    const { claim: turnedDown } = await row(46, 1200);
+    const rejected = await system(() => cash.rejectClaim(turnedDown.id, 'admin-review', 'the customer paid after all'));
+    expect(rejected.status).toBe('REJECTED');
+    expect(await code(system(() => cash.markClaimPaid(turnedDown.id, 'admin-pay', ref('CBC2'), 1200)))).toBe('INVALID_CLAIM_STATE');
+  });
+
+  it('what a person decides is told as that one decision, and the words come from the evidence as it stands now, never the stored copy', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(48, door);
+    const complete = (await file(await atDoorOrder({ food: 1300, pair, door }), 'no_show', { pair, door })).claim!;
+    // A photo held for its scan at filing: stored incomplete, complete now.
+    await system(() => app.prisma.reimbursementClaim.update({ where: { id: complete.id }, data: { evidenceComplete: false, flags: [LOSS_PROTECTION_FLAGS.evidenceIncomplete] } }));
+    const approved = await system(() => cash.approveClaim(complete.id, 'admin-review', 'read the bundle'));
+    expect(approved).toMatchObject({ evidenceComplete: true, flags: [] });
+    const helped = await noticeOf(pair.riderUserId, 'claim_update');
+    expect(helped?.body).toMatch(/this order only/i);
+    expect(helped?.body).toMatch(/1,300/);
+    expect(`${helped?.title} ${helped?.body}`).not.toMatch(/will pay|pays you|automatic|guarantee|covered/i);
+
+    const door2 = await ownDoor();
+    const pair2 = await freshPair(50, door2);
+    const missing = (await file(await atDoorOrder({ food: 1300, pair: pair2, door: door2 }), 'no_show', { pair: pair2, door: door2, photo: false })).claim!;
+    expect(missing.evidenceComplete).toBe(false);
+    // Stored complete, incomplete now: the rule changed under an open case.
+    await system(() => app.prisma.reimbursementClaim.update({ where: { id: missing.id }, data: { evidenceComplete: true, flags: [] } }));
+    const held = await system(() => cash.approveClaim(missing.id, 'admin-review', 'read the bundle'));
+    expect(held.evidenceComplete).toBe(false);
+    expect(held.flags).toContain(LOSS_PROTECTION_FLAGS.evidenceIncomplete);
+    const stuck = await noticeOf(pair2.riderUserId, 'claim_update');
+    expect(stuck?.title).toBe('Reviewed');
+    expect(stuck?.body).toMatch(/evidence is missing/i);
+    expect(stuck?.body).not.toMatch(/1,300|\$\d/);
+    expect(`${stuck?.title} ${stuck?.body}`).not.toMatch(/will pay|pays you|automatic/i);
+  });
+
+  it('a person may pay a case with missing evidence: never without a written reason, and the reason goes on the audit row and the ledger', async () => {
+    await fund(3_000);
+    const door = await ownDoor();
+    const pair = await freshPair(54, door);
+    const { claim } = await file(await atDoorOrder({ food: 1400, pair, door }), 'no_show', { pair, door, photo: false });
+    await system(() => cash.approveClaim(claim!.id, 'admin-review', 'the customer confirmed by phone'));
+    const before = await balance();
+    const pay = (reason?: string, facts?: Record<string, unknown>[]) => system(() => cash.markClaimPaid(claim!.id, 'admin-pay', ref('WHY1'), 1400,
+      facts ? async (_tx, f) => { facts.push(f); } : undefined, reason === undefined ? {} : { evidenceReason: reason }));
+    for (const none of [undefined, '', '   ', 'too short']) {
+      await expect(pay(none), String(none)).rejects.toMatchObject({ code: 'RLP_EVIDENCE_INCOMPLETE' });
+    }
+    expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    expect(await balance()).toBe(before);
+    const facts: Record<string, unknown>[] = [];
+    const paid = await pay('  The rider phoned support from the door; no photo was possible.  ', facts);
+    expect(paid.status).toBe('PAID');
+    expect(await balance()).toBe(before - 1400);
+    expect(facts[0]).toMatchObject({ evidenceMissing: 'door_photo', evidenceReason: 'The rider phoned support from the door; no photo was possible.' });
+    expect((await claimRow(claim!.id)).flags).toContain(LOSS_PROTECTION_FLAGS.paidEvidenceIncomplete);
+    const draw = await system(() => app.prisma.rlpReserveEntry.findUnique({ where: { claimId: claim!.id } }));
+    expect(draw?.note).toContain('no photo was possible');
+    // A short line still refuses it: the reason answers for the evidence, never for the money.
+    const door2 = await ownDoor();
+    const pair2 = await freshPair(56, door2);
+    const big = (await file(await atDoorOrder({ food: 1500, pair: pair2, door: door2 }), 'no_show', { pair: pair2, door: door2, photo: false })).claim!;
+    await system(() => cash.approveClaim(big.id, 'admin-review', 'read the bundle'));
+    await fund(-(await balance()));
+    await expect(system(() => cash.markClaimPaid(big.id, 'admin-pay', ref('WHY2'), 1500, undefined, { evidenceReason: 'A reason long enough to pass.' }))).rejects.toMatchObject({ code: 'RLP_RESERVE_UNFUNDED' });
+    expect((await claimRow(big.id)).flags).not.toContain(LOSS_PROTECTION_FLAGS.paidEvidenceIncomplete);
+  });
+
+  it('no case is ever stuck: an unpaid approval can be rejected, the mover is told, and a paid one cannot', async () => {
+    await fund(2_000);
+    const door = await ownDoor();
+    const pair = await freshPair(58, door);
+    const { claim } = await file(await atDoorOrder({ food: 1100, pair, door }), 'no_show', { pair, door, photo: false });
+    await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
+    const before = await balance();
+    const closed = await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'the evidence will not come back', undefined, { nothingSent: true }));
+    expect(closed.status).toBe('REJECTED');
+    expect(await balance()).toBe(before);
+    expect((await noticeOf(pair.riderUserId, 'claim_update'))?.body).toContain('the evidence will not come back');
+    const door2 = await ownDoor();
+    const pair2 = await freshPair(60, door2);
+    const done = (await file(await atDoorOrder({ food: 900, pair: pair2, door: door2 }), 'no_show', { pair: pair2, door: door2 })).claim!;
+    await system(() => cash.approveClaim(done.id, 'admin-review', 'read the bundle'));
+    await system(() => cash.markClaimPaid(done.id, 'admin-pay', ref('DONE'), 900));
+    await expect(system(() => cash.rejectClaim(done.id, 'admin-review', 'too late', undefined, { nothingSent: true }))).rejects.toMatchObject({ code: 'INVALID_CLAIM_STATE' });
+    expect((await claimRow(done.id)).status).toBe('PAID');
+  });
+
+  it('the queue states the evidence as it stands now, so the console offers only what can be recorded', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(62, door);
+    const { claim } = await file(await atDoorOrder({ food: 1000, pair, door }), 'no_show', { pair, door, photo: false });
+    await system(() => app.prisma.reimbursementClaim.update({ where: { id: claim!.id }, data: { evidenceComplete: true } }));
+    const [row] = await system(async () => cash.withEvidenceNow([await claimRow(claim!.id)]));
+    expect(row!.evidenceNow).toEqual({ complete: false, missing: ['door_photo'] });
+  });
+
+  it('a closed case carries no late flag to the mover, on any phone; a decided, open one does', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(64, door);
+    const late = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'APPROVED', flags: [LOSS_PROTECTION_FLAGS.slaBreached, 'gps_far'] });
+    const closed = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'REJECTED', flags: [LOSS_PROTECTION_FLAGS.slaBreached, 'gps_far'] });
+    const paid = await plantClaim((await atDoorOrder({ food: 700, pair, door })).id, 700, { riderId: pair.riderId, customerId: pair.customerId, status: 'PAID', flags: [LOSS_PROTECTION_FLAGS.slaBreached] });
+    const view = await system(() => moverClaims(app.prisma, { riderId: pair.riderId, driverId: null }));
+    const flagsOf = (id: string) => view.claims.find((c) => c.id === id)!.flags;
+    expect(flagsOf(late.id)).toContain(LOSS_PROTECTION_FLAGS.slaBreached);
+    expect(flagsOf(closed.id)).toEqual(['gps_far']);
+    expect(flagsOf(paid.id)).toEqual([]);
+    expect((await claimRow(closed.id)).flags, 'the record keeps the fact').toContain(LOSS_PROTECTION_FLAGS.slaBreached);
+  });
+
+  it('reject refuses while a payment ask stands on the case: on this rail the money may already have left', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(66, door);
+    const { claim } = await file(await atDoorOrder({ food: 800, pair, door }), 'no_show', { pair, door });
+    await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
+    const ask = (status: string, expiresAt: Date) => system(() => app.prisma.privilegedApproval.create({ data: {
+      action: PAY_ASK_ACTION, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim!.id, fingerprint: `fixture-${RUN}-${status}`, status, requestedBy: 'admin-pay', reason: 'fixture', expiresAt,
+    } }));
+    const later = new Date(Date.now() + HOUR);
+    const pending = await ask('PENDING', later);
+    await expect(system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help'))).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_OPEN' });
+    await system(() => app.prisma.privilegedApproval.update({ where: { id: pending.id }, data: { status: 'APPROVED' } }));
+    await expect(system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help'))).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_OPEN' });
+    expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    // Withdrawn or lapsed, the case can always be closed.
+    await system(() => app.prisma.privilegedApproval.update({ where: { id: pending.id }, data: { status: 'CANCELLED' } }));
+    await ask('PENDING', new Date(Date.now() - HOUR));
+    expect((await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help', undefined, { nothingSent: true }))).status).toBe('REJECTED');
+  });
+
+  // A spent approval on a refused payment is reachable: the gate marks the ask APPLIED before the handler runs, and a
+  // short line, changed evidence or a reused reference then refuses it. The row stays APPROVED, and the dialog that made
+  // the ask said "the amount you actually transferred".
+  it('an approved case never closes silently: a person states nothing was sent, and it is on the audit row, after a spent ask too', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(68, door);
+    const { claim } = await file(await atDoorOrder({ food: 750, pair, door }), 'no_show', { pair, door });
+    await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
+    await system(() => app.prisma.privilegedApproval.create({ data: {
+      action: PAY_ASK_ACTION, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim!.id, fingerprint: `fixture-${RUN}-spent`, status: 'APPLIED', requestedBy: 'admin-pay', reason: 'fixture', expiresAt: new Date(Date.now() + HOUR),
+    } }));
+    for (const opts of [undefined, {}, { nothingSent: false }]) {
+      await expect(system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help', undefined, opts))).rejects.toMatchObject({ code: 'CLAIM_CONFIRM_NOTHING_SENT' });
+    }
+    expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    const facts: Record<string, unknown>[] = [];
+    const closed = await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help', async (_tx, f) => { facts.push(f); }, { nothingSent: true }));
+    expect(closed.status).toBe('REJECTED');
+    expect(facts[0]).toMatchObject({ nothingSent: true });
+  });
+
+  it('an undecided case needs no such statement: nothing could have been sent', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(70, door);
+    const { claim } = await file(await atDoorOrder({ food: 750, pair, door }), 'no_show', { pair, door });
+    const facts: Record<string, unknown>[] = [];
+    expect((await system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help', async (_tx, f) => { facts.push(f); }))).status).toBe('REJECTED');
+    expect(facts[0]).not.toHaveProperty('nothingSent');
+  });
+
+  describe('a payment ask and a reject never pass each other', () => {
+    const settled = async (p: Promise<unknown>, ms = 400) => Promise.race([p.then(() => true, () => true), new Promise<boolean>((done) => { setTimeout(() => done(false), ms); })]);
+    const approved = async (seed: number) => {
+      const door = await ownDoor();
+      const pair = await freshPair(seed, door);
+      const { claim } = await file(await atDoorOrder({ food: 650, pair, door }), 'no_show', { pair, door });
+      await system(() => cash.approveClaim(claim!.id, 'admin-review', 'read the bundle'));
+      return claim!;
+    };
+    const payAsk = (claimId: string): Promise<ApprovalOutcome> => system(() => resolveApproval(
+      app.prisma, { cls: 'C4', capability: 'cashrules.claim.pay' } as never,
+      { method: 'PUT', routeUrl: '/cash-rules/claims/:id/paid', params: { id: claimId }, body: { reference: ref(`ASK${claimId.slice(-6)}`), amount: 650 } },
+      { userId: 'admin-pay' }, null, 'recording the payment',
+    ));
+
+    it('an ask on a closed case is refused before it is written', async () => {
+      const claim = await approved(72);
+      await system(() => cash.rejectClaim(claim.id, 'admin-review', 'no help', undefined, { nothingSent: true }));
+      await expect(payAsk(claim.id)).rejects.toMatchObject({ code: 'INVALID_CLAIM_STATE' });
+      expect(await system(() => app.prisma.privilegedApproval.count({ where: { action: PAY_ASK_ACTION, entityId: claim.id } }))).toBe(0);
+    });
+
+    it('an ask on a case that has not been approved, or came from the old rule, is refused before it is written', async () => {
+      const door = await ownDoor();
+      const pair = await freshPair(74, door);
+      const { claim } = await file(await atDoorOrder({ food: 650, pair, door }), 'no_show', { pair, door });
+      await expect(payAsk(claim!.id)).rejects.toMatchObject({ code: 'INVALID_CLAIM_STATE' });
+      await system(() => app.prisma.reimbursementClaim.update({ where: { id: claim!.id }, data: { status: 'AUTO_APPROVED' } }));
+      await expect(payAsk(claim!.id)).rejects.toMatchObject({ code: 'RLP_PERSON_MUST_DECIDE' });
+    });
+
+    it('an ask waits for a reject that holds the lock, and then is refused', async () => {
+      const claim = await approved(76);
+      let asked: Promise<boolean> | null = null;
+      await system(() => app.prisma.$transaction(async (tx) => {
+        await lockClaimPaymentAsks(tx, claim.id);
+        const ask = payAsk(claim.id).then(() => 'written', (e: { code?: string }) => e.code);
+        asked = settled(ask);
+        expect(await asked, 'the ask waits for the lock').toBe(false);
+        await tx.reimbursementClaim.update({ where: { id: claim.id }, data: { status: 'REJECTED' } });
+        asked = ask as unknown as Promise<boolean>;
+      }));
+      expect(await asked).toBe('INVALID_CLAIM_STATE');
+      expect(await system(() => app.prisma.privilegedApproval.count({ where: { action: PAY_ASK_ACTION, entityId: claim.id } }))).toBe(0);
+    });
+
+    it('a reject reads the row under its lock: a case approved while it waits still needs the statement', async () => {
+      const door = await ownDoor();
+      const pair = await freshPair(80, door);
+      const { claim } = await file(await atDoorOrder({ food: 650, pair, door }), 'no_show', { pair, door });
+      let rejected: Promise<string | undefined> | null = null;
+      await system(() => app.prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM reimbursement_claims WHERE id = ${claim!.id} FOR UPDATE`;
+        const reject = system(() => cash.rejectClaim(claim!.id, 'admin-review', 'no help')).then(() => 'closed', (e: { code?: string }) => e.code);
+        expect(await settled(reject), 'the reject waits for the row').toBe(false);
+        await tx.reimbursementClaim.update({ where: { id: claim!.id }, data: { status: 'APPROVED' } });
+        rejected = reject;
+      }));
+      expect(await rejected).toBe('CLAIM_CONFIRM_NOTHING_SENT');
+      expect((await claimRow(claim!.id)).status).toBe('APPROVED');
+    });
+
+    it('a statement made before a payment was tried does not stand: the reject is refused, and an older spent ask does not stop it', async () => {
+      const claim = await approved(82);
+      const row = (status: string, createdAt: Date, action: string, appliedAt?: Date) => system(() => app.prisma.privilegedApproval.create({ data: {
+        action, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim.id, fingerprint: `fixture-${RUN}-${action}-${createdAt.getTime()}`, status, requestedBy: 'admin-pay', reason: 'fixture', expiresAt: new Date(Date.now() + HOUR), createdAt, ...(appliedAt ? { appliedAt } : {}),
+      } }));
+      const ago = (hours: number) => new Date(Date.now() - hours * HOUR);
+      const REJECT = 'PUT /cash-rules/claims/:id/reject';
+      const spent = await row('APPLIED', ago(5), PAY_ASK_ACTION, ago(1));
+      const before = await row('APPLIED', ago(2), REJECT, ago(0));
+      const reject = (approvalId: string) => system(() => cash.rejectClaim(claim.id, 'admin-review', 'no help', undefined, { nothingSent: true, approvalId }));
+      await expect(reject(before.id)).rejects.toMatchObject({ code: 'CLAIM_PAYMENT_ASK_SINCE' });
+      expect((await claimRow(claim.id)).status).toBe('APPROVED');
+      expect(spent.id).toBeTruthy();
+      // Asked after that payment was tried: the person knew.
+      const after = await row('APPLIED', ago(0.5), REJECT, ago(0));
+      expect((await reject(after.id)).status).toBe('REJECTED');
+    });
+
+    it('a reject waits for an ask that holds the lock, and then sees it', async () => {
+      const claim = await approved(78);
+      let rejected: Promise<string | undefined> | null = null;
+      await system(() => app.prisma.$transaction(async (tx) => {
+        await lockClaimPaymentAsks(tx, claim.id);
+        await tx.privilegedApproval.create({ data: {
+          action: PAY_ASK_ACTION, cls: 'C4', capability: 'cashrules.claim.pay', entityId: claim.id, fingerprint: `fixture-${RUN}-lock`, status: 'PENDING', requestedBy: 'admin-pay', reason: 'fixture', expiresAt: new Date(Date.now() + HOUR),
+        } });
+        const reject = system(() => cash.rejectClaim(claim.id, 'admin-review', 'no help', undefined, { nothingSent: true })).then(() => 'closed', (e: { code?: string }) => e.code);
+        expect(await settled(reject), 'the reject waits for the lock').toBe(false);
+        rejected = reject;
+      }));
+      expect(await rejected).toBe('CLAIM_PAYMENT_ASK_OPEN');
+      expect((await claimRow(claim.id)).status).toBe('APPROVED');
+    });
+  });
+
+  it('the mover view carries no pay-by date, and an old automatic row reads as waiting for a person', async () => {
+    const door = await ownDoor();
+    const pair = await freshPair(52, door);
+    const { claim } = await file(await atDoorOrder({ food: 1000, pair, door }), 'no_show', { pair, door });
+    await system(() => app.prisma.reimbursementClaim.update({ where: { id: claim!.id }, data: { status: 'AUTO_APPROVED' } }));
+    const view = await system(() => moverClaims(app.prisma, { riderId: pair.riderId, driverId: null }));
+    const mine = view.claims.find((c) => c.id === claim!.id)!;
+    expect(mine).not.toHaveProperty('payoutDueBy');
+    expect(mine.underReview).toBe(true);
   });
 });

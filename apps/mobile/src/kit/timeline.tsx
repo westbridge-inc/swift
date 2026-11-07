@@ -43,6 +43,10 @@ export type TimelineStep = {
   timestamp?: string | null;
   /** Explicit override. Wins over `currentIndex` when the domain knows better. */
   state?: TimelineStepState;
+  /** [PICKUP · owner 30 Oct 2026] A DONE step that is still happening (reached, not finished — "Preparing" while
+   *  the kitchen works): drawn done (tick), but it keeps its present-tense `description`, says "Now" to a screen
+   *  reader, and does not light the leg to the next step. */
+  live?: boolean;
 };
 
 /** Server time → a short clock, or null when there is nothing truthful to show. */
@@ -64,7 +68,7 @@ function resolveState(step: TimelineStep, index: number, currentIndex?: number |
 }
 
 function describe(step: TimelineStep, state: TimelineStepState): string {
-  if (state === 'done') return step.doneDescription ?? step.description;
+  if (state === 'done' && !step.live) return step.doneDescription ?? step.description;
   if (state === 'upcoming') return step.upcomingDescription ?? step.description;
   return step.description;
 }
@@ -72,7 +76,7 @@ function describe(step: TimelineStep, state: TimelineStepState): string {
 /** The one accessibility sentence, so both orientations read identically to a
  *  screen reader even though they look nothing alike [WS-3.5]. */
 function stepLabel(step: TimelineStep, state: TimelineStepState, time: string | null): string {
-  const word = state === 'done' ? 'Complete' : state === 'current' ? 'Current' : 'Upcoming';
+  const word = state === 'done' ? (step.live ? 'Now' : 'Complete') : state === 'current' ? 'Current' : 'Upcoming';
   return `${step.label}. ${word}${time ? ` at ${time}` : ''}. ${describe(step, state)}`;
 }
 
@@ -82,7 +86,7 @@ const DOT = space['2xl'];
  *  keeps the same geometry and state grammar but swaps to inks that read on
  *  the mover cockpit's dark ground (WS-2: one component, so the dark twin
  *  can never drift from the light one). */
-function nodeStyle(state: TimelineStepState, onDark?: boolean) {
+function nodeStyle(state: TimelineStepState, onDark?: boolean, doneTone: DoneTone = 'brand') {
   if (onDark) {
     return {
       background: state === 'current' ? color.brand[500] : state === 'done' ? withAlpha(color.white, 0.15) : withAlpha(color.white, 0.06),
@@ -90,6 +94,10 @@ function nodeStyle(state: TimelineStepState, onDark?: boolean) {
       borderWidth: state === 'current' ? space.xs / 2 : StyleSheet.hairlineWidth,
       ink: state === 'upcoming' ? withAlpha(color.white, 0.45) : color.white,
     };
+  }
+  // [PICKUP · owner 30 Oct 2026] The order timeline's done steps are green (success), like the web's rail.
+  if (doneTone === 'success' && state === 'done') {
+    return { background: color.soft.success, border: color.success, borderWidth: StyleSheet.hairlineWidth, ink: color.success };
   }
   return {
     background: state === 'current' ? color.brand[500] : state === 'done' ? color.brand[50] : color.surface.sunken,
@@ -99,8 +107,8 @@ function nodeStyle(state: TimelineStepState, onDark?: boolean) {
   };
 }
 
-function Node({ step, state, onDark }: { step: TimelineStep; state: TimelineStepState; onDark?: boolean }) {
-  const s = nodeStyle(state, onDark);
+function Node({ step, state, onDark, doneTone }: { step: TimelineStep; state: TimelineStepState; onDark?: boolean; doneTone?: DoneTone }) {
+  const s = nodeStyle(state, onDark, doneTone);
   return (
     <View
       style={{
@@ -121,6 +129,16 @@ function Node({ step, state, onDark }: { step: TimelineStep; state: TimelineStep
   );
 }
 
+/** The colour of a done step: the brand tint (default) or green (`success`, the order timeline). */
+type DoneTone = 'brand' | 'success';
+
+/** The leg after a step: lit only behind a step that HAPPENED and is over (a live step's next leg is not walked). */
+function legColor(step: TimelineStep, state: TimelineStepState, onDark?: boolean, doneTone: DoneTone = 'brand') {
+  if (!(state === 'done' && !step.live)) return onDark ? withAlpha(color.white, 0.18) : color.border.subtle;
+  if (onDark) return color.brand[500];
+  return doneTone === 'success' ? color.success : color.brand[200];
+}
+
 export type TimelineProps = {
   steps: TimelineStep[];
   /** Index of the current step. Omit when each step carries its own `state`. */
@@ -128,14 +146,16 @@ export type TimelineProps = {
   orientation?: 'vertical' | 'horizontal';
   /** Dark-surface inks (the mover cockpit). Same geometry, same grammar. */
   onDark?: boolean;
+  /** Done steps in the brand tint (default) or green (`success`). */
+  doneTone?: DoneTone;
   style?: ViewStyle;
 };
 
-export function Timeline({ steps, currentIndex, orientation = 'vertical', onDark, style }: TimelineProps) {
+export function Timeline({ steps, currentIndex, orientation = 'vertical', onDark, doneTone, style }: TimelineProps) {
   if (steps.length === 0) return null;
   return orientation === 'horizontal'
-    ? <HorizontalRail steps={steps} currentIndex={currentIndex} onDark={onDark} style={style} />
-    : <VerticalTimeline steps={steps} currentIndex={currentIndex} onDark={onDark} style={style} />;
+    ? <HorizontalRail steps={steps} currentIndex={currentIndex} onDark={onDark} doneTone={doneTone} style={style} />
+    : <VerticalTimeline steps={steps} currentIndex={currentIndex} onDark={onDark} doneTone={doneTone} style={style} />;
 }
 
 /**
@@ -150,7 +170,7 @@ export function StatusRail(props: Omit<TimelineProps, 'orientation'>) {
   return <Timeline {...props} orientation="horizontal" />;
 }
 
-function VerticalTimeline({ steps, currentIndex, onDark, style }: Omit<TimelineProps, 'orientation'>) {
+function VerticalTimeline({ steps, currentIndex, onDark, doneTone, style }: Omit<TimelineProps, 'orientation'>) {
   const darkInk = (state: TimelineStepState) =>
     onDark ? { color: state === 'upcoming' ? withAlpha(color.white, 0.5) : color.white } : undefined;
   const darkMuted = onDark ? { color: withAlpha(color.white, 0.55) } : undefined;
@@ -168,17 +188,15 @@ function VerticalTimeline({ steps, currentIndex, onDark, style }: Omit<TimelineP
             style={{ flexDirection: 'row', alignItems: 'stretch' }}
           >
             <View style={{ width: space['3xl'], alignItems: 'center' }}>
-              <Node step={step} state={state} onDark={onDark} />
+              <Node step={step} state={state} onDark={onDark} doneTone={doneTone} />
               {last ? null : (
                 <View
                   style={{
                     flex: 1,
                     width: StyleSheet.hairlineWidth,
                     minHeight: space['3xl'],
-                    // The leg is lit only behind a step that HAPPENED.
-                    backgroundColor: state === 'done'
-                      ? (onDark ? color.brand[500] : color.brand[200])
-                      : (onDark ? withAlpha(color.white, 0.18) : color.border.subtle),
+                    // The leg is lit only behind a step that HAPPENED (state === 'done' && !step.live).
+                    backgroundColor: legColor(step, state, onDark, doneTone),
                   }}
                 />
               )}
@@ -201,7 +219,7 @@ function VerticalTimeline({ steps, currentIndex, onDark, style }: Omit<TimelineP
   );
 }
 
-function HorizontalRail({ steps, currentIndex, onDark, style }: Omit<TimelineProps, 'orientation'>) {
+function HorizontalRail({ steps, currentIndex, onDark, doneTone, style }: Omit<TimelineProps, 'orientation'>) {
   return (
     <View style={[{ flexDirection: 'row', alignItems: 'flex-start' }, style]}>
       {steps.map((step, i) => {
@@ -215,7 +233,7 @@ function HorizontalRail({ steps, currentIndex, onDark, style }: Omit<TimelinePro
               accessibilityLabel={stepLabel(step, state, time)}
               style={{ alignItems: 'center', width: DOT + space.lg }}
             >
-              <Node step={step} state={state} onDark={onDark} />
+              <Node step={step} state={state} onDark={onDark} doneTone={doneTone} />
               <T
                 variant="caption"
                 weight={state === 'current' ? 'semibold' : 'regular'}
@@ -242,9 +260,8 @@ function HorizontalRail({ steps, currentIndex, onDark, style }: Omit<TimelinePro
                   marginTop: DOT / 2,
                   marginHorizontal: space.xs,
                   borderRadius: radius.full,
-                  backgroundColor: state === 'done'
-                    ? (onDark ? color.brand[500] : color.brand[200])
-                    : (onDark ? withAlpha(color.white, 0.18) : color.border.subtle),
+                  // Lit only behind a finished step (state === 'done' && !step.live).
+                  backgroundColor: legColor(step, state, onDark, doneTone),
                 }}
               />
             )}

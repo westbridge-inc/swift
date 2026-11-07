@@ -262,8 +262,10 @@ afterAll(async () => {
 });
 
 describe('Spec §I — acceptance conformance baseline', () => {
-  // 1. Threshold gate — OrderService.checkout blocks an L1 cart at/over the gate.
-  it('1. an L1 customer over the ID threshold is blocked at checkout (ID_VERIFICATION_REQUIRED)', async () => {
+  // 1. Threshold gate — REMOVED by owner ruling 24 Oct 2026 ~05:55Z (no customer ID for orders at or over the
+  //    ID-gate threshold; Swift's own 8 Oct choice, not a legal duty). OrderService.checkout used to refuse an L1
+  //    cart at/over the gate; it now places it like any other.
+  it('1. an L1 customer over the old ID threshold checks out — no ID asked (owner 24 Oct 2026)', async () => {
     const category = await app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } });
     const item = await app.prisma.item.create({
       data: { vendorId, categoryId: category.id, name: 'Big Combo', basePrice: 60000 }, // well over the ~$50 (GYD) gate
@@ -275,7 +277,10 @@ describe('Spec §I — acceptance conformance baseline', () => {
     const orders = new OrderService(app.prisma, app.io);
     await expect(
       orders.checkout({ userId: customer.id, paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' }, now: new Date() }),
-    ).rejects.toMatchObject({ code: 'ID_VERIFICATION_REQUIRED' });
+    ).resolves.toBeTruthy();
+    const placed = await app.prisma.order.findMany({ where: { customerId: customer.id }, select: { totalAmount: true, status: true } });
+    expect(placed.map((o) => [Number(o.totalAmount), o.status])).toEqual([[60000, 'PENDING']]);
+    expect((await app.prisma.user.findUniqueOrThrow({ where: { id: customer.id } })).trustLevel).toBe('L1');
   });
 
   // 2. Float gate — D.3, now LIVE. A rider without enough free float to front the
@@ -336,24 +341,25 @@ describe('Spec §I — acceptance conformance baseline', () => {
   // 3 & 4. Ghost / no-show — cashRules.handover on an ARRIVED CASH order.
   // [SAFE-B] Each is filed on the evidence the server holds: the rider's own session holds a fresh fix at the
   // door (makeArrivedCashOrder) and the server issued the door photo.
-  it('3. a sub-threshold no-show → guarantee auto-approves the rider + customer is struck', async () => {
+  it('3. a sub-threshold no-show → a person decides the case + customer is struck', async () => {
     const customer = await makeCustomerUser('L1');
     const rider = await makeRiderUser();
     const order = await makeArrivedCashOrder(customer.id, rider.riderId, 3500); // under the ~$50 gate
     const photo = await issueSyntheticHandoverPhoto(app.prisma, { orderId: order.id, actorId: rider.userId, role: 'RIDER' });
     const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS, photoUrl: photo.url, sessionId: rider.sessionId });
-    expect(result.claim?.status).toBe('AUTO_APPROVED');
+    expect(result.claim?.status).toBe('PENDING_REVIEW');
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
     expect(strike).not.toBeNull();
   });
 
-  it('4. an over-threshold no-show → claim is NOT auto-covered (withheld), customer still struck', async () => {
+  it('4. an over-threshold no-show → a person decides that case too, flagged over the gate; customer still struck', async () => {
     const customer = await makeCustomerUser('L2');
     const rider = await makeRiderUser();
     const order = await makeArrivedCashOrder(customer.id, rider.riderId, 20000); // over the gate
     const photo = await issueSyntheticHandoverPhoto(app.prisma, { orderId: order.id, actorId: rider.userId, role: 'RIDER' });
     const result = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: GPS, photoUrl: photo.url, sessionId: rider.sessionId });
-    expect(result.claim).toBeNull();
+    expect(result.claim).toMatchObject({ status: 'PENDING_REVIEW' });
+    expect(result.claim?.flags).toContain('over_gate');
     const strike = await app.prisma.strike.findFirst({ where: { orderId: order.id } });
     expect(strike).not.toBeNull();
   });

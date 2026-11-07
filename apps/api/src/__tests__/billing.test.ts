@@ -310,9 +310,9 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
   });
 
   it('an admin top-up bills instantly and reinstates — vendor returns to browse', async () => {
-    // [OWNER #62 · 14 Oct] At most one week ahead (was four, 8 Oct): with
-    // GY$10,000 already held and the owed week of GY$20,000, the most an
-    // operator can record is GY$30,000 (the owed week and the coming one).
+    // [OWNER 6 Nov 2026] Up to four weeks ahead: with GY$10,000 already held
+    // and the owed week of GY$20,000, GY$30,000 (the owed week and the coming
+    // one) is well inside the limit.
     const res = await injectWithApproval(app, {
       method: 'POST',
       url: `/api/v1/admin/subscriptions/${subId}/topup`,
@@ -326,7 +326,7 @@ describe('Prepaid path, retries across days, suspension, top-up reinstatement', 
     expect(sub.failedAttempts).toBe(0);
 
     const balance = await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: subId } });
-    expect(Number(balance.balance)).toBe(10000 + 30000 - 20000); // the coming week held: one week ahead, the cap
+    expect(Number(balance.balance)).toBe(10000 + 30000 - 20000); // the coming week held
 
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
     expect(vendor.status).toBe('ACTIVE');
@@ -485,8 +485,13 @@ describe('Waivers, reminders, tier recalculation', () => {
   it('sends exactly one due-tomorrow reminder per period', async () => {
     // A corrupt legacy subscription cannot be notified, but it also must not
     // poison the batch or consume a REMINDER idempotency key.
+    // [BILL-PRO PR1] A subscription is born with exactly one owner, so the orphan is made the way
+    // it really arises: born to a rider, then its owner column set to NULL (the FK's ON DELETE SET NULL).
+    const gone = await makeUserWithSession(['MOVER'], 'MOVER');
+    const goneRider = await app.prisma.rider.create({ data: { userId: gone.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
     const orphan = await app.prisma.subscription.create({
       data: {
+        riderId: goneRider.id,
         type: 'DELIVERY_RIDER',
         status: 'ACTIVE',
         weeklyRate: 12000,
@@ -497,6 +502,7 @@ describe('Waivers, reminders, tier recalculation', () => {
       },
     });
     createdSubIds.push(orphan.id);
+    await app.prisma.subscription.update({ where: { id: orphan.id }, data: { riderId: null } });
 
     const { subId } = await makeMoverWithCardSub({
       token: 'tok_good_reminder',
@@ -512,6 +518,32 @@ describe('Waivers, reminders, tier recalculation', () => {
     await billing.sendUpcomingReminders();
     const stillOne = await app.prisma.billingEvent.count({ where: { subscriptionId: subId, type: 'REMINDER' } });
     expect(stillOne).toBe(1);
+  });
+
+  it('[FEE-STATUS] the due-tomorrow reminder names the due day as Guyana reads it and the fee in GY$', async () => {
+    // A fee due at 02:00 UTC falls due at 22:00 the evening BEFORE in Guyana (UTC-4). The reminder
+    // printed the UTC calendar date ("is due on 2026-10-14" for a fee due on the 13th in Guyana): a
+    // day late, a misleading fee claim. And "$12,000 GYD" is not how any other fee notice writes money.
+    const now = new Date();
+    // The next 00:00-03:59 UTC hour that is 1-23 h away: always the day before in Guyana, always inside the reminder window.
+    const due = [0, 1].flatMap((d) => [0, 1, 2, 3].map((h) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + d, h))))
+      .find((t) => t.getTime() > now.getTime() + HOUR && t.getTime() <= now.getTime() + 23 * HOUR)!;
+    const { subId, userId } = await makeMoverWithCardSub({ token: 'tok_good_reminder_day', due });
+    await billing.sendUpcomingReminders(now);
+    const notices = await app.prisma.billingFeeNotice.findMany({ where: { subscriptionId: subId } });
+    const inbox = await app.prisma.notification.findMany({ where: { userId } });
+    const bodies = [...notices.map((n) => String((n.payload as { body?: unknown }).body ?? '')), ...inbox.map((n) => n.body)]
+      .filter((body) => body.startsWith('Your weekly fee of'));
+    expect(bodies.length).toBeGreaterThanOrEqual(1);
+    const guyana = new Date(due.getTime() - 4 * HOUR);
+    const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const day = `${WEEKDAYS[guyana.getUTCDay()]} ${guyana.getUTCDate()} ${MONTHS[guyana.getUTCMonth()]}`;
+    for (const body of bodies) {
+      expect(body).toMatch(new RegExp(`^Your weekly fee of GY\\$12,000 is due on ${day}\\.`));
+      expect(body).not.toContain(due.toISOString().slice(0, 10));
+      expect(body).not.toMatch(/\$12,000 GYD/);
+    }
   });
 
   it('prices a vendor for the large tier from catalogue size — never from sales; the rise is held for the 14-day notice', async () => {
@@ -546,13 +578,15 @@ describe('Waivers, reminders, tier recalculation', () => {
 
     // Shrink the catalogue back under the threshold: the held rise no longer stands and is dropped.
     await app.prisma.item.updateMany({ where: { vendorId: fixture.vendorId }, data: { isAvailable: false } });
-    // [R27 · security review] The week's largest catalogue counts: listings hidden today still count
-    // for 7 days, and the lower tier must then hold on two weekly passes before the rise is dropped.
+    // [R27 · security review] The week's largest catalogue counts: listings hidden today still count for 7 days, so
+    // hiding them just before a count changes nothing. [RETIER PR-B · owner 30 Oct 2026] Once the store has been under
+    // the step for a whole week, the next weekly count cancels the waiting rise (the fee itself only comes DOWN after
+    // two counts; here it never went up).
     const t = Date.now();
     await billing.recalculateVendorTiers(new Date(t));
     expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ to: 20000 });
     await billing.recalculateVendorTiers(new Date(t + 8 * DAY));
-    expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ to: 20000 });
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: heldKey } })).toBeNull();
     await billing.recalculateVendorTiers(new Date(t + 15 * DAY));
     sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
     expect(Number(sub.weeklyRate)).toBe(15000);

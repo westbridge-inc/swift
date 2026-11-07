@@ -101,9 +101,14 @@ function MarketInner({ seed }: { seed: MarketPageSeed }) {
         </nav>
       )}
 
-      <div className="pb-3 pt-6">
-        <span className="sw-eyebrow sw-eyebrow-soft">Fresh from local sellers</span>
-        <h2 className="sw-title mt-0.5">{category && current ? current.name : 'Everything in the market'}</h2>
+      {/* [P35 · board 4a] As the phone: the feed is newest-first, so its title is "New arrivals"; a category names
+          itself, and "See all" is the way back out (absent when there is nothing to go back to). */}
+      <div className="flex items-end pb-3 pt-6">
+        <div className="flex-1">
+          <span className="sw-eyebrow sw-eyebrow-soft">Fresh from local sellers</span>
+          <h2 className="sw-title mt-0.5">{category && current ? current.name : 'New arrivals'}</h2>
+        </div>
+        {category ? <Link href="/market" replace className="sw-link text-[15px] leading-[22px]">See all</Link> : null}
       </div>
 
       {feed.isError && items.length === 0 ? (

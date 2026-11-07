@@ -12,7 +12,9 @@ export interface ServiceCategory {
   riskTier: 'HIGH' | 'LOW';
   modes: ServiceBookingMode[];
   quoteRequestsEnabled: boolean;
-  appointmentsEnabled: false;
+  /** [BOOK-P2] True only while instant booking is on, for a category whose pros take bookings
+   *  from a menu (tutor, cleaner, photographer; never a held one). Builds 9-12 do not read it. */
+  appointmentsEnabled: boolean;
   availabilityMessage: string | null;
   documents: ServiceCategoryDocument[];
 }

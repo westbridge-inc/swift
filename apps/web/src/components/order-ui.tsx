@@ -6,6 +6,7 @@ import { ChevronRight, Star } from 'lucide-react';
 import { Bone, LoadingRegion } from './customer-skeletons';
 import { Pictogram, verticalPictogram } from './glyphs';
 import { money, type Vendor } from '@/lib/customer';
+import type { BrandCard } from '@/lib/brand-card';
 import { storeHref } from '@/lib/customer-routes';
 import { photo } from '@/lib/media';
 
@@ -77,7 +78,14 @@ const SQUARE_COPY = 'flex min-w-0 flex-col gap-1 pt-2';
 /** The list card ("Nearby", search, browse): photo, name, rating · time. */
 /** What a store row reads — a browse `Vendor` and a search hit both carry it. */
 export type VendorCardData = Pick<Vendor, 'id' | 'name' | 'vendorType' | 'coverImageUrl' | 'isCurrentlyOpen' | 'displayRating'>
-  & { slug?: string | null; estimatedPrepTime?: number | null; etaMin?: number | null; distanceKm?: number | null };
+  & { slug?: string | null; estimatedPrepTime?: number | null; etaMin?: number | null; distanceKm?: number | null }
+  & { brand?: BrandCard; addressLine1?: string | null; city?: string | null };
+
+/** [CHAINS PR3] A store card as the lists send it: set `brand` when the card stands for a whole chain (its name and how
+ *  many branches); the card opens this store. */
+type BrandedVendor = Vendor & { brand?: BrandCard; addressLine1?: string | null };
+
+/** [CHAINS PR3] A list card standing for a whole chain reads as the brand; it opens the branch the server chose (the store page names it and offers the others). */
 
 export function VendorCard({ v }: { v: VendorCardData }) {
   const closed = !v.isCurrentlyOpen;
@@ -88,7 +96,7 @@ export function VendorCard({ v }: { v: VendorCardData }) {
         <Photo src={v.coverImageUrl} alt={v.name} vendorType={v.vendorType} sizes="84px" className="absolute inset-0 rounded-xl" dim={closed} />
       </span>
       <span data-store-part="copy" className={ROW_COPY}>
-        <span className={`truncate text-[15px] font-semibold leading-[22px] ${closed ? 'text-[var(--swift-muted)]' : ''}`}>{v.name}</span>
+        <span className={`truncate text-[15px] font-semibold leading-[22px] ${closed ? 'text-[var(--swift-muted)]' : ''}`}>{v.brand?.name || v.name}</span>
         {closed ? (
           <span className="sw-eyebrow sw-eyebrow-soft">Closed right now</span>
         ) : (
@@ -123,7 +131,7 @@ export function VendorGridSkeleton({ n = 6, label = 'Loading stores' }: { n?: nu
 }
 
 /** The hero card ("Recommended for you"): a wide photo, the name over it. */
-export function VendorHeroCard({ v }: { v: Vendor }) {
+export function VendorHeroCard({ v }: { v: BrandedVendor }) {
   const meta = storeMeta(v);
   return (
     <Link href={storeHref(v)} className="sw-card relative block overflow-hidden transition-transform duration-200 hover:-translate-y-0.5">
@@ -141,7 +149,7 @@ export function VendorHeroCard({ v }: { v: Vendor }) {
 }
 
 /** The square card ("Groceries & shops", "Order again"). */
-export function VendorSquareCard({ v }: { v: Vendor }) {
+export function VendorSquareCard({ v }: { v: BrandedVendor }) {
   const meta = storeMeta(v);
   return (
     <Link href={storeHref(v)} className="flex min-w-0 flex-col text-left text-[var(--swift-ink)] active:opacity-85">

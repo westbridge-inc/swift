@@ -1,5 +1,6 @@
 import { courierReceiptKey, openCourierAnswer, sealCourierAnswer } from './courier-receipt';
 import { scanUpload } from '../../lib/malware-scan';
+import { heldFolder, recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { checkoutRequestHash, persistCheckoutReceiptInTransaction, persistDispatchCommandInTransaction, drainCheckoutOutbox } from '../order/checkout-outbox';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertRoadTripInMarket } from '../rides/road-trip-market';
@@ -20,7 +21,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CashRulesService, gpsEvidence, orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { goodsSizeCarriableToday } from '../../config/vehicle-classes';
+import { parcelSizeCarriableToday } from '../../config/vehicle-classes';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
@@ -31,6 +32,11 @@ import { SupportService } from '../support/support.service';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
 import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
 import { POSTAL_REFUSAL, postalItem } from './postal-items';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
+import { courierRiderAnswer } from './courier-rider-answer';
+import { assertParcelHasRiders } from '../dispatch/delivery-capacity';
+import { DISPATCH_LOCATION_FRESH_SECONDS, DISPATCH_WIDEST_RADIUS_KM } from '../dispatch/dispatch.service';
+import { readOrderPlacementBudget, refundOrderPlacement, reserveOrderPlacement, type OrderPlacementReservation } from '../integrity/velocity';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -99,6 +105,24 @@ const collectSchema = z.object({
   outcome: z.enum(['paid', 'refused']),
   gps: z.object({ lat: z.number().min(-90).max(90), lng: z.number().min(-180).max(180) }),
 });
+/** [BUG-HUNT-2 G15] Why a parcel is coming back, in the words true for that reason: "we couldn't reach the recipient" was said
+ *  for every reason, measured with "Recipient refused the parcel". Anything else the rider typed stays out of a notice. */
+const PARCEL_RETURN_WHY: Readonly<Record<string, string>> = {
+  'Recipient unreachable': 'We couldn’t reach the recipient.',
+  'Recipient refused the parcel': 'The recipient refused the parcel.',
+  'Wrong or incomplete address': 'The address was wrong or incomplete.',
+};
+/** [BUG-HUNT-2 G12] The owner's rule, said out loud: no refund of the fee and no return fee. A recipient who was to pay never
+ *  did, so the sender paid no fee for anything to stay anywhere. */
+export function parcelReturnedBody(payer: string | null): string {
+  const fee = payer === 'RECIPIENT' ? 'There is no return fee.' : 'The delivery fee stays with the rider, who rode both ways, and there is no return fee.';
+  return `The parcel is back with you. ${fee} The rider took a proof photo: if there is a problem, contact Swift support.`;
+}
+
+export function parcelReturnWhy(reason: string): string {
+  return PARCEL_RETURN_WHY[reason.trim()] ?? 'The rider could not deliver it.';
+}
+
 const returnSchema = z.object({
   reason: z.string().trim().min(1).max(500),
   gps: pointSchema.optional(),
@@ -205,7 +229,8 @@ export default async function courierRoutes(app: FastifyInstance) {
    *  carry (the largest size while car deliveries are off) is refused at its quote and at its request, before
    *  anything is written: never booked, dispatched to nobody and stranded. */
   const assertParcelCarriable = (packageSize: string) => {
-    if (!goodsSizeCarriableToday(packageSize)) {
+    // [CARS-PLATES · owner 6 Nov 2026] cars never carry parcels, so a parcel only a car could carry is refused here.
+    if (!parcelSizeCarriableToday(packageSize)) {
       throw new AppError(409, 'PARCEL_TOO_BIG', 'No vehicle on Swift can carry a parcel this size right now. Choose a smaller size if it fits, or send it another way.');
     }
   };
@@ -280,17 +305,25 @@ export default async function courierRoutes(app: FastifyInstance) {
         { expectedFee: body.expectedFee, fee: estimate.totalFee, currencyCode: estimate.currency });
     }
 
+    await assertParcelHasRiders(app.prisma, body.pickup, customer.tenantId, body.packageSize, DISPATCH_LOCATION_FRESH_SECONDS, DISPATCH_WIDEST_RADIUS_KM);
+    const placementBudget = await readOrderPlacementBudget({ prisma: app.prisma }, userId);
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayCount = await app.prisma.order.count({ where: { placedAt: { gte: today } } });
 
     const trackingToken = randomBytes(32).toString('base64url');
+    // [FULL-LAUNCH] The order limit is charged under the customer's lock, after the replay: a racing retry of one
+    // parcel waits here and is answered by the receipt, so it spends nothing and is never told "too many orders".
+    let reservation = null as OrderPlacementReservation | null;
+    let bodyFinished = false;
     const committed = await app.prisma.$transaction(async (tx) => {
       await lockActiveOrderCustomer(tx, userId, customer.tenantId);
       // A racing retry observes the first commit under the same customer lock.
       const existing = await replay(tx);
       if (existing) return existing;
       await assertCashAllowed(tx);
+      reservation = await reserveOrderPlacement(app.redis, placementBudget);
       const order = await tx.order.create({
         data: {
           tenantId: customer.tenantId,
@@ -355,7 +388,13 @@ export default async function courierRoutes(app: FastifyInstance) {
         userId, tenantId: order.tenantId, idempotencyKey: receiptKey, requestHash,
         orderIds: [order.id], result: await sealCourierAnswer(answer, receiptContext),
       });
+      bodyFinished = true;
       return { answer, orderId: order.id };
+    }).catch(async (err: unknown) => {
+      // The body threw, so nothing committed and the reservation comes back. An error at the commit itself is an unknown
+      // outcome, and keeps the spend.
+      if (!bodyFinished) await refundOrderPlacement(app.redis, reservation);
+      throw err;
     });
 
     // The existing worker sweep recovers a crash or outage after commit.
@@ -392,7 +431,8 @@ export default async function courierRoutes(app: FastifyInstance) {
     // licence to keep watching the courier.
     // [S1 response-shaping] the sender's past parcel is not a licence to keep
     // the courier's coordinates — nor their personal phone.
-    return { success: true, data: { ...redactCounterpartyPhone(redactLiveLocation(order)), courierTrackingToken: null } };
+    // [O-1] And a bridge-aware client is sent the courier's number not even while live.
+    return { success: true, data: { ...withCounterpartPhones(request, redactCounterpartyPhone(redactLiveLocation(order))), courierTrackingToken: null } };
   });
 
   /** Sender controls rotate/revoke without recovering bearer secrets. */
@@ -525,8 +565,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
-    const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}/pickup` });
+    const scan = await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
+    const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: heldFolder(scan, `courier-proof/${id}/pickup`) });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'courier-proof', fileKey: url, buffer, storage });
     // The pickup mirror of [REPORT-016 F-016-04]: record the SERVER-issued URL
     // and the rider it was issued to. /pickup-proof exact-matches it, so pickup
     // proof is proof of an actual upload by this rider, not any string that
@@ -588,7 +629,8 @@ export default async function courierRoutes(app: FastifyInstance) {
           } });
         },
       });
-    return { success: true, data: updated };
+    // [F20] The rider's answer follows the O-1 counterpart-phone rule (courier-rider-answer.ts).
+    return { success: true, data: courierRiderAnswer(request, updated) };
   });
 
   /** POST /order/:id/proof-photo — the assigned rider uploads the delivery photo
@@ -682,11 +724,11 @@ export default async function courierRoutes(app: FastifyInstance) {
           userId: order.customerId,
           type: 'ORDER_UPDATE',
           title: 'Parcel delivered',
-          body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'} — proof photo captured.`,
+          body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'}. The rider took a proof photo: if there is a problem, contact Swift support and they can check it.`,
           data: { orderId: id, status: 'DELIVERED' },
         }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
       }
-      return { success: true, data: { ...result.order, claim: result.claim ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags } : null } };
+      return { success: true, data: { ...courierRiderAnswer(request, result.order), claim: result.claim ? { id: result.claim.id, status: result.claim.status, amount: Number(result.claim.amount), flags: result.claim.flags } : null } };
     }
     // Proof metadata, DELIVERED, rider release/count, float, earnings, and the
     // immutable log commit atomically. A retry after any pre-commit failure
@@ -717,11 +759,11 @@ export default async function courierRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Parcel delivered',
-      body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'} — proof photo captured.`,
+      body: `${order.orderNumber} was handed to ${order.courierRecipientName ?? 'the recipient'}. The rider took a proof photo: if there is a problem, contact Swift support and they can check it.`,
       data: { orderId: id, status: 'DELIVERED' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier proof notification failed after commit'));
 
-    return { success: true, data: { ...updated, totalDeliveries: updated.rider?.totalDeliveries ?? null } };
+    return { success: true, data: { ...courierRiderAnswer(request, updated), totalDeliveries: updated.rider?.totalDeliveries ?? null } };
   });
 
   /** [E17] POST /order/:id/return — the assigned mover (or support on their
@@ -778,7 +820,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Parcel coming back',
-      body: "We couldn't reach the recipient — the parcel is on its way back to you.",
+      body: `${parcelReturnWhy(body.reason)} The parcel is on its way back to you.`,
       data: { orderId: id, status: 'RETURNING' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return notification failed after commit'));
     try {
@@ -786,7 +828,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier return socket publication failed after commit');
     }
-    return { success: true, data: updated };
+    return { success: true, data: courierRiderAnswer(request, updated) };
   });
 
   /** [E17] POST /order/:id/return-proof — the return photo (magic-byte checked,
@@ -799,7 +841,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     if (!rider) throw new NotFoundError('Rider');
     const order = await app.prisma.order.findFirst({
       where: { id, orderType: 'COURIER', riderId: rider.id },
-      select: { id: true, status: true, orderNumber: true, customerId: true },
+      select: { id: true, status: true, orderNumber: true, customerId: true, courierPayer: true },
     });
     if (!order) throw new NotFoundError('CourierOrder', id);
     if ((TERMINAL_ORDER_STATUSES as string[]).includes(order.status)) {
@@ -846,8 +888,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
     }
 
-    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
-    const { url } = await storage.upload({ buffer, filename, mimeType: mimetype, folder: `courier-proof/${id}/return` });
+    const scan = await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
+    const { url } = await storage.upload({ buffer, filename, mimeType: mimetype, folder: heldFolder(scan, `courier-proof/${id}/return`) });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'courier-proof', fileKey: url, buffer, storage });
 
     const { order: updated } = await orderService.transitionOrderAtomically({
       orderId: id,
@@ -874,9 +917,19 @@ export default async function courierRoutes(app: FastifyInstance) {
       userId: order.customerId,
       type: 'ORDER_UPDATE',
       title: 'Parcel returned',
-      body: 'The parcel was returned to you — return proof captured.',
+      body: parcelReturnedBody(order.courierPayer),
       data: { orderId: id, status: 'RETURNED' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return-proof notification failed after commit'));
-    return { success: true, data: updated };
+    // [BUG-HUNT-2 G12] The rider rode both ways and has the fee in their hand, on no record they can see.
+    await notifications.send({
+      userId: request.user.userId,
+      type: 'ORDER_UPDATE',
+      title: 'Return recorded',
+      body: `${order.orderNumber} is closed. Any fee you collected for it is yours. A returned parcel does not show in Earnings.`,
+      audience: 'earner',
+      data: { orderId: id, status: 'RETURNED' },
+      dedupeKey: `parcel-returned:rider:${id}`,
+    }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return-proof rider notice failed after commit'));
+    return { success: true, data: courierRiderAnswer(request, updated) };
   });
 }

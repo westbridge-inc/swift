@@ -3,6 +3,7 @@ import { safeMmgNumber } from '../../utils/mmg-number';
 import { offeredStoreMmgPayUrl } from '../../utils/store-mmg';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure, type DisclosureBlock } from './storefront-disclosure';
+import { FOOD_HANDLER_CERT_DOC_TYPE } from './doc-registry';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
@@ -31,6 +32,9 @@ export interface StorefrontSeller {
   payment: { cash: true; storeMmg: boolean };
   refundRule: string | null;
   statutoryRights: string;
+  /** [FOOD-PERMIT · owner 24 Oct 2026] The trust badge: a current food handler's certificate is on file (a VALID record
+   *  in the compiled block). Optional for a registered restaurant, required of a home cook; never its number. */
+  foodHandlerCertificate: boolean;
 }
 
 /** Project the seller block from a compiled public disclosure and the store's own payment and refund facts. */
@@ -49,6 +53,7 @@ export function storefrontSeller(
     payment: { cash: true, storeMmg: safeMmgNumber(store.mmgNumber) !== null || offeredStoreMmgPayUrl(store.mmgPayUrl) !== null },
     refundRule,
     statutoryRights: STATUTORY_RIGHTS_SENTENCE,
+    foodHandlerCertificate: disclosure.licences.some((licence) => licence.docType === FOOD_HANDLER_CERT_DOC_TYPE),
   };
 }
 

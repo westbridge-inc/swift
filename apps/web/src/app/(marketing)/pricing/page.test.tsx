@@ -1,11 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@/lib/api';
 import PricingPage from './page';
 
 // The real config refuses to load while company details are placeholders; the
-// page only needs a support address from it.
-vi.mock('@/site.config', () => ({ site: { supportEmail: 'support@example.test' }, showAppStoreBadges: false }));
+// page only needs the support and sales addresses from it.
+vi.mock('@/site.config', () => ({ site: { supportEmail: 'support@example.test', salesEmail: 'sales@example.test' } }));
 
 // ---------------------------------------------------------------------------
 // The public price list must quote each partner the rate they will be billed.
@@ -40,15 +42,18 @@ const GY = {
   vendors: {
     service: 8000,
     catalogue: [
-      { minItems: 0, tier: 'small', rate: 15000 },
-      { minItems: 1000, tier: 'large', rate: 20000 },
-      { minItems: 10000, tier: 'department', rate: 60000 },
+      { minItems: 0, tier: 'small', rate: 15000, trialDays: 14 },
+      { minItems: 1000, tier: 'large', rate: 20000, trialDays: 14 },
+      // [DEPT-PRICE · owner 29 Oct 2026] 45,000 (was 60,000); a NEW department-store signup gets 7 days free.
+      { minItems: 10000, tier: 'department', rate: 45000, trialDays: 7 },
     ],
   },
   // No multi-store pricing (owner, 13 Oct 2026): the server serves null.
   franchise: null,
+  // [RETIER PR-C] what the server sends while its weekly re-tier is off (WEEKLY_RETIER_ON = false)
+  catalogueRetier: { on: false, noticeDays: 14 } as { on?: unknown; noticeDays?: unknown } | undefined,
   // What an older page reads; this page must not.
-  weekly: { mover: 8000, moverHeavy: 8000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 60000, departmentVendor: 60000 },
+  weekly: { mover: 8000, moverHeavy: 8000, serviceVendor: 8000, smallVendor: 15000, largeVendor: 45000, departmentVendor: 45000 },
 };
 
 let pricing: unknown;
@@ -110,16 +115,38 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(within(cardOf('Services')).getByText(/8,000/)).toBeTruthy();
     const small = cardOf('Businesses');
     expect(within(small).getByText(/15,000/)).toBeTruthy();
-    expect(small.textContent).toContain('fewer than 1,000 active items');
+    expect(small.textContent).toContain('fewer than 1,000 items');
     const large = cardOf('Large catalogues');
     expect(within(large).getByText(/20,000/)).toBeTruthy();
-    expect(large.textContent).toContain('1,000–9,999 active items');
+    expect(large.textContent).toContain('1,000–9,999 items');
     const department = cardOf('Department stores');
-    expect(within(department).getByText(/60,000/)).toBeTruthy();
-    expect(department.textContent).toContain('10,000+ active items');
+    expect(within(department).getByText(/45,000/)).toBeTruthy();
+    expect(department.textContent).toContain('10,000+ items');
   });
 
-  it('shows no multi-store discount — every store pays its own tier, even if an older server still sends the old rule', async () => {
+  it('[DEPT-PRICE] each catalogue card shows its own free trial: 7 days for a new department store, 14 for the others', async () => {
+    await renderPage();
+    const department = cardOf('Department stores').textContent!;
+    expect(department).toContain('7-day free trial');
+    expect(department).toContain('A new store with this many items when Swift approves it gets 7 days free.');
+    expect(department).not.toContain('14-day');
+    for (const title of ['Businesses', 'Large catalogues', 'Services', 'Taxi drivers', 'Delivery & courier riders']) {
+      const card = cardOf(title).textContent!;
+      expect(card, title).toContain('14-day free trial');
+      expect(card, title).not.toContain('when Swift approves it gets');
+    }
+  });
+
+  it('[DEPT-PRICE] a server that predates the per-step trial, or sends a value that is not whole days, shows the list\'s own trial', async () => {
+    for (const trialDays of [undefined, 0, 2.5, '7']) {
+      pricing = { ...GY, vendors: { ...GY.vendors, catalogue: GY.vendors.catalogue.map((band) => ({ ...band, trialDays })) } };
+      await renderPage();
+      expect(cardOf('Department stores').textContent, String(trialDays)).toContain('14-day free trial');
+      cleanup();
+    }
+  });
+
+  it('shows no multi-store discount — every store pays its own fee, even if an older server still sends the old rule', async () => {
     pricing = { ...GY, franchise: { minLocations: 5, discountPct: 50 } };
     await renderPage();
     expect(screen.queryByRole('heading', { name: 'Franchises' })).toBeNull();
@@ -132,12 +159,58 @@ describe('public pricing page — every partner reads their own weekly fee', () 
 
   it('says every store pays its own rate only when the server confirms there is no multi-store pricing', async () => {
     await renderPage();
-    expect(document.body.textContent).toContain('Every store is its own account and pays the rate for its own catalogue, however many stores its owner runs.');
+    // [WEBSITE 30 Oct] Shorter words, the same promise.
+    expect(document.body.textContent).toContain('Each store pays its own weekly fee, however many stores its owner runs.');
     cleanup();
     // A server from before multi-store pricing existed sends no key at all.
     pricing = { ...GY, franchise: undefined };
     await renderPage();
     expect(document.body.textContent).toContain('however many stores its owner runs');
+  });
+
+  // [RETIER PR-A · owner 30 Oct 2026] A new store's fee is born when Swift approves it, on its own catalogue's step,
+  // and its owner ticks that exact fee first. [R27] The weekly re-tier is OFF on the server
+  // (apps/api/src/modules/billing/weekly-retier.ts): after that nothing moves it. The page must not say it moves on its own.
+  it('[RETIER PR-A · R27] a new store is priced for its catalogue when approved and ticks that fee first; nothing moves it after', async () => {
+    await renderPage();
+    const page = document.body.textContent!;
+    expect(page).not.toMatch(/automatic/i);
+    expect(page).not.toMatch(/moves? between (catalogue )?(tiers|rates)/i);
+    expect(page).not.toMatch(/every new store starts on/i);
+    expect(page).toContain('When Swift approves a new store, its weekly fee is the rate for the items it has then, counting items taken off sale, changed or removed in the last 7 days (a services business pays the Services rate). '
+      + 'The store sees that exact fee, and its owner ticks it before anything is charged; '
+      + 'after that, Swift does not move a store to another rate as its items change, and a rate agreed with Swift stays as agreed.');
+  });
+
+  it('[RETIER PR-C] the server switched the re-tier on: a higher rate told at least 14 days ahead with how to stop it; a lower one after two weekly counts', async () => {
+    pricing = { ...GY, catalogueRetier: { on: true, noticeDays: 14 } };
+    await renderPage();
+    const page = document.body.textContent!;
+    expect(page).toContain('The store sees that exact fee, and its owner ticks it before anything is charged; '
+      + 'after that, Swift counts each store\'s items every week and tells the store in the app at least 14 days before a higher rate applies, with how to stop it '
+      + '(a lower rate applies after two weekly counts a week apart, with a notice), and a rate agreed with Swift stays as agreed.');
+    expect(page).not.toContain('does not move a store');
+    expect(page).not.toMatch(/automatic/i);
+  });
+
+  it('[RETIER PR-C] a server that says nothing about the re-tier (older, malformed): no claim either way', async () => {
+    for (const catalogueRetier of [undefined, { on: 'yes' }, { on: true, noticeDays: 3 }]) {
+      pricing = { ...GY, catalogueRetier };
+      await renderPage();
+      const page = document.body.textContent!;
+      expect(page, JSON.stringify(catalogueRetier)).toContain('its owner ticks it before anything is charged, and a rate agreed with Swift stays as agreed.');
+      expect(page, JSON.stringify(catalogueRetier)).not.toContain('after that');
+      cleanup();
+    }
+  });
+
+  // [R27 · RETIER PR-C] The later-moves words are the server's, never the page's: the API serves `catalogueRetier.on`
+  // from its own switch (WEEKLY_RETIER_ON), so switching the re-tier on (the owner's go) changes this page with it.
+  it('[R27 · RETIER PR-C] the sentence follows the server\'s switch: the API serves it from WEEKLY_RETIER_ON, the page reads only that', () => {
+    const api = (...p: string[]) => readFileSync(join(__dirname, '..', '..', '..', '..', '..', 'api', 'src', 'modules', ...p), 'utf8');
+    expect(api('billing', 'weekly-retier.ts')).toMatch(/^export const WEEKLY_RETIER_ON = (false|true);$/m);
+    expect(api('auth', 'auth.routes.ts')).toContain('catalogueRetier: { on: WEEKLY_RETIER_ON, noticeDays: FEE_RISE_NOTICE_DAYS }');
+    expect(readFileSync(join(__dirname, 'page.tsx'), 'utf8')).toContain('const retier = catalogueRetierOf(list.pricing);');
   });
 
   it('prints the server boundaries, not copy frozen into the page', async () => {
@@ -146,8 +219,8 @@ describe('public pricing page — every partner reads their own weekly fee', () 
       vendors: { service: 8000, catalogue: [{ minItems: 0, tier: 'small', rate: 15000 }, { minItems: 500, tier: 'large', rate: 20000 }] },
     };
     await renderPage();
-    expect(cardOf('Businesses').textContent).toContain('fewer than 500 active items');
-    expect(cardOf('Large catalogues').textContent).toContain('500+ active items');
+    expect(cardOf('Businesses').textContent).toContain('fewer than 500 items');
+    expect(cardOf('Large catalogues').textContent).toContain('500+ items');
     expect(document.body.textContent).not.toContain('1,000');
     expect(screen.queryByRole('heading', { name: 'Department stores' })).toBeNull();
   });
@@ -169,6 +242,31 @@ describe('public pricing page — every partner reads their own weekly fee', () 
   });
 });
 
+// [WEBSITE 30 Oct · owner] Plain words: short sentences, no em dash, and the note under the cards stays short.
+describe('[WEBSITE] the pricing page reads plainly', () => {
+  it('says the model in one short line and uses no em dash anywhere', async () => {
+    await renderPage();
+    const page = document.body.textContent!;
+    expect(page).toContain('One flat weekly fee and no commission. Partners keep 100% of every sale, fare and tip, and customers pay Swift nothing.');
+    expect(page).not.toContain('—');
+  });
+
+  it('the note under the cards is three short sentences at most', async () => {
+    await renderPage();
+    const note = screen.getByText(/When Swift approves a new store/);
+    const sentences = (note.textContent ?? '').split(/(?<=\.)\s+/).filter(Boolean);
+    expect(sentences.length).toBeLessThanOrEqual(3);
+    expect(note.textContent).not.toMatch(/taxi rate whatever the vehicle/);
+  });
+
+  it('the fallback, with no rates, has no em dash either', async () => {
+    pricing = null;
+    await renderPage();
+    expect(document.body.textContent).toMatch(/could not load this week/);
+    expect(document.body.textContent).not.toContain('—');
+  });
+});
+
 // [WEB-LAUNCH-CHECK F5] The price cards were h3 straight under the page's h1:
 // a screen reader's heading list skipped a level. No heading may skip one.
 describe('[WEB-LAUNCH-CHECK F5] the pricing page outline', () => {
@@ -177,5 +275,95 @@ describe('[WEB-LAUNCH-CHECK F5] the pricing page outline', () => {
     const levels = screen.getAllByRole('heading').map((h) => Number(h.tagName.slice(1)));
     expect(levels[0]).toBe(1);
     levels.forEach((level, i) => { if (i > 0) expect(level - levels[i - 1]!, `heading ${i}: h${levels[i - 1]} -> h${level}`).toBeLessThanOrEqual(1); });
+  });
+});
+
+// [ENTERPRISE-PAGE · owner 31 Oct 2026] A short "Chains and enterprise" block with a Contact sales button. It says only
+// what main does (partner.service addBranch + branchLimit, billing/chain-checkout.ts, billing/chain-statement.ts,
+// vendor/chain-deal.ts + billing/fee-rise-notice.ts) and quotes no chain rate: the rate is negotiated.
+describe('[ENTERPRISE-PAGE] chains and enterprise', () => {
+  const block = () => screen.getByRole('heading', { level: 2, name: 'Chains and enterprise' }).closest('section')!;
+
+  it('says what a chain gets today, in plain words', async () => {
+    await renderPage();
+    const text = block().textContent!;
+    expect(text).toContain('One login runs all your branches.');
+    expect(text).toContain('A person at Swift checks and approves each new branch before it goes live.');
+    // [REVIEW-F #2267 S4-1] chain-checkout takes only the branch fees DUE now (a branch in its free trial or not yet
+    // due is left out), so the page never says "all your branches".
+    expect(text).toContain('Pay every branch fee that is due in one MMG checkout, or pay each branch on its own.');
+    expect(text).not.toMatch(/all (of )?your branches (in|at) once|pay all your branches/i);
+    expect(text).toContain('A monthly fee statement lists every branch, the weeks it paid and its receipts.');
+    expect(text).toContain('Swift agrees a weekly rate per branch with you. A branch never pays more than its own fee, and the rate ends or goes up only after 14 days\' notice.');
+    expect(text).toContain('Need more branches than one account allows? Contact sales.');
+  });
+
+  it('quotes no chain rate and promises no discount: the rate is negotiated', async () => {
+    await renderPage();
+    const text = block().textContent!;
+    expect(text).not.toMatch(/\$|GYD|%|discount|automatic|franchise/i);
+    expect(text).not.toContain('—');
+    // The only number is the notice period the fee-change flow enforces.
+    expect(text.match(/\d+/g)).toEqual(['14']);
+  });
+
+  it('the Contact sales button mails the sales address from the site config with a subject', async () => {
+    await renderPage();
+    const button = within(block()).getByRole('link', { name: 'Contact sales' });
+    expect(button.getAttribute('href')).toBe('mailto:sales@example.test?subject=Chain%20%2F%20enterprise%20enquiry');
+    expect(block().textContent).toContain('sales@example.test');
+  });
+
+  it('shows even when this week\'s rates could not be loaded', async () => {
+    pricing = null;
+    await renderPage();
+    expect(within(block()).getByRole('link', { name: 'Contact sales' })).toBeTruthy();
+  });
+
+  it('the sales address lives once, in the site config next to support', () => {
+    const config = readFileSync(join(__dirname, '..', '..', '..', 'site.config.ts'), 'utf8');
+    expect(config).toMatch(/^ {2}salesEmail: 'sales@swiftgy\.com',$/m);
+    const page = readFileSync(join(__dirname, 'page.tsx'), 'utf8');
+    expect(page).not.toContain('sales@swiftgy.com');
+    expect(page).toContain('site.salesEmail');
+  });
+});
+
+// [ENTERPRISE-CARD · owner 31 Oct 2026] The price list ends with an "Enterprise and chains" card in the same style:
+// a custom rate, no figure, no discount (decision 49), and no free-trial line (a chain's branches share the owner's
+// trial end date or pay from day 1, so "14-day free trial" would not be true for them).
+describe('[ENTERPRISE-CARD] the last price card is enterprise and chains', () => {
+  const card = () => cardOf('Enterprise and chains');
+
+  it('comes last in the price list, after Department stores, with "Custom rate" where the price goes', async () => {
+    await renderPage();
+    const titles = within(screen.getByRole('heading', { level: 2, name: 'Weekly rates' }).parentElement!)
+      .getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
+    expect(titles.slice(-2)).toEqual(['Department stores', 'Enterprise and chains']);
+    expect(card().querySelector('p')!.textContent).toBe('Custom rate');
+    expect(card().textContent).toContain('For chains and large groups with several branches. Swift agrees a weekly rate per branch with you.');
+  });
+
+  it('quotes no rate, promises no discount and shows no free-trial line', async () => {
+    await renderPage();
+    const text = card().textContent!;
+    expect(text).not.toMatch(/\$|GYD|\d|%|discount|week\b|free trial/i);
+    expect(text).not.toContain('—');
+  });
+
+  it('its Contact sales button mails the same address and subject as the chains section', async () => {
+    await renderPage();
+    const button = within(card()).getByRole('link', { name: 'Contact sales' });
+    expect(button.getAttribute('href')).toBe('mailto:sales@example.test?subject=Chain%20%2F%20enterprise%20enquiry');
+    // The chains section below is still there, with its own button.
+    const section = screen.getByRole('heading', { level: 2, name: 'Chains and enterprise' }).closest('section')!;
+    expect(within(section).getByRole('link', { name: 'Contact sales' })).toBeTruthy();
+  });
+
+  it('shows with the price list, like the catalogue cards; with no rates there is no card (the chains section still shows)', async () => {
+    pricing = null;
+    await renderPage();
+    expect(screen.queryByRole('heading', { name: 'Enterprise and chains' })).toBeNull();
+    expect(screen.getByRole('heading', { level: 2, name: 'Chains and enterprise' })).toBeTruthy();
   });
 });

@@ -81,6 +81,7 @@ vi.mock('../../components/MmgPayLinkCard', async () => {
   return { MmgPayLinkCard: () => R.createElement('section', { 'data-card': 'mmg-pay-link' }, 'Your MMG pay link') };
 });
 vi.mock('../../components/StandingCard', () => ({ StandingCard: () => null }));
+vi.mock('./DeliveriesTooCard', () => ({ DeliveriesTooCard: () => null })); // [CARS-DELIVER] its own test: MoverAccount.deliveriesToo
 vi.mock('../../components/billing/BillingSurfaces', () => ({ BillingStatusBlock: () => null, BillingStopControl: () => null }));
 vi.mock('../../components/RoleSwitcherSheet', () => ({ RoleSwitcherSheet: () => null }));
 vi.mock('../../components/onboarding/WentLive', () => ({ useWentLive: () => ({ celebrate: false, dismiss: () => undefined }), WentLivePopup: () => null }));
@@ -92,7 +93,7 @@ vi.mock('../../hooks', () => {
     useActiveJob: () => ({ data: null }), useBroadcastLocation: () => undefined,
     useMoverKind: () => ({ kind: 'DRIVER', profile: fx.profile }),
     useVerificationStatus: () => ({ data: { roleVerified: true }, isLoading: false }),
-    useMoverStanding: () => read, useEarningsSummary: () => read, useMoverSubscription: () => read,
+    useActiveJobs: () => ({ legs: [] }), useMoverStanding: () => read, useEarningsSummary: () => read, useMoverSubscription: () => read,
     useSetMoverBillingMethod: () => write, useUploadVehiclePhoto: () => write,
   };
 });

@@ -36,22 +36,36 @@ export interface ReasonCaller {
 export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── People ─────────────────────────────────────────────────────────────
   { route: 'PUT /users/:id/suspend', helper: 'suspendUser', args: ['usr_1'] },
+  { route: 'PUT /users/:id/name', helper: 'changeLegalName', args: ['usr_1', 'First', 'Last'], requiredBodyKeys: ['firstName', 'lastName'] },
+  { route: 'POST /users/:id/phone-change', helper: 'startPhoneChange', args: ['usr_1', '+5926001234'], requiredBodyKeys: ['phone'] },
+  { route: 'POST /users/:id/phone-change/confirm', helper: 'confirmPhoneChange', args: ['usr_1', '123456'], requiredBodyKeys: ['code'] },
+  { route: 'POST /users/:id/mover-plan/allow-move', helper: 'allowMoverPlanMove', args: ['usr_1'] },
+  { route: 'POST /service-jobs/:id/close', helper: 'closeServiceJob', args: ['job_1'] },
   { route: 'PUT /users/:id/unsuspend', helper: 'unsuspendUser', args: ['usr_1'] },
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b), Q1] a person lifts a strike restriction
+  { route: 'POST /users/:id/strike-restriction/lift', helper: 'liftStrikeRestriction', args: ['usr_1'] },
   { route: 'PUT /users/:id/ban', helper: 'banUser', args: ['usr_1'] },
   { route: 'POST /support/:id/complete-account-closure', helper: 'completeAccountClosure', args: ['tkt_1'] },
 
   // ── Vendors and movers ─────────────────────────────────────────────────
   { route: 'PUT /vendors/:id/approve', helper: 'approveVendor', args: ['vnd_1'] },
   { route: 'PUT /vendors/:id/suspend', helper: 'suspendVendor', args: ['vnd_1'] },
+  { route: 'PUT /vendors/:id/type', helper: 'changeStoreType', args: ['vnd_1', 'STORE'], requiredBodyKeys: ['vendorType'] },
+  { route: 'PUT /vendors/:id/name', helper: 'changeStoreName', args: ['vnd_1', 'New Name'], requiredBodyKeys: ['name'] },
   { route: 'PUT /riders/:id/verify-documents', helper: 'verifyRiderDocuments', args: ['rdr_1'] },
   { route: 'PUT /drivers/:id/verify-documents', helper: 'verifyDriverDocuments', args: ['drv_1'] },
   { route: 'PUT /drivers/:id/ride-class', helper: 'setDriverRideClass', args: ['drv_1', 'COMFORT'], requiredBodyKeys: ['rideClass'] },
 
   // ── Orders ─────────────────────────────────────────────────────────────
   { route: 'PUT /orders/:id/cancel', helper: 'cancelOrder', args: ['ord_1', { refund: false }] },
+  { route: 'POST /orders/:id/end-ride', helper: 'endStuckRide', args: ['ord_1'] },
+  { route: 'POST /finance/cash-settlements/:id/close', helper: 'closeCashSettlement', args: ['cs_1'] },
   { route: 'PUT /orders/:id/refund-settled', helper: 'settleOrderRefund', args: ['ord_1', 'REF-1', 500], requiredBodyKeys: ['reference', 'amount'] },
   { route: 'POST /orders/:id/payment-claim/resolve', helper: 'resolvePaymentDispute', args: ['ord_1', { resolution: 'CUSTOMER_PAID', expectedClaimRevision: 2 }],
     requiredBodyKeys: ['resolution', 'note', 'expectedClaimRevision'], reply: { orderId: 'ord_1', resolution: 'CUSTOMER_PAID', mismatch: false } },
+  { route: 'POST /orders/:id/close-store-refund', helper: 'closeStoreRefund', args: ['ord_1', 2], requiredBodyKeys: ['expectedClaimRevision'], reply: { orderId: 'ord_1', status: 'CANCELLED' } },
+  { route: 'POST /mmg-refunds/sends/:id/resolve', helper: 'resolveMmgRefund', args: ['snd_1', true, 'Checked the statement'], requiredBodyKeys: ['received', 'note'], reply: { sendId: 'snd_1', received: true } },
+  { route: 'POST /mmg-refunds/:id/void', helper: 'voidMmgRefund', args: ['obl_1', 'Settled in cash'], requiredBodyKeys: ['note'], reply: { id: 'obl_1', status: 'VOIDED' } },
   { route: 'POST /orders/:id/door-cash-return/resolve', helper: 'resolveHeldDoorCash', args: ['ord_1'], reply: { orderId: 'ord_1', doorCashReturn: { status: 'RESOLVED' } } },
 
   // ── Moderation ─────────────────────────────────────────────────────────
@@ -64,6 +78,8 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
 
   // ── Ads ────────────────────────────────────────────────────────────────
   { route: 'PUT /ads/advertisers/:id/approve', helper: 'approveAdvertiser', args: ['adv_1'] },
+  { route: 'PUT /ads/link-domains/:id/approve', helper: 'approveLinkDomain', args: ['dom_1'] },
+  { route: 'PUT /ads/link-domains/:id/reject', helper: 'rejectLinkDomain', args: ['dom_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /ads/advertisers/:id/reject', helper: 'rejectAdvertiser', args: ['adv_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /ads/advertisers/:id/suspend', helper: 'suspendAdvertiser', args: ['adv_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /ads/advertisers/:id/reinstate', helper: 'reinstateAdvertiser', args: ['adv_1'] },
@@ -72,6 +88,14 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'PUT /verification/:id/approve', helper: 'approveDoc', args: ['doc_1', undefined] },
   { route: 'PUT /verification/:id/reject', helper: 'rejectDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
   { route: 'PUT /verification/:id/revoke', helper: 'revokeDoc', args: ['doc_1'], requiredBodyKeys: ['reason'] },
+  // [STORE-VAT · owner O-5] A store's VAT: the reviewer types what the GRA certificate says; a refusal or withdrawal says why.
+  { route: 'POST /store-vat/:vendorId/approve', helper: 'approveStoreVat',
+    args: ['vnd_1', { certificateDocId: 'doc_1', vatNumber: '012345678', registeredName: 'Sample Shop Ltd', effectiveFrom: '2026-01-01', nameMatchesStore: true }],
+    requiredBodyKeys: ['certificateDocId', 'vatNumber', 'registeredName', 'effectiveFrom', 'nameMatchesStore'] },
+  { route: 'POST /store-vat/:vendorId/reject', helper: 'rejectStoreVat', args: ['vnd_1'], requiredBodyKeys: ['reason'] },
+  { route: 'POST /store-vat/:vendorId/revoke', helper: 'revokeStoreVat', args: ['vnd_1'], requiredBodyKeys: ['reason'] },
+  // [VAT-DOCS · owner ruling 31 Oct 2026] An approved store's change of price choice: approve or refuse what the reviewer saw.
+  { route: 'POST /store-vat/:vendorId/mode', helper: 'decideStoreVatMode', args: ['vnd_1', { approve: false, mode: 'PRICES_INCLUDE_VAT' }], requiredBodyKeys: ['approve', 'mode', 'reason'] },
   { route: 'PUT /staff/:userId/document-reviewer', helper: 'setDocumentReviewer', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
   { route: 'PUT /staff/:userId/catalogue-approver', helper: 'setCatalogueApprover', args: ['usr_1', true], requiredBodyKeys: ['grant'] },
 
@@ -88,6 +112,13 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   // ── Finance, subscriptions, cash ───────────────────────────────────────
   { route: 'PUT /finance/settlements/:id/process', helper: 'processSettlement', args: ['set_1', undefined] },
   { route: 'PUT /subscriptions/:id/waive-fee', helper: 'waiveSubscriptionFee', args: ['sub_1'], requiredBodyKeys: ['reason'] },
+  { route: 'PUT /vendor-owners/:id/deal-rate', helper: 'setChainDeal', args: ['own_1', 14000], requiredBodyKeys: ['weeklyRate', 'reason'] },
+  { route: 'PUT /vendor-owners/:id/brand', helper: 'setChainBrand', args: ['own_1', 'Royal Castle'], requiredBodyKeys: ['brandName', 'reason'] },
+  { route: 'PUT /vendors/:id/brand-listing', helper: 'setBranchListedAlone', args: ['ven_1', true], requiredBodyKeys: ['alone', 'reason'] },
+  { route: 'POST /users/:id/verified-deletion', helper: 'deleteVerifiedRequest', args: ['usr_1', { identityCheck: 'OWNER_CHECKED', identityNote: 'Owner spoke to the person' }], requiredBodyKeys: ['identityCheck', 'identityNote', 'reason'] },
+  { route: 'POST /vendor-owners/:id/deal-change', helper: 'changeChainDeal', args: ['own_1', { kind: 'RAISE', weeklyRate: 17000 }], requiredBodyKeys: ['kind', 'reason'] },
+  { route: 'DELETE /vendor-owners/:id/deal-change', helper: 'withdrawChainDealChange', args: ['own_1'] },
+  { route: 'POST /subscriptions/:id/in-person-payment', helper: 'recordInPersonFeePayment', args: ['sub_1', { method: 'CASH', amount: 1000, reference: 'RCPT-1', receipt: 'PRINTED' }], requiredBodyKeys: ['method', 'amount', 'reference'] },
   { route: 'POST /subscriptions/:id/topup', helper: 'topUpSubscription', args: ['sub_1', 1000, 'REF-1', 'idem-1'], requiredBodyKeys: ['amount', 'reference'] },
   { route: 'POST /subscriptions/:id/refund-credit/set-aside', helper: 'setAsideSubscriptionCredit', args: ['sub_1', 1000], requiredBodyKeys: ['amount'] },
   { route: 'POST /subscriptions/:id/refund-credit/paid', helper: 'recordSubscriptionRefundPaid', args: ['sub_1', 1000, 'MMG', 'REF-1', 'evt_aside_1'], requiredBodyKeys: ['amount', 'method', 'reference', 'setAsideId'] },
@@ -101,6 +132,7 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'POST /billing/agent-payments/:id/attach', helper: 'attachAgentPayment', args: ['pay_1', 'sub_1'], requiredBodyKeys: ['subscriptionId'] },
   { route: 'POST /billing/agent-payments/:id/refund-flag', helper: 'flagAgentPaymentRefund', args: ['pay_1'], requiredBodyKeys: ['note'] },
   // [MMG REVERSAL · owner #11] Return a whole MMG weekly-fee payment: the whole amount, typed.
+  { route: 'POST /billing/mmg-checkouts/:id/refund-case', helper: 'openFeeRefundCase', args: ['mco_1', 'DUPLICATE'], requiredBodyKeys: ['kind', 'reason'] },
   { route: 'POST /billing/mmg-checkouts/:id/reverse', helper: 'reverseMmgFeePayment', args: ['mco_1', 2100], requiredBodyKeys: ['amountGyd'] },
   { route: 'POST /billing/mmg-fee-reversals/:id/resolve', helper: 'resolveMmgFeeReversal', args: ['rev_1', 'NOT_RETURNED', 'MMG-STMT-123'], requiredBodyKeys: ['outcome', 'mmgReference'] },
   // [continues #1592] Weekly-fee payment confirmations: the reason travels in the body (and the header).
@@ -128,6 +160,9 @@ export const REASONED_CALLERS: readonly ReasonCaller[] = [
   { route: 'POST /zone-fares', helper: 'createZoneFare', args: [{ fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12000 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
   { route: 'PUT /zone-fares/:id', helper: 'updateZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b', fare: 12500 }], requiredBodyKeys: ['fromZoneId', 'toZoneId', 'fare'] },
   { route: 'DELETE /zone-fares/:id', helper: 'deleteZoneFare', args: ['zf_1', { fromZoneId: 'zone_a', toZoneId: 'zone_b' }], requiredBodyKeys: ['fromZoneId', 'toZoneId'] },
+
+  // [RIDER-SAFE 5] Swift's delivery pause (C3: the reason in the header; the body repeats it for the switch's own audit row)
+  { route: 'PUT /delivery-pause', helper: 'setDeliveryPause', args: [{ platform: true, zoneIds: [], expectedVersion: 0 }], requiredBodyKeys: ['platform', 'zoneIds', 'expectedVersion', 'reason'] },
 
   // ── The decision itself ────────────────────────────────────────────────
   { route: 'POST /approvals/:id/decide', helper: 'decideApproval', args: ['apr_1', true], requiredBodyKeys: ['approve'] },

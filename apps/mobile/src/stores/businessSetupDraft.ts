@@ -16,6 +16,10 @@ export interface BusinessSetupDraft {
   agree: boolean;
   /** [Q8] Null until the owner confirms a spot on the map; never the phone's position. */
   pin: StorePin | null;
+  /** [ROLE-DOCS · owner 21 Oct 2026] The store trades under the owner's own name (no business registration) or a business name. */
+  nameBasis: 'REGISTERED' | 'OWN_NAME';
+  /** The own-name declaration tick (the signature is recorded when the store exists). Never outlives the process. */
+  ownNameTick: boolean;
 }
 
 export const EMPTY_BUSINESS_SETUP_DRAFT: Readonly<BusinessSetupDraft> = Object.freeze({
@@ -26,6 +30,8 @@ export const EMPTY_BUSINESS_SETUP_DRAFT: Readonly<BusinessSetupDraft> = Object.f
   city: 'Georgetown',
   agree: false,
   pin: null,
+  nameBasis: 'REGISTERED',
+  ownNameTick: false,
 });
 
 type DraftPatch = Partial<BusinessSetupDraft> | ((draft: BusinessSetupDraft) => Partial<BusinessSetupDraft>);

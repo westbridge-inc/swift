@@ -1,49 +1,49 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
-import { sendOtp, sessionProbe } from '@/lib/auth';
-import { LEGAL_URL } from '@/lib/api';
-import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer-account';
+import { hasProviderProfile, sessionProbe } from '@/lib/auth';
+import { sendOtp } from '@/lib/otp-send';
+import { markSignedIn } from '@/lib/session-hint';
+import { ACCOUNT_STEPS, clearDraft, readDraft, saveDraft, stepOf, stepUrl } from '@/lib/signup-draft';
+import { roleHome } from '@/lib/role-home';
+import { otpVerifyRefusal } from '@/lib/otp-send-refusal';
+import { verifyOtp, registerAccount } from '@/lib/customer-account';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
 import { launchCity } from '@/lib/web-ordering';
+import { EXAMPLE, LIMIT, NAME_AS_ON_ID } from '@/lib/signup-fields';
 import { SwiftLogo } from '@/components/swift-logo';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
-import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
-// [PERF] The map picker (with its place search and location code) is needed
-// only on a store's "Place your store on the map" step, so it no longer rides
-// in the sign-up page's first load. Its stylesheet stays in the page, so the
-// picker's code arrives alone (no stylesheet to fetch on demand). It starts
-// loading when a store reaches its business step, before the tap; a failed
-// fetch says so in place and can be tried again, the form kept as typed.
+import { partnerDoorRole } from '@/lib/signup-roles';
+// [PERF] The map picker's stylesheet stays in the page, so its code (loaded on demand by the business step) arrives
+// alone, with no stylesheet to fetch on demand.
 import '@/components/store-location-picker.module.css';
-import type { StoreLocationPicker as StoreLocationPickerComponent } from '@/components/store-location-picker';
-import { loadStorePicker } from './store-picker-loader';
-// [Row 628] The weekly fee block (its price read, words and tick) loads on the partner steps only.
-import type { WeeklyFee as WeeklyFeeComponent } from './weekly-fee';
-import type { FeeState } from '@/lib/signup-fee';
-import { loadWeeklyFee } from './weekly-fee-loader';
-import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
+// [D6 · perf] The business and vehicle steps (with the store map picker, the own-name choice and the weekly fee block
+// they load) are their own chunk: only partners reach them. Loading starts on a partner's name step (partner-steps.tsx).
+import type * as PartnerStepsModule from './partner-steps';
+import { loadPartnerSteps } from './partner-steps-loader';
 import styles from '../auth-flow.module.css';
-import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 import { AGE_TICK_LABEL, AGE_TICK_REQUIRED } from '@/lib/age-tick';
-
-/** The server's rule for a taxi's year (partner.routes vehicle schema): 1980
- *  to next year. Checked here too, so a typo is caught before the round trip. */
-function vehicleYearAccepted(year: string): boolean {
-  const n = Number(year);
-  return Number.isInteger(n) && n >= 1980 && n <= new Date().getFullYear() + 1;
-}
+import { CODE_NOT_SEEN_HINT, PhoneField } from '@/components/phone-field';
+import { loadSignedIn } from '@/components/signed-in-loader';
+import type { SignedIn, SignedInAlready as SignedInAlreadyComponent } from '@/components/signed-in-already';
+import { sendCooldownOf, sendLabel, useSendCooldown } from '@/lib/otp-cooldown';
+import { guyanaDisplay, guyanaLocal, guyanaPhone, guyanaPhoneProblem, guyanaPhoneReady } from '@/lib/guyana-phone';
 
 /** [W9] The four ways in. A delivery rider and a taxi driver are both movers
  *  to the API; the vehicle each chooses decides which (partner.service:
  *  a car or a bus provisions a Driver, a motorbike or bicycle a Rider). */
 type Role = 'CUSTOMER' | 'VENDOR' | 'RIDER' | 'DRIVER';
 const accountRole = (r: Role): 'CUSTOMER' | 'VENDOR' | 'MOVER' => (r === 'RIDER' || r === 'DRIVER' ? 'MOVER' : r);
+/** A self-employed pro's profile, asked of the server; any failure is "no", as on sign-in. */
+async function isPro(): Promise<boolean> {
+  try { return await hasProviderProfile(); } catch { return false; }
+}
+
 type Step = 'role' | 'phone' | 'code' | 'name' | 'business' | 'vehicle';
 
 function safeReturnPath(): string {
@@ -53,32 +53,13 @@ function safeReturnPath(): string {
 
 const ROLES: { role: Role; title: string; desc: string; pictogram: PictogramName }[] = [
   { role: 'CUSTOMER', title: 'Order on Swift', desc: 'Food, groceries, shops, parcels and rides.', pictogram: 'food' },
-  { role: 'VENDOR', title: 'Put my business on Swift', desc: 'Take orders and keep 100% of your prices. A flat weekly fee, paid through MMG checkout.', pictogram: 'shops' },
-  { role: 'RIDER', title: 'Deliver with Swift', desc: 'Motorbike or bicycle deliveries on your own schedule.', pictogram: 'send' },
+  { role: 'VENDOR', title: 'Put my business on Swift', desc: 'Take orders and keep 100% of your prices. A flat weekly fee, paid through MMG checkout or in person.', pictogram: 'shops' },
+  // [CARS-PLATES · owner 6 Nov 2026] A private (P) plate car delivers too (the vehicle step offers it while Swift takes
+  // cars); the door names no vehicle list, so its words stay true even with car deliveries paused (the kill switch).
+  { role: 'RIDER', title: 'Deliver with Swift', desc: 'Deliver orders and parcels on your own schedule.', pictogram: 'send' },
   { role: 'DRIVER', title: 'Drive a taxi with Swift', desc: 'Take ride requests with your car. Documents are checked before your first trip.', pictogram: 'taxi' },
 ];
 
-
-/** Until the weekly fee block reports, the partner buttons wait for it. */
-const FEE_LOADING: FeeState = { ask: 'Loading your weekly fee…' };
-
-/** The partner agreement clickwrap: unticked until the person ticks it. */
-function PartnerAgreement({ kind, doc, agree, onChange }: {
-  kind: 'Vendor' | 'Driver';
-  doc: 'vendor-agreement' | 'driver-agreement';
-  agree: boolean;
-  onChange: (_next: boolean) => void;
-}) {
-  return (
-    <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
-      <input type="checkbox" checked={agree} onChange={(e) => onChange(e.target.checked)} />
-      <span>
-        I agree to the{' '}
-        <a href={LEGAL_URL(doc)} target="_blank" rel="noreferrer" className={styles.inlineLink}>{kind} Partner Agreement</a>
-      </span>
-    </label>
-  );
-}
 
 export default function SignupPage() {
   const router = useRouter();
@@ -87,85 +68,138 @@ export default function SignupPage() {
   useEffect(() => { safeReturnPath(); }, []);
   const [step, setStep] = useState<Step>('role');
   const [role, setRole] = useState<Role>('CUSTOMER');
-  const [phone, setPhone] = useState('+592');
+  // [REVIEW-G G1] A resumed mover account says first whether it delivers or drives a taxi.
+  const [pickMover, setPickMover] = useState(false);
+  // [FLOW-QA F9] Set when an existing account goes on to add a business or a vehicle.
+  const [addingTo, setAddingTo] = useState<string | null>(null);
+  // [SIGNUP-PHONE] The local number only: the +592 chip sits beside it, as on sign-in and in the app.
+  const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
+  const phoneProblem = guyanaPhoneProblem(phone);
+  const cooldown = useSendCooldown();
+  const [codeNotice, setCodeNotice] = useState<string | null>(null);
+  // [SIGNUP-PHONE] A browser already signed in is not asked for a code again (components/signed-in-already).
+  const [signedIn, setSignedIn] = useState<{ who: SignedIn; Card: typeof SignedInAlreadyComponent } | null>(null);
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('resume')) return;
+    let alive = true;
+    loadSignedIn().then((m) => m.probeSignedIn().then((who) => { if (alive && who) setSignedIn({ who, Card: m.SignedInAlready }); })).catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const [first, setFirst] = useState('');
   const [last, setLast] = useState('');
-  const [biz, setBiz] = useState({ name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' });
-  const [storePin, setStorePin] = useState<StorePin | null>(null);
-  const [placingStore, setPlacingStore] = useState(false);
-  const storePinButton = useRef<HTMLButtonElement>(null);
-  const restorePinFocus = useRef(false);
+
+  // [D6] What a partner typed on the business or vehicle step, kept here across Back and forward (the steps themselves
+  // load on demand: partner-steps.tsx).
+  const [bizDraft, setBizDraft] = useState<PartnerStepsModule.BusinessDraft | null>(null);
+  const [vehDraft, setVehDraft] = useState<PartnerStepsModule.VehicleDraft | null>(null);
+  // [FLOW-QA F6] One history entry per step, and what was typed kept for this tab (lib/signup-draft).
+  const fromHistory = useRef(false);
+  const stepNow = useRef<Step>('role');
+  useEffect(() => { stepNow.current = step; }, [step]);
+  const restored = useRef(false);
+  // The step a kept draft is being restored to: until the page shows it, nothing is saved over the draft and the
+  // partner-door effect below leaves the door alone (REVIEW-GMF2 S3-1).
+  const restoringTo = useRef<Step | null>(null);
   useEffect(() => {
-    if (!placingStore && restorePinFocus.current) {
-      storePinButton.current?.focus();
-      restorePinFocus.current = false;
+    const wanted = stepOf(window.location.search);
+    const draft = readDraft();
+    if (wanted && wanted !== 'role' && draft && draft.step === wanted) {
+      restoringTo.current = wanted;
+      if (draft.role === 'CUSTOMER' || draft.role === 'VENDOR' || draft.role === 'RIDER' || draft.role === 'DRIVER') setRole(draft.role);
+      setPhone(draft.phone); setFirst(draft.first); setLast(draft.last);
+      setStep(wanted);
+    } else if (wanted) {
+      // an old step address with nothing kept for it: start at the beginning, without an extra entry
+      fromHistory.current = true;
+      window.history.replaceState(window.history.state, '', stepUrl('role'));
     }
-  }, [placingStore]);
-  const closeStorePicker = () => { restorePinFocus.current = true; setPlacingStore(false); };
-  // A store's business step fetches the map picker's code ahead of the tap.
-  const [StoreLocationPicker, setStoreLocationPicker] = useState<typeof StoreLocationPickerComponent | null>(null);
-  const [pickerFailed, setPickerFailed] = useState(false);
-  const pickerLoading = useRef(false);
-  const loadPicker = useCallback(() => {
-    if (pickerLoading.current) return;
-    pickerLoading.current = true;
-    setPickerFailed(false);
-    loadStorePicker()
-      .then((module) => setStoreLocationPicker(() => module.StoreLocationPicker))
-      .catch(() => setPickerFailed(true))
-      .finally(() => { pickerLoading.current = false; });
+    restored.current = true;
+    const onPop = () => {
+      // [REVIEW-GMF2 S3] Back has already left sign-up (every way in is a client-side link, so this page's listener
+      // can still hear the page it came from): nothing more to do, and never another step back.
+      if (window.location.pathname !== '/signup') return;
+      const popped = stepOf(window.location.search) ?? 'role';
+      // [REVIEW-GMF2 S3-3] Once the account exists, Back never reopens the steps that made it: it keeps going back,
+      // past them, so one press leaves sign-up (the page stays on its step while it does).
+      if (ACCOUNT_STEPS.includes(stepNow.current) && !ACCOUNT_STEPS.includes(popped)) { window.history.back(); return; }
+      fromHistory.current = true;
+      setStep(popped);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
   }, []);
-  useEffect(() => { if (step === 'business' && !StoreLocationPicker) loadPicker(); }, [step, StoreLocationPicker, loadPicker]);
-  const [veh, setVeh] = useState({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
-  // A Driver's vehicles are taxis (car / wagon car): their plate starts with H.
-  const taxiPlateWrong = !!veh.licensePlate.trim() && MOVER_VEHICLES.DRIVER.some((v) => v.value === veh.vehicleType) && !isHirePlate(veh.licensePlate);
+  useEffect(() => {
+    if (!restored.current) return;
+    if (restoringTo.current) {
+      if (step !== restoringTo.current) return; // the restored values have not landed yet
+      restoringTo.current = null;
+    } else if (fromHistory.current) { fromHistory.current = false; }
+    else if (stepOf(window.location.search) !== step) {
+      if (stepOf(window.location.search) === null && step === 'role') window.history.replaceState(window.history.state, '', stepUrl(step));
+      else window.history.pushState(window.history.state, '', stepUrl(step));
+    }
+    saveDraft({ step, role, phone, first, last });
+  }, [step, role, phone, first, last]);
   const mover = role === 'RIDER' || role === 'DRIVER' ? role : null;
-  // The partner agreement: an explicit, unticked clickwrap. The API records the
-  // consent and refuses a partner sign-up without it (AGREEMENT_REQUIRED).
-  const [agree, setAgree] = useState(false);
   // [Owner ruling 15 Oct 2026] the sign-up ticks: Terms + Privacy, and "I am 18 or older". Both start
-  // unticked and, like the agreement, are cleared whenever the role or the step changes.
+  // unticked and are cleared whenever the role or the step changes (the partner agreement and the weekly fee tick
+  // live on the partner steps, which start empty each time).
   const [acceptTerms, setAcceptTerms] = useState(false);
   const [adult, setAdult] = useState(false);
-  // [COORD ruling 22 Oct 2026 · row 628] The weekly fee is on screen before a partner signs up: the
-  // block reports what the button may do, and a refused tick (the fee changed) remounts it to read
-  // the price again. Nobody pays here: the fee starts only after approval.
-  const [fee, setFee] = useState<FeeState>(FEE_LOADING);
-  const [feeEpoch, setFeeEpoch] = useState(0);
-  const [WeeklyFee, setWeeklyFee] = useState<typeof WeeklyFeeComponent | null>(null);
-  const [feeLoadFailed, setFeeLoadFailed] = useState(false);
-  const feeStep = step === 'business' || step === 'vehicle';
+  const partnerStep = step === 'business' || step === 'vehicle';
+  const [Steps, setSteps] = useState<typeof PartnerStepsModule | null>(null);
+  const [stepsFailed, setStepsFailed] = useState(false);
   useEffect(() => {
-    if (!feeStep || WeeklyFee || feeLoadFailed) return;
-    loadWeeklyFee().then((m) => setWeeklyFee(() => m.WeeklyFee), () => setFeeLoadFailed(true));
-  }, [feeStep, WeeklyFee, feeLoadFailed]);
-  // A tick is given to the agreement on screen: it is cleared whenever the role
-  // or the step changes, so it never carries from one agreement to the other,
-  // nor survives leaving the step (reset during render, so no frame shows it).
+    // A partner door starts loading them as soon as it is chosen, well before its name step ends.
+    if (Steps || stepsFailed || !(partnerStep || (step !== 'role' && role !== 'CUSTOMER'))) return;
+    loadPartnerSteps().then((m) => setSteps(() => m), () => setStepsFailed(true));
+  }, [Steps, stepsFailed, partnerStep, step, role]);
+  // A tick is given to what is on screen: it is cleared whenever the role or the step changes, so it never carries
+  // over, nor survives leaving the step (reset during render, so no frame shows it).
   const agreementScope = `${role}:${step}`;
   const [agreeScope, setAgreeScope] = useState(agreementScope);
   if (agreeScope !== agreementScope) {
     setAgreeScope(agreementScope);
-    setAgree(false);
     setAcceptTerms(false);
     setAdult(false);
-    setFee(FEE_LOADING);
   }
   // A signed-in business account whose store was never created comes back
   // here from the console (/signup?resume=business) straight to that step.
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('resume') !== 'business') return;
-    let cancelled = false;
+  // [REVIEW-G G1 · owner rule 3] A rider or driver account that stopped after its name comes back
+  // (/signup?resume=mover, from the signed-in card) straight to the vehicle step.
+  const resumeAccount = (resume: 'business' | 'mover', live: () => boolean = () => true) => {
     void sessionProbe().then((session) => {
-      if (cancelled || !session.ok) return;
+      if (!live() || !session.ok) return;
       const accountPhone = session.user?.['phone'];
-      if (typeof accountPhone === 'string') setPhone(accountPhone);
+      if (typeof accountPhone === 'string') setPhone(guyanaLocal(accountPhone));
+      if (resume === 'mover') { setPickMover(true); setStep('vehicle'); return; }
       setRole('VENDOR');
       setStep('business');
     });
+  };
+  useEffect(() => {
+    const resume = new URLSearchParams(window.location.search).get('resume');
+    if (resume !== 'business' && resume !== 'mover') return;
+    let cancelled = false;
+    resumeAccount(resume, () => !cancelled);
     return () => { cancelled = true; };
   }, []);
+  /** [FLOW-QA2 NEW-1] The signed-in card's "Finish signing up" (/signup?resume=mover) is this page: a link to it
+   *  changes only the address and this page stays mounted, so the card's tap resumes here, as a refresh would. */
+  const goFromCard = (href: string): boolean => {
+    const resume = /^\/signup\?resume=(mover|business)$/.exec(href)?.[1] as 'mover' | 'business' | undefined;
+    if (!resume) return false;
+    window.history.replaceState(window.history.state, '', href);
+    resumeAccount(resume);
+    return true;
+  };
+  /** [FLOW-QA F9] An existing account that chose another partner door goes on to that door's step (its account is
+   *  kept; a business or a vehicle is added to it). [FLOW-QA2 NEW-9] So does a signed-in one, from the card. */
+  const addToAccount = (door: Role) => {
+    setAddingTo(door === 'VENDOR' ? 'Add a business to your Swift account.' : 'Add your vehicle to your Swift account.');
+    setStep(door === 'VENDOR' ? 'business' : 'vehicle');
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busyNow = useRef(false);
@@ -180,17 +214,38 @@ export default function SignupPage() {
     finally { busyNow.current = false; setBusy(false); }
   };
 
-  const doSend = () => wrap(async () => { await sendOtp(phone.trim()); setStep('code'); });
+  const doSend = () => wrap(async () => {
+    setCodeNotice(null);
+    try {
+      await sendOtp(guyanaPhone(phone));
+      setStep('code');
+    } catch (e) {
+      // A wait is not an error: the button counts down; a code already on its way is entered, not asked for again.
+      const wait = sendCooldownOf(e);
+      if (!wait) throw e;
+      cooldown.start(wait.seconds);
+      if (wait.codeAlreadySent) { setCodeNotice('We already sent a code to this number. Enter it below.'); setStep('code'); }
+    }
+  });
   const doVerify = () => wrap(async () => {
-    const r = await verifyOtp(phone.trim(), code.trim());
+    let r: Awaited<ReturnType<typeof verifyOtp>>;
+    // [FLOW-QA F16] a refused code in plain words
+    try { r = await verifyOtp(guyanaPhone(phone), code.trim()); } catch (e) { throw new Error(otpVerifyRefusal(e)); }
     if (r.signedIn) {
+      markSignedIn();
       // Existing account: route by its ACTUAL roles, not the tile they tapped.
-      const roles: string[] = r.user?.roles ?? [];
-      const isVendor = roles.includes('VENDOR') || roles.includes('VENDOR_OWNER') || !!r.user?.vendorOwner;
-      const isMover = roles.some((x) => ['MOVER', 'RIDER', 'DRIVER'].includes(x));
+      const { kind, home } = roleHome(r.user);
+      const isVendor = kind === 'business';
+      const isMover = kind === 'earner';
+      // [FLOW-QA F9] An existing account that chose another partner door goes on to that door's step (its account is
+      // kept; a business or a vehicle is added to it), never silently back to its old home.
+      if (role === 'VENDOR' ? !isVendor : role !== 'CUSTOMER' && !isMover) { addToAccount(role); return; }
       const customerReturnPath = role === 'CUSTOMER' ? safeReturnPath() : '';
       if (customerReturnPath) continueJourney();
-      router.replace(customerReturnPath || (isVendor ? '/dashboard' : isMover ? '/portal' : '/'));
+      clearDraft();
+      // [REVIEW-GMF2 S4] a self-employed pro (no partner role) goes where sign-in sends them: their weekly fee
+      const pro = !customerReturnPath && kind === 'customer' && await isPro();
+      router.replace(customerReturnPath || (pro ? '/portal/weekly-fee' : home));
       return;
     }
     setStep('name');
@@ -201,7 +256,8 @@ export default function SignupPage() {
     if (!acceptTerms) throw new Error('Tick the Terms of Service and Privacy Policy to continue');
     if (!adult) throw new Error(AGE_TICK_REQUIRED);
     try {
-      await registerAccount({ phone: phone.trim(), firstName: first.trim(), lastName: last.trim(), role: accountRole(role), acceptTerms, ageConfirmed: adult });
+      await registerAccount({ phone: guyanaPhone(phone), firstName: first.trim(), lastName: last.trim(), role: accountRole(role), acceptTerms, ageConfirmed: adult });
+      markSignedIn();
     } catch (cause) {
       // Registration consumes its HttpOnly continuation before account reads
       // and writes. A transport or server error is therefore ambiguous: never
@@ -217,53 +273,38 @@ export default function SignupPage() {
       // where they were headed (else to ordering), not to the camera.
       const destination = safeReturnPath();
       if (destination) continueJourney();
+      clearDraft();
       router.replace(destination || '/');
     }
     else setStep(role === 'VENDOR' ? 'business' : 'vehicle');
   });
-  const doBusiness = () => wrap(async () => {
-    if (!storePin || placingStore) throw new Error('Place your store on the map');
-    if (!storePinInMarket(storePin)) throw new Error(STORE_PIN_OUTSIDE);
-    if (fee.ask) throw new Error(fee.ask);
-    if (!agree) throw new Error('Tick the Vendor Partner Agreement to continue');
-    await feeChecked(becomePartner({ role: 'VENDOR', acceptAgreement: true, ...(fee.ack && { weeklyFeeAck: fee.ack }), business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } }));
-    router.replace('/dashboard');
-  });
-  const editBusinessAddress = (patch: Partial<typeof biz>) => {
-    setBiz({ ...biz, ...patch });
-    setStorePin(null);
-    setPlacingStore(false);
-    setError(null);
-  };
-  /** A refused tick (WEEKLY_FEE_*: the fee changed since it was read) reads the price again, with the tick cleared. */
-  const feeChecked = (call: Promise<unknown>) => call.catch((e: { code?: unknown }) => {
-    if (typeof e?.code === 'string' && e.code.startsWith('WEEKLY_FEE_')) setFeeEpoch((n) => n + 1);
-    throw e;
-  });
-  const doVehicle = () => wrap(async () => {
-    if (fee.ask) throw new Error(fee.ask);
-    if (!agree) throw new Error('Tick the Driver Partner Agreement to continue');
-    if (!mover || !MOVER_VEHICLES[mover].some((v) => v.value === veh.vehicleType)) throw new Error('Choose your vehicle');
-    // A rider's bike needs no make or plate here (the documents step asks for
-    // what the vehicle needs); a taxi's details are required by the server.
-    const weeklyFee = fee.ack && { weeklyFeeAck: fee.ack };
-    await feeChecked(becomePartner(mover === 'DRIVER'
-      ? { role: 'MOVER', acceptAgreement: true, ...weeklyFee, vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } }
-      : { role: 'MOVER', acceptAgreement: true, ...weeklyFee, vehicleType: veh.vehicleType }));
-    router.replace('/portal');
-  });
-  const feeBlock = ({ role: feeRole, type }: { role: 'VENDOR' | 'MOVER'; type: string }) => (WeeklyFee
-    ? <WeeklyFee key={feeEpoch} role={feeRole} type={type} onChange={setFee} />
-    : feeLoadFailed
-      ? <button type="button" className={styles.roleButton} onClick={() => setFeeLoadFailed(false)}>Couldn’t load your weekly fee — try again</button>
-      : <p role="status" className={styles.smallCopy}>{FEE_LOADING.ask}</p>);
+  /** [D6] What the partner steps need from the page (they load on demand). */
+  const shell: PartnerStepsModule.StepShell = { phone, busy, wrap, setError, done: (path) => { clearDraft(); router.replace(path); } };
+  const stepsLoading = stepsFailed
+    ? <button type="button" className={styles.roleButton} onClick={() => setStepsFailed(false)}>Couldn’t load this step — try again</button>
+    : <p role="status" className={styles.smallCopy}>Loading…</p>;
   const chooseRole = (r: Role) => {
     if (r !== 'CUSTOMER') clearStorefrontContinuation();
     setRole(r);
-    // Each mover starts on their own kind of vehicle.
-    if (r === 'RIDER' || r === 'DRIVER') setVeh((current) => ({ ...current, vehicleType: MOVER_VEHICLES[r][0]!.value }));
     setStep('phone');
   };
+  // [OPEN-EARLY · owner 31 Oct 2026] A partner page's button (/signup?as=business|rider|driver) opens straight
+  // onto that door's phone step, as if its tile had been tapped; Back still reaches the four doors. Only the three
+  // partner doors: no link can open the customer door (closed on the public site before launch). A business
+  // account resuming its store (?resume=business) keeps its own path.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('resume') === 'business' || params.get('resume') === 'mover') return;
+    // [REVIEW-GMF2 S3-1] a refresh or Back on a partner page's sign-up (?as=…&step=…) resumes its step: the door is
+    // already in the kept draft, so it is not opened again on the phone step
+    if (restoringTo.current) return;
+    const door = partnerDoorRole(params.get('as'));
+    if (door) chooseRole(door);
+  }, []);
+  const chosenDoor = ROLES.find((r) => r.role === role && r.role !== 'CUSTOMER');
+  // [FLOW-QA2 NEW-9] The partner door this signed-in visit came by, when the account is not already that partner.
+  const cardDoor = signedIn && chosenDoor && signedIn.who.kind
+    && (chosenDoor.role === 'VENDOR' ? signedIn.who.kind !== 'business' : signedIn.who.kind !== 'earner') ? chosenDoor : null;
 
   return (
     <main id="main" tabIndex={-1} className={styles.page}>
@@ -280,7 +321,12 @@ export default function SignupPage() {
         ) : null}
         <Link href="/" aria-label="Swift home" onClick={clearStorefrontContinuation} className={styles.brandLink}><SwiftLogo /></Link>
 
-        {step === 'role' && (
+        {signedIn && (step === 'role' || step === 'phone') ? (
+          <signedIn.Card who={signedIn.who} here="/signup" titleId="signup-title" onGo={goFromCard} onSignedOut={() => setSignedIn(null)}
+            addTo={cardDoor ? (cardDoor.role === 'VENDOR' ? 'business' : 'vehicle') : undefined}
+            onAddTo={() => { if (cardDoor) { clearStorefrontContinuation(); setPhone(guyanaLocal(signedIn.who.phone)); addToAccount(cardDoor.role); } }} />
+        ) : null}
+        {step === 'role' && !signedIn && (
           <div className={styles.stackTight}>
             <h1 id="signup-title" className={styles.heading}>Who are you signing up as?</h1>
             <p className={styles.bodyCopy}>Every sign-up starts with your phone and a 6-digit code. Partners also accept their partner agreement.</p>
@@ -288,15 +334,19 @@ export default function SignupPage() {
               // [Item 7] Before launch, the public site cannot start a customer
               // account; businesses, riders and drivers can still sign up.
               const closed = r === 'CUSTOMER' && !orderingOpen;
-              return (
-                <button key={r} type="button" disabled={closed} onClick={() => chooseRole(r)} className={styles.roleButton}>
+              const inner = (
+                <>
                   <span className={styles.roleIcon} data-role-tile={r === 'CUSTOMER' ? 'brand' : 'neutral'}><Pictogram name={pictogram} size={24} /></span>
                   <span className={styles.roleCopy}><span className={styles.roleTitle}>{title}</span><span className={styles.roleDescription}>{closed ? `Launching soon in ${launchCity()}` : desc}</span></span>
-                </button>
+                </>
               );
+              // [FLOW-QA F28] the closed door is not a dead button: it opens the launching-soon page
+              return closed
+                ? <Link key={r} href="/launching-soon" className={styles.roleButton}>{inner}</Link>
+                : <button key={r} type="button" onClick={() => chooseRole(r)} className={styles.roleButton}>{inner}</button>;
             })}
             <p className={styles.inlineText}>Already on Swift? <Link
-              href="/login?next=/"
+              href={orderingOpen ? '/login?next=/' : '/login'}
               onClick={(event) => {
                 continueJourney();
                 const next = safeReturnPath();
@@ -309,26 +359,28 @@ export default function SignupPage() {
           </div>
         )}
 
-        {step === 'phone' && (
+        {step === 'phone' && !signedIn && (
           <div className={styles.stack}>
             <h1 id="signup-title" className={styles.heading}>Confirm your phone</h1>
+            {chosenDoor ? <p className={styles.smallCopy} data-chosen-door>Signing up as: {chosenDoor.title}</p> : null}
             <p className={styles.bodyCopy}>We’ll text you a code to confirm your number.</p>
-            <div className={styles.field}>
-              <label htmlFor="signup-phone" className={styles.label}>Phone number</label>
-              <input id="signup-phone" type="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void doSend()} placeholder="+592 600 0001" className={styles.input} />
-            </div>
-            <button type="button" onClick={() => void doSend()} disabled={busy || phone.trim().length < 6} className={styles.primaryButton}>{busy ? 'Sending…' : 'Send code'}</button>
+            <PhoneField id="signup-phone" value={phone} onChange={setPhone} onEnter={() => { if (guyanaPhoneReady(phone)) void doSend(); }} />
+            {phoneProblem ? <p className={styles.smallCopy} aria-live="polite">{phoneProblem}</p> : null}
+            <button type="button" onClick={() => void doSend()} disabled={busy || !guyanaPhoneReady(phone) || cooldown.secondsLeft > 0} className={styles.primaryButton}>{busy ? 'Sending…' : sendLabel(cooldown.secondsLeft, 'Send code')}</button>
           </div>
         )}
         {step === 'code' && (
           <div className={styles.stack}>
             <h1 id="signup-title" className={styles.heading}>Enter your code</h1>
-            <p className={styles.bodyCopy}>Enter the code sent to {phone}.</p>
+            <p className={styles.bodyCopy}>Enter the code sent to {guyanaDisplay(phone)}.</p>
             <div className={styles.field}>
               <label htmlFor="signup-code" className={styles.label}>Verification code</label>
               <input id="signup-code" inputMode="numeric" autoComplete="one-time-code" autoFocus value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void doVerify()} placeholder="000000" className={`${styles.input} ${styles.codeInput}`} />
             </div>
+            {codeNotice ? <p className={styles.smallCopy} role="status">{codeNotice}</p> : null}
+            <p className={styles.smallCopy}>{CODE_NOT_SEEN_HINT}</p>
             <button type="button" onClick={() => void doVerify()} disabled={busy || code.trim().length < 4} className={styles.primaryButton}>{busy ? 'Checking…' : 'Continue'}</button>
+            <button type="button" onClick={() => void doSend()} disabled={busy || cooldown.secondsLeft > 0} className={styles.roleButton}>{sendLabel(cooldown.secondsLeft, 'Send a new code')}</button>
           </div>
         )}
         {step === 'name' && (
@@ -336,12 +388,14 @@ export default function SignupPage() {
             <h1 id="signup-title" className={styles.heading}>Your name</h1>
             <div className={styles.field}>
               <label htmlFor="signup-first" className={styles.label}>First name</label>
-              <input id="signup-first" autoComplete="given-name" value={first} onChange={(e) => setFirst(e.target.value)} className={styles.input} />
+              <input id="signup-first" autoComplete="given-name" maxLength={LIMIT.name} placeholder={EXAMPLE.first} value={first} onChange={(e) => setFirst(e.target.value)} className={styles.input} />
             </div>
             <div className={styles.field}>
               <label htmlFor="signup-last" className={styles.label}>Last name</label>
-              <input id="signup-last" autoComplete="family-name" value={last} onChange={(e) => setLast(e.target.value)} className={styles.input} />
+              <input id="signup-last" autoComplete="family-name" maxLength={LIMIT.name} placeholder={EXAMPLE.last} value={last} onChange={(e) => setLast(e.target.value)} className={styles.input} />
             </div>
+            {/* [WEB-ONBOARDING] a person compares each partner document's name with the account's (NAME_MISMATCH) */}
+            {role !== 'CUSTOMER' ? <p className={styles.smallCopy}>{NAME_AS_ON_ID}</p> : null}
             {/* Two explicit, unticked ticks (the Terms say acceptance is by "ticking the acceptance box at registration"):
                 the Terms and Privacy consent, and the owner's 15 Oct 18+ declaration. The API records both in the consent ledger. */}
             <label className={styles.legal} style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
@@ -360,66 +414,19 @@ export default function SignupPage() {
             <button type="button" onClick={() => void doRegister()} disabled={busy || !first.trim() || !last.trim() || !acceptTerms || !adult} className={styles.primaryButton}>{busy ? 'Creating…' : 'Create account'}</button>
           </div>
         )}
-        {step === 'business' && (
+        {step === 'business' && (Steps ? <Steps.BusinessStep shell={shell} draft={bizDraft} onDraft={setBizDraft} note={addingTo} /> : stepsLoading)}
+        {step === 'vehicle' && !mover && pickMover && (
           <div className={styles.stackTight}>
-            <h1 id="signup-title" className={styles.heading}>Your business</h1>
-            <div className={styles.field}><label htmlFor="business-name" className={styles.label}>Business name</label><input id="business-name" value={biz.name} onChange={(e) => setBiz({ ...biz, name: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
-              <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
-            </select></div>
-            <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" disabled={busy || placingStore} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
-            <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
-            {placingStore ? (
-              StoreLocationPicker ? <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
-              : pickerFailed ? (
-                <div role="alert" className={styles.stackTight}>
-                  <p className={styles.bodyCopy}>The map didn’t load. Check your connection; what you typed is kept.</p>
-                  <button type="button" className={styles.roleButton} onClick={loadPicker}>Try again</button>
-                  <button type="button" className={styles.roleButton} onClick={closeStorePicker}>Back</button>
-                </div>
-              ) : <p role="status" className={styles.bodyCopy}>Loading the map…</p>
-            ) : (
-              <>
-                <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); if (!StoreLocationPicker) loadPicker(); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
-                {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed: {storePin.address ?? biz.addressLine1}.</p>}
-              </>
-            )}
-            {feeBlock({ role: 'VENDOR', type: biz.vendorType })}
-            <PartnerAgreement kind="Vendor" doc="vendor-agreement" agree={agree} onChange={setAgree} />
-            <button type="button" onClick={() => void doBusiness()} disabled={busy || !!fee.ask || !agree || placingStore || !storePin || !biz.name.trim() || !biz.addressLine1.trim() || !biz.city.trim() || !biz.region.trim()} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create business'}</button>
-            <p className={styles.smallCopy}>You’ll finish verification (documents) in your dashboard before going live.</p>
+            <h1 id="signup-title" className={styles.heading}>Finish signing up</h1>
+            <p className={styles.bodyCopy}>Your account is made. Tell us how you work with Swift to add your vehicle.</p>
+            {(['RIDER', 'DRIVER'] as const).map((r) => (
+              <button key={r} type="button" className={styles.roleButton} onClick={() => { setRole(r); setPickMover(false); }}>
+                <span className={styles.roleCopy}><span className={styles.roleTitle}>{ROLES.find((x) => x.role === r)?.title}</span><span className={styles.roleDescription}>{ROLES.find((x) => x.role === r)?.desc}</span></span>
+              </button>
+            ))}
           </div>
         )}
-        {step === 'vehicle' && mover && (
-          <div className={styles.stackTight}>
-            <h1 id="signup-title" className={styles.heading}>{mover === 'DRIVER' ? 'Your taxi' : 'How you deliver'}</h1>
-            <div className={styles.field}><label htmlFor="vehicle-type" className={styles.label}>Vehicle</label><select id="vehicle-type" value={veh.vehicleType} onChange={(e) => setVeh({ ...veh, vehicleType: e.target.value })} className={styles.input}>
-              {MOVER_VEHICLES[mover].map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
-            </select></div>
-            {mover === 'DRIVER' ? (
-              <>
-                {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
-                <p className={styles.smallCopy}>{TAXI_TWO_LICENCES}</p>
-                <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
-                <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} aria-describedby="vehicle-plate-rule" aria-invalid={taxiPlateWrong || undefined} />
-                  {/* [Owner ruling 11 Oct 2026 — H-PLATE] said where the plate is typed; the server refuses a non-H taxi plate too */}
-                  <p id="vehicle-plate-rule" className={taxiPlateWrong ? styles.error : styles.smallCopy} role={taxiPlateWrong ? 'alert' : undefined}>{taxiPlateWrong ? TAXI_PLATE_ERROR : TAXI_PLATE_HINT}</p></div>
-              </>
-            ) : null}
-            {feeBlock({ role: 'MOVER', type: veh.vehicleType })}
-            <PartnerAgreement kind="Driver" doc="driver-agreement" agree={agree} onChange={setAgree} />
-            {mover === 'DRIVER' ? (
-              <button type="button" onClick={() => void doVehicle()} disabled={busy || !!fee.ask || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || taxiPlateWrong || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
-            ) : (
-              <button type="button" onClick={() => void doVehicle()} disabled={busy || !!fee.ask || !agree} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create rider account'}</button>
-            )}
-            <p className={styles.smallCopy}>You’ll upload your documents in your earner dashboard before going online.</p>
-          </div>
-        )}
+        {step === 'vehicle' && mover && (Steps ? <Steps.VehicleStep key={mover} shell={shell} mover={mover} draft={vehDraft} onDraft={setVehDraft} note={addingTo} /> : stepsLoading)}
 
         {error ? <p className={styles.error} role="alert" aria-live="assertive">{error}</p> : null}
       </section>

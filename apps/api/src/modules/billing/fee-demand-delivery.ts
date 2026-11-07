@@ -4,6 +4,7 @@ import type { NotificationPayload } from '../notification/notification.service';
 import { currentDunningClock, lockBillingAuthority } from './dunning-clock';
 import { feePauseHoldsBilling } from './mmg-pause';
 import { upsertNoticeFor } from '../../lib/owner-wall-notices';
+import { providerFeeNotice } from '../notification/provider-fee-kinds';
 
 const FEE_DEMAND_KINDS = new Set([
   'billing_failed', 'billing_final_warning', 'billing_suspended',
@@ -85,7 +86,9 @@ export async function persistFeeDemandInbox(db: PrismaClient, noticeId: string):
   return db.$transaction(async (tx) => {
     const notice = await permitted(tx, noticeId);
     if (!notice) return null;
-    const payload = notice.payload as unknown as NotificationPayload;
+    // [BILL-PRO PR4] The ledger keeps the original kind (its stage rules read it); a pro's inbox row and push carry
+    // the pro kind (notification/provider-fee-kinds.ts).
+    const payload = providerFeeNotice(notice.payload as unknown as NotificationPayload);
     // [item 20] Idempotent per demand (userId, dedupeKey), for the payer: the one notice helper.
     const row = await upsertNoticeFor(tx, { userId: notice.userId, type: payload.type, title: payload.title, body: payload.body,
       dedupeKey: `fee-demand:${notice.id}`,

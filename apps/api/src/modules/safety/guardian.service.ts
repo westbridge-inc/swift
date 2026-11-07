@@ -4,7 +4,8 @@ import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { haversineDistance } from '../../utils/distance';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { createHash, randomBytes } from 'node:crypto';
+import { enterOwner, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { guardianDriverConfirmCounter } from '../../plugins/observability';
@@ -132,7 +133,11 @@ interface DetectorState {
   /** [S-04] The hard-check cycle the session is in: minted at L3 with a
    *  one-time driver nonce, replaced by the next L3, and the ONLY thing a
    *  driver confirmation can answer. */
-  checkinCycle?: { id: string; requestedAtMs: number; level?: 'SOFT' | 'HARD'; hardRequestedAtMs?: number; driverNonceHash?: string; driverNonceUsedAtMs?: number; undeliveredPagedAtMs?: number };
+  checkinCycle?: {
+    id: string; requestedAtMs: number; level?: 'SOFT' | 'HARD'; hardRequestedAtMs?: number; driverNonceHash?: string; driverNonceUsedAtMs?: number; undeliveredPagedAtMs?: number;
+    /** [WEB-TAXI] sha256 of each passenger ask's one-time answer-link secret (the texted link); the secrets themselves are never kept. */
+    answerHashes?: string[];
+  };
   /** [S-04] The driver's confirmation, bound to a cycle, with who / which
    *  device / when — a stale one can never absolve a later cycle. */
   driverConfirm?: { cycleId: string; atMs: number; actorUserId: string; deviceId: string | null };
@@ -162,6 +167,10 @@ const pushEvent = (state: DetectorState, now: Date, kind: string, detail?: Recor
  *  hard check — the auto-SOS proceeds rather than accepting any driver proof. */
 const driverDeescalationKilled = () => process.env['GUARDIAN_DRIVER_DEESCALATION_KILL'] === '1';
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
+/** [WEB-TAXI] 128 bits, URL-safe: one passenger ask's answer-link secret. */
+const newAnswerToken = () => randomBytes(16).toString('base64url');
+/** Constant-time compare of two hex digests of equal length. */
+const sameDigest = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 /** [S-04] A driver confirmation counts only for the cycle it answers,
  *  made after that cycle asked. */
 const confirmBoundToCycle = (state: DetectorState): boolean =>
@@ -701,7 +710,10 @@ export class GuardianService {
       // obligation: the cycle, the status change and the delivery rows commit
       // together. [S-04] A new climb owes nothing to the last one.
       const cycleId = nanoid(12);
-      const committed: DetectorState = { ...state, checkinCycle: { id: cycleId, requestedAtMs: now.getTime(), level: 'SOFT' }, driverConfirm: undefined, driverConfirmedAtMs: undefined };
+      // [WEB-TAXI] The ask's answer link: the secret travels only in the text
+      // a push-less passenger gets; the cycle keeps its hash.
+      const answerToken = newAnswerToken();
+      const committed: DetectorState = { ...state, checkinCycle: { id: cycleId, requestedAtMs: now.getTime(), level: 'SOFT', answerHashes: [sha256(answerToken)] }, driverConfirm: undefined, driverConfirmedAtMs: undefined };
       const moved = await this.prisma.$transaction(async (tx) => {
         const m = await tx.tripSafetySession.updateMany({
           where: { id: session.id, status: 'MONITORING', checkinRequestedAt: null },
@@ -711,7 +723,7 @@ export class GuardianService {
         });
         if (m.count !== 1) return 0;
         if (session.passengerUserId) {
-          await stageCheckinDeliveries(tx, session, [{ cycleId, level: 'SOFT', recipient: 'PASSENGER', userId: session.passengerUserId, payload: passengerAsk(session, cycleId, 'SOFT', null) }]);
+          await stageCheckinDeliveries(tx, session, [{ cycleId, level: 'SOFT', recipient: 'PASSENGER', userId: session.passengerUserId, payload: passengerAsk(session, cycleId, 'SOFT', null, answerToken) }]);
         }
         return 1;
       });
@@ -747,7 +759,9 @@ export class GuardianService {
       // [S-06] The status change and both delivery rows commit together.
       const driverNonce = randomBytes(16).toString('hex');
       const base = state.checkinCycle ?? { id: nanoid(12), requestedAtMs: now.getTime(), level: 'SOFT' as const };
-      const hardCycle = { ...base, level: 'HARD' as const, hardRequestedAtMs: now.getTime(), driverNonceHash: sha256(driverNonce), driverNonceUsedAtMs: undefined, undeliveredPagedAtMs: undefined };
+      // [WEB-TAXI] The hard ask gets its own answer link; the soft one's stays good until the cycle ends.
+      const answerToken = newAnswerToken();
+      const hardCycle = { ...base, level: 'HARD' as const, hardRequestedAtMs: now.getTime(), driverNonceHash: sha256(driverNonce), driverNonceUsedAtMs: undefined, undeliveredPagedAtMs: undefined, answerHashes: [...(base.answerHashes ?? []), sha256(answerToken)] };
       const committed: DetectorState = { ...state, checkinCycle: hardCycle, driverConfirm: undefined, driverConfirmedAtMs: undefined };
       const moved = await this.prisma.$transaction(async (tx) => {
         const m = await tx.tripSafetySession.updateMany({
@@ -756,7 +770,7 @@ export class GuardianService {
         });
         if (m.count !== 1) return 0;
         const asks = [];
-        if (session.passengerUserId) asks.push({ cycleId: hardCycle.id, level: 'HARD' as const, recipient: 'PASSENGER' as const, userId: session.passengerUserId, payload: passengerAsk(session, hardCycle.id, 'HARD', deadline) });
+        if (session.passengerUserId) asks.push({ cycleId: hardCycle.id, level: 'HARD' as const, recipient: 'PASSENGER' as const, userId: session.passengerUserId, payload: passengerAsk(session, hardCycle.id, 'HARD', deadline, answerToken) });
         // Low-key driver-side prompt (§5.3): a stopped driver with a flat
         // tire will answer — and that answer is a record.
         asks.push({ cycleId: hardCycle.id, level: 'HARD' as const, recipient: 'DRIVER' as const, userId: session.driverUserId, payload: driverAsk(session, hardCycle.id, driverNonce, deadline) });
@@ -952,7 +966,35 @@ export class GuardianService {
       orderBy: { createdAt: 'desc' },
     });
     if (!session) throw new NotFoundError('SafetyCheckin', passengerUserId);
+    return this.answerSession(session, passengerUserId, response);
+  }
 
+  /**
+   * [WEB-TAXI · owner 21 Oct 2026] The texted answer link: the same two
+   * answers as the card, without signing in — a passenger the push could not
+   * reach (a website booking, a phone with push off) is texted a link, and a
+   * sign-in code would eat the deadline. The secret is one ask's, good only
+   * while that check-in is waiting in the cycle that asked it: any other case
+   * (a wrong or old secret, an answered or escalated check, a closed trip) is
+   * the same null — no oracle. Answered exactly as the passenger's own tap.
+   */
+  async answerByLink(ref: string, secret: string, response: 'OK' | 'NEED_HELP') {
+    if (typeof ref !== 'string' || ref.length < 8 || ref.length > 64 || typeof secret !== 'string' || secret.length < 16 || secret.length > 64) return null;
+    const session = await runAsSystem('guardian-answer-link', () => this.prisma.tripSafetySession.findUnique({ where: { id: ref } }));
+    if (!session?.passengerUserId || (session.status !== 'MONITORING' && session.status !== 'CHECKIN_PENDING')) return null;
+    if (!session.checkinRequestedAt || session.checkinRespondedAt) return null;
+    const hashes = ((session.deviationState as DetectorState | null)?.checkinCycle?.answerHashes ?? []);
+    const digest = sha256(secret);
+    if (!hashes.some((h) => typeof h === 'string' && sameDigest(h, digest))) return null;
+    const passengerUserId = session.passengerUserId;
+    guardianDeliveryCounter.labels('answered_by_link').inc();
+    return runWithTenant(session.tenantId, async () => {
+      enterOwner(passengerUserId);
+      return this.answerSession(session, passengerUserId, response);
+    });
+  }
+
+  private async answerSession(session: TripSafetySession, passengerUserId: string, response: 'OK' | 'NEED_HELP') {
     if (response === 'NEED_HELP') {
       const alert = await this.sos.create({
         actorUserId: passengerUserId,

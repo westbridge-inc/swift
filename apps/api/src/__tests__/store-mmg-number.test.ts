@@ -236,15 +236,25 @@ describe('[PAYMENT-SIMPLIFY · ALG-34 parity] the store MMG number', () => {
     expect(cold.statusCode).toBe(403);
     expect(cold.json().error.code).toBe('STEP_UP_REQUIRED');
 
+    // [owner 30 Oct 2026] The store's FIRST-EVER number waits 1 hour; the screen is told before it saves.
+    const before = await call('GET', '/api/v1/vendor/profile', owner.token, undefined, store());
+    expect(before.json().data.vendors.find((v: { id: string }) => v.id === vendorId).mmgNumberHoldHours).toBe(1);
+
     await grantStepUp(app, owner.token);
     const landline = await call('PUT', '/api/v1/vendor/profile', owner.token, { mmgNumber: '+592 225 1234' }, store());
     expect(landline.statusCode).toBe(400);
     expect(landline.json().error.code).toBe('INVALID_MMG_NUMBER');
 
+    const stagedAt = Date.now();
     const staged = await call('PUT', '/api/v1/vendor/profile', owner.token, { mmgNumber: '600 1234' }, store());
     expect(staged.statusCode, staged.body).toBe(200);
     expect(staged.json().data.mmgNumber).toBeNull(); // not live yet
     expect(staged.json().data.mmgNumberPending).toBe(NUMBER);
+    const applyAt = new Date(staged.json().data.mmgNumberApplyAt).getTime();
+    expect(applyAt - stagedAt).toBeGreaterThanOrEqual(3_600_000 - 1000);
+    expect(applyAt - stagedAt).toBeLessThanOrEqual(3_600_000 + 60_000);
+    // A number is now waiting: another one set now would wait the full cool-off.
+    expect(staged.json().data.mmgNumberHoldHours).toBe(24);
     expect((await vendorRow()).mmgNumber).toBeNull();
     const stage = await sys(() => app.prisma.moneySurfaceCommand.findFirstOrThrow({ where: { entityId: vendorId, kind: 'MMG_NUMBER_STAGE' } }));
     expect(stage.state).toBe('DECIDED');
@@ -259,6 +269,8 @@ describe('[PAYMENT-SIMPLIFY · ALG-34 parity] the store MMG number', () => {
     const mine = profile.json().data.vendors.find((v: { id: string }) => v.id === vendorId);
     expect(mine.mmgNumber).toBe(NUMBER);
     expect(mine.mmgNumberPending).toBeNull();
+    expect(mine.mmgNumberHoldHours).toBe(24); // a change of a live number keeps the cool-off
+    expect(mine.mmgPayUrlHoldHours).toBeNull(); // the store pay link is off
   });
 
   it('"this wasn\'t me" drops a staged number, keeps the live one, and signs out the other devices', async () => {

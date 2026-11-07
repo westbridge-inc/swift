@@ -8,6 +8,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { testControlEnabled, verifyLoadLease, mintLoadLease, testControlIdentity } from '../modules/ops/test-control';
 import { testControlRoutes } from '../modules/ops/test-control.routes';
 import { persistCheckoutReceiptInTransaction } from '../modules/order/checkout-outbox';
+import { ORDER_PLACE_ACTION } from '../modules/integrity/velocity';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,24 @@ afterAll(async () => {
   await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
   await app.close();
+});
+
+describe('[FULL-LAUNCH] a journey suite starts with a fresh order budget', () => {
+  it('clears this limit’s counters and no other, for a signed-in caller; the routes exist only where test-control does', async () => {
+    const u = await makeUser();
+    const ours = [`vel:${ORDER_PLACE_ACTION}:actor:a${nanoid(6)}:1`, `vel:${ORDER_PLACE_ACTION}:cluster:c${nanoid(6)}:1`];
+    const other = `vel:promo.validate:actor:p${nanoid(6)}:1`;
+    for (const key of [...ours, other]) await app.redis.set(key, '6', 'EX', 60);
+    const post = (token?: string) => app.inject({ method: 'POST', url: '/api/v1/test-control/order-place-budget/reset', headers: token ? { authorization: `Bearer ${token}` } : {} });
+    expect((await post()).statusCode).toBe(401);
+    expect(await app.redis.exists(...ours)).toBe(2);
+    const res = await post(u.token);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.cleared).toBeGreaterThanOrEqual(2);
+    expect(await app.redis.exists(...ours)).toBe(0);
+    expect(await app.redis.exists(other)).toBe(1);
+    await app.redis.del(other);
+  });
 });
 
 describe('[SCR-003] the identity exists only in isolated load builds', () => {

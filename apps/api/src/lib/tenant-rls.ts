@@ -33,6 +33,8 @@ export const TENANT_TABLES = [
   'sos_escalations',
   // [MKT-2] the stock ledger: one operator's inventory movements.
   'stock_movements',
+  // [POS-SYNC] A till export a store confirmed, walled like the store.
+  'pos_imports',
   // [R048-007] money-surface commands: one operator's decided money changes.
   'money_surface_commands',
   // [E02] MMG refund obligations and the sends that answer them, walled like their order.
@@ -50,6 +52,11 @@ export const TENANT_TABLES = [
   // [STA-1 §4 lineage] Child tables walled on the row itself, not only through their vendor.
   'items',
   'categories',
+  // [BOOK-S1] A booking takes its business time: walled on the row like the listing it was made on.
+  'bookings',
+  // [BOOK-P1] The bookable services and time off of a pro: walled on the row like the jobs they book.
+  'service_offerings',
+  'service_provider_time_off',
   // [STA-1 §4 lineage · money] personal and operator money rows, walled on the row itself.
   // (No apostrophes in comments inside this array: the CI gate extracts the names by quote.)
   'transactions',
@@ -95,7 +102,7 @@ export const TENANT_TABLES = [
   'algo_decisions',
   'vendor_prep_stats',
   'eta_pad_stats',
-  'ad_campaigns', 'ad_events', 'ad_invoices', 'ad_placements',
+  'ad_campaigns', 'ad_events', 'ad_invoices', 'ad_link_domains', 'ad_placements',
   'ad_refund_intents', 'ad_refund_items', 'ad_refund_outbox', 'ads_audit_log',
   'ads_settings', 'advertisers', 'attribution_claims', 'batch_evaluations',
   'batching_settings', 'booking_exceptions',
@@ -110,9 +117,10 @@ export const TENANT_TABLES = [
   'mmg_agent_payments',
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it,
   // walled like the provider payment that credits it.
-  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations',
+  'mmg_checkout_intents', 'mmg_checkout_keys', 'mmg_checkout_observations', 'mmg_checkout_parts',
   // [MMG REVERSAL] returning a whole weekly-fee payment: the payer's operator's money.
   'mmg_fee_reversals',
+  'fee_refund_cases',
   'billing_dunning_clocks', 'payment_confirmation_holds', 'billing_fee_notices', 'billing_notice_handoffs',
   // [#1393] Consumed weekly-fee coverage: the paid or resumed obligation a clock moved past.
   'billing_obligation_transitions',
@@ -127,6 +135,10 @@ export const TENANT_TABLES = [
   'custody_recovery_cases',
   // [TAXI waiting charge] One ride's waiting terms and frozen charge, walled like the ride.
   'taxi_ride_waiting',
+  // [O-1] A Swift call-bridge attempt on an order, walled like the order.
+  'call_sessions',
+  // [BOOK-FU2 · owner B3] "Customer didn't come": the business's record on an appointment order, walled like the order.
+  'appointment_no_shows',
   'scan_daily_rollups', 'scan_events',
   // [TA-S1-006] A service job is one operator's incident scope: its SOS routes by this column.
   'service_jobs',
@@ -250,14 +262,27 @@ export interface TenantLineageRule {
   /** QR lineage never exempts an UPDATE whose non-null parent is missing or RLS-hidden. */
   requiredParent?: boolean;
 }
+/** [BILL-PRO PR1 · migration 20261029030000] The independent-pro owner branch of the
+ *  collection_contacts owner derivation. The DB-05 migration (20261013221500) shipped the
+ *  derivation without it; its backfill ran before any pro could own a subscription. */
+export const PRO_OWNER_TENANT_BRANCH = ' UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN service_providers sp ON sp.id = s."serviceProviderId" JOIN users u ON u.id = sp."userId" WHERE s.id = NEW."subscriptionId"';
 export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'items', trigger: 'items_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'categories', trigger: 'categories_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+  // [BOOK-S1] one hop: a booking inherits the tenant of the business whose time it takes
+  { table: 'bookings', trigger: 'bookings_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+  // [BOOK-P1] two hops: a pro's service and time off inherit the tenant of the person the provider profile belongs to
+  { table: 'service_offerings', trigger: 'service_offerings_tenant_matches_provider', parent: 'service_providers', fk: 'providerId',
+    parentTenantSql: `SELECT u."tenantId" FROM users u JOIN service_providers p ON p."userId" = u.id WHERE p.id = NEW."providerId"` },
+  { table: 'service_provider_time_off', trigger: 'service_provider_time_off_tenant_matches_provider', parent: 'service_providers', fk: 'providerId',
+    parentTenantSql: `SELECT u."tenantId" FROM users u JOIN service_providers p ON p."userId" = u.id WHERE p.id = NEW."providerId"` },
   // [money] one hop through the owner
   { table: 'transactions', trigger: 'transactions_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'payout_requests', trigger: 'payout_requests_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'payout_schedules', trigger: 'payout_schedules_tenant_matches_user', parent: 'users', fk: 'userId' },
   { table: 'settlements', trigger: 'settlements_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
+  // [POS-SYNC] one hop: an applied till export inherits the tenant of its store
+  { table: 'pos_imports', trigger: 'pos_imports_tenant_matches_vendor', parent: 'vendors', fk: 'vendorId' },
   { table: 'delivery_cash_settlements', trigger: 'delivery_cash_settlements_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [E02] an MMG refund obligation and a refund send belong to the tenant of their order
   { table: 'mmg_refund_obligations', trigger: 'mmg_refund_obligations_tenant_matches_order', parent: 'orders', fk: 'orderId' },
@@ -316,6 +341,10 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   { table: 'custody_recovery_cases', trigger: 'custody_recovery_cases_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [TAXI waiting charge] one hop: a ride's waiting row inherits the tenant of its ride (the same shape)
   { table: 'taxi_ride_waiting', trigger: 'taxi_ride_waiting_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [O-1] one hop: a call-bridge attempt inherits the tenant of the order it is about (the same shape)
+  { table: 'call_sessions', trigger: 'call_sessions_tenant_matches_order', parent: 'orders', fk: 'orderId' },
+  // [BOOK-FU2 · owner B3] one hop: a missed-appointment record inherits the tenant of its order (the same shape)
+  { table: 'appointment_no_shows', trigger: 'appointment_no_shows_tenant_matches_order', parent: 'orders', fk: 'orderId' },
   // [PT-1 card rail v2] one hop through the payer, the transactions/payouts shape: an enrolled
   // card and a hosted session belong to the person who pays the fee
   { table: 'payment_instruments', trigger: 'payment_instruments_tenant_matches_user', parent: 'users', fk: 'userId' },
@@ -334,9 +363,9 @@ export const TENANT_LINEAGE_TABLES: readonly TenantLineageRule[] = [
   // checked by its own authority resolver, never by an invented foreign key).
   { table: 'content_reports', trigger: 'content_reports_tenant_matches_reporter', parent: 'users', fk: 'reporterId', nullable: true },
   // [DB-05 EXPAND] A collection contact belongs to its subscription's owner (vendor, or the
-  // rider or driver person); owners in more than one tenant are no owner at all.
+  // rider, driver or [BILL-PRO] independent pro person); owners in more than one tenant are no owner at all.
   { table: 'collection_contacts', trigger: 'collection_contacts_tenant_matches_owner', parent: 'subscriptions', fk: 'subscriptionId', nullable: true,
-    parentTenantSql: `SELECT CASE WHEN count(DISTINCT owners.t) = 1 THEN min(owners.t) END FROM (SELECT v."tenantId" AS t FROM subscriptions s JOIN vendors v ON v.id = s."vendorId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN riders r ON r.id = s."riderId" JOIN users u ON u.id = r."userId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN drivers d ON d.id = s."driverId" JOIN users u ON u.id = d."userId" WHERE s.id = NEW."subscriptionId") owners` },
+    parentTenantSql: `SELECT CASE WHEN count(DISTINCT owners.t) = 1 THEN min(owners.t) END FROM (SELECT v."tenantId" AS t FROM subscriptions s JOIN vendors v ON v.id = s."vendorId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN riders r ON r.id = s."riderId" JOIN users u ON u.id = r."userId" WHERE s.id = NEW."subscriptionId" UNION ALL SELECT u."tenantId" FROM subscriptions s JOIN drivers d ON d.id = s."driverId" JOIN users u ON u.id = d."userId" WHERE s.id = NEW."subscriptionId"${PRO_OWNER_TENANT_BRANCH}) owners` },
 ];
 
 /** The SQL that yields a lineage rule's parent tenant for the row `NEW`. */
@@ -438,6 +467,9 @@ const APP_ROLE_MIGRATION_REVOCATIONS: ReadonlyArray<{ readonly table: string; re
   { table: 'public.billing_fee_notices', privileges: 'DELETE' },
   { table: 'public.billing_notice_handoffs', privileges: 'DELETE' },
   { table: 'public.billing_obligation_transitions', privileges: 'UPDATE, DELETE' },
+  { table: 'public.erasure_ledger_entry', privileges: 'INSERT, UPDATE, DELETE' }, // 20261021140000
+  { table: 'public.erasure_ledger_shipment', privileges: 'INSERT, UPDATE, DELETE' },
+  { table: 'public.mmg_checkout_parts', privileges: 'UPDATE, DELETE' }, // 20261029070000 (ENTERPRISE E1: a chain checkout's branch shares)
   { table: 'swift_qr.token_identities', privileges: 'ALL' }, // 20261005210300
 ];
 

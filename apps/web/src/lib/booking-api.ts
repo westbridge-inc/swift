@@ -20,6 +20,16 @@ export interface VendorBooking {
   status: string;
   orderId: string | null;
   customer: { firstName: string } | null;
+  /** [BOOK-S5b] The listing booked (its free times are what a move may pick). An older server omits it. */
+  itemId?: string;
+}
+
+/** [BOOK-S5b · owner B2, the app's bookingMovable] A booking the business can move from its Schedule: a live one
+ *  (reserved or confirmed) that has not started, whose listing the server named. */
+export function bookingMovable(b: Pick<VendorBooking, 'status' | 'slotStart' | 'itemId'>, now = Date.now()): boolean {
+  return typeof b.itemId === 'string' && b.itemId.length > 0
+    && (b.status === 'RESERVED' || b.status === 'CONFIRMED')
+    && new Date(b.slotStart).getTime() > now;
 }
 
 /** Blocked time: a full day (start/end null) or a window, "HH:MM" in Guyana. */

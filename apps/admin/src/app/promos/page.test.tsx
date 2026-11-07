@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import PromosPage from './page';
 import { mockApi, renderWithQuery, requestsByMethod, type ApiReply, type ApiRequest } from '@/test/test-utils';
 
@@ -75,5 +75,19 @@ describe('[U62] the new promo form is a dialog that keeps what was typed', () =>
     await user.click(within(panel).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'New promo code' })).toBeTruthy());
     expect((screen.getByLabelText('Code') as HTMLInputElement).value).toBe('WELCOME10');
+  });
+});
+
+// [REVIEW-F #2155 S4-b] The new promo's days default to today in Guyana (the server reads a bare day as a Guyana day):
+// cut from the UTC clock, a promo made on a Guyana evening started tomorrow.
+describe('[ADMIN-AUDIT S3-4] a new promo starts today in Guyana', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  it('on the evening of 27 Oct (Guyana) the form says from 27 Oct, for 30 days', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-28T01:00:00Z') }); // 21:00 on 27 Oct in Georgetown
+    mockApi(handler());
+    const { user } = renderWithQuery(<PromosPage />);
+    await user.click(await screen.findByRole('button', { name: /create promo/i }));
+    expect((screen.getByLabelText('Valid from') as HTMLInputElement).value).toBe('2026-10-27');
+    expect((screen.getByLabelText('Valid until') as HTMLInputElement).value).toBe('2026-11-26');
   });
 });

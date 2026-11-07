@@ -95,6 +95,10 @@ if (COMPLETION_CLAIM_WAIT_MS < COMPLETION_TIMEOUT_MS + 5_000) throw new Error('C
 export const SPI_TOKEN_LIFETIME_MS = 5 * 60_000;
 /** A page's facts outlive it long enough for any reconciliation (as the simulator's). */
 const RECORD_RETAIN_MS = 30 * 24 * 60 * 60_000;
+/** [REVIEW-G S4-2 on #1524] The sandbox self-check's page record is only proof
+ *  that the page set up: it is abandoned at once and kept one hour, never the
+ *  30-day card record retention. Nothing reads it afterwards. */
+export const SELF_CHECK_RECORD_TTL_MS = 60 * 60_000;
 
 /** ISO 4217 numeric codes (sec. 5.1 CurrencyCode "Must use numeric currency code (ISO 4217)"). */
 export const CURRENCY_NUMERIC: Readonly<Record<string, string>> = {
@@ -930,17 +934,32 @@ export class PowerTranzCardRailProvider implements CardRailProvider {
     const alive = await this.call(PATH.alive, { method: 'GET', headers: { accept: 'application/json' } });
     out.push({ check: 'gateway reachable', ok: alive.shape !== 'transport' && alive.status >= 200 && alive.status < 300 });
     const probe = await this.call(PATH.riskMgmt, { method: 'POST', headers: this.headers(true), body: '{}' });
-    const refusedCredentials = probe.shape === 'transport'
-      || probe.status === 401 || probe.status === 403
-      || (probe.shape === 'json' && isObject(probe.json) && (str(probe.json['IsoResponseCode']) === '89' || errorCodes(probe.json).includes('312')));
-    out.push({ check: 'credentials accepted', ok: !refusedCredentials });
+    const refusedCredentials = probe.shape !== 'transport' && (probe.status === 401 || probe.status === 403
+      || (probe.shape === 'json' && isObject(probe.json) && (str(probe.json['IsoResponseCode']) === '89' || errorCodes(probe.json).includes('312'))));
+    // [DS845 S3] Accepted ONLY on a readable gateway answer (2xx, a JSON object,
+    // not a system-error code — Appendix 1) that is not the credentials refusal:
+    // the gateway authenticated, then refused the empty body by design. No answer,
+    // another HTTP status (404, 5xx), an unreadable body or a system error says
+    // nothing about the credentials: FAIL, "could not tell".
+    const readable = probe.shape === 'json' && probe.status >= 200 && probe.status < 300 && isObject(probe.json)
+      && !AMBIGUOUS_ISO.has(str(probe.json['IsoResponseCode']) ?? '');
+    out.push(refusedCredentials || readable
+      ? { check: 'credentials accepted', ok: !refusedCredentials }
+      : { check: 'credentials accepted (could not tell: the gateway gave no readable answer)', ok: false });
     if (opts.preprocess && this.binding.environment === 'sandbox') {
       const created = await this.createSession({
         binding: this.binding, sessionRef: `selfcheck-${randomBytes(6).toString('hex')}`, purpose: 'PAY_NOW',
         returnUrl: opts.returnUrl, expiresAt: new Date(this.now().getTime() + 60_000), amountMinor: 100, currencyCode: 'GYD',
       });
       out.push({ check: 'hosted payment page set up', ok: created.status === 'succeeded' });
-      if (created.status === 'succeeded') await this.abandon(this.key.session(created.providerSessionRef), 'SELF_CHECK');
+      if (created.status === 'succeeded') {
+        const record = this.key.session(created.providerSessionRef);
+        try {
+          await this.abandon(record, 'SELF_CHECK');
+        } finally {
+          await this.redis.pexpire(record, SELF_CHECK_RECORD_TTL_MS).catch(() => 0);
+        }
+      }
     }
     return out;
   }

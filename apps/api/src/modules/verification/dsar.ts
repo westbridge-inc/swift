@@ -22,9 +22,10 @@ import type { PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { getKeyProvider } from '../../providers/storage/envelope';
 import { unpackAndDecrypt } from './extraction-ledger';
-import { isRetiredPlaceholder, registryCode, RETIRED_FIELDS } from './doc-registry';
+import { isRetiredPlaceholder, POLICE_CLEARANCE_DOC_TYPE, registryCode, RETIRED_FIELDS } from './doc-registry';
 import { notifyAdmins, tenantOfUser, type NotificationService } from '../notification/notification.service';
 import { REVIEW_SLA_HOURS, type VerificationService } from './verification.service';
+import { erasureDelayedWords, holdForOpenIdentityReviews, INVESTIGATION_HOLD_PLACER, investigationHoldRevisitBy } from './investigation-hold';
 
 export const DSAR_EXPORT_REASON = 'SUBJECT_ACCESS';
 export const RECTIFICATION_PRIORITY = 50;
@@ -32,10 +33,12 @@ export const RECTIFICATION_PRIORITY = 50;
 export type RefusalGround = 'LEGAL_HOLD' | 'AML_RECORD' | 'ACTIVE_LICENCE';
 
 /** The obligation that refuses an erasure, if any — the ground is stated, never a vague no. */
-export function refusalGround(doc: { held: boolean; amlRecord: boolean; approved: boolean; relationshipLive: boolean }): RefusalGround | null {
+export function refusalGround(doc: { held: boolean; amlRecord: boolean; approved: boolean; relationshipLive: boolean; docType?: string }): RefusalGround | null {
   if (doc.held) return 'LEGAL_HOLD';
   if (doc.amlRecord) return 'AML_RECORD';
-  if (doc.approved && doc.relationshipLive) return 'ACTIVE_LICENCE';
+  // [POLICE-CLEARANCE CONSENT · DPA s.9(1)(a)] A police clearance rests on the person's explicit consent, which they
+  // can withdraw at any time: it is never kept as an "active licence" against their erasure (a hold still keeps it).
+  if (doc.approved && doc.relationshipLive && doc.docType !== POLICE_CLEARANCE_DOC_TYPE) return 'ACTIVE_LICENCE';
   return null;
 }
 
@@ -87,6 +90,9 @@ export interface EraseOutcome {
   docType: string;
   outcome: 'ALREADY_DESTROYED' | 'DESTROYED' | 'DESTRUCTION_PENDING' | 'REFUSED';
   ground?: RefusalGround;
+  /** [SEC-PII] For a document an open review keeps: why (generically) and when the request is looked at again. */
+  message?: string;
+  revisitBy?: Date;
   receipt?: { deletedAt: Date; probe: string; stores: string[] };
 }
 
@@ -102,6 +108,9 @@ async function relationshipIsLive(prisma: PrismaClient, userId: string): Promise
 export async function eraseDocumentsFor(prisma: PrismaClient, service: VerificationService, userId: string, documentIds?: string[]): Promise<EraseOutcome[]> {
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true, tenantId: true } });
   if (!user) throw new NotFoundError('User', userId);
+  // [REVIEW-G S3-3] An identity review open on the person's live group, not yet holding them: its hold first, so the
+  // refusal is a real hold with its date and the written why and when (never a hold-less keep).
+  await holdForOpenIdentityReviews(prisma, userId);
   const docs = await prisma.verificationDocument.findMany({
     where: { userId, ...(documentIds && documentIds.length > 0 ? { id: { in: documentIds } } : {}) },
     orderBy: { createdAt: 'asc' },
@@ -120,12 +129,25 @@ export async function eraseDocumentsFor(prisma: PrismaClient, service: Verificat
       amlRecord: Boolean(type && type.amlRecordClass !== 'NOT_APPLICABLE'),
       approved: d.status === 'APPROVED',
       relationshipLive: live,
+      docType: d.docType,
     });
     if (ground) { outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground }); continue; }
     const result = await service.purgeDocumentNow({ id: d.id, userId, fileUrl: d.fileUrl, docType: d.docType, user: { tenantId: user.tenantId } }, userId, { requireRetentionElapsed: false, shredFields: true });
     if (result === 'PURGED') outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'DESTROYED', receipt: await receiptOf(d.id) });
     else if (result === 'PROBE_FAILED') outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'DESTRUCTION_PENDING', receipt: await receiptOf(d.id) });
     else outcomes.push({ documentId: d.id, docType: d.docType, outcome: 'REFUSED', ground: 'LEGAL_HOLD' }); // a hold landed under the lock
+  }
+  // [SEC-PII · Privacy §6] A request the system's investigation hold delays is answered why and when, in writing:
+  // on each kept document of this answer, and in the person's inbox. Generic words, never the review's kind.
+  const revisitBy = outcomes.some((o) => o.outcome === 'REFUSED' && o.ground === 'LEGAL_HOLD') ? await investigationHoldRevisitBy(prisma, userId) : null;
+  if (revisitBy) {
+    const heldBySystem = new Set((await prisma.verificationDocument.findMany({
+      where: { userId, id: { in: outcomes.map((o) => o.documentId) }, legalHold: { placedBy: INVESTIGATION_HOLD_PLACER, releasedAt: null } }, select: { id: true },
+    })).map((d) => d.id));
+    const othersDone = outcomes.every((o) => heldBySystem.has(o.documentId) || o.outcome === 'DESTROYED' || o.outcome === 'ALREADY_DESTROYED');
+    const words = erasureDelayedWords(revisitBy, othersDone, heldBySystem.size);
+    for (const o of outcomes) if (heldBySystem.has(o.documentId)) Object.assign(o, { message: words.body, revisitBy });
+    await service.notifyErasureDelayed(userId, revisitBy, othersDone, heldBySystem.size);
   }
   await prisma.auditLog.create({ data: {
     userId, action: 'DSAR_DOCUMENT_ERASURE', entity: 'User', entityId: userId,

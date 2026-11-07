@@ -1,6 +1,7 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
 import { formatMoney } from '../../utils/currency-amount';
+import { weeklyFeeAmount } from './subscription-fee';
 
 // ---------------------------------------------------------------------------
 // [OWNER LEGAL PLAN 15 Oct 2026 · R10, research T1] The VAT registration
@@ -151,7 +152,8 @@ export async function vatTracker(db: Db, tenantId: string, now = new Date()): Pr
   let expected = 0;
   let weeklyFees = 0;
   for (const s of subs) {
-    const weekly = Number(s.customRate ?? s.weeklyRate);
+    // [CHAINS · REVIEW-M #2211] The fee the biller charges: a custom rate never above the tier rate.
+    const weekly = weeklyFeeAmount(s);
     if (!(weekly > 0)) continue;
     const trialLeft = (s.isTrialActive || s.status === 'TRIAL') && s.trialEndDate && s.trialEndDate.getTime() > now.getTime()
       ? Math.ceil((s.trialEndDate.getTime() - now.getTime()) / WEEK_MS) : 0;

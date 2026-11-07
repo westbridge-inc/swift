@@ -81,7 +81,7 @@ async function advertiserIds(prisma: Db, ids: string[]): Promise<Set<string>> {
   if (ids.length === 0) return new Set();
   const [owners, members] = await Promise.all([
     prisma.advertiser.findMany({ where: { createdByUserId: { in: ids } }, select: { createdByUserId: true } }),
-    prisma.advertiserMember.findMany({ where: { userId: { in: ids } }, select: { userId: true } }),
+    prisma.advertiserMember.findMany({ where: { userId: { in: ids }, acceptedAt: { not: null } }, select: { userId: true } }),
   ]);
   return new Set([...owners.map((r) => r.createdByUserId), ...members.map((r) => r.userId)]);
 }

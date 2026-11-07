@@ -24,7 +24,9 @@ describe('company facts come from the legal texts’ operator', () => {
     expect(site).toMatchObject({
       legalEntityName: OPERATOR.name, registrationNo: '17703', phone: '+592 716 3534', supportEmail: 'support@swiftgy.com',
       address: 'Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana',
-      supportHours: 'Monday to Saturday, 8:00–20:00 Guyana time (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.',
+      // [Owner 30 Oct 2026] 8:00–16:00 (was 20:00).
+      supportHours: 'Monday to Saturday, 8:00–16:00 Guyana time (in-app Help & Support). In an emergency use SOS or call Police 911, Fire 912, Ambulance 913.',
+      supportDays: 'Monday to Saturday, 8:00–16:00 Guyana time',
     });
   });
 
@@ -44,7 +46,7 @@ describe('refunds (research E5, ¶12, ¶13, ¶15)', () => {
     'These rules do not affect your rights under the Consumer Affairs Act 2011 to return goods or get a refund from the business.',
     'We reply within 2 business days; the business must refund within 72 hours of our contact.',
     'refunds the extra or mistaken charge in full, within 14 days, to the method you paid with',
-    'within 14 days, to the account you paid from, records the refund, and then deletes your account.',
+    'within 14 days, to the account you paid from or, if you paid in person, by a way you and {site.tradeName} agree, records the refund, and then deletes your account.',
   ])('%s', (text) => expect(REFUNDS).toContain(text));
 
   it('no advertising sentence while ads are off', () => {
@@ -54,7 +56,11 @@ describe('refunds (research E5, ¶12, ¶13, ¶15)', () => {
 
 describe('delivery (research E3)', () => {
   it('the fee figures', () => {
-    expect(DELIVERY).toContain('GYD 500 for the first 3 km, then GYD 100 per km; express is 1.5 times the standard fee.');
+    // [Owner 1 Nov 2026] Express is the standard fee + a flat GYD 1,000, any distance (it was 1.5 times the fee).
+    expect(DELIVERY).toContain('GYD 500 for the first 3 km, then GYD 100 per km; express adds GYD 1,000 to the standard fee, whatever the distance.');
+    expect(DELIVERY).toContain('Express delivery, where offered, adds GYD 1,000 for each store in your order that is delivered to you.');
+    expect(DELIVERY).toContain("const UPDATED = '5 November 2026';");
+    expect(DELIVERY).not.toMatch(/1\.5 times|one and a half/i);
   });
 
   it('held: no sentence the strike code contradicts', () => {

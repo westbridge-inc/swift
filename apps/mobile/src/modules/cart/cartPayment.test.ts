@@ -6,11 +6,10 @@ import {
   checkoutPaymentMethod,
   mmgOffered,
   normalizeCartPaymentCapabilities,
-  paymentActionForCheckout,
-  placedOrderConfirmationCopy,
   reconcileCartPaymentSelection,
   selectCartPaymentMethod,
 } from './cartPayment';
+import { paymentActionForCheckout, pickupCodeGivenAtCheckout, placedOrderConfirmationCopy } from './cartPlaced';
 
 function capabilities(scope: string, mmg: boolean): CartPaymentCapabilities {
   return {
@@ -101,6 +100,27 @@ describe('post-checkout MMG action and confirmation copy', () => {
     expect(cashCopy).toContain('Swift never holds the order money');
     expect(cashCopy).not.toContain('MMG');
   });
+
+  // [PICKUP · REVIEW-F S3-1 (a) on #2251] A cash takeaway names the pickup code only when the checkout answer
+  // carries one (the store asks for it); with the store's code off (the default) the counter checks the
+  // customer's first name and order number, so the popup never promises a code they do not have.
+  it('a cash takeaway names the code only when the store asks for it', () => {
+    const base = { appointment: false, pickup: true, held: false, submittedMethod: 'CASH' as const, paymentAction: null };
+    const off = placedOrderConfirmationCopy({ ...base, pickupCodeGiven: false });
+    expect(off).toBe('We’ll tell you when it’s ready — give your first name and order number and pay cash directly at the counter.');
+    expect(off).not.toMatch(/code/i);
+    expect(placedOrderConfirmationCopy({ ...base })).toBe(off);
+    expect(placedOrderConfirmationCopy({ ...base, pickupCodeGiven: true })).toBe('We’ll tell you when it’s ready — show the pickup code and pay cash directly at the counter.');
+  });
+
+  it('pickupCodeGivenAtCheckout: true only when a placed takeaway carries a code', () => {
+    expect(pickupCodeGivenAtCheckout({ orders: [{ pickupCode: null }] })).toBe(false);
+    expect(pickupCodeGivenAtCheckout({ orders: [{}] })).toBe(false);
+    expect(pickupCodeGivenAtCheckout({})).toBe(false);
+    expect(pickupCodeGivenAtCheckout(null)).toBe(false);
+    expect(pickupCodeGivenAtCheckout({ orders: [{ pickupCode: '' }] })).toBe(false);
+    expect(pickupCodeGivenAtCheckout({ orders: [{ pickupCode: null }, { pickupCode: '424242' }] })).toBe(true);
+  });
 });
 
 // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG to the store's NUMBER (build 12 + web). The old link rail is off on
@@ -154,5 +174,57 @@ describe('[PAYMENT-SIMPLIFY] MMG to the store number', () => {
   it('the confirmation says the number comes on the order once the business accepts', () => {
     expect(placedOrderConfirmationCopy({ appointment: false, pickup: false, held: false, submittedMethod: 'MOBILE_MONEY', paymentAction: null, mmgPayTo: 'STORE_NUMBER' }))
       .toBe('When the business accepts, your order screen shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG; it marks the order paid when the money arrives. Swift never holds the money.');
+  });
+});
+
+// [BOOK-S6a] A booking the checkout answer came back ACCEPTED for is confirmed now, not "when the business accepts".
+describe('[BOOK-S6a] the booking confirmation copy follows the answer', () => {
+  const base = { appointment: true, pickup: false, held: false, submittedMethod: 'CASH' as const, paymentAction: null };
+  it('confirmed', () => {
+    const copy = placedOrderConfirmationCopy({ ...base, appointmentConfirmed: true });
+    expect(copy).toBe('Your time is confirmed — pay cash directly to the business when the service is done.');
+    expect(copy).not.toContain('accepts');
+  });
+  it('a request, or no answer about it, keeps the request words', () => {
+    for (const appointmentConfirmed of [false, undefined]) {
+      expect(placedOrderConfirmationCopy({ ...base, appointmentConfirmed })).toBe('Your time is confirmed when the business accepts — pay cash directly to them when the service is done.');
+    }
+  });
+});
+
+// [BOOK-FU3 · REVIEW-F S4 on #2202] An MMG booking is a booking in every line (phone and website share these words).
+describe('[BOOK-FU3] MMG words for a booking say "booking", never "order"', () => {
+  const numberCaps = normalizeCartPaymentCapabilities({
+    scope: 'scope-b',
+    cash: { available: true, fundsFlow: 'DIRECT_AT_HANDOVER' },
+    mmg: { available: false, provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', unavailableReason: 'PAY_LINKS_OFF' },
+    mmgStoreNumber: { available: true, provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', payTo: 'STORE_NUMBER', shownWhen: 'STORE_ACCEPTS', unavailableReason: null },
+  });
+  const base = { appointment: true, pickup: false, held: false, submittedMethod: 'MOBILE_MONEY' as const, paymentAction: null };
+
+  it('the confirmation after an MMG booking to the store number', () => {
+    const copy = placedOrderConfirmationCopy({ ...base, mmgPayTo: 'STORE_NUMBER' });
+    expect(copy).toBe('When the business accepts, your booking shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the booking cancels automatically. You pay the business directly in MMG; it marks the booking paid when the money arrives. Swift never holds the money.');
+    expect(copy).not.toMatch(/\border\b/);
+  });
+
+  it('the confirmation when an MMG booking\'s pay link is missing', () => {
+    const copy = placedOrderConfirmationCopy(base);
+    expect(copy).toBe('Your MMG booking was placed, but its payment link is unavailable. Do not send money to another link; open the booking for the latest payment action.');
+    expect(copy).not.toMatch(/\border\b/);
+  });
+
+  it('the MMG choice on a booking-only cart (store number, and the older link rail)', () => {
+    const [, mmg] = cartPaymentOptions(numberCaps, { appointmentOnly: true, pickup: false });
+    expect(mmg!.sub).toBe('When the business accepts, your booking shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the booking cancels automatically. You pay the business directly in MMG. Swift never holds the money.');
+    const [, link] = cartPaymentOptions(capabilities('scope-bl', true), { appointmentOnly: true, pickup: false });
+    expect(link!.sub).toBe('Pay the business directly in MMG after booking. Swift never holds the money.');
+    for (const sub of [mmg!.sub, link!.sub]) expect(sub).not.toMatch(/\border\b/);
+  });
+
+  it('control: an ordinary order keeps the order words', () => {
+    expect(placedOrderConfirmationCopy({ ...base, appointment: false })).toBe('Your MMG order was placed, but its payment link is unavailable. Do not send money to another link; open the order for the latest payment action.');
+    const [, link] = cartPaymentOptions(capabilities('scope-ol', true), { appointmentOnly: false, pickup: false });
+    expect(link!.sub).toBe('Pay the business directly in MMG after placing the order. Swift never holds the money.');
   });
 });

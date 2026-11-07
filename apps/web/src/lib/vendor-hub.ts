@@ -12,7 +12,7 @@ import { customerDeciding, mmgAwaitingPayment, nothingToAccept } from '../../../
 import { canVendorConfirmDelivered } from '../../../mobile/src/modules/vendor/screens/delivery-owner';
 import { addAppointmentDays, appointmentDayKey } from '../../../mobile/src/lib/appointmentTime';
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
@@ -253,21 +253,6 @@ export function financialDeltaLabel(cur: number, prev: number | null) {
   const pct = Math.round(((cur - prev) / prev) * 100);
   if (Math.abs(pct) < 1) return 'Revenue level with previous period';
   return `Revenue ${pct > 0 ? 'up' : 'down'} ${Math.abs(pct)} percent`;
-}
-
-export function subscriptionTone(sub: any): 'brand' | 'success' | 'neutral' | 'error' | 'warning' {
-  if (sub?.status === 'ACTIVE') return 'success';
-  if (sub?.status === 'PAST_DUE') return 'warning';
-  if (sub?.status === 'SUSPENDED' || sub?.status === 'CHURNED') return 'error';
-  if (sub?.isTrialActive || sub?.status === 'TRIAL') return 'brand';
-  return 'neutral';
-}
-
-export function billingSummary(sub: any) {
-  if (!sub) return 'Subscription not active';
-  if (sub.isInGracePeriod && sub.gracePeriodEnd) return `Pay by ${fmtDate(sub.gracePeriodEnd)}`;
-  const next = sub.nextBillingDate ? `Next bill ${fmtDate(sub.nextBillingDate)}` : null;
-  return next || String(sub.status ?? 'Subscription').toLowerCase();
 }
 
 export type VendorMemberRole = 'OWNER' | 'MANAGER' | 'STAFF';

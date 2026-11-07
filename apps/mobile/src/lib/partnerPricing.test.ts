@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { moverQuote, vendorQuote, quoteGate, QUOTE_GATE_COPY, QUOTE_MAX_AGE_MS, type PartnerPricing } from './partnerPricing';
+import { moverQuote, privateCarsOpen, vehicleQuote, vendorQuote, quoteGate, QUOTE_GATE_COPY, QUOTE_MAX_AGE_MS, type PartnerPricing } from './partnerPricing';
+import { isHirePlate } from './taxiPlate';
 
 // The app never prices a partner itself. It looks up the quote the server
 // resolved with the SAME function signup and the weekly re-tier bill through,
@@ -126,5 +127,25 @@ describe('[PR1270-S2-04] quoteGate — a partner commits only to a fetched, curr
       expect(QUOTE_GATE_COPY[why]).toMatch(/fee/i);
       expect(QUOTE_GATE_COPY[why]).not.toMatch(/\$|\d/);
     }
+  });
+});
+
+// [CARS-PLATES · owner 6 Nov 2026 + 04:30Z] A private (P) plate car delivers only and pays the delivery rider's fee: the
+// server's `privateCars` quote, only while it says private cars deliver. An H car keeps the taxi quote.
+describe('vehicleQuote — a car priced for the work its plate gets', () => {
+  const open: PartnerPricing = { ...GY, privateCars: { on: true, quotes: [mover('CAR', 'RIDER', 'STANDARD', 'courier', 8000)] } };
+  it('P plate while open: the rider quote; H plate: the taxi quote; closed or absent: the taxi quote as before', () => {
+    expect(privateCarsOpen(open)).toBe(true);
+    expect(vehicleQuote(open, 'CAR', 'PWX 1', isHirePlate)).toMatchObject({ role: 'RIDER', tier: 'courier', rate: 8000 });
+    expect(vehicleQuote(open, 'CAR', 'HC 1', isHirePlate)).toMatchObject({ role: 'DRIVER', tier: 'taxi', rate: 9000 });
+    expect(vehicleQuote({ ...GY, privateCars: { on: false, quotes: [] } }, 'CAR', 'PWX 1', isHirePlate)).toMatchObject({ role: 'DRIVER', rate: 9000 });
+    expect(vehicleQuote(GY, 'CAR', 'PWX 1', isHirePlate)).toMatchObject({ role: 'DRIVER', rate: 9000 });
+    expect(privateCarsOpen({ ...GY, privateCars: { on: 'true' } })).toBe(false);
+    expect(vehicleQuote(open, 'MOTORCYCLE', '', isHirePlate)).toMatchObject({ role: 'RIDER', rate: 8000 });
+  });
+  it('open but no valid private quote: no price at all (never the taxi fee for a delivery car)', () => {
+    expect(vehicleQuote({ ...GY, privateCars: { on: true, quotes: [] } }, 'CAR', 'PWX 1', isHirePlate)).toBeNull();
+    expect(vehicleQuote({ ...GY, privateCars: { on: true, quotes: [mover('CAR', 'RIDER', 'STANDARD', 'courier', 0)] } }, 'CAR', 'PWX 1', isHirePlate)).toBeNull();
+    expect(vehicleQuote({ ...GY, privateCars: { on: true, quotes: [mover('CAR', 'DRIVER', 'STANDARD', 'taxi', 9000)] } }, 'CAR', 'PWX 1', isHirePlate)).toBeNull();
   });
 });

@@ -16,9 +16,11 @@ import { getStores } from './vendor-api';
  * `failed`: the read failed and there is no answer at all (not a failed
  * re-read behind a good one), so a page can say it could not check.
  */
-export function useStoreRole(): { role: VendorMemberRole | undefined; manager: boolean; surface: ReturnType<typeof vendorSurfaceForRole>; known: boolean; failed: boolean } {
+export function useStoreRole(): { role: VendorMemberRole | undefined; manager: boolean; surface: ReturnType<typeof vendorSurfaceForRole>; known: boolean; failed: boolean; stores: number } {
   const storeId = useStoreId();
   const q = useQuery({ queryKey: storeKey(storeId, 'my-role'), queryFn: getStores });
   const role = safeVendorRole(q.data?.myRole);
-  return { role, manager: role === 'OWNER' || role === 'MANAGER', surface: vendorSurfaceForRole(role), known: q.isSuccess, failed: q.isError && q.data === undefined };
+  // [ENTERPRISE E1b] How many stores this login can open (the same read): "Pay all my branches" is offered to an owner of several.
+  const stores = Array.isArray(q.data?.stores) ? q.data.stores.length : 0;
+  return { role, manager: role === 'OWNER' || role === 'MANAGER', surface: vendorSurfaceForRole(role), known: q.isSuccess, failed: q.isError && q.data === undefined, stores };
 }

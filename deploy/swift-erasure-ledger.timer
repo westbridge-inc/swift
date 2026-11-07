@@ -1,0 +1,14 @@
+[Unit]
+Description=Ship the off-site erasure ledger every minute
+# [Off-site erasure ledger · COORD ruling 21 Oct] At the time of the erasure, not hourly: the backup
+# already holds every erasure up to its own time; this closes the gap after it.
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=swift-erasure-ledger.service
+
+[Install]
+WantedBy=timers.target

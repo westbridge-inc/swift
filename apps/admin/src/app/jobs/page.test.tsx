@@ -154,7 +154,9 @@ describe('a money queue is not one queue among six', () => {
     // Colour is the SECOND signal; the queue name is the first. What is asserted
     // here is that the two are not styled identically.
     expect(settlement.className).not.toBe(search.className);
-    expect(settlement.className).toMatch(/red/);
+    // [ADMIN-UI] Mission Control's alarm colour is the 'bad' tone (red #B91C1C), not a Tailwind red-* class.
+    expect(settlement.className).toMatch(/mc-tone-bad/);
+    expect(search.className).not.toMatch(/mc-tone-bad/);
   });
 });
 

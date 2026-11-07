@@ -12,6 +12,7 @@ import { vendorPreviewDataset } from './vendorPreviewData';
 const src = readFileSync(join(process.cwd(), 'src/hooks/vendorops.ts'), 'utf8');
 const editor = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorItemEditorScreen.tsx'), 'utf8');
 const bulkImport = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorBulkImportScreen.tsx'), 'utf8');
+const account = readFileSync(join(process.cwd(), 'src/modules/vendor/screens/VendorAccountScreen.tsx'), 'utf8');
 
 describe('vendor mutations are preview-read-only by construction', () => {
   it('no vendor hook calls useMutation({ directly — all route through usePreviewSafeMutation', () => {
@@ -23,6 +24,21 @@ describe('vendor mutations are preview-read-only by construction', () => {
   it('the wrapper exists and short-circuits to the read-only stub in preview', () => {
     expect(src).toMatch(/function usePreviewSafeMutation/);
     expect(src).toMatch(/pv \? previewMutation\(\) : m/);
+  });
+
+  it('[STORE-VAT · REVIEW-G #2103 S4-2] every store VAT write sends nothing in a preview (checked at the send); only an owner outside a preview sees VAT', () => {
+    // The VAT hooks keep `return useMutation({` (the double-press census reads that shape), so each write's mutationFn is
+    // wrapped in previewReadOnly, whose preview check is pinned here; hooks/storeVat.binding.test.ts drives it.
+    const vat = readFileSync(join(process.cwd(), 'src/hooks/storeVat.ts'), 'utf8');
+    expect(vat).toMatch(/export function previewReadOnly[\s\S]*?if \(useVendorPreview\.getState\(\)\.previewType != null\) \{\s*await previewMutation\(\)\.mutateAsync\(\);\s*return undefined;/);
+    for (const rel of ['src/hooks/storeVat.ts', 'src/hooks/storeVatCertificate.ts']) {
+      const hook = readFileSync(join(process.cwd(), rel), 'utf8');
+      const writes = (hook.match(/useMutation\(\{/g) ?? []).length;
+      expect(writes, rel).toBeGreaterThan(0);
+      expect((hook.match(/mutationFn: guardVendorOperation\(previewReadOnly\(/g) ?? []).length, rel).toBe(writes);
+    }
+    expect(account).toContain('{isOwner && !samplePreview && store ? <StoreVatSection');
+    expect(editor).toContain("useStoreVat(myRole === 'OWNER' && !samplePreview)");
   });
 
   it('gates editor, modifier, stock and bulk-import controls in sample preview', () => {

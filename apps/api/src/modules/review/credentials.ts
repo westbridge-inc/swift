@@ -56,6 +56,23 @@ export function reviewCodeMatches(credential: Pick<ReviewCredentialFacts, 'id' |
   return expected.length === got.length && crypto.timingSafeEqual(expected, got);
 }
 
+/**
+ * [SEC-TRUST F12] Take one attempt from the failure budget BEFORE the code is compared, in one Redis
+ * script (one key, so it is atomic on standalone Redis and Redis Cluster, like utils/otp.ts): a guess is
+ * compared only if it got one of the five places. Simultaneous guesses cannot all read a low count.
+ * Returns false when the budget is spent (nothing is counted then). A correct code clears the key.
+ */
+const RESERVE_ATTEMPT_SCRIPT = `
+local used = tonumber(redis.call('GET', KEYS[1]) or '0') or 0
+if used >= tonumber(ARGV[1]) then return 0 end
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2])) end
+return 1
+`;
+export async function reserveReviewAttempt(redis: Pick<Redis, 'eval'>, failKey: string): Promise<boolean> {
+  return Number(await redis.eval(RESERVE_ATTEMPT_SCRIPT, 1, failKey, String(REVIEW_CODE_MAX_ATTEMPTS), String(REVIEW_CODE_LOCKOUT))) === 1;
+}
+
 /** send-otp for a review identifier: nothing is sent; the window opens. */
 export async function armReviewCode(redis: Redis, identifier: string, credentialId: string): Promise<void> {
   await redis.set(`${ARMED_PREFIX}${identifier}`, credentialId, 'EX', REVIEW_CODE_TTL);
@@ -72,16 +89,9 @@ export async function verifyReviewCode(
   const failKey = `${FAIL_PREFIX}${identifier}`;
   const armed = await redis.get(armedKey);
   if (armed !== credential.id) return { valid: false, reason: 'OTP expired or not found. Request a new one.' };
-  const fails = Number((await redis.get(failKey)) ?? 0);
-  if (fails >= REVIEW_CODE_MAX_ATTEMPTS) return { valid: false, reason: 'Too many attempts. Request a new OTP.' };
-  const expected = Buffer.from(credential.staticOtpHash);
-  const got = Buffer.from(hashReviewCode(credential.id, code));
-  const ok = expected.length === got.length && crypto.timingSafeEqual(expected, got);
-  if (!ok) {
-    const n = await redis.incr(failKey);
-    if (n === 1) await redis.expire(failKey, REVIEW_CODE_LOCKOUT);
-    return { valid: false, reason: 'Invalid OTP code' };
-  }
+  // [SEC-TRUST F12] The attempt is counted first, atomically; only then is the code compared.
+  if (!(await reserveReviewAttempt(redis, failKey))) return { valid: false, reason: 'Too many attempts. Request a new OTP.' };
+  if (!reviewCodeMatches(credential, code)) return { valid: false, reason: 'Invalid OTP code' };
   await redis.del(armedKey, failKey);
   return { valid: true };
 }

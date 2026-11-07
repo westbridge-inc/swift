@@ -1,7 +1,6 @@
-import { assertHirePlate } from '../verification/hire-plate';
+import { assertPlateForWork, moverRoleForVehicle } from '../verification/hire-plate';
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../utils/errors';
-import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { z } from '../../lib/zod';
 import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
@@ -17,6 +16,7 @@ import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { recordBackgroundLocationConsent } from './location-consent';
 import { assertWeeklyFeeAck, weeklyFeeAckRequired } from './weekly-fee-ack';
+import { assertStoreNameAllowed, businessSchema, weeklyFeeAckSchema } from './business-input';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -24,17 +24,6 @@ const vehicleSchema = z.object({
   year: z.number().int().min(1980).max(new Date().getFullYear() + 1),
   color: z.string().trim().min(1).max(40),
   licensePlate: z.string().trim().min(1).max(20),
-});
-
-const businessSchema = z.object({
-  name: z.string().trim().min(2).max(120),
-  vendorType: z.enum(['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE']),
-  phone: z.string().trim().min(5).max(30),
-  addressLine1: z.string().trim().min(3).max(200),
-  city: z.string().trim().min(2).max(80),
-  region: z.string().trim().max(80).optional(),
-  latitude: z.number().min(-90).max(90),
-  longitude: z.number().min(-180).max(180),
 });
 
 const becomeSchema = z.object({
@@ -50,11 +39,7 @@ const becomeSchema = z.object({
   acceptAgreement: z.boolean().optional(),
   // [Row 628] "I understand the weekly fee": the words' version and the fee the client showed. Required from
   // the website and from any client that sends it; phone builds 9-12 send none (partner/weekly-fee-ack.ts).
-  weeklyFeeAck: z.object({
-    version: z.string().trim().min(1).max(20),
-    amount: z.number().int().positive(),
-    currencyCode: z.string().trim().length(3),
-  }).strict().optional(),
+  weeklyFeeAck: weeklyFeeAckSchema.optional(),
 });
 export const AGREEMENT_REQUIRED = 'AGREEMENT_REQUIRED';
 
@@ -96,11 +81,8 @@ export async function partnerRoutes(app: FastifyInstance) {
     }
     // [Row 628] The weekly fee was shown and ticked — before any provisioning, role change or row.
     assertWeeklyFeeAck(weeklyFeeAckRequired(request, body), body.weeklyFeeAck);
-    if (body.business?.name) {
-      // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only.
-      const me = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
-      assertNameNotReserved(body.business.name, me?.phone);
-    }
+    // [MC-PR3 · ROLE-DOCS] "TEST-" names and own-name stores, checked before the store exists (business-input.ts).
+    if (body.business?.name) await assertStoreNameAllowed(app.prisma, request.user.userId, body.business);
     const { result, authorityCleanup } = await service.becomePartnerWithAuthority(
       request.user.userId,
       body,
@@ -114,6 +96,9 @@ export async function partnerRoutes(app: FastifyInstance) {
       { accepted: body.acceptAgreement === true, ip: request.ip, surface: consentSurfaceOf(request), weeklyFeeAck: body.weeklyFeeAck },
     );
     await completeUserRoleAuthorityTransition(app, authorityCleanup);
+    // Papers approved before this vehicle was saved owe the weekly fee now: no later approval will (a repeat save collects
+    // what a failed one missed).
+    if (result.kind !== 'VENDOR') await verification.settleMoverFee(request.user.userId);
     reply.code(result.created ? 201 : 200);
     const provisioned = {
       kind: result.kind,
@@ -151,7 +136,8 @@ export async function partnerRoutes(app: FastifyInstance) {
       || ((!!rider || !!driver) && await verification.isRoleVerified(userId, 'MOVER'));
     // [Owner ruling 11 Oct 2026] A taxi plate that can never be approved is refused in plain words
     // BEFORE the step-up: there is nothing to confirm for it. The service checks it again.
-    if (body.vehicle) assertHirePlate(body.vehicleType, body.vehicle.licensePlate);
+    // [CARS-PLATES · owner 6 Nov] A car's plate decides its work: a private plate is a delivery car.
+    if (body.vehicle) assertPlateForWork(body.vehicleType, body.vehicle.licensePlate, moverRoleForVehicle(body.vehicleType, body.vehicle.licensePlate));
     if (verified) await requireStepUp(app, request);
     const { result, authorityCleanup } = await service.changeVehicleWithAuthority(
       userId,
@@ -166,6 +152,8 @@ export async function partnerRoutes(app: FastifyInstance) {
         driverId: authorityCleanup.driverId ?? result.retiredDriverId,
       });
     }
+    // A vehicle whose list the approved papers already complete owes the fee now, as on the first save.
+    if (result.changed) await verification.settleMoverFee(userId);
     return {
       success: true,
       data: {

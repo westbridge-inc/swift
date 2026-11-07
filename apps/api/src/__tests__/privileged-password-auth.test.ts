@@ -5,7 +5,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { loginWithOtp } from './helpers/otp';
 
@@ -108,7 +108,7 @@ beforeAll(async () => {
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
   await app.register(authPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   app.get('/privileged-session-probe', { preHandler: [app.authenticate] }, async (request) => ({
     success: true,
     role: request.user.role,

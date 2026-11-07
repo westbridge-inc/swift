@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { shownRatingFor } from '../rating/rating-groups';
 import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -8,7 +9,6 @@ import { z } from '../../lib/zod';
 import { FareService } from './fare.service';
 import {
   assertRideGates,
-  assertL2,
   createRideRequest,
   fareChanged,
   replayRideRequestAnswer,
@@ -21,9 +21,10 @@ import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from
 import { assertHirePassengers } from './hire-passengers';
 import { assertWebBookingCarriesQuoteAndKey, taxiMobileAppRequired, webTaxiBookingEnabled } from './web-taxi-booking';
 import { readRideItinerary } from './taxi-stops-read';
-import { hasTaxiPassengerCustody } from './passenger-custody';
+import { hasTaxiPassengerCustody, lockTaxiOrderForCustodyDecision } from './passenger-custody';
 import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';
-import { decorateRideWaiting, taxiWaitingEnabled, waitingDisclosure } from './taxi-waiting';
+import { decorateRideWaiting, recordPickupArrival, taxiWaitingEnabled, waitingDisclosure } from './taxi-waiting';
+import { arrivalGate } from '../dispatch/arrival-evidence';
 import {
   CHECKOUT_CLAIM_TTL_S,
   checkoutRequestHash,
@@ -46,6 +47,8 @@ import { tenantCacheKey } from '../../utils/tenant-cache';
 import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterOwner, enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
+import { counterpartPhone } from '../calls/counterpart-phone';
+import { withoutPositionEvidence } from '../order/customer-timeline';
 
 // ---------------------------------------------------------------------------
 // Taxi: the fare is computed and SHOWN before any driver
@@ -80,6 +83,9 @@ const requestRideSchema = z.object({
   // server's own fare, never used as the price.
   stops: z.array(z.unknown()).nullish(),
   expectedFare: zMoneyWhole.optional(),
+  // [TAXI waiting charge · quote proof] The waiting terms the passenger was
+  // shown beside the fare, echoed back (the website; the phone from build 13).
+  waiting: z.object({ chargePerBlock: zMoneyWhole, blockMinutes: z.number().int().min(1).max(1440) }).optional(),
 });
 
 const cancelSchema = z.object({
@@ -257,6 +263,8 @@ export async function ridesRoutes(app: FastifyInstance) {
       // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
       // passenger was shown travels to the booking for every ride that has one.
       ...(body.expectedFare !== undefined ? { expectedFare: body.expectedFare } : {}),
+      // [TAXI waiting charge · quote proof] The terms the passenger was shown, when echoed.
+      ...(body.waiting !== undefined ? { waitingEcho: { chargePerBlock: body.waiting.chargePerBlock, blockMinutes: body.waiting.blockMinutes } } : {}),
     };
     const userId = request.user.userId;
     if (body.expectedFare === undefined) {
@@ -364,8 +372,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     assertHirePassengers(body.passengerCount);
     if (!isRideClassServed(body.rideClass)) throw new AppError(400, 'INVALID_RIDE_CLASS', 'This ride class is no longer offered. Choose one of the available ride classes.');
     assertRoadTripInMarket(body);
+    // [Owner ruling 24 Oct 2026] No customer ID gate here either (rides.service assertRideGates).
     const user = await assertRideGates(app, request.user.userId);
-    assertL2(user);
 
     // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
     // passenger saw is checked now and kept with the entry; nothing is queued
@@ -462,9 +470,9 @@ export async function ridesRoutes(app: FastifyInstance) {
 
   /** GET /presence — the "map is alive" read (rides spec 5.1/6.2): up to 12
    *  COARSE positions of free online drivers near a point. Privacy is the
-   *  design: server-side ~100m deterministic jitter (stable per driver per
-   *  5-min bucket so cars don't dance between refetches), no identities, no
-   *  bearings, hailable (online + available) cars only. Zero rows ⇒ empty
+   *  design: each position is snapped to the shared coarse grid (board-privacy
+   *  coarsePoint; no per-driver component, stable between refetches), no
+   *  identities, no bearings, hailable (online + available) cars only. Zero rows ⇒ empty
    *  array — the client renders nothing rather than faking supply (0.8). */
   app.get('/presence', auth, async (request) => {
     const qq = request.query as Record<string, unknown>;
@@ -536,7 +544,14 @@ export async function ridesRoutes(app: FastifyInstance) {
     // holds it — never shown while they're still deciding on a driver.
     // [owner 17 Oct · PAYMENT-SIMPLIFY] And only while DRIVER_MMG_PAY_LINK is on:
     // off (the default), the passenger pays the driver directly at drop-off.
-    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average };
+    // [O-1] The driver's personal number: as today while the call bridge is off; with it on, only to an
+    // installed store build (it dials it) — a bridge-aware client calls through Swift and is sent none.
+    const driver = {
+      ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average,
+      // [DOC-SECURITY G2] The driver's photo as a link the passenger's phone can load (a sealed photo's signed
+      // link, or the bucket's presigned one), never the stored key.
+      user: { ...ride.driver.user, avatar: await resolveAvatarUrl(ride.driver.user.avatar), phone: counterpartPhone(request, ride.driver.user.phone) },
+    };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
@@ -559,9 +574,15 @@ export async function ridesRoutes(app: FastifyInstance) {
       },
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
+    // [REVIEW-F S4-2 on #2055] The driver's recorded position (a step note's ' — gps:…' evidence, kept
+    // for support and appeals) is never the passenger's to read: the same cut as the customer's
+    // order timeline. Every other field of a row is unchanged.
+    ride.statusHistory = ride.statusHistory.map((row) => ({ ...row, note: withoutPositionEvidence(row.note) }));
     if (ride.driver) {
       const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
       Object.assign(ride.driver as object, { displayRating: shown.displayRating, averageRating: shown.average });
+      // [DOC-SECURITY G2] The driver's photo as a loadable link, never the stored key (as /active).
+      if (ride.driver.user) ride.driver.user.avatar = await resolveAvatarUrl(ride.driver.user.avatar);
     }
     // Same trip-end rule as /active: the pay link only for a ride that is
     // underway or done (receipt / pay-later), never during matching.
@@ -575,7 +596,12 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] As /active while the ride is live; once finished, the
     // fare it was paid at, itemised (route fare + waiting = total).
     const waiting = await decorateRideWaiting(app.prisma, ride, itinerary?.stops ?? null);
-    return { success: true, data: itinerary || waiting.waiting || waiting.fareBreakdown ? { ...ride, ...itinerary, ...waiting } : ride };
+    // [BUG-HUNT-2 G06] The finished-ride screen asks for a rating only once. A live ride gains no key.
+    const finished = ride.status === 'DELIVERED' || ride.status === 'COMPLETED';
+    const rated = finished
+      ? { hasBeenRated: await app.prisma.rating.count({ where: { orderId: ride.id, raterId: request.user.userId } }) > 0 }
+      : null;
+    return { success: true, data: itinerary || waiting.waiting || waiting.fareBreakdown || rated ? { ...ride, ...rated, ...itinerary, ...waiting } : ride };
   });
 
   /** POST /:id/cancel — rides ride the same state machine as everything else. */
@@ -589,22 +615,37 @@ export async function ridesRoutes(app: FastifyInstance) {
   });
 
   /** POST /:id/confirm-driver-arrival — the passenger's own eyes override the
-   *  arrival GPS gate [E19]. Ownership and the status CAS are one `updateMany`,
-   *  so the confirm itself IS the override transaction: no new column, no
-   *  migration, and nobody but this ride's customer can start the clock. */
+   *  arrival GPS gate [E19]. Ownership and the status are read on the locked
+   *  row, as at the driver's own door, and nobody but this ride's customer can
+   *  use it. [Owner 4 Nov 2026] It moves the ride on; it does not start the
+   *  waiting charge. Only GPS does: the gate is read here on the driver's own
+   *  fix, and a car it cannot place waits for free. */
   app.post<{ Params: { id: string } }>('/:id/confirm-driver-arrival', auth, async (request) => {
     const now = new Date();
-    const claimed = await app.prisma.order.updateMany({
-      where: {
-        id: request.params.id,
-        customerId: request.user.userId,
-        orderType: 'TAXI',
-        status: 'DRIVER_EN_ROUTE',
-        driverId: { not: null },
-      },
-      data: { status: 'DRIVER_ARRIVED', driverArrivedAt: now },
+    const claimed = await app.prisma.$transaction(async (tx) => {
+      await lockTaxiOrderForCustodyDecision(tx, request.params.id);
+      const ride = await tx.order.findFirst({
+        where: {
+          id: request.params.id,
+          customerId: request.user.userId,
+          orderType: 'TAXI',
+          status: 'DRIVER_EN_ROUTE',
+          driverId: { not: null },
+        },
+        select: { id: true, driverId: true, pickupLat: true, pickupLng: true },
+      });
+      if (!ride?.driverId) return false;
+      const driver = await tx.driver.findUnique({ where: { id: ride.driverId }, select: { currentLat: true, currentLng: true, lastLocationUpdate: true } });
+      const gate = arrivalGate(
+        { lat: driver?.currentLat ?? null, lng: driver?.currentLng ?? null, at: driver?.lastLocationUpdate ?? null },
+        { lat: ride.pickupLat, lng: ride.pickupLng },
+        now,
+      );
+      await tx.order.updateMany({ where: { id: ride.id, status: 'DRIVER_EN_ROUTE' }, data: { status: 'DRIVER_ARRIVED', driverArrivedAt: now } });
+      await recordPickupArrival(tx, ride.id, gate.allowed);
+      return true;
     });
-    if (claimed.count === 0) {
+    if (!claimed) {
       throw new AppError(409, 'INVALID_STATUS',
         'The driver has not started this ride, or it is no longer waiting for pickup.');
     }
@@ -653,8 +694,9 @@ export async function ridesRoutes(app: FastifyInstance) {
     const raisedBy = ride.customerId === request.user.userId ? 'passenger' : 'driver';
     const counterpartyUserId = raisedBy === 'passenger' ? ride.driver?.userId ?? null : ride.customerId;
 
-    // Loud, correlated trace for ops.
-    log().error({ orderId: ride.id, orderNumber: ride.orderNumber, raisedBy, lat: body.lat, lng: body.lng }, 'SOS raised on active ride');
+    // Loud, correlated trace for ops. Never the position: logs are kept for 30 days
+    // (deploy/keep-logs.py). The alert below carries it to the responders.
+    log().error({ orderId: ride.id, orderNumber: ride.orderNumber, raisedBy }, 'SOS raised on active ride');
 
     // ONE SOS engine (safety §4, standing order #17): a ride panic is a
     // first-class SosAlert, never a parallel notify. It goes straight to ACTIVE

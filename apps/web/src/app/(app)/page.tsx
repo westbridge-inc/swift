@@ -14,7 +14,8 @@ import { HomeScreen } from './home-screen';
  *   - The legal duties: the site footer below (privacy, terms, child safety,
  *     account deletion, the support inbox and the operating company's name) —
  *     the same footer every marketing page carries.
- *   - Store badges: none, still gated by showAppStoreBadges in site.config.
+ *   - Store links: the footer's, shown only while the web server's
+ *     SWIFT_APP_STORES switch is live (lib/launch-switch.ts).
  */
 /**
  * [W2] The page arrives with the stores in it. The server reads the GUEST Home

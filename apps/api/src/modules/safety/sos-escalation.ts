@@ -7,6 +7,7 @@ import { OPS_WAR_ROOM, warRoomsFor } from './war-room';
 import { isOwnNumber } from './emergency-contact.service';
 import { log } from '../../utils/logger';
 import { maskPii } from '../rating/review-scrub';
+import { gsm7Name } from '../../utils/sms-text';
 import { sosEscalationCounter, sosEscalationGauge } from '../../plugins/observability';
 
 /**
@@ -94,7 +95,23 @@ async function claimNext(prisma: PrismaClient, leaseMs: number, alertIds?: strin
   return rows[0] ?? null;
 }
 
+/** [FULL-LAUNCH] What ops reads and the on-call text repeats: who raised it, on what job, and where to go. It takes
+ *  only these three fields, so a person's name, words or location cannot reach it: those are on the Safety page. */
+export function sosPageBody(alert: { actorRole: string; orderId: string | null; serviceJobId: string | null }): string {
+  const job = alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : '';
+  return `${alert.actorRole} raised an SOS${job}. Open the Safety page in Mission Control now.`;
+}
+
 const TERMINAL = new Set(['RESOLVED', 'CANCELLED']);
+
+/** [SMS-COST] The longest name an SOS text to an emergency contact carries (as the contact's code text). */
+export const SOS_SMS_NAME_MAX = 30;
+/** The SOS text to an emergency contact. [SMS-COST · REVIEW-G4 S3-1] Texts leave as GSM-7, so the name travels
+ *  only as GSM-7 can carry it: a name it cannot carry falls back to words, never to nothing. */
+export function sosContactText(rawWho: string | null | undefined, where: string): string {
+  const who = gsm7Name(rawWho, SOS_SMS_NAME_MAX) || 'Someone you know';
+  return `URGENT: ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`;
+}
 
 /** Deliver one claimed row. Returns the receipt, or 'skipped' with a reason. */
 async function deliver(prisma: PrismaClient, io: Server, notifications: NotificationService, row: Claimed): Promise<{ status: 'SENT' | 'SKIPPED'; receipt: Record<string, unknown> }> {
@@ -115,7 +132,7 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       const page = await openOpsAlert(prisma, notifications, {
         kind: 'SOS', tenantId: alert.tenantId, sosAlertId: alert.id,
         title: 'URGENT: SOS ACTIVE — respond now',
-        body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : ''}. Open the war room now.`,
+        body: sosPageBody(alert),
         data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId },
       });
       // [AUD-L8b-008 · AUD-G7-003] opsPaged is what REACHED a person: pushes
@@ -158,11 +175,10 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       // [Q9] Staged before its number became the person's own: skipped, and the receipt says why.
       if (!contact) return { status: 'SKIPPED', receipt: { skipped: authority.ownNumberContactIds.includes(row.targetKey) ? 'contact-is-own-number' : 'contact-unverified-or-gone' } };
       const { getChannels } = await import('../../providers/notifications/channels');
-      const who = authority.who || 'Someone you know';
       const where = alert.triggerLat != null && alert.triggerLng != null ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.` : '';
       // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.
       const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
-      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, `URGENT: ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`));
+      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, sosContactText(authority.who, where)));
       return { status: 'SENT', receipt: { id: contact.id, ok: true, ...(authority.fromEscrow ? { source: 'safety-escrow' } : {}) } };
     }
     case 'EVIDENCE': {
@@ -330,21 +346,27 @@ export const FAILURE_PAGE_LEASE_SECONDS = 120;
 const FAILURE_PAGE_WORDS: Record<SosEscalationChannel, { title: string; body: (sosAlertId: string) => string }> = {
   CONTACT_SMS: {
     title: 'URGENT: SOS contact text failed — call the person now',
-    body: (id) => `The emergency text to the contact of the person who raised SOS alert ${id} did not go through (number hidden). Call the person who raised it now.`,
+    body: (id) => `The text to the contact for SOS alert ${id} failed (number hidden). Call the person who raised it now.`,
   },
   OPS_PAGE: {
-    title: 'URGENT: SOS page failed — open the war room now',
-    body: (id) => `The page for SOS alert ${id} did not go through. Open the war room and respond now.`,
+    title: 'URGENT: SOS page failed — open the Safety page now',
+    body: (id) => `The page for SOS alert ${id} did not go through. Open the Safety page and respond now.`,
   },
   WAR_ROOM: {
-    title: 'URGENT: SOS live board update failed — open the war room now',
-    body: (id) => `The live war-room update for SOS alert ${id} did not go through. Open the alert and respond now.`,
+    title: 'URGENT: SOS live board update failed — open the Safety page now',
+    body: (id) => `The live update for SOS alert ${id} did not go through. Open the Safety page and respond now.`,
   },
   EVIDENCE: {
     title: 'SOS evidence record failed — check the alert',
     body: (id) => `The evidence record for SOS alert ${id} could not be opened. Check the alert now.`,
   },
 };
+/** The page for a failed delivery. Its text must keep the last sentence inside two parts (ops-alert opsSmsText). */
+export function failurePageWords(channel: SosEscalationChannel, sosAlertId: string, row: { status: string; attempts: number }): { title: string; body: string } {
+  const words = FAILURE_PAGE_WORDS[channel];
+  const retrying = row.status === 'FAILED' ? ` Swift stopped retrying after ${row.attempts} attempts.` : ' Swift keeps retrying.';
+  return { title: words.title, body: `${words.body(sosAlertId)}${retrying}` };
+}
 
 /**
  * [AUD-L4-016 · S1] ANY failed delivery of a live, real SOS pages on-call
@@ -408,12 +430,11 @@ export async function pageFailedSosEscalations(
     if (alert.tenantId && await isReviewTenantId(prisma, alert.tenantId)) { review.push(row.id); continue; }
     const claim = await prisma.sosEscalation.updateMany({ where: { id: row.id, ...claimable, AND: [failedNow], sosAlert: liveAlert }, data: { failurePageClaimedAt: now } });
     if (claim.count !== 1) continue; // another tick holds it, it is already covered, it delivered, or the emergency ended
-    const words = FAILURE_PAGE_WORDS[row.channel];
-    const retrying = row.status === 'FAILED' ? ` Swift stopped retrying after ${row.attempts} attempts.` : ' Swift keeps retrying.';
+    const words = failurePageWords(row.channel, alert.id, row);
     try {
       const page = await openOpsAlert(prisma, notifications, {
         kind: 'SOS', tenantId: alert.tenantId, sosAlertId: alert.id,
-        title: words.title, body: `${words.body(alert.id)}${retrying}`,
+        title: words.title, body: words.body,
         data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId, failedDelivery: row.channel },
         now,
         ...(options.sms !== undefined ? { sms: options.sms } : {}),

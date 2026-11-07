@@ -1,0 +1,126 @@
+import { apiFetch, ApiRequestError } from '@/lib/auth';
+
+/**
+ * [O-1 · owner 22-24 Oct 2026] Calling the other person on an order, on the website.
+ *
+ * - Bridge OFF (the launch state): exactly today's behaviour: the API still sends the number, and
+ *   "Call" is a tel: link.
+ * - Bridge ON: the API sends no personal number. "Call via Swift" asks Swift to connect the call:
+ *   Swift rings the signed-in person's own phone first; they answer and press 1, then Swift rings
+ *   the other person. Both phones show Swift's number.
+ * - Neither: no Call button (chat and support remain).
+ */
+
+export type CallTarget = 'customer' | 'rider' | 'driver' | 'store' | 'recipient';
+export interface CallConfig { enabled: boolean; callerId: string | null }
+export type CallChoice = { mode: 'bridge' } | { mode: 'dial'; href: string } | { mode: 'none' };
+
+/** A `tel:` target only for something that is a phone number. */
+export function telHref(phone: string | null | undefined): string | null {
+  const digits = (phone ?? '').replace(/[^\d+]/g, '');
+  return /^\+?\d{5,}$/.test(digits) ? `tel:${digits}` : null;
+}
+
+export function callChoice(config: CallConfig | null | undefined, phone: string | null | undefined, orderId?: string | null): CallChoice {
+  if (config?.enabled && orderId) return { mode: 'bridge' };
+  const href = telHref(phone);
+  return href ? { mode: 'dial', href } : { mode: 'none' };
+}
+
+export const CALL_WORDS = {
+  viaSwift: 'Call via Swift',
+  calling: 'Calling…',
+  // [REVIEW-F #2092 S4-1] True for every app (older apps may still get counterpart numbers).
+  started: 'Swift is calling your phone now. Answer, then press 1. Swift will then ring them. Both phones show Swift’s number.',
+} as const;
+
+/** Swift's number spaced to read: +1 878 555 0123 (North America), +592 600 1234 (Guyana); any other as sent. */
+export function formatCallerId(callerId: string): string {
+  const nanp = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(callerId);
+  if (nanp) return `+1 ${nanp[1]} ${nanp[2]} ${nanp[3]}`;
+  const gy = /^\+592(\d{3})(\d{4})$/.exec(callerId);
+  if (gy) return `+592 ${gy[1]} ${gy[2]}`;
+  return callerId;
+}
+
+/**
+ * [CALL-RELAY-ON · owner 6 Nov 2026] "So a call does not look like a scam": Guyana networks show only the
+ * number for an incoming call, never a name. The number is the server's (GET /calls/config), never typed
+ * here. Plain GSM-7 words, the same as the phone app.
+ */
+export function callerLine(callerId: string | null | undefined): string | null {
+  return callerId ? `Swift calls you from ${formatCallerId(callerId)} (save it as Swift).` : null;
+}
+
+export const CALLER_LINE_WORDS = {
+  copy: 'Copy number',
+  copyA11y: "Copy Swift's call number",
+  copied: 'Number copied. Save it in your contacts as Swift.',
+  copyFailed: 'Select the number to copy it.',
+  save: 'Save contact',
+  saveA11y: 'Save Swift as a contact',
+} as const;
+
+/** A contact card (vCard 3.0) for Swift's call number, made in the browser; null for anything not a +E.164 number. */
+export function swiftContactCard(callerId: string | null | undefined): string | null {
+  if (!callerId || !/^\+[1-9]\d{6,14}$/.test(callerId)) return null;
+  return ['BEGIN:VCARD', 'VERSION:3.0', 'N:;Swift;;;', 'FN:Swift', 'ORG:Swift', `TEL;TYPE=VOICE:${callerId}`, 'END:VCARD', ''].join('\r\n');
+}
+
+export function bridgeErrorText(code: string | null | undefined): string {
+  switch (code) {
+    case 'CALL_RELAY_OFF': return 'Calls through Swift are not on yet. Message them in chat, or ask support to connect you.';
+    case 'CALL_ORDER_NOT_LIVE': return 'This order is finished, so Swift can no longer connect a call. Message them in chat or ask support.';
+    case 'CALL_IN_PROGRESS': return 'A Swift call on this order is already ringing. Answer it, or try again in a minute.';
+    case 'CALL_LIMIT_REACHED': return 'Swift has connected as many calls as it can for this order. Message them in chat, or ask support.';
+    case 'CALL_NO_NUMBER': return 'Swift has no number to call for this. Message them in chat, or ask support.';
+    // [CALL-RELAY-ON] The server's daily cap on Swift calls (CALL_RELAY_MAX_CALLS_PER_DAY) was reached.
+    case 'CALL_DAILY_LIMIT_REACHED': return 'Swift calls are busy right now. Message them in chat, or ask support.';
+    // [REVIEW-G23 S4-4] The caller's OWN number is not one Swift can ring.
+    case 'CALL_CALLER_NUMBER_UNSUPPORTED': return 'Swift calls only Guyana numbers, not yours. Message them in chat, or ask support.';
+    // [REVIEW-M17 S3-1] One live Swift call per person at a time.
+    case 'CALL_CALLER_BUSY': return 'You already have a Swift call ringing. Answer it, or try again in a minute.';
+    // [CALL-RELAY-ON] This person's own daily cap (CALL_RELAY_MAX_CALLS_PER_USER_PER_DAY).
+    case 'CALL_USER_DAILY_LIMIT_REACHED': return 'You have used your Swift calls for today. Message them in chat, or ask support.';
+    default: return 'Swift could not place the call right now. Try again, or message them in chat.';
+  }
+}
+
+const CONFIG_TTL_MS = 5 * 60_000;
+let cached: { at: number; value: Promise<CallConfig | null> } | null = null;
+
+/**
+ * The switch as the API reports it, cached for a few minutes. A failed read is "off": the page behaves exactly as today.
+ * [REVIEW-F #2092 S4-2] Only a GOOD answer stays cached (asks at the same moment share one request); a failure is
+ * forgotten as soon as it settles, so one blip never hides the Call buttons for minutes while the bridge is on.
+ */
+export function fetchCallConfig(now = Date.now()): Promise<CallConfig | null> {
+  if (cached && now - cached.at < CONFIG_TTL_MS) return cached.value;
+  const entry = { at: now, value: readCallConfig() };
+  cached = entry;
+  void entry.value.then((value) => { if (!value && cached === entry) cached = null; });
+  return entry.value;
+}
+
+/** Tests only. */
+export function resetCallConfigForTests(): void { cached = null; }
+
+async function readCallConfig(): Promise<CallConfig | null> {
+  try {
+    const body = await apiFetch('/api/v1/calls/config', undefined, { redirectOnExpired: false });
+    const d = body?.data;
+    return d && typeof d.enabled === 'boolean' ? { enabled: d.enabled, callerId: d.callerId ?? null } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Ask Swift to connect the call. Resolves to the words to show the person. */
+export async function startSwiftCall(orderId: string, target: CallTarget): Promise<{ ok: boolean; message: string }> {
+  try {
+    await apiFetch('/api/v1/calls/bridge', { method: 'POST', body: JSON.stringify({ orderId, target }) });
+    return { ok: true, message: CALL_WORDS.started };
+  } catch (e) {
+    return { ok: false, message: bridgeErrorText(e instanceof ApiRequestError ? e.code : undefined) };
+  }
+}

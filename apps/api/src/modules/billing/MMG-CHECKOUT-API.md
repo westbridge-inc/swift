@@ -15,7 +15,7 @@ The wire format to MMG is in `providers/mmg/CHECKOUT-CONTRACT.md`. It never reac
    - how much;
    - whether a payment happened.
 
-   Clients render server state. They never compute an amount, never infer "paid" from a redirect or a browser result, and never offer a method that is not in `payActions`.
+   Clients render server state. They never compute an amount, never infer "paid" from a redirect or a browser result, and never offer a new payment method that is not in `payActions`. Reopening the same MMG checkout uses only the separate server grant below.
 2. **Partners are never offered a payment at an MMG agent, in cash, by Swift Number or by account number.** The subscription payload still carries `san`, `sanFormatted`, `payCashSteps` and `activationCopy` for app builds already in people's hands. **Do not render them.** They will be removed once the new app has shipped.
 3. **Nothing is credited until MMG confirms it.** A fee is credited only after MMG's own transaction records (the merchant lookup API) confirm the exact amount, the currency (GYD) and that the money went to Swift's merchant account. A redirect, a reply token or the app's word never credits anything.
 4. **Hidden, never teased.** A method whose state is `off` is not shown at all: no disabled button, no "coming soon".
@@ -37,7 +37,7 @@ Below, `{family}` means one of `vendor`, `rider` or `driver`. The same routes an
 | `Authorization` | every partner route | `Bearer <access token>` |
 | `x-client-platform` | every partner route below (**required**) | `ios`, `android` or `web` |
 | `x-vendor-id` | vendor routes | the selected store's id |
-| `Idempotency-Key` | `POST …/mmg-checkout` only | 8–128 characters from `[A-Za-z0-9_-]`, new per tap |
+| `Idempotency-Key` | `POST …/mmg-checkout` and `POST …/mmg-checkout/{ref}/reopen` only | 8–128 characters from `[A-Za-z0-9_-]`, new per tap |
 
 **The web signs in with its existing session.** Every partner route accepts either `Authorization: Bearer …` or, from the web, the browser session. For the browser session, send the HttpOnly `swift_at` cookie with `credentials: 'include'`, plus `x-swift-client: web`, from an allowed origin (`CORS_ORIGIN`). The header and origin gate is the CSRF defence. This is the same `app.authenticate` every other partner route uses.
 
@@ -47,7 +47,7 @@ Below, `{family}` means one of `vendor`, `rider` or `driver`. The same routes an
 
 ## 3. The subscription payload
 
-`GET /api/v1/{family}/subscription` keeps every field it has today and gains three.
+`GET /api/v1/{family}/subscription` keeps every field it has today. The checkout fields below are additive.
 
 ```ts
 type SubscriptionFee = {
@@ -56,11 +56,12 @@ type SubscriptionFee = {
   //     amountDueGyd, ...) unchanged.
   payActions: PayAction[];                  // every known method, in display order
   latestMmgCheckout: CheckoutStatus | null; // the newest checkout of the last 24 h, to resume after a restart
+  reopenableMmgCheckout: { ref: string; expiresAt: string } | null; // additive; the same page only
   recentCheckouts: CheckoutStatus[];        // the last 10 checkouts, newest first
 };
 
 type PayAction =
-  | { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' }
+  | { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD'; weekOptions: Array<{ weeks: number; amountGyd: number }> }
   | { id: 'MMG_CHECKOUT'; state: 'off' }
   | { id: 'CARD'; state: 'off' };
 ```
@@ -73,11 +74,104 @@ It is `live` only when **all** of these hold:
 - the server's MMG checkout is configured and valid (`MMG_CHECKOUT_ENABLED=1` with complete credentials, which the boot guard already checks);
 - the platform switch allows the caller's platform (section 2);
 - the subscription can be paid: `TRIAL`, `ACTIVE`, `PAST_DUE`, `SUSPENDED` or `CHURNED` (paying rejoins), and its fee is not waived;
-- none of this fee's payments is being confirmed: no MMG checkout that is open, confirming, held or expired without an answer, and no card payment that is pending, awaiting 3-D Secure or unclear (the same pause that refuses a new page with `409 PAYMENT_CONFIRMING`, section 4). While a checkout is open or confirming, `latestMmgCheckout` carries it: resume or follow it from there;
+- none of this fee's payments is being confirmed: no MMG checkout that is open, confirming, held or expired without an answer, and no card payment that is pending, awaiting 3-D Secure or unclear (the same pause that refuses a new page with `409 PAYMENT_CONFIRMING`, section 4). While a checkout is open or confirming, `latestMmgCheckout` carries it: follow its status from there. Only `reopenableMmgCheckout` grants a button back to that same page;
 - the billing confirmation clock covers the subscription (the billing cutover maps every subscription; one it has not mapped yet stays `off` until it has, and reading the payload never maps one);
 - the partner is in a production tenant: a store-review demo account never opens a real MMG page.
 
 It is `off` for `PAUSED` (weekly billing stopped: resume first), `CANCELLED`, waived fees and store-review demo accounts, and while a payment is being confirmed.
+
+### Reopen the partner's own checkout (additive, OFF unless switched on)
+
+`MMG_CHECKOUT` remains `off` while an OPEN checkout pauses fee collection. A
+separate `reopenableMmgCheckout` may carry only its opaque `ref` and ISO
+`expiresAt`, never the page URL. Older clients can ignore this addition; older
+APIs omit it, which grants no reopen action.
+
+**Its own switch, OFF by default.** The platform-config key
+`billing.feeCheckout.reopen.platforms`, value `{ "ios": true, "android": true, "web": true }`.
+A missing row, or a missing platform in it, is **off**. Only the JSON boolean
+`true` turns a platform on: any other value is off, with a warning in the
+server log. An unknown platform counts only when every platform is on. It is
+read at most once a minute and is separate from the Pay switch
+(`billing.feeCheckout.platforms`, section 8): turning reopen off never hides Pay.
+It stays off in production until UAT has answered the open questions below;
+staging may switch it on for that UAT run. While it is off the payload carries
+`reopenableMmgCheckout: null` and the reopen route answers
+`409 CHECKOUT_NOT_REOPENABLE`, which is the behaviour from before this addition.
+
+**The grant.** It exists only for this subscription's latest checkout, still
+`OPEN` and strictly before its deadline. Its `ACTIVE` hold must be the only
+active confirmation hold on the covered billing clock (and on any mover source
+subscription), in the current epoch. Of the confirmation sources, the only one
+still unresolved must be this checkout. A source counts as resolved exactly as
+it does for a new payment (its hold is on this clock and no longer active), so
+resolved history never denies the grant. Missing or stale fee authority,
+another unresolved checkout or payment (including `CONFIRMING`/`HELD` and
+pending card payments), a non-production payer, the Pay rule for the platform
+(configuration, platform switch, a payable subscription) or the reopen switch
+removes the grant. Reading takes no hold and changes no payment. If the read
+itself fails, the payload carries `null` and the fee page still loads.
+
+**Back to MMG's page.** With the grant, phone relaunch and web reload show
+**Back to MMG's page**, **Swift keeps this checkout open until HH:MM (Guyana time).**
+and **Already paid on MMG's page? Don't pay again — we'll confirm it with MMG.**
+That time is Swift's own time limit for the checkout (30 minutes from its
+start), not the lifetime of MMG's page, which MMG has not documented (U8 below).
+The button calls the reopen route for that one checkout, with a new
+`Idempotency-Key` and the body `{}`:
+
+`POST /api/v1/{family}/subscription/mmg-checkout/{ref}/reopen`
+
+This route can only hand back the page of the checkout it names. It answers
+`200` with the start route's shape (section 4) when that checkout is still this
+subscription's latest, still `OPEN`, before its deadline, the grant above still
+holds and section 4's locked checks pass; the key is then bound to that
+checkout. In every other case it prices, creates and reserves nothing, and no
+page goes out:
+
+| Status | Code | Meaning | What the client does |
+|---|---|---|---|
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | the header is missing or malformed | send a key |
+| 404 | `CHECKOUT_NOT_FOUND` | not a checkout of this subscription | refetch the subscription |
+| 409 | `CHECKOUT_NOT_REOPENABLE` | the checkout was answered or confirmed, is past its deadline (it is then expired), is not the latest, or the grant no longer holds (the reopen switch included); `error.details` is `{ ref, status }` | open nothing; refetch, and show that checkout's status (section 5) |
+| 409 | `PAY_ACTION_OFF`, `PAYMENT_CONFIRMING` | the MMG checkout is off or the account is a store-review demo; or section 4's locked checks refused the page | the same |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | the key was used for another checkout | new tap, new key |
+| 429 | `RATE_LIMITED` | too many attempts | wait and retry |
+
+So a stale **Back** tap (the checkout was paid, or answered not paid, on another
+device, in another tab, or just before the app came back) never creates a
+second checkout or a second hold. A client opens the page only when the answer
+names the same `ref`, is `OPEN` and carries a page; for anything else it opens
+nothing and refetches. Clients never retain that URL. **Pay** is a different
+action: it calls the start route (section 4), which may start a new checkout
+once nothing is being confirmed.
+
+After expiry without an MMG answer, hide Pay and Back: **This checkout expired.
+Don't pay again. Swift support will check this payment.** Refresh status
+remains available. Expiry is no proof of non-payment, releases no hold, and
+permits no retry payment. No automatic check runs when MMG never answered
+(there is nothing to look up): the confirmation stays open, and a person is
+asked to review it after a day.
+
+**Open questions for MMG, to answer in UAT before the switch goes on.** Nothing
+here is an MMG fact; these are the questions (`providers/mmg/CHECKOUT-CONTRACT.md`):
+- whether MMG's page can be opened a second time for the same checkout at all;
+- **U6**: whether MMG refuses a second payment for a `merchantTransactionId` it
+  has already taken a payment for. If it does not, a reopened page whose first
+  payment succeeded, but whose reply never reached Swift, could take a second
+  payment;
+- what MMG answers on such a page. A not-paid answer (result `1`, `2` or `6`, or
+  `7` naming no transaction, for example a timeout or the partner pressing
+  Cancel because they already paid) is, under the current rule (section 5), MMG's
+  own not-paid answer for the checkout: it releases the checkout's pause even
+  though a payment may have happened. Changing how such an answer is treated for
+  a page handed out more than once would be a change to the crediting rules, and
+  is not part of this addition;
+- **U8**: how long MMG's own checkout session lives; it may end before Swift's
+  time limit;
+- **U3**: whether MMG's server-to-server notify reaches Swift when the partner's
+  browser closes before MMG's redirect, which is when a payment's reply is most
+  likely to be lost.
 
 ### `amountGyd`
 
@@ -87,6 +181,10 @@ It is `off` for `PAUSED` (weekly billing stopped: resume first), `CANCELLED`, wa
 
 Button label: `Pay GY$<amountGyd, grouped> with MMG`.
 
+### `weekOptions` (owner 6 Nov 2026: up to four weeks ahead)
+
+Every number of weeks from 1 to `PAY_AHEAD_MAX_WEEKS` (4) that fits the limit now, in order, each with what that checkout charges: the one-week amount above plus one whole weekly fee for each week after it (`checkoutAmountForWeeks`). `weekOptions[0]` is always 1 week at `amountGyd`. A client shows the choice when there is more than one, sends the chosen `weeks` in the start body, and labels the button with that option's amount. An app that ignores it pays one week, as before.
+
 ### `CARD`
 
 `CARD` stays `off` until the card rail exists (PT-4).
@@ -94,6 +192,8 @@ Button label: `Pay GY$<amountGyd, grouped> with MMG`.
 ## 4. Start a checkout
 
 `POST /api/v1/{family}/subscription/mmg-checkout`
+
+Body: `{}` (one week), or `{ "weeks": 1..4 }` (owner 6 Nov 2026). Any other `weeks` is `400 VALIDATION_ERROR`. A tap whose weeks (none = one week) cost a different amount than the open checkout asks is `409 CHECKOUT_OPEN_OTHER_AMOUNT` (`details.ref`, `amountGyd`, `expiresAt`): never handed a page for another amount; the same amount is handed the open one, as before. Past the limit: `409 PAY_AHEAD_LIMIT`.
 
 The body is `{}`. The server prices the checkout; a client amount would be ignored.
 
@@ -138,7 +238,7 @@ poll GET …/mmg-checkout/{ref}            → section 5
 | 409 | `PAY_ACTION_OFF` | the MMG checkout is not live for this subscription or platform (or the account is a store-review demo) | refetch the subscription, hide the button |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | the key was used for a different request | new tap, new key |
 | 409 | `CHECKOUT_CONFIRMING` | an earlier checkout is being confirmed; `error.details.ref` names it | show that checkout (section 5); do not start another |
-| 409 | `PAYMENT_CONFIRMING` | another weekly-fee payment (any checkout or card payment) is being confirmed; `error.details.ref` is optional: it names a checkout only when the server knows which one, so never rely on it | "We're confirming a payment. Don't pay again."; refetch the subscription |
+| 409 | `PAYMENT_CONFIRMING` | another weekly-fee payment (any checkout or card payment) is being confirmed, or billing for this fee is still being prepared or is under review (the code does not say which); `error.details.ref` is optional: it names a checkout only when the server knows which one, so never rely on it | neutral words, for example "Paying is paused while Swift checks this fee. If you already paid, don't pay again."; refetch the subscription |
 | 409 | `PAYMENT_QUOTE_CHANGED` | the fee, the wallet or the owed week changed while the page was being prepared | refetch the subscription, then let the partner tap again |
 | 429 | `RATE_LIMITED` | too many attempts | wait and retry |
 | 503 | `MMG_CHECKOUT_UNAVAILABLE` | the checkout could not be built or stored safely right now | "Try again in a minute." |
@@ -194,7 +294,7 @@ An API older than this sends neither: show nothing in their place.
 | `CONFIRMING` | MMG sent the partner back; Swift is checking with MMG | "Confirming your payment with MMG. Don't pay again." |
 | `CONFIRMED` | MMG answered success for this checkout and its records confirm the payment (the six conditions below), and the fee is credited | "Paid: GY$X received on <date>." |
 | `NOT_PAID` | MMG answered for this checkout that it was not paid (result 1, 2 or 6; 7 when MMG declines the transaction it named), or MMG's own record for this checkout shows the payment did not complete. Never a return path or a missing record alone | "MMG didn't complete this payment. You can try again." |
-| `EXPIRED` | the checkout ran out of time, or MMG never confirmed it within a day; no failure is declared | "This checkout expired. If you paid, it will be credited once MMG confirms it." |
+| `EXPIRED` | the checkout ran out of time, or MMG never confirmed it within a day; no failure is declared | "This checkout expired. Don't pay again. Swift support will check this payment." |
 | `HELD` | MMG's records show a payment that cannot be confirmed automatically: a condition below fails (status word, amount, currency, merchant, time, a number already credited), the server is not configured to read MMG's payment time (condition 5), MMG never answered success for it, or MMG's answers for this checkout disagree; a person reviews it, and reminders and suspension stay paused meanwhile | "We're checking this payment by hand. Don't pay again. Support will contact you." |
 
 **Automatic confirmation (owner, 1 Oct).** A payment is credited automatically only when ALL of these hold; anything else is `HELD` for a person, with no reminders and no suspension, and operators are alerted once:
@@ -224,6 +324,8 @@ The official merchant page says MMG posts an encrypted TOKEN to the configured R
    - answer `{ success: true, data: { state: 'CONFIRMED' | 'CONFIRMING' | 'NOT_PAID' | 'UNKNOWN' } }`
 
    The answer carries no amount, name or `ref`: anyone who holds the link would see the page.
+
+   [SEC-DOS F8] The page forwards the partner's own address (the first `X-Forwarded-For` entry the site's proxy set, an IP literal only), over the private network (`API_URL` on the web container), where the API trusts it through `TRUST_PROXY`. So the API's per-source limits and its reply gate count each partner, not the web server. The page also limits each partner address to 20 returns a minute before it reads the body. It relays nothing when there is no `token` field: the API reads the reply from that field only. When the API answers `503 TRY_AGAIN` (too many replies waiting to be opened), the page tries once more after the wait the API asked for (1 to 2 seconds).
 3. **Render only that state:**
 
    | State | Page text |
@@ -246,6 +348,8 @@ The official merchant page says MMG posts an encrypted TOKEN to the configured R
 5. **Headers and privacy:** send `X-Robots-Tag: noindex`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. Never log, render or forward the received values anywhere except `/return`. Keep the query out of analytics.
 
 The planned `POST /api/v1/billing/mmg-checkout/notify` is for MMG's servers. Its authentication and server-to-server behavior must be confirmed with MMG before enabling it (U3). It accepts JSON or a form of up to 16 KB and always answers `200 { success: true }`. The app and the web never call it.
+
+Both `/return` and `/notify` read the reply from its `token` field only (any case) and open it once. MMG's docs say MMG posts the encrypted token to the Response URL but do not name the field, and they do not describe Notify at all. If MMG documents a different Notify field, that field is added and nothing else. Opening a reply is a private-key operation, so that work is bounded: one at a time, with the event loop getting a turn between them, a bounded wait in all and per source, and a reserved place for a source's first waiting reply. When too many replies are waiting, both doors answer `503 TRY_AGAIN` with `retryAfterSeconds` (retryable, and it says nothing about the payment). Notify answers `200` in every other case.
 
 **Registered with MMG (5 Oct 2026):** MMG has registered Swift's UAT Notify URL, `https://api-staging.swiftgy.com/api/v1/billing/mmg-checkout/notify` (this route). A notify is a pointer only: it is written down and prompts Swift's own lookup with MMG; it never credits anything by itself. Its authentication remains unconfirmed (U3).
 
@@ -290,6 +394,7 @@ The server writes the fee notices. They never offer an agent, cash, a Swift Numb
   An explicit numeric offset (for example `-04:00`) is read as stated with either value. Unset is the safety net, not a configuration: no MMG payment is then confirmed automatically, each one is `HELD` (reason `CREATION_ZONE_UNVERIFIED`) and operators are alerted once per checkout. Any other value stops the server from starting. If MMG's time for a payment is later than the first MMG reply Swift received about it (beyond two minutes), the payment is `HELD` (reason `PAYMENT_TIME_AFTER_REPLY`) and operators are told the setting may not match how MMG writes its times, or the payment is not this checkout's.
 - **MMG's Transaction History (condition 5):** asked only for a payment MMG's lookup calls `successful`: `GET …/e-merchant-initiated-transactions/txn-history` for Swift's merchant, from two minutes and ten more before the checkout opened to two minutes and ten more after the first reply naming the payment or the deadline, whichever is first, never past now, with up to 100 rows (MMG's `offset` is a row count, oldest first; an answer of 100 rows may have been cut short and is not trusted). Its answer is written down before anything is decided, keeping only the record(s) of this payment. Holds: `PAYMENT_TIME_NOT_IN_HISTORY` and `PAYMENT_TIME_UNAVAILABLE` (no record yet, or history not readable in full: retried, then held when the window ends), `PAYMENT_TIME_AMBIGUOUS` (more than one record), `HISTORY_REFERENCE_MISMATCH` (missing or different checkout reference: held immediately, operators told), `PAYMENT_TIME_DISAGREES` (a record that does not match the checkout), `PAYMENT_TIME_UNREADABLE`, `PAYMENT_TIME_AFTER_REPLY` and `PAYMENT_TIME_OUTSIDE_WINDOW`. Payments held before 7 Oct keep their reasons (`CREATION_AFTER_REPLY`, `OUTSIDE_CHECKOUT_WINDOW`, `CREATION_DATE_UNREADABLE`).
 - **The per-platform switch:** the platform-config key `billing.feeCheckout.platforms`, value `{ "ios": true, "android": true, "web": true }`. A missing row, or a missing platform in it, counts as on (owner ruling "3 b": the iPhone button is on; owner ruling of 1 Oct, option 2: the in-app MMG checkout on iOS and Android). Setting a platform to `false` hides the MMG checkout there within a minute, with no deploy or app build: the server-side fallback for the iOS app. **It also pauses every weekly fee on the server** (fee-pause.ts, 22 Oct): with the push rail off (production), MMG counts as a way to pay only while the checkout is live on every platform, so while any platform is `false` (and no card rail is live) no fee is charged, failed, dunned or suspended, for any partner. Never set a platform to `false` while fees run unless that is intended. A store-review demo account never gets it, on any platform. Only the JSON booleans `true` and `false` count: any other value for a platform (the string `"false"` included) switches that platform off, and a value that is not an object switches every platform off, each with a warning in the server log.
+- **The reopen switch:** the platform-config key `billing.feeCheckout.reopen.platforms`, the same shape. It is the opposite default: a missing row, or a missing platform in it, counts as **off**, so "Back to MMG's page" is offered nowhere until someone switches it on (section 3). It stays off in production until UAT has answered section 3's open questions. Setting a platform to `true` offers it there within a minute; `false`, a missing row or any non-boolean value withdraws it within a minute, and the reopen route then refuses.
 
 ## 9. Answers to the UI lane (2026-09-29)
 
@@ -323,4 +428,75 @@ For Swift support, never a partner. Both routes are under `/api/v1/admin`, for `
 
 **Every read is recorded** in the admin audit trail, inside the request, before the answer leaves: who, when, which identifier type matched (`queryType`), what kind of query it was (`queryShape`) and the checkout ids. Never the query itself: it may be a phone number. A refused read, and a detail of a checkout that is not there, disclosed nothing and are not recorded.
 
+## 12. Pay all my branches (store owners with several branches)
+
+[ENTERPRISE E1 · owner, 29 Oct 2026] An owner of several stores (branches) may pay every branch fee that is due in **one** MMG checkout. It is optional: each branch's own checkout (sections 3–5) keeps working exactly as before. Nothing in sections 1–11 changes: one MMG page, one `merchantTransactionId`, the same six conditions before anything is credited (section 5), the same not-paid, expired and held states.
+
+Routes (vendor family only; the store's OWNER only, with the selected store's `x-vendor-id`; a manager or staff member gets `403`):
+
+`GET /api/v1/vendor/subscription/chain-fees`
+
+```ts
+{ success: true, data: {
+  branches: Array<{
+    vendorId: string; branchName: string;
+    subscriptionId: string | null; subscriptionStatus: SubscriptionStatus | null;
+    state: 'DUE' | 'TRIAL' | 'NOTHING_DUE' | 'PAYMENT_CONFIRMING' | 'NOT_PAYABLE';
+    amountGyd: number | null;   // DUE only: exactly what that branch's own Pay button would charge now
+  }>;
+  totalGyd: number;              // the DUE amounts added up
+  currencyCode: 'GYD';
+  payable: boolean;              // false for a store-review demo owner, or when nothing is DUE
+  recentCheckouts: ChainCheckout[]; // the owner's last 10 pay-all checkouts, newest first
+} }
+```
+
+A branch is `DUE` only when its status is `ACTIVE`, `PAST_DUE` or `SUSPENDED`, its own MMG Pay is live (section 3: configured, platform switch, nothing of its fee being confirmed) and it owes something within the one-week-ahead limit. A branch in its free trial is `TRIAL`; a churned, paused, cancelled or waived branch is `NOT_PAYABLE` (paying rejoins a churned store from that store's own fee screen).
+
+`POST /api/v1/vendor/subscription/chain-fees/mmg-checkout` with `Idempotency-Key` (section 2), `x-client-platform`, a fresh step-up ("confirm it's you", `403 STEP_UP_REQUIRED` otherwise), and the list the owner was shown and confirmed:
+
+```ts
+{ branches: Array<{ subscriptionId: string; amountGyd: number }>; totalGyd: number }
+```
+
+The server never takes an amount from this body: it prices the list again, then again under every branch's billing locks, **before** any MMG page exists. Any difference (a branch added, missing or repeated, another amount or total, a branch's wallet or obligation that moved, a branch paid on its own meanwhile) is `409 PAYMENT_QUOTE_CHANGED`: show the list again. Nothing is ever adjusted after a payment. `409 NOTHING_DUE` when no branch is due. The answer is the start route's shape (section 4) plus `branches: Array<{ vendorId; branchName; subscriptionId; amountGyd }>`; `201` new, `200` when the owner's open pay-all checkout is handed back. One open or confirming pay-all checkout per owner (a partial unique index); every other refusal of section 4 applies the same way.
+
+`GET /api/v1/vendor/subscription/chain-fees/mmg-checkout/{ref}` follows it: a `CheckoutStatus` (section 5, without `subscriptionStatus`) plus `branches`. `404 CHECKOUT_NOT_FOUND` for an unknown ref and for another owner's.
+
+**While it is unresolved** (open, confirming, held, or expired without an answer), every branch it pays is paused exactly as its own checkout would pause it: each branch's billing clock is held by that branch's part (`payment_confirmation_holds.checkoutPartId`). So each branch's own Pay is `off`, its own checkout start is `409 PAYMENT_CONFIRMING`, and reminders and suspension wait. A fee is never paid twice.
+
+**Crediting.** Once MMG's lookup confirms the exact total (the six conditions), one transaction claims the one MMG payment once (`provider_payments`, naming no single subscription) and credits each branch's own weekly fee with exactly its share: one top-up per branch (event key `mmg-checkout:pp:<identity>:<part>`), a receipt per branch (`fee_receipts`), and the week each share pays is recorded on that receipt when the branch's charge spends it (`fee_receipt_allocations`). A replay, a second door or the poll credits nothing more.
+
+**Not paid, expired, held** behave exactly as for one checkout (section 5), for every branch at once: MMG's not-paid answer releases every branch; an expired checkout with no answer keeps every branch paused until MMG answers or a person confirms it was not paid (finance review: resolving one branch's share as not paid resolves the whole checkout); a held payment is reviewed by a person. A branch's share is never confirmed as paid by hand on its own: only the checkout's own verified credit settles it. The automatic no-reply close (HOLD-AUTO) covers a pay-all checkout as it covers one checkout: once MMG's own history shows no payment for it (and nothing was paid on any branch it covers since it opened, and no admin request is in flight on any of its branches' holds), it is closed as not paid for every branch at once, and watched for a week after, every branch held again if a record naming it appears.
+
+**Finance: a held pay-all whose money is real** has no in-system credit (one MMG payment cannot be split across branches by an admin top-up, and the reversal tool refuses it): finance refunds it FIRST through the refund procedure, then resolves it as not paid (which resumes every branch's billing); the owner pays again.
+
+**Not here:** returning a pay-all payment through MMG's reversal (`409 CHAIN_CHECKOUT`: it paid several branches; follow the refund procedure), reopening its page ("Back to MMG's page"), a monthly cycle, volume discounts, bank transfer.
+
+**Notice.** The owner hears once per outcome (push kind `billing_mmg_checkout`, data `{ ref, status, chainCheckout: true }`, no `subscriptionId`): route it to the pay-all screen, or to the fee screen of the selected store on an older app.
+
 Changes to this contract are made here first, in the same PR as the code that changes.
+
+## Advertisers (`ADS_MMG_CHECKOUT`, off)
+
+An advertiser's invoice is a third payer of this same checkout: one more kind of `MmgCheckoutIntent`, with the same reply, lookup and six conditions. **Nothing settles until MMG's own lookup confirms it**, and there is no typed-reference settlement. The switch stays off until MMG has answered U11, U12 and U13 (`providers/mmg/CHECKOUT-CONTRACT.md`). With it off, production issues no ad invoice and opens no page.
+
+| Route | Who | |
+|---|---|---|
+| `POST /api/v1/ads/invoices/{id}/mmg-checkout` | the advertiser's OWNER | `Idempotency-Key` as section 2. 201 new, 200 the one already open |
+| `GET /api/v1/ads/invoices/{id}/mmg-checkout/{ref}` | any member | the server's own state |
+
+MMG sends every payment back to the one set of registered pages. `POST /api/v1/billing/mmg-checkout/return` adds `audience: 'ADVERTISER'` when the checkout is an advertiser's, and the page words itself from that. A weekly-fee answer is unchanged.
+
+What differs from a weekly fee:
+
+- **The amount is the invoice's.** The database refuses an ad checkout that differs from its invoice, or that is born from a paid one. An invoice with cents is refused, never rounded.
+- **No fee clock.** The campaign lock serializes a checkout against settlement and the expiry sweep. The slots stay held past the page, and the sweep leaves them while a page is open or a payment is being confirmed.
+- **Settlement is one commit** with the confirmation and the provider identity.
+- **A second payment is never swallowed.** MMG's confirmation of a payment on an invoice another payment settled is held for a person, not answered "already paid".
+- **One unresolved payment blocks the next.** No page opens, and no open page is handed out again, while another payment on the campaign is open, confirming, held or expired. An expired one nobody answered is read against MMG's history, as a fee's is: no payment and it closes as not paid; anything else goes to a person.
+- **A close is watched for a week, and the next page waits for it.** A fee's automatic close is watched through its hold; an ad checkout has none, so the watch reads the checkout itself. Every read goes back over the page's own time, as a fee's does: MMG's records may show a payment only after the close read them. A record naming the checkout goes to a person, and nothing settles. Until the week has read clean to its end no new page opens: how long MMG keeps a page is unconfirmed (U8) and an ad payment cannot be returned yet (U13). A week that could not be read stays blocked, in front of the admins.
+- **A late payment** on a released hold is recorded, and its full amount becomes a refund obligation. The advertiser is told it was received, that the ad was not placed, and that it is owed back. The return page never says "in review": it cannot tell a late payment from a settled one.
+- **Invoice numbers** come from one sequence (`ad_invoice_number_seq`): unique across operators, and a request sees only its own behind the tenant wall.
+- **No reversal.** `reversalRefusal` refuses an ad checkout (U13).
+- **A held ad payment has no close path yet.** It stays held and blocks new pages for that campaign until there is one. On the ads-on checklist.

@@ -34,11 +34,24 @@ export async function reorder(id: string): Promise<{ unavailableItems?: number |
 }
 // [SUBSTITUTION · owner 17 Oct 2026] The web renders the server's swap view (its
 // permitted answers and deadline), so it opts in to swap decisions.
-export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}?swapDecisions=v2`)).data; }
+// [PICKUP · owner 30 Oct 2026] pickupHandover=v1: the order page tells the customer the first name + order number when
+// the store's code is off, so the server sends no code then.
+export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}?swapDecisions=v2&pickupHandover=v1`)).data; }
 /** The customer's answer to the store's swap question (approve = take the substitute). */
 export async function decideSubstitution(orderId: string, lineId: string, approve: boolean): Promise<any> {
   return (await apiFetch(`/api/v1/customer/orders/${orderId}/items/${lineId}/substitution`, { method: 'POST', body: JSON.stringify({ approve }) })).data;
 }
+/** [BUG-HUNT-2 G08] The customer's word on a "Refund sent": it arrived, or it did not. */
+export async function answerMmgRefund(orderId: string, sendId: string, received: boolean): Promise<void> {
+  await apiFetch(`/api/v1/customer/orders/${orderId}/mmg-refunds/${encodeURIComponent(sendId)}/answer`, { method: 'POST', body: JSON.stringify({ received }) });
+}
+
 export async function cancelOrder(id: string, reason: string) {
   return apiFetch(`/api/v1/customer/orders/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) });
+}
+/** [BOOK-S6b · owner B2] Move my booking to another free time of the same service
+ *  (POST /customer/bookings/:id/reschedule, the phone's useRescheduleBooking). The
+ *  server judges the new time and the two-hour cut-off; its refusal is thrown in its own words. */
+export async function rescheduleBooking(bookingId: string, newSlotStart: string) {
+  return (await apiFetch(`/api/v1/customer/bookings/${encodeURIComponent(bookingId)}/reschedule`, { method: 'POST', body: JSON.stringify({ newSlotStart }) })).data;
 }

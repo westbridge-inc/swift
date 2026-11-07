@@ -2,6 +2,8 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { OPERATOR, OPERATOR_ADDRESS } from '../legal/operator';
 import { formatMoney } from '../../utils/currency-amount';
 import { formatGuyanaTime } from '../../utils/guyana-day';
+import { personUserOf } from '../subscription/subscription-owner';
+import { inPersonReceiptLine } from './in-person-channel';
 
 // ---------------------------------------------------------------------------
 // [OWNER LEGAL PLAN 15 Oct 2026 · R11 + R12, research T3] THE weekly-fee
@@ -97,12 +99,12 @@ export async function feeReceiptDocument(
     db.billingEvent.findUnique({ where: { id: receipt.billingEventId }, select: { currencyCode: true } }),
     db.subscription.findUnique({
       where: { id: receipt.subscriptionId },
-      select: { vendor: { select: { name: true } }, rider: { select: { user: { select: { firstName: true, lastName: true } } } }, driver: { select: { user: { select: { firstName: true, lastName: true } } } } },
+      select: { vendor: { select: { name: true } }, rider: { select: { user: { select: { firstName: true, lastName: true } } } }, driver: { select: { user: { select: { firstName: true, lastName: true } } } }, serviceProvider: { select: { user: { select: { firstName: true, lastName: true } } } } },
     }),
     settings ? settings.tin : companyTin(db),
     settings ? settings.vat : vatRegistration(db),
   ]);
-  const person = sub?.rider?.user ?? sub?.driver?.user;
+  const person = personUserOf(sub);
   const partnerName = sub?.vendor?.name ?? (person ? `${person.firstName} ${person.lastName}`.trim() : 'Partner');
   const currencyCode = event?.currencyCode ?? 'GYD';
   const amount = Number(receipt.amount);
@@ -120,6 +122,7 @@ export async function feeReceiptDocument(
     ...receiptUsage(receipt.allocations, amount, currencyCode),
     // [REVIEW-F #1963 S4-5] The payment's amount, never labelled as the fee's price.
     `Amount paid: ${formatMoney(amount, currencyCode, { whole: false })}`,
+    ...inPersonReceiptLine(receipt.channel, receipt.mmgRef),
     ...(vat ? [`Price includes VAT at ${Math.round(VAT_RATE * 100)}%: ${formatMoney(included, currencyCode)}`] : [NOT_A_VAT_INVOICE]),
   ];
   return {

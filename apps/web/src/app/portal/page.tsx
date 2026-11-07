@@ -8,10 +8,13 @@ import { DataUnavailable } from '@/components/data-unavailable';
 import { formatMoney as money } from '@/lib/money';
 import { readSettlementLedger } from '@/lib/cash-settlement-view';
 import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
+import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
+import { NoEarnerProfile } from '@/components/pro-office-note';
 import {
-  confirmRiderSettlement, getDriverEarnings, getDriverProfile, getDriverSubscription,
-  getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary,
+  confirmRiderSettlement, getDriverProfile, getDriverSubscription, getDriverSummary, getEarningsStatementPath,
+  getRiderCashSettlements, getRiderProfile, getRiderSubscription, getRiderSummary, getVerificationStatus, type EarningsSummary,
 } from '@/lib/mover-api';
+import { moverNextStep, moverNextWords } from '@/lib/first-steps';
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -25,6 +28,65 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
 
 /** [S4] "1 job", never "1 jobs". */
 const jobsLabel = (n: number) => `${n} ${n === 1 ? 'job' : 'jobs'}`;
+
+/** [Board 13a "CASH COLLECTED"] This week's cash kept from cash jobs, as the server sent it; undefined (older API, or
+ *  junk) leaves the tile out — never a guessed $0. */
+function cashThisWeek(s: EarningsSummary): number | undefined {
+  const v = s.cashInHand?.thisWeek;
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+/** [P36 · 13d / W3] The four windows the phone shows, for one role, and the phone's CASH COLLECTED tile (13a). */
+function SummaryTiles({ s, role }: { s: EarningsSummary; role: 'rider' | 'driver' }) {
+  const cash = cashThisWeek(s);
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <Stat label="Today" value={money(s.today.total)} sub={jobsLabel(s.today.count)} />
+      <Stat label="This week" value={money(s.thisWeek.total)} sub={jobsLabel(s.thisWeek.count)} />
+      <Stat label="This month" value={money(s.thisMonth.total)} sub={jobsLabel(s.thisMonth.count)} />
+      <Stat label="All time" value={money(s.allTime.total)} sub={jobsLabel(s.allTime.count)} />
+      {cash !== undefined && (
+        <Stat
+          label="Cash collected"
+          value={money(cash)}
+          sub={role === 'driver' ? 'This week: the fares passengers paid you in cash' : 'This week, after paying stores for the goods'}
+        />
+      )}
+    </div>
+  );
+}
+
+/** [P36 · 13d "Download statement"] Opens the phone's earnings statement (a short-lived signed link) in a new tab.
+ *  The tab is opened on the click itself, so a pop-up blocker allows it, and closed again if the link fails. */
+function StatementButton({ role, label }: { role: 'rider' | 'driver'; label: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const open = async () => {
+    if (busy) return;
+    const tab = window.open('about:blank', '_blank');
+    if (!tab) { setError('Your browser blocked the new tab. Allow pop-ups for Swift, then try again.'); return; }
+    tab.opener = null;
+    setBusy(true);
+    setError(null);
+    try {
+      const path = await getEarningsStatementPath(role);
+      tab.location.href = `${BROWSER_API_ORIGIN}${path}`;
+    } catch {
+      tab.close();
+      setError('We couldn’t open your statement. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <button type="button" onClick={() => void open()} disabled={busy} className="sw-btn sw-btn-md sw-btn-outline">
+        {busy ? 'Opening…' : label}
+      </button>
+      {error ? <p role="alert" className="text-xs text-[var(--swift-red)]">{error}</p> : null}
+    </div>
+  );
+}
 
 function SubscriptionCard({ title, sub, isError, error, onRetry }: {
   title: string;
@@ -58,10 +120,17 @@ export default function PortalHome() {
   const rider = useQuery({ queryKey: ['p-rider'], queryFn: getRiderProfile, retry: 0 });
   const driver = useQuery({ queryKey: ['p-driver'], queryFn: getDriverProfile, retry: 0 });
   const summary = useQuery({ queryKey: ['p-summary'], queryFn: getRiderSummary, enabled: !!rider.data, retry: 0 });
-  const driverEarn = useQuery({ queryKey: ['p-driver-earn'], queryFn: () => getDriverEarnings(1), enabled: !!driver.data, retry: 0 });
-  const riderSub = useQuery({ queryKey: ['p-rider-sub'], queryFn: getRiderSubscription, enabled: !!rider.data, retry: 0 });
+  // The taxi driver's four windows; the name stays `driverEarn` (the [W-10] census checks every money read's error state).
+  const driverEarn = useQuery({ queryKey: ['p-driver-summary'], queryFn: getDriverSummary, enabled: !!driver.data, retry: 0 });
+  // [CARS-DELIVER] One weekly fee per person: with a taxi profile too, the driver read below is that same fee.
+  const riderSub = useQuery({ queryKey: ['p-rider-sub'], queryFn: getRiderSubscription, enabled: !!rider.data && driver.isSuccess && !driver.data, retry: 0 });
   const driverSub = useQuery({ queryKey: ['p-driver-sub'], queryFn: getDriverSubscription, enabled: !!driver.data, retry: 0 });
   const settlements = useQuery({ queryKey: ['p-settlements'], queryFn: getRiderCashSettlements, enabled: !!rider.data, retry: 0 });
+  // [WEB-ONBOARDING · owner 1 Nov 2026] A mover not cleared yet is told what is left, as the app's mover onboarding
+  // screen does: the Documents page's own read (same key), so opening Documents next reads nothing twice.
+  const vehicleType = (rider.data?.['vehicleType'] as string | undefined) ?? undefined;
+  const docs = useQuery({ queryKey: ['p-docs', vehicleType], queryFn: () => getVerificationStatus(vehicleType), enabled: !!rider.data || !!driver.data, retry: 0 });
+  const next = moverNextStep(docs.data);
   // [W-26] see the store's half in dashboard/settings: confirming this row says
   // real cash reached the rider's hand. It names the store and the figure, and
   // takes a second deliberate step.
@@ -99,34 +168,49 @@ export default function PortalHome() {
     );
   }
   if (!isRider && !isDriver) {
+    // [REVIEW-F #2238 S4-1] A pro is told what this office is for and where their fee is.
     return (
-      <p className="rounded-2xl border border-dashed border-[var(--swift-border)] bg-[var(--swift-card)] p-10 text-center text-sm text-[var(--swift-muted)]">
-        No earner profile on this account — start driving or delivering from the Swift app.
-      </p>
+      <NoEarnerProfile>
+        {/* [WEB-ONBOARDING · FLOW-QA F27] the website's own doors (partners have no app yet) */}
+        <p className="rounded-2xl border border-dashed border-[var(--swift-border)] bg-[var(--swift-card)] p-10 text-center text-sm text-[var(--swift-muted)]">
+          {/* [REVIEW-LIGHT2 #2309] a signed-in account adds its vehicle on the sign-up's resume door: the partner doors would
+              show it "Go to your dashboard" instead */}
+          No earner profile on this account.{' '}
+          <Link href="/signup?resume=mover" className="font-semibold underline">Add your vehicle: deliver or drive a taxi with Swift</Link>.
+        </p>
+      </NoEarnerProfile>
     );
   }
 
   return (
     <div className="space-y-6">
-      <h1 className="sw-title">Earnings</h1>
+      <div>
+        <h1 className="sw-title">Earnings</h1>
+        {/* [P36 · 13d / W3] The phone's sentence (EarningsScreen THIS WEEK hero). */}
+        <p className="mt-1 text-sm font-semibold text-[var(--swift-success)]">100% yours · cash · 0% commission</p>
+      </div>
 
+      {next && (
+        <div className="sw-card p-5">
+          <p className="font-semibold">{moverNextWords(next)}</p>
+          {next.kind === 'send' && <Link href="/portal/documents" className="sw-btn sw-btn-md mt-3 inline-flex">Upload your documents</Link>}
+        </div>
+      )}
+
+      {/* [P36] A mover who both delivers and drives sees each role's own windows, named. */}
+      {isRider && isDriver && <h2 className="sw-heading">Deliveries</h2>}
       {isRider && summary.isError && (
         <DataUnavailable what="your earnings" error={summary.error} onRetry={() => void summary.refetch()} />
       )}
-      {isRider && s && (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Stat label="Today" value={money(s.today.total)} sub={jobsLabel(s.today.count)} />
-          <Stat label="This week" value={money(s.thisWeek.total)} sub={jobsLabel(s.thisWeek.count)} />
-          <Stat label="This month" value={money(s.thisMonth.total)} sub={jobsLabel(s.thisMonth.count)} />
-          <Stat label="All time" value={money(s.allTime.total)} sub={jobsLabel(s.allTime.count)} />
-        </div>
-      )}
+      {isRider && s && <SummaryTiles s={s} role="rider" />}
+      {isRider && <StatementButton role="rider" label={isDriver ? 'Get delivery earnings statement' : 'Get earnings statement'} />}
+
+      {isRider && isDriver && <h2 className="sw-heading">Taxi rides</h2>}
       {isDriver && driverEarn.isError && (
         <DataUnavailable what="your taxi earnings" error={driverEarn.error} onRetry={() => void driverEarn.refetch()} />
       )}
-      {isDriver && driverEarn.data && (
-        <Stat label="Taxi earnings · all time" value={money(driverEarn.data.totalEarnings)} sub="Full history in the History tab" />
-      )}
+      {isDriver && driverEarn.data && <SummaryTiles s={driverEarn.data} role="driver" />}
+      {isDriver && <StatementButton role="driver" label={isRider ? 'Get taxi earnings statement' : 'Get earnings statement'} />}
 
       {/* [W-10] `settlements.data?.unsettled ?? []` made a failed read look
           exactly like "no store owes you anything", and the whole card — with
@@ -189,6 +273,9 @@ export default function PortalHome() {
         </div>
       )}
 
+      {/* [CARS-DELIVER · owner 8 + 25 Oct] A mover who both delivers and drives pays ONE weekly fee (the server keeps
+          one per person across both profiles, and both routes answer with it): the delivery read is not made (above),
+          so its card stays empty, and the one card names both kinds of work. */}
       <div className="grid gap-4 md:grid-cols-2">
         <SubscriptionCard
           title="Delivery subscription"
@@ -198,7 +285,7 @@ export default function PortalHome() {
           onRetry={() => void riderSub.refetch()}
         />
         <SubscriptionCard
-          title="Taxi subscription"
+          title={isRider && isDriver ? 'Weekly fee — taxi rides and deliveries' : 'Taxi subscription'}
           sub={driverSub.data ?? null}
           isError={isDriver && driverSub.isError}
           error={driverSub.error}

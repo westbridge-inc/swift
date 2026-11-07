@@ -12,6 +12,7 @@ import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { billingBlocked, type StoreHold } from '../../../lib/vendorProfile';
 import { GUTTER, TabHeader, type VendorMemberRole } from '../shared';
 import { HeldStoreOrders } from './HeldStoreOrders';
+import { storeLabel } from '../../../lib/branches';
 
 type BlockingHold = Exclude<StoreHold, 'FEE_UNPAID'>;
 
@@ -80,7 +81,7 @@ export function VendorStoreBlocked({ store, stores, myRole, hold }: {
         {stores.length > 1 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm, marginBottom: space.lg }}>
             {stores.map((candidate) => (
-              <Chip key={candidate.id} label={candidate.name} selected={candidate.id === store.id} onPress={() => setSelectedStore(candidate.id)} />
+              <Chip key={candidate.id} label={storeLabel(candidate)} selected={candidate.id === store.id} onPress={() => setSelectedStore(candidate.id)} />
             ))}
           </ScrollView>
         ) : null}

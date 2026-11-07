@@ -4,12 +4,14 @@ import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
 import { FloatService } from '../dispatch/float.service';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { applyStockMovement } from '../inventory/stock';
+import { applyStockMovement, lockItemsInIdOrder } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
-import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, MMG_SWAP_SETTLES_DIRECTLY, ONLY_ITEM_LEFT_COPY, PICK_ALIVE_WHERE, type AdjustableOrder } from './substitution-view';
+import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, totalFixedCopy, ONLY_ITEM_LEFT_COPY, PICK_ALIVE_WHERE, type AdjustableOrder } from './substitution-view';
 import { storeTeam, ringRecipients } from '../notification/store-team';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
+import { recomputeOrderVat } from '../store-vat/order-vat';
+import { orderStageRefusal } from './order-status-words';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -24,11 +26,14 @@ function assertMmgMoneyAdjustable(order: AdjustableOrder): void {
   // yet (the store's number shows only after acceptance; no pay link, no claim):
   // the total may still change, and the customer pays only the total they
   // confirmed. orderTotalAdjustable decides it; an unprojected fact fails closed.
+  // [REVIEW-M S4-1 on #2043] The same rule on every rail but cash (card, bank
+  // transfer: prepaid, both OFF today). The code stays MMG_ADJUSTMENT_UNAVAILABLE
+  // (what clients already handle); the words fit the rail.
   if (orderTotalAdjustable(order)) return;
   throw new AppError(
     409,
     'MMG_ADJUSTMENT_UNAVAILABLE',
-    MMG_SWAP_SETTLES_DIRECTLY,
+    totalFixedCopy(order),
   );
 }
 
@@ -160,7 +165,7 @@ export class PickingService {
     });
     if (!line) throw new NotFoundError('Order line', lineId);
     if (!PICKABLE_STATES.includes(line.order.status)) {
-      throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${line.order.status}`);
+      throw new AppError(409, 'NOT_PICKABLE', orderStageRefusal(line.order.status, 'the pick list is closed'));
     }
     return line;
   }
@@ -226,7 +231,7 @@ export class PickingService {
     if (!order) throw new NotFoundError('Order', orderId);
     await mmgClaimLockObserver.afterLock?.({ orderId, actor: 'PICK' });
     if (!PICKABLE_STATES.includes(order.status)) {
-      throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${order.status}`);
+      throw new AppError(409, 'NOT_PICKABLE', orderStageRefusal(order.status, 'the pick list is closed'));
     }
     return order;
   }
@@ -511,7 +516,7 @@ export class PickingService {
       });
       if (!order) throw new NotFoundError('Order', orderId);
       if (!PICKABLE_STATES.includes(order.status)) {
-        throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${order.status}`);
+        throw new AppError(409, 'NOT_PICKABLE', orderStageRefusal(order.status, 'the pick list is closed'));
       }
       assertMmgFulfilmentAllowed(order, questionGateTarget(order.status));
 
@@ -560,7 +565,16 @@ export class PickingService {
       if (cas.count === 0) {
         throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
       }
+      // [STORE-VAT] On an order that froze VAT, the line now carries the SUBSTITUTE's VAT class (read now, at the
+      // customer's yes). A substitute with no item row keeps the line's class.
+      if (fresh.vatClass != null && fresh.substituteItemId) {
+        const subClass = await tx.item.findUnique({ where: { id: fresh.substituteItemId }, select: { vatClass: true } });
+        if (subClass) await tx.orderItem.update({ where: { id: lineId }, data: { vatClass: subClass.vatClass } });
+      }
 
+      // Two items move here (the substitute off the shelf, the original back):
+      // lock them in id order first, as every multi-item stock path does.
+      await lockItemsInIdOrder(tx, [fresh.substituteItemId, fresh.itemId]);
       if (fresh.substituteItemId) {
         const sub = await tx.item.findUnique({
           where: { id: fresh.substituteItemId },
@@ -598,6 +612,8 @@ export class PickingService {
           totalAmount: { increment: delta },
         },
       });
+      // [STORE-VAT] The VAT inside the goods follows the goods (a no-op on an order without VAT).
+      await recomputeOrderVat(tx, orderId);
 
       // [REPORT-006 F-006-05] Committed float tracks the LIVE cash subtotal a
       // rider fronts. A dearer substitute must still fit the exposure cap
@@ -653,7 +669,7 @@ export class PickingService {
         },
       });
       if (!PICKABLE_STATES.includes(ord.status)) {
-        throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${ord.status}`);
+        throw new AppError(409, 'NOT_PICKABLE', orderStageRefusal(ord.status, 'the pick list is closed'));
       }
       assertMmgMoneyAdjustable(ord);
       // [O-4 · REVIEW-F S3-1] On a waiting order a customer's answer never empties it: the only
@@ -696,6 +712,8 @@ export class PickingService {
           totalAmount: { decrement: decTotal },
         },
       });
+      // [STORE-VAT] A removed line carries no VAT any more (a no-op on an order without VAT).
+      await recomputeOrderVat(tx, line.order.id);
       await tx.orderStatusLog.create({
         data: { orderId: line.order.id, status: ord.status as PickableStatus, changedBy, note: opts.note ?? `Line ${subStatus.toLowerCase()}: ${line.name}` },
       });
@@ -712,7 +730,7 @@ export class PickingService {
       // original is restocked twice while the substitute strands decremented
       // (possibly auto-hidden at zero) with the wrong RETURN audit row.
       const restockItemId = line.subStatus === 'APPROVED' ? line.substituteItemId : line.itemId;
-      await this.restockLine({ itemId: restockItemId, quantity: line.quantity }, subStatus.toLowerCase(), tx);
+      await this.restockLine({ itemId: restockItemId, quantity: line.quantity, orderId: line.order.id }, subStatus.toLowerCase(), tx);
       return { decTotal };
     });
     if (!closed) return false;
@@ -879,20 +897,43 @@ export class PickingService {
 
   /** Put a line's units back on the shelf (tracked items only) + log it. */
   private async restockLine(
-    line: { itemId: string | null; quantity: number },
+    line: { itemId: string | null; quantity: number; orderId: string },
     note: string,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
   ) {
     if (!line.itemId) return;
     // [MKT-2] Through the single writer. It no-ops on an untracked item, which
     // is the same rule the `stockQuantity: { not: null }` guard enforced here.
-    const restock = await applyStockMovement(db, {
-      itemId: line.itemId,
-      delta: line.quantity,
-      reason: 'PICK_REFUND',
-      note: `picking: ${note}`,
+    // The movement names its order, like the sale it gives back, so the units
+    // an open order still holds net to zero for this line (POS-SYNC
+    // unitsHeldByOpenOrders).
+    // [POS-SYNC · Sol S2] Only units this order actually took are given back
+    // in its name. An order placed before the item tracked stock took nothing
+    // from the count; naming it on a return would cancel another open order's
+    // hold. Whatever it did not take is still put back, as before, but not in
+    // its name. The item lock serializes this read with every stock writer.
+    await lockItemsInIdOrder(db, [line.itemId]);
+    const taken = await db.stockMovement.aggregate({
+      where: { itemId: line.itemId, orderId: line.orderId },
+      _sum: { delta: true },
     });
-    if (restock.applied) {
+    const ownUnits = Math.min(line.quantity, Math.max(0, -(taken._sum.delta ?? 0)));
+    const parts = [
+      { delta: ownUnits, orderId: line.orderId },
+      { delta: line.quantity - ownUnits, orderId: null },
+    ].filter((part) => part.delta > 0);
+    let applied = false;
+    for (const part of parts) {
+      const restock = await applyStockMovement(db, {
+        itemId: line.itemId,
+        delta: part.delta,
+        reason: 'PICK_REFUND',
+        orderId: part.orderId,
+        note: `picking: ${note}`,
+      });
+      applied = applied || restock.applied;
+    }
+    if (applied) {
       await unhideRestocked(db, line.itemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
       await db.stockAdjustment.create({
         data: { itemId: line.itemId, delta: line.quantity, reason: 'RETURN', note: `picking: ${note}` },

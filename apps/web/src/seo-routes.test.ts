@@ -7,7 +7,6 @@ vi.mock('@/site.config', () => ({
   SITE_ORIGIN: 'https://swiftgy.com',
   site: { legalEntityName: 'Swift Test Company Ltd', supportEmail: 'support@swiftgy.com' },
   launch: { markets: ['Georgetown, Guyana'], webOrdering: 'live', verticals: {} },
-  showAppStoreBadges: false,
 }));
 
 const { default: sitemap } = await import('./app/sitemap');

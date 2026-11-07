@@ -60,7 +60,9 @@ services:
     tmpfs:
       - /srv/swift/uploads:uid=1000,gid=1000,mode=0700
     ports: !reset []
-    networks: !override [private]
+    # The copy's internal network, and the copy's own internal scanner network
+    # so the journeys' uploads are scanned by the copy's clamd (never the live one).
+    networks: !override [private, scanner]
 
   journeys-copy:
     image: swift-api:${SWIFT_TAG:-local}

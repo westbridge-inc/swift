@@ -198,6 +198,25 @@ export function carriesGoods(vehicleType: string, env: Record<string, string | u
   return !isPassengerVehicle(vehicleType as VehicleType) || carDeliveriesEnabled(env);
 }
 
+/**
+ * [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car (any passenger vehicle: a private P-plate car, or a taxi car's delivery
+ * side) takes FOOD and SHOP orders only — never a courier parcel. The one answer every parcel door reads: dispatch,
+ * the claim, the board grab, the relay pick, and whether a parcel size can be placed at all.
+ */
+export function carriesParcels(vehicleType: string, env: Record<string, string | undefined> = process.env): boolean {
+  return carriesGoods(vehicleType, env) && !isPassengerVehicle(vehicleType as VehicleType);
+}
+
+/** The vehicles that may carry a courier parcel of this size today: capacity, the switch, and never a car. */
+export function parcelVehicleTypesForPackageSize(size: string | null | undefined, env: Record<string, string | undefined> = process.env): VehicleType[] {
+  return vehicleTypesForPackageSize(size).filter((type) => carriesParcels(type, env));
+}
+
+/** Can any vehicle Swift takes on today carry a courier parcel of this size? (Cars never do.) */
+export function parcelSizeCarriableToday(size: string | null | undefined, env: Record<string, string | undefined> = process.env): boolean {
+  return parcelVehicleTypesForPackageSize(size, env).some((type) => isVehicleOffered(type));
+}
+
 /** The vehicles that may carry goods of this size today (any size when unknown): capacity AND the switch. */
 export function goodsVehicleTypesForPackageSize(size: string | null | undefined, env: Record<string, string | undefined> = process.env): VehicleType[] {
   return vehicleTypesForPackageSize(size).filter((type) => carriesGoods(type, env));
@@ -205,17 +224,23 @@ export function goodsVehicleTypesForPackageSize(size: string | null | undefined,
 
 /**
  * Can any vehicle Swift takes on today carry goods of this size? False means no mover on Swift could ever be
- * offered it right now (e.g. a bulky order while car deliveries are off: only cars, vans and the heavy fleet
- * carry the largest class, and the heavy fleet is not taken on yet), so it must be refused before it is placed,
- * never accepted and stranded.
+ * offered it right now (e.g. the largest class while car deliveries are off: only cars, vans and the heavy fleet
+ * carry it, and the heavy fleet is not taken on yet). A parcel of that size is refused before it is placed; a
+ * store order's size is capped to what is carriable (utils/load), so it is never refused for size alone.
  */
 export function goodsSizeCarriableToday(size: string | null | undefined, env: Record<string, string | undefined> = process.env): boolean {
   return goodsVehicleTypesForPackageSize(size, env).some((type) => isVehicleOffered(type));
 }
 
-/** The document-checklist keys a given vehicle adds on top of the base MOVER list. */
-export function docProfilesFor(vehicleType: VehicleType): string[] {
-  return VEHICLE_CLASSES[vehicleType]?.docProfiles ?? [];
+/** The document-checklist keys a given vehicle adds on top of the base MOVER list.
+ *  [CARS-PLATES · owner 6 Nov 2026] `kind` RIDER on a passenger vehicle (a car's delivery profile) drops the taxi
+ *  extras: a private (P) plate car delivers on the delivery rider's papers (licence, registration, insurance for hire
+ *  or reward), never the hire licences only an H-plate taxi can hold. Without a kind (or as a DRIVER) the list is the
+ *  vehicle's own, exactly as before. */
+export const TAXI_DOC_PROFILE = 'MOVER_TAXI_EXTRA';
+export function docProfilesFor(vehicleType: VehicleType, kind: MoverRole | null = null): string[] {
+  const profiles = VEHICLE_CLASSES[vehicleType]?.docProfiles ?? [];
+  return kind === 'RIDER' && isPassengerVehicle(vehicleType) ? profiles.filter((key) => key !== TAXI_DOC_PROFILE) : profiles;
 }
 
 /**

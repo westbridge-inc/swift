@@ -8,14 +8,14 @@
  *  - A partner's REJECTED document: a PERSONAL one is deleted 30 days after the rejection; a
  *    vehicle or business one after its registry window (90 days), like every other document
  *    that stops being needed ("while active + 90 days").
- *  - A CUSTOMER's ID is not touched here: it is kept while the account is open and goes when
- *    the account closes (owner ruling 8 Oct; account deletion purges it).
+ *  - A CUSTOMER's ID is not touched here: [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] Swift no longer keeps them,
+ *    and each stored one is withdrawn and deleted by its own daily sweep (verification.service retireCustomerIds).
  *
  * Continues the VERIFY-DOCS PR-V2 work (fix/verify-docs-retention): the windows are settings,
  * read from PlatformConfig each sweep and 30 days when unset, so the lawyer's numbers are a
  * settings change. A value outside 1..3650 is ignored — a typo never deletes everything at once.
  */
-import type { Prisma, PrismaClient, UserRole } from '@prisma/client';
+import type { DocState, Prisma, PrismaClient, UserRole } from '@prisma/client';
 import { BUCKET_OF } from './doc-registry';
 
 type Db = Prisma.TransactionClient | PrismaClient;
@@ -26,18 +26,19 @@ export const DEFAULT_PERSONAL_IMAGE_DAYS = 30;
 export const DEFAULT_REJECTED_DOCUMENT_DAYS = 30;
 export const DAY_MS = 86_400_000;
 
-/** The roles whose documents are partner documents. A customer's ID is kept while the account is open. */
+/** The roles whose documents are partner documents. A customer's ID has its own retirement sweep. */
 export const PARTNER_DOCUMENT_ROLES: readonly UserRole[] = ['RIDER', 'DRIVER', 'MOVER', 'VENDOR_OWNER'];
 
-/** The customer's own ID (verification.service IDENTITY_DOC_TYPE; a test holds the two equal). */
+/** The customer's own ID (verification.service IDENTITY_DOC_TYPE; a test holds the two equal). [CHECKLIST-LEGAL] Retired:
+ *  none is taken any more, and the stored ones are deleted by verification.service retireCustomerIds. */
 export const CUSTOMER_ID_DOC_TYPE = 'identity_l2';
 
 /**
  * Which documents are a partner's. An individual SERVICE PROVIDER's documents (national ID,
  * police clearance for home visits, trade licence) are stored with role CUSTOMER: the provider
  * lives inside the customer account (verification.service roleKeyToUserRole). So a CUSTOMER row
- * is a partner document too, unless it is the customer's own ID, which is kept while the account
- * is open. Every partner selector uses this one predicate.
+ * is a partner document too, unless it is the customer's own ID, which its own retirement sweep deletes. Every partner
+ * selector uses this one predicate.
  */
 export const PARTNER_DOCUMENT_WHERE: Prisma.VerificationDocumentWhereInput = {
   OR: [
@@ -62,3 +63,14 @@ export const NON_PERSONAL_DOC_TYPES: readonly string[] = Object.entries(BUCKET_O
   .map(([docType]) => docType);
 
 export const isPersonalDocType = (docType: string): boolean => !NON_PERSONAL_DOC_TYPES.includes(docType);
+
+/**
+ * [DOC-SECURITY G5] The states a submission rests in once it is no longer current: replaced (a newer copy
+ * before review, or a renewal after approval), revoked, or expired. None of them can be decided again (each
+ * leads only to PURGED, doc-state.ts), so a PERSONAL one keeps no image: it goes the same window after it
+ * stopped being current, through the same purge. Its record and history stay.
+ */
+export const NO_LONGER_CURRENT_STATES = ['SUPERSEDED', 'REVOKED', 'EXPIRED'] as const satisfies readonly DocState[];
+
+/** The states whose image the image policy may purge: an approval in force, or one no longer current. */
+export const IMAGE_PURGE_STATES: readonly DocState[] = ['COMMITTED', ...NO_LONGER_CURRENT_STATES];

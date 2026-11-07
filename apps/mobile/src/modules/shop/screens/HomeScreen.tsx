@@ -710,6 +710,8 @@ export function HomeScreen() {
                       width={RAIL_CARD_W}
                       image={vendorPhoto(v)}
                       name={v.name}
+                      brand={v.brand}
+                      place={v.addressLine1 ?? v.city}
                       rating={v.displayRating ?? null}
                       ratingBucket={v.ratingBucket}
                       topRated={v.topRated}
@@ -838,6 +840,8 @@ export function HomeScreen() {
                     width={HERO_CARD_W}
                     image={vendorPhoto(v)}
                     name={v.name}
+                    brand={v.brand}
+                    place={v.addressLine1 ?? v.city}
                     rating={v.displayRating ?? null}
                     ratingBucket={v.ratingBucket}
                     topRated={v.topRated}
@@ -905,6 +909,8 @@ export function HomeScreen() {
                       key={v.id}
                       image={vendorPhoto(v)}
                       name={v.name}
+                      brand={v.brand}
+                      place={v.addressLine1 ?? v.city}
                       meta={
                         <RatingMeta
                           rating={v.displayRating ?? null}
@@ -949,6 +955,8 @@ export function HomeScreen() {
                         width={RAIL_CARD_W}
                         image={vendorPhoto(v)}
                         name={v.name}
+                        brand={v.brand}
+                        place={v.addressLine1 ?? v.city}
                         rating={v.displayRating ?? null}
                         ratingBucket={v.ratingBucket}
                         topRated={v.topRated}
@@ -990,6 +998,8 @@ export function HomeScreen() {
                         closed
                         image={vendorPhoto(v)}
                         name={v.name}
+                        brand={v.brand}
+                        place={v.addressLine1 ?? v.city}
                         meta={
                           <RatingMeta
                             rating={v.displayRating ?? null}

@@ -41,7 +41,8 @@ export function isVendorScopedPath(url: string): boolean {
   return path === VENDOR_SCOPED_PREFIX || path.startsWith(`${VENDOR_SCOPED_PREFIX}/`);
 }
 
-/** The endpoint family a path belongs to, for the metric: the first segment under /api/v1, else the first segment, else root. */
+/** The endpoint family a path belongs to: the first segment under /api/v1, else the first segment, else root.
+ *  Fed ONLY route templates (see metricFamilyOf), never the request's own path. */
 export function apiFamilyOf(url: string): string {
   const path = pathOf(url);
   const versioned = /^\/api\/v1\/([^/]+)/.exec(path);
@@ -49,11 +50,22 @@ export function apiFamilyOf(url: string): string {
   return path.split('/').filter(Boolean)[0] ?? 'root';
 }
 
+/**
+ * The family LABEL for a request: taken from the matched route's template, so
+ * the label set is bounded by the routes this server registers; a request no
+ * route matched is the one 'unmatched' series. Raw request-path text never
+ * becomes a label: the path is chosen by the caller, and every distinct label
+ * value is a series kept in memory for the life of the process.
+ */
+export function metricFamilyOf(routeUrl: string | undefined): string {
+  return routeUrl === undefined ? 'unmatched' : apiFamilyOf(routeUrl);
+}
+
 export function registerTenantHeaderScope(app: FastifyInstance, mode: TenantHeaderMode = tenantHeaderMode()): void {
   app.addHook('onRequest', async (request) => {
     if (request.headers[VENDOR_STORE_HEADER] === undefined) return;
     if (isVendorScopedPath(request.url)) return;
-    const family = apiFamilyOf(request.url);
+    const family = metricFamilyOf(request.routeOptions?.url);
     unexpectedTenantHeaderCounter.labels(mode === 'reject' ? 'rejected' : 'ignored', family).inc();
     if (mode === 'reject') {
       throw new AppError(400, 'UNEXPECTED_TENANT_HEADER', `${VENDOR_STORE_HEADER} is accepted only by the vendor endpoint family`);

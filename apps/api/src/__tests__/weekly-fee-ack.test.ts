@@ -4,7 +4,8 @@
  * A partner sees the weekly fee BEFORE they submit sign-up — the server's amount for their vehicle or
  * business, what it covers, when it starts, how it is paid and the 14-day rule for price changes — and
  * ticks "I understand the weekly fee" next to the partner agreement. The words come from the server
- * (GET /auth/pricing `feeTerms`), are hash-anchored in the consent ledger (weekly_fee_acknowledgement v1),
+ * (GET /auth/pricing `feeTerms`), are hash-anchored in the consent ledger (weekly_fee_acknowledgement v2 since
+ * 1 Nov 2026: v1 with "How you pay" naming the website; weekly-fee-words-v2.unit.test.ts),
  * and the tick is recorded in the same transaction that provisions the partner, with the amount the
  * partner saw — which must be the server's quote at that moment.
  *
@@ -12,6 +13,7 @@
  * builds 9-12 send no such field and keep signing up; nothing is fabricated for them.
  */
 import { createHash } from 'node:crypto';
+import { WEEKLY_RETIER_ON } from '../modules/billing/weekly-retier';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -20,7 +22,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { partnerRoutes } from '../modules/partner/partner.routes';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
@@ -41,7 +43,24 @@ const V1_ITEMS = [
   { heading: 'If the price changes', text: 'Swift tells you in the app at least 14 days before. A new price applies only from your first weekly fee due after that, never to a week you have already paid.' },
 ];
 const V1_TICK = 'I understand the weekly fee.';
-const V1_TEXT = [...V1_ITEMS.map((i) => `${i.heading}: ${i.text}`), V1_TICK].join('\n');
+/** [WEB-ONBOARDING · owner 1 Nov 2026 (D3, F13)] The words served now: v1 with "How you pay" naming the website and "When it starts" saying the trial. */
+const V2_CHANGED: Record<string, string> = {
+  'When it starts': 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one. A new partner\u2019s free trial lasts 14 days, or 7 days for a store with 10,000 or more items when Swift approves it, counted from the day Swift approves you (for a service provider, from the day the Pro Agreement says). A new branch has no trial of its own: it shares its business\u2019s. Each person gets one free trial for each kind of partner, and none while an earlier Swift subscription of theirs is overdue, paused or ended.',
+  'How you pay': 'In the Swift app or on swiftgy.com, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.',
+};
+const V2_ITEMS = V1_ITEMS.map((i) => (V2_CHANGED[i.heading] ? { ...i, text: V2_CHANGED[i.heading]! } : i));
+/** [OWNER 5 Nov 2026] The words served now: v2 with "How you pay" adding the partner paying Westbridge Inc. in person, and the price line split into a rise and a cut. */
+const V3_HOW_YOU_PAY = 'In the Swift app or on swiftgy.com, on MMG\u2019s checkout page, one week at a time. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.';
+/** [REVIEW-G18 S3-1] v3 says 14 days' notice before a RISE only; a cut applies from the next fee not yet paid or charged. */
+const V3_PRICE_CHANGES = 'If the price goes up, Swift tells you in the app at least 14 days before, and the new price applies only from your first weekly fee due after that, never to a week you have already paid. If it goes down, the lower price applies from your next weekly fee not yet paid or charged, with a notice in the app.';
+const V3_CHANGED: Record<string, string> = { 'How you pay': V3_HOW_YOU_PAY, 'If the price changes': V3_PRICE_CHANGES };
+const V3_ITEMS = V2_ITEMS.map((i) => (V3_CHANGED[i.heading] ? { ...i, text: V3_CHANGED[i.heading]! } : i));
+/** [PAYAHEAD-4W · owner 6 Nov 2026] v4: up to four weeks ahead, and a cut reaches weeks paid ahead. */
+const V4_HOW_YOU_PAY = 'In the Swift app or on swiftgy.com, on MMG\u2019s checkout page, for one week or up to four weeks ahead. Or in person, directly to Westbridge Inc., by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.';
+const V4_PRICE_CHANGES = 'If the price goes up, Swift tells you in the app at least 14 days before, and the new price applies only from your first weekly fee due after that, never to a week you have already paid. If it goes down, the lower price applies from your next weekly fee not yet charged, even one you have already paid for, with a notice in the app; what you paid above it counts toward your later weekly fees.';
+const V4_CHANGED: Record<string, string> = { 'How you pay': V4_HOW_YOU_PAY, 'If the price changes': V4_PRICE_CHANGES };
+const V4_ITEMS = V3_ITEMS.map((i) => (V4_CHANGED[i.heading] ? { ...i, text: V4_CHANGED[i.heading]! } : i));
+const V4_TEXT = [...V4_ITEMS.map((i) => `${i.heading}: ${i.text}`), V1_TICK].join('\n');
 
 async function customer(n: number) {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: { phone: `+59274${NUM}${n}`, firstName: 'Fee', lastName: `Tick${n}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, customer: { create: {} } } as never }));
@@ -82,7 +101,7 @@ beforeAll(async () => {
   app = Fastify({ logger: false }); registerErrorHandler(app); registerEmptyJsonBodyParser(app);
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(authPlugin); await app.register(socketPlugin);
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.ready();
 });
 afterAll(async () => {
@@ -103,9 +122,16 @@ afterAll(async () => {
 });
 
 describe('the weekly fee words are the server’s, pinned and served with the price', () => {
-  it('GET /auth/pricing serves the v1 words beside the amounts: what it covers, when it starts, how it is paid, the 14-day rule, and the tick', async () => {
+  it('GET /auth/pricing serves the v2 words beside the amounts: what it covers, when it starts, how it is paid (the app or the website), the 14-day rule, and the tick', async () => {
     const p = await priceList();
-    expect(p.feeTerms).toEqual({ version: 'v1', items: V1_ITEMS, tick: V1_TICK });
+    expect(p.feeTerms).toEqual({ version: 'v4', items: V4_ITEMS, tick: V1_TICK });
+  });
+
+  it('[RETIER PR-B] says whether Swift moves existing stores between catalogue steps (off until the owner\'s go) and the notice a rise gets', async () => {
+    const p = await priceList() as unknown as { catalogueRetier?: unknown };
+    // the switch's own value (pinned off in weekly-retier-off.test.ts): turning it on changes this answer with it
+    expect(p.catalogueRetier).toEqual({ on: WEEKLY_RETIER_ON, noticeDays: 14 });
+    expect(WEEKLY_RETIER_ON).toBe(false);
   });
 });
 
@@ -114,14 +140,14 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     const c = await customer(1);
     const p = await priceList();
     const amount = moverRate(p, 'MOTORCYCLE');
-    const res = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v1', amount, currencyCode: p.currencyCode } }, { 'x-client-platform': 'android' });
+    const res = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v4', amount, currencyCode: p.currencyCode } }, { 'x-client-platform': 'android' });
     expect([200, 201], res.body).toContain(res.statusCode);
     const rows = await feeRows(c.id);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ subjectType: 'driver', documentVersion: 'v1', action: 'granted', surface: 'android', documentContentHash: sha256(V1_TEXT) });
+    expect(rows[0]).toMatchObject({ subjectType: 'driver', documentVersion: 'v4', action: 'granted', surface: 'android', documentContentHash: sha256(V4_TEXT) });
     expect(rows[0]!.evidence).toMatchObject({ control: 'weekly_fee_checkbox', path: 'partner/become', kind: 'RIDER', vehicleType: 'MOTORCYCLE', weeklyFee: { amount, currencyCode: p.currencyCode, tier: 'courier' } });
-    const doc = await system(() => app.prisma.legalDocument.findUniqueOrThrow({ where: { documentType_version_locale: { documentType: 'weekly_fee_acknowledgement', version: 'v1', locale: 'en-GY' } } }));
-    expect(doc.renderedText).toBe(V1_TEXT);
+    const doc = await system(() => app.prisma.legalDocument.findUniqueOrThrow({ where: { documentType_version_locale: { documentType: 'weekly_fee_acknowledgement', version: 'v4', locale: 'en-GY' } } }));
+    expect(doc.renderedText).toBe(V4_TEXT);
     expect(doc.publishedAt).toBeInstanceOf(Date);
   });
 
@@ -147,7 +173,7 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: c.id } }))).toBe(0);
 
     const p = await priceList();
-    const ticked = await becomeFromWeb(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v1', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
+    const ticked = await becomeFromWeb(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v4', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
     expect([200, 201], ticked.body).toContain(ticked.statusCode);
     expect((await feeRows(c.id)).map((r) => r.surface)).toEqual(['web']);
   });
@@ -156,11 +182,11 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     const c = await customer(4);
     const p = await priceList();
     const amount = moverRate(p, 'MOTORCYCLE');
-    const stale = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v1', amount: amount + 500, currencyCode: p.currencyCode } });
+    const stale = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v4', amount: amount + 500, currencyCode: p.currencyCode } });
     expect(stale.statusCode, stale.body).toBe(409);
     expect(stale.json().error.code).toBe('WEEKLY_FEE_CHANGED');
     expect(stale.json().error.details).toMatchObject({ amount, currencyCode: p.currencyCode });
-    const wrongCurrency = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v1', amount, currencyCode: 'USD' } });
+    const wrongCurrency = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v4', amount, currencyCode: 'USD' } });
     expect(wrongCurrency.statusCode, wrongCurrency.body).toBe(409);
     expect(wrongCurrency.json().error.code).toBe('WEEKLY_FEE_CHANGED');
     const after = await provisioned(c.id);
@@ -169,12 +195,14 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: c.id } }))).toBe(0);
   });
 
-  it('a tick given to other words (an older or unknown version) is refused before anything is written', async () => {
+  it('a tick given to other words (the older v1, or an unknown version) is refused before anything is written', async () => {
     const c = await customer(5);
     const p = await priceList();
-    const res = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version: 'v0', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
-    expect(res.statusCode, res.body).toBe(409);
-    expect(res.json().error.code).toBe('WEEKLY_FEE_TERMS_CHANGED');
+    for (const version of ['v1', 'v0']) {
+      const res = await become(c.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck: { version, amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('WEEKLY_FEE_TERMS_CHANGED');
+    }
     expect((await provisioned(c.id)).rider).toBeNull();
     expect(await system(() => app.prisma.consentRecord.count({ where: { subjectId: c.id } }))).toBe(0);
   });
@@ -193,23 +221,23 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     const driver = await customer(7);
     const car = { make: 'Toyota', model: 'Allion', year: 2018, color: 'Silver', licensePlate: `HB ${NUM}7` };
     const taxiRate = moverRate(p, 'CAR');
-    const wrong = await become(driver.token, { role: 'MOVER', vehicleType: 'CAR', vehicle: car, acceptAgreement: true, weeklyFeeAck: { version: 'v1', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
+    const wrong = await become(driver.token, { role: 'MOVER', vehicleType: 'CAR', vehicle: car, acceptAgreement: true, weeklyFeeAck: { version: 'v4', amount: moverRate(p, 'MOTORCYCLE'), currencyCode: p.currencyCode } });
     if (moverRate(p, 'MOTORCYCLE') !== taxiRate) expect(wrong.json().error?.code, wrong.body).toBe('WEEKLY_FEE_CHANGED');
-    const ok = await become(driver.token, { role: 'MOVER', vehicleType: 'CAR', vehicle: car, acceptAgreement: true, weeklyFeeAck: { version: 'v1', amount: taxiRate, currencyCode: p.currencyCode } });
+    const ok = await become(driver.token, { role: 'MOVER', vehicleType: 'CAR', vehicle: car, acceptAgreement: true, weeklyFeeAck: { version: 'v4', amount: taxiRate, currencyCode: p.currencyCode } });
     expect([200, 201], ok.body).toContain(ok.statusCode);
     expect((await feeRows(driver.id))[0]!.evidence).toMatchObject({ kind: 'DRIVER', vehicleType: 'CAR', weeklyFee: { amount: taxiRate, tier: 'taxi' } });
 
     const service = await customer(8);
-    const s = await become(service.token, { role: 'VENDOR', business: store('SERVICE', 8), acceptAgreement: true, weeklyFeeAck: { version: 'v1', amount: p.vendors.service, currencyCode: p.currencyCode } });
+    const s = await become(service.token, { role: 'VENDOR', business: store('SERVICE', 8), acceptAgreement: true, weeklyFeeAck: { version: 'v4', amount: p.vendors.service, currencyCode: p.currencyCode } });
     expect([200, 201], s.body).toContain(s.statusCode);
     const serviceRows = await feeRows(service.id);
     expect(serviceRows).toHaveLength(1);
-    expect(serviceRows[0]).toMatchObject({ subjectType: 'vendor_user', documentVersion: 'v1' });
+    expect(serviceRows[0]).toMatchObject({ subjectType: 'vendor_user', documentVersion: 'v4' });
     expect(serviceRows[0]!.evidence).toMatchObject({ kind: 'VENDOR', vendorType: 'SERVICE', weeklyFee: { amount: p.vendors.service, tier: 'service' } });
 
     const shop = await customer(9);
     const first = p.vendors.catalogue[0]!;
-    const r = await become(shop.token, { role: 'VENDOR', business: store('RESTAURANT', 9), acceptAgreement: true, weeklyFeeAck: { version: 'v1', amount: first.rate, currencyCode: p.currencyCode } });
+    const r = await become(shop.token, { role: 'VENDOR', business: store('RESTAURANT', 9), acceptAgreement: true, weeklyFeeAck: { version: 'v4', amount: first.rate, currencyCode: p.currencyCode } });
     expect([200, 201], r.body).toContain(r.statusCode);
     expect((await feeRows(shop.id))[0]!.evidence).toMatchObject({ kind: 'VENDOR', vendorType: 'RESTAURANT', weeklyFee: { amount: first.rate, tier: first.tier } });
   });

@@ -189,7 +189,10 @@ const SCOPE: Record<string, Entry> = {
   [`${ADMIN}|POST|/billing/settlement-batches/:id/confirm-deposit`]: approval('payout'),
   [`${ADMIN}|POST|/billing/settlement-batches/:id/adjust-deposit`]: approval('payout'),
   // Weekly-fee checkouts and fee money.
+  'modules/ads/ads.routes.ts|POST|/invoices/:id/mmg-checkout': { kind: 'ad-spend', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createAdCheckout', 'const replay = await this.answerForKey(who, now);']] },
   'modules/billing/mmg-checkout.routes.ts|POST|/subscription/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createCheckout', 'const replay = await this.answerForKey(who, now);']] },
+  // [ENTERPRISE E1] "Pay all my branches": the same key rule (a key that answered keeps its answer), one open per owner.
+  'modules/billing/mmg-checkout.routes.ts|POST|/subscription/chain-fees/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createChainCheckout', 'const replay = await this.answerForKey(who, now);']] },
   'modules/billing/mmg-checkout.routes.ts|POST|/notify': { kind: 'fee-checkout', guard: 'state', pins: MMG_REPLY_CAS },
   'modules/billing/mmg-checkout.routes.ts|POST|/return': { kind: 'fee-checkout', guard: 'state', pins: MMG_REPLY_CAS },
   'modules/billing/card-rail.routes.ts|POST|/subscription/card-sessions': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/card-rail.routes.ts', H, 'subscriptionId_purpose_idempotencyKey: { subscriptionId: sub.id, purpose, idempotencyKey: key }']] },
@@ -199,7 +202,6 @@ const SCOPE: Record<string, Entry> = {
   [`${ADMIN}|POST|/billing/agent-payments`]: approval('fee-checkout'),
   [`${ADMIN}|POST|/billing/agent-payments/:id/attach`]: approval('fee-checkout'),
   [`${ADMIN}|POST|/billing/settlement-import`]: approval('fee-checkout'),
-  [`${ADMIN}|PUT|/ads/invoices/:id/mark-paid`]: approval('fee-checkout'),
   // Ad spend (ads are OFF at launch; the routes still guard).
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/reserve': { kind: 'ad-spend', guard: 'state', pins: [['modules/ads/booking.service.ts', 'reserveAndHold', 'FOR UPDATE']] },
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/checkout': { kind: 'ad-spend', guard: 'state', pins: [['modules/ads/checkout.service.ts', 'checkout', 'if (open) { invoice = open; return; }']] },
@@ -226,14 +228,30 @@ const SCOPE: Record<string, Entry> = {
     [SERVICES_SVC, 'createServiceJobWithLiveAuthority', 'if (earlier) return { job: earlier, created: false as const };'],
     ['modules/services/services.routes.ts', H, 'if (!created) {'],
   ] },
+  // [BOOK-P2] A retried booking from a pro's menu returns the first job: the same customer, pro, service
+  // and minute, still SCHEDULED, found under the customer's booking lock and User-row lock. And the database's
+  // one-pro-one-time exclusion refuses a second live job over that time whatever the path.
+  'modules/services/pro-booking.routes.ts|POST|/jobs/book': { kind: 'order', guard: 'state', pins: [
+    ['modules/services/pro-booking.routes.ts', H, 'await lockCustomerBookings(tx, customerId);'],
+    ['modules/services/pro-booking.routes.ts', H, 'FOR UPDATE /* pro-booking-live-authority */'],
+    ['modules/services/pro-booking.routes.ts', H, "where: { customerId, providerId: provider.id, offeringId: body.offeringId, scheduledFor: start, status: 'SCHEDULED' },"],
+    ['modules/services/pro-booking.routes.ts', H, 'if (earlier) return { job: earlier, created: false, notificationIds: [] };'],
+  ] },
   // A tip after delivery is refused until a collection path exists.
   [`${CUSTOMER}|POST|/orders/:id/tip`]: { kind: 'payout', guard: 'refused', pins: [['modules/order/order.service.ts', 'addPostDeliveryTip', 'TIP_COLLECTION_UNAVAILABLE']] },
 };
 
 /** Verb-matched routes that create none of the eight things (reviewed). */
 const OUT: Record<string, string> = {
+  // [BUG-HUNT-2 G08] A finding on one send: decided once under the order lock, compare-and-set on its revision. Moves no money.
+  'modules/admin/admin.routes.ts|POST|/mmg-refunds/sends/:id/resolve': 'A support finding on a refund already recorded: a repeat is refused, it creates none of the eight.',
+  // [Row 156] A note that a clock started, not one of the eight: it moves no money, and checkoutId is unique, so a retry is 409.
+  [`${ADMIN}|POST|/billing/mmg-checkouts/:id/refund-case`]: 'records a partner\'s ask on one payment: unique per payment (a retry is REFUND_CASE_EXISTS), and it moves no money',
+  // [WEB-DELETE · owner ruling 1 Nov 2026]
+  [`${CUSTOMER}|POST|/account/closure-request/cancel`]: 'The owner takes back their own closure request: it resolves that ticket and lifts its pause on new orders, under the person lock (a replay finds no open request and is refused). No order or money.',
   [`${CUSTOMER}|POST|/orders/:id/reorder`]: 'Fills the CART from a past order; nothing is ordered until checkout (which holds its own key).',
   [`${CUSTOMER}|PUT|/cart/tip`]: 'Sets the tip VALUE on the cart (a replay sets the same value); the money moves at checkout.',
+  'modules/admin/admin.routes.ts|POST|/users/:id/phone-change/confirm': 'Moves an existing account to the number the code went to: nothing is created and no money moves, and the code is spent on first use, so a replay is refused.',
   'modules/ads/ads.routes.ts|POST|/campaigns': 'Creates a DRAFT campaign; no money is reserved or charged until reserve / checkout (both guarded).',
   'modules/courier/courier.routes.ts|POST|/order/:id/return': 'A state transition of an existing parcel (return to sender), not a new parcel; the parcel state machine refuses a second one.',
   'modules/billing/card-rail.routes.ts|POST|/return': 'The card page returning to Swift: it credits nothing itself (the card rail is off, and a card payment is credited only after the provider\'s own lookup).',
@@ -241,17 +259,23 @@ const OUT: Record<string, string> = {
   'modules/safety/safety.routes.ts|POST|/sos/:id/confirm': 'Safety: confirms an existing SOS; it creates no order or money.',
   'modules/safety/safety.routes.ts|POST|/sos/:id/resolve': 'Safety: resolves an existing SOS; it creates no order or money.',
   'modules/vendor/vendor.routes.ts|POST|/items/:id/adjust': 'A stock count adjustment on the store\'s item (inventory), not an order or money.',
+  'modules/vendor/vendor.routes.ts|POST|/items/import/sync/confirm': 'Applies a till export to the store\'s own items (stock counts and prices), not an order or money. A replay is still a no-op: the upload id is the pos_imports row id, so a retried confirm returns the stored result, and (store, file hash) is unique.',
   'modules/vendor/vendor.routes.ts|POST|/store-categories/request': 'Asks Swift to add a store category; no order or money.',
   [`${ADMIN}|POST|/orders/:id/food-age-hold/release`]: 'Releases an age hold on an existing order (C2 workflow state), not a new order or money.',
   [`${ADMIN}|POST|/integrity/appeals/:id/resolve`]: 'Decides an integrity appeal (C3); it creates no order or money.',
   [`${ADMIN}|PUT|/verification/legal-holds/:id/release`]: 'Releases a legal hold on a verification record; no order or money.',
   [`${ADMIN}|POST|/verification/cases/:id/release`]: 'Releases a verification case back to the queue; no order or money.',
+  [`${ADMIN}|POST|/upload-scan-debts/:id/release`]: 'Rescans an upload held by the malware scanner and releases it only if the scan is clean (scan-ledger state + audit row); no order or money. A replay finds it NOT_HELD (409).',
   [`${ADMIN}|PUT|/support/:id/resolve`]: 'Marks a support ticket resolved; no order or money.',
   [`${ADMIN}|POST|/compliance/violations/:id/resolve`]: 'Resolves a compliance violation record; no order or money.',
   [`${ADMIN}|POST|/discovery/backfill`]: 'Rebuilds discovery/search projections; no order or money.',
   [`${ADMIN}|POST|/rating-reports/:id/resolve`]: 'Decides a reported rating; no order or money.',
   // [#1964 review F2 S3-1 / G S4-1] Transitions and nouns now read, that create none of the eight.
   'modules/rider/rider.routes.ts|POST|/orders/:id/accept': 'A rider takes an existing order (assignment under the order lock); no new order and no money row — earnings come at delivered.',
+  // [#1995 ads security] Accepting one's own advertiser team invitation creates nothing: one compare-and-set
+  // (updateMany where acceptedAt is null, the invitee's own row, unexpired) sets acceptedAt; a retry finds no
+  // open invitation and answers 404. No order, no money row, no new row.
+  'modules/ads/ads.routes.ts|POST|/advertiser/:id/members/accept': 'The invited person accepts their own open invitation: one compare-and-set on their row (acceptedAt null -> now); a retry finds nothing open (404). Creates no row and moves no money.',
   'modules/rider/rider.routes.ts|POST|/offers/accept': 'A rider takes an offered order (the offer is claimed once); assignment only, no money row.',
   'modules/driver/driver.routes.ts|POST|/rides/:id/accept': 'A driver takes an existing ride request (assignment); the fare is earned at complete, not here.',
   'modules/driver/driver.routes.ts|POST|/offers/accept': 'A driver takes an offered ride (the offer is claimed once); assignment only, no money row.',
@@ -285,7 +309,8 @@ function sources(dir: string): string[] {
 }
 const FILES = Object.fromEntries(sources(join(SRC, 'modules')).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')]));
 /** The approval gate itself: every C4/C5 admin request spends its approval once, before the handler. */
-const GATE: Pin[] = [['modules/admin/admin-approval.ts', 'markApplied', "where: { id: approvalId, status: 'APPROVED' }"], ['modules/admin/admin-approval.ts', 'resolveApproval', 'markApplied(prisma, approvalId, now)']];
+// [#2086] The spend's compare-and-set also carries the expiry (a lapsed approval never spends): the pin follows it.
+const GATE: Pin[] = [['modules/admin/admin-approval.ts', 'markApplied', "where: { id: approvalId, status: 'APPROVED', expiresAt: { gt: now } }"], ['modules/admin/admin-approval.ts', 'resolveApproval', 'markApplied(prisma, approvalId, now)']];
 const RESULT = census(FILES, SCOPE, OUT, PENDING_FIX, GATE);
 
 describe('[BUG-GUARDS C2 · server] a retried request never creates twice', () => {

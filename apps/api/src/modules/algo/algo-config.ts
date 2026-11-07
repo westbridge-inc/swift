@@ -147,7 +147,12 @@ export const ALGO_DEFAULTS = {
    */
   'velocity.limits': {
     'promo.validate': { max: 10, perSeconds: 600, clusterMax: 30 },
+    // [SEC-TRUST F16] a referral code is redeemed once per person: a few tries an hour is generous
+    'referral.redeem': { max: 10, perSeconds: 3_600, clusterMax: 30 },
     'return.request': { max: 5, perSeconds: 86_400, clusterMax: 10 },
+    // [FULL-LAUNCH · owner ruling 5 Nov 2026] Orders placed, a store order or a parcel alike: 6 an hour for one person,
+    // 12 an hour across a linked identity cluster. Never the IP: Guyana's carriers put many customers behind one address.
+    'order.place': { max: 6, perSeconds: 3_600, clusterMax: 12 },
     // [R048-007] the money surfaces: a pay link is changed a handful of times a day at most,
     // and these fail CLOSED when the control is unavailable (integrity/velocity.ts)
     'money.mmg-link': { max: 5, perSeconds: 86_400, clusterMax: 10 },
@@ -197,6 +202,47 @@ export const ALGO_DEFAULTS = {
    */
   'rescue.arrivedFixMaxAgeMinutes': 2,
   'rescue.arrivedFixMaxMetres': 150,
+  /**
+   * [BOOK-S2 · COORD ruling 28 Oct 2026] With INSTANT_BOOKING on, a booking
+   * takes the business's time at checkout, before anyone pays: these caps stop
+   * one customer from holding a business's (or many businesses') time. A
+   * customer may hold at most `maxLivePerBusiness` upcoming appointments
+   * (RESERVED or CONFIRMED, not yet started) with one business, and
+   * `maxLiveTotal` in all. Clamped 1..50 at the reader (booking/booking-limits.ts).
+   */
+  'booking.maxLivePerBusiness': 2,
+  'booking.maxLiveTotal': 5,
+  /**
+   * [RIDER-SAFE · COORD ruling 29 Oct 2026] The delivery safeguard for when
+   * riders run short (dispatch/delivery-capacity.ts). Every value is a dial,
+   * read per tenant; the defaults are the launch values.
+   *
+   *  · `avgRiderLegMinutes` — how long one delivery takes a rider, store to
+   *    door and free again. The honest rider wait when every rider is busy is
+   *    (orders ahead of this one + 1) × this ÷ (riders near + 1). Clamped 5..120.
+   *  · `maxRiderWaitMinutes` — past this wait, delivery is refused at checkout
+   *    (NONE: order for pickup instead) rather than promised. Clamped 5..120.
+   *  · `vendorBacklogCap` — when this many of ONE store's delivery orders are
+   *    waiting for a rider (longer than `waitingGraceMinutes`), new delivery
+   *    orders for that store pause by themselves; pickup stays open. 0 = off.
+   *    Clamped 0..50.
+   *  · `waitingGraceMinutes` — an order is "waiting for a rider" only after
+   *    this long without one (the first offers take about a minute). Clamped 1..30.
+   *  · `ridersShortWaiting` / `ridersShortExhaustions` — operations is paged
+   *    ONCE ("riders are short") when this many orders wait for a rider, or
+   *    this many searches ran out of riders in the last 10 minutes. Clamped 1..500.
+   *  · `pause` — Swift's own switch: delivery paused platform-wide, or in the
+   *    listed zones; pickup stays open. Written only by the admin route
+   *    (audited, a reason required); rows are versions, so the history is the
+   *    log of who paused and lifted it.
+   */
+  'delivery.avgRiderLegMinutes': 25,
+  'delivery.maxRiderWaitMinutes': 30,
+  'delivery.vendorBacklogCap': 3,
+  'delivery.waitingGraceMinutes': 3,
+  'delivery.ridersShortWaiting': 5,
+  'delivery.ridersShortExhaustions': 3,
+  'delivery.pause': { platform: false, zoneIds: [] as string[] } as { platform: boolean; zoneIds: string[] },
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;

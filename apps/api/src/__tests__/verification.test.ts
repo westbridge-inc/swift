@@ -7,7 +7,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
-import { authRoutes } from '../modules/auth/auth.routes';
+import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
@@ -49,13 +49,14 @@ const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
 const FACE_MATCH_PHONE = `+${runBase + 9}`;
 const CONSENT_ID_PHONE = `+${runBase + 10}`;
 const CONSENT_DOC_PHONE = `+${runBase + 11}`;
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE, CONSENT_ID_PHONE, CONSENT_DOC_PHONE];
+const CONSENT_ID2_PHONE = `+${runBase + 12}`;
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE, CONSENT_ID_PHONE, CONSENT_DOC_PHONE, CONSENT_ID2_PHONE];
 
 // [VERIFY-DOCS · owner rulings 6 Oct 2026] A motorbike courier's REQUIRED documents are the motor
-// documents; the licence is their photo ID, so the national ID — and, for every mover, the police
-// clearance — are OPTIONAL: accepted for upload, never a gate.
+// documents; the licence is their photo ID. [ROLE-DOCS · owner 21 Oct 2026 — a DELIBERATE change] A
+// delivery rider is offered nothing optional any more: no second ID, no police clearance (taxi drivers only).
 const MOVER_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
-const MOVER_OPTIONAL_DOCS = ['national_id', 'police_clearance'];
+const MOVER_OPTIONAL_DOCS: string[] = [];
 
 let app: FastifyInstance;
 let sweepService: VerificationService;
@@ -116,7 +117,7 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
-  await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await registerAuthRoutes(app);
   await app.register(verificationRoutes, { prefix: '/api/v1/verification' });
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
@@ -228,9 +229,12 @@ describe('Checklists drive from config', () => {
   it('commerce checklists carry the Guyana-real docs (registration, GRA licence, storefront) — no TIN certificate', async () => {
     const restaurant = await inject('GET', '/api/v1/verification/status?role=RESTAURANT', undefined, vendorToken);
     expect(restaurant.json().data.checklist).toEqual([
+      // [FOOD-PERMIT · owner ruling 24 Oct 2026 — a DELIBERATE change] the food handler's certificate is optional for a
+      // registered restaurant (its owner ticks for its food handlers instead: food-handlers.test.ts)
       'owner_national_id', 'business_registration',
-      'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo',
+      'gra_restaurant_licence', 'storefront_photo',
     ]);
+    expect(restaurant.json().data.optional).toContain('food_handler_cert');
 
     const supermarket = await inject('GET', '/api/v1/verification/status?role=SUPERMARKET', undefined, vendorToken);
     expect(supermarket.json().data.checklist).toEqual([
@@ -295,7 +299,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
 
   it('rejection notifies the applicant with the reason (resubmit path)', async () => {
     const doc = await app.prisma.verificationDocument.findFirstOrThrow({
-      where: { userId: moverUserId, docType: 'national_id', status: 'PENDING' },
+      where: { userId: moverUserId, docType: 'drivers_licence', status: 'PENDING' },
     });
     rejectedDocId = doc.id;
 
@@ -320,8 +324,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   it('resubmission after rejection creates a fresh PENDING document', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'national_id',
-      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'national_id_v2'),
+      docType: 'drivers_licence',
+      fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'drivers_licence_v2'),
       consent: true,
       privacyNoticeVersion: 'v1',
     }, moverToken);
@@ -362,7 +366,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   it('an approved document cannot be submitted again', async () => {
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'national_id',
+      docType: 'drivers_licence',
       fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'dupe'),
       consent: true,
       privacyNoticeVersion: 'v1',
@@ -403,6 +407,7 @@ describe('Provider auto-decisions (swappable interface)', () => {
       fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-clearance'),
       consent: true,
       privacyNoticeVersion: 'v1',
+      consentTick: 'document_v1', // [WEB-POLICE (a)] a police clearance needs a tick: the build-12 body
     }, vendorToken);
     expect(clearance.statusCode).toBe(201);
     expect(clearance.json().data.status).toBe('APPROVED');
@@ -421,46 +426,24 @@ describe('Provider auto-decisions (swappable interface)', () => {
   });
 });
 
-describe('L2 identity — permanent customer verification', () => {
-  it('auto-approval promotes to L2 immediately', async () => {
+// [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change] Swift no longer takes a customer's ID: the route
+// answers 410 whatever it is sent, and nothing promotes the account (customer-id-removed.test.ts proves the rest).
+describe('L2 identity — retired (owner 1 Nov 2026)', () => {
+  it('an ID sent the old ways is refused as not needed, and the account stays L1', async () => {
     const customer = await signup(L2_AUTO_PHONE, 'CUSTOMER');
-    const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'auto-approve-id'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie'),
-      consent: true,
-      privacyNoticeVersion: 'v1',
-    }, customer.tokens.accessToken);
-    expect(res.statusCode).toBe(201);
-    expect(res.json().data.status).toBe('APPROVED');
-
+    for (const marker of ['auto-approve-id', 'id']) {
+      const res = await inject('POST', '/api/v1/verification/identity', {
+        idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, marker),
+        selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, `${marker}-selfie`),
+        consent: true,
+        privacyNoticeVersion: 'v1',
+      }, customer.tokens.accessToken);
+      expect(res.statusCode, res.body).toBe(410);
+      expect(res.json().error.code).toBe('CUSTOMER_ID_NOT_NEEDED');
+    }
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_AUTO_PHONE } });
-    expect(user.trustLevel).toBe('L2');
-
-    // Already verified — no second submission
-    const again = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id2'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie2'),
-      consent: true,
-      privacyNoticeVersion: 'v1',
-    }, customer.tokens.accessToken);
-    expect(again.statusCode).toBe(409);
-  });
-
-  it('manual path: pending review, then admin approval promotes to L2', async () => {
-    const customer = await signup(L2_MANUAL_PHONE, 'CUSTOMER');
-    const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'id'),
-      selfieUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'selfie'),
-      consent: true,
-      privacyNoticeVersion: 'v1',
-    }, customer.tokens.accessToken);
-    expect(res.json().data.status).toBe('PENDING');
-
-    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, reviewerTyped('identity_l2', res.json().data.id), adminToken);
-    expect(approve.statusCode).toBe(200);
-
-    const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_MANUAL_PHONE } });
-    expect(user.trustLevel).toBe('L2');
+    expect(user.trustLevel).toBe('L1');
+    expect(await app.prisma.verificationDocument.count({ where: { userId: customer.user.id, docType: 'identity_l2' } })).toBe(0);
   });
 });
 
@@ -682,13 +665,13 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
-  it('asks a bicycle courier for identity only — no vehicle docs; police clearance optional', async () => {
+  it('asks a bicycle courier for identity only — no vehicle docs, nothing optional', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, bicycleToken);
     const data = res.json().data;
-    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required;
-    // the police clearance is optional for every mover. The vehicle documents scale away.
+    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required.
+    // [ROLE-DOCS · owner 21 Oct 2026] a delivery rider is not offered a police clearance (taxi drivers only).
     expect(data.checklist).toEqual(['national_id']);
-    expect(data.optional).toEqual(['police_clearance']);
+    expect(data.optional).toEqual([]);
     expect(data.checklist).not.toContain('drivers_licence');
     expect(data.checklist).not.toContain('vehicle_insurance');
     expect(data.vehicleType).toBe('BICYCLE');
@@ -729,6 +712,8 @@ describe('Operator identity docs are face-matched against the signup selfie', ()
     const u = await signup(FACE_MATCH_PHONE, 'MOVER');
     faceToken = u.tokens.accessToken;
     faceUserId = u.user.id;
+    // [ROLE-DOCS · owner 21 Oct 2026] only a bicycle rider sends a national ID now (a licence holder is not asked)
+    await app.prisma.rider.create({ data: { userId: faceUserId, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } });
   });
 
   it('refuses an ID submission when no profile selfie exists', async () => {
@@ -916,6 +901,7 @@ describe('Commerce gate — acceptingOrders requires verification', () => {
       fileUrl: await ownedVerificationFixture(app.prisma, vendorUserId, 'auto-approve-clearance-renewed'),
       consent: true,
       privacyNoticeVersion: 'v1',
+      consentTick: 'document_v1', // [WEB-POLICE (a)] a police clearance needs a tick: the build-12 body
     }, vendorToken);
     expect(renewal.statusCode).toBe(201);
 
@@ -1163,7 +1149,8 @@ describe('[A-19] the reviewer can see what they are asked to cross-check', () =>
       expect(withDriver.user!.driver).toHaveProperty('vehicleMake');
     } else {
       // no driver applicant in this fixture run — assert the selection exists
-      const routes = readFileSync(join(__dirname, '../modules/admin/admin.routes.ts'), 'utf8');
+      // [DOC-SECURITY G3] The queue's allow-listed selection lives beside the row it builds.
+      const routes = readFileSync(join(__dirname, '../modules/admin/review-queue-row.ts'), 'utf8');
       expect(routes).toMatch(/driver: \{ select: \{ licensePlate: true/);
     }
   });
@@ -1209,19 +1196,19 @@ describe('[R17] upload consent ticks are recorded in the consent ledger', () => 
     expect(doc.renderedText).toBe('I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.');
   });
 
-  it('a customer ID sent with the tick writes a customer_id_consent row (the in-app ¶15 words)', async () => {
+  // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b) — a DELIBERATE change] A customer ID is not taken any more, so its
+  // tick records nothing: build 12 (customer_id_v1) and the later app (customer_id_v2) are answered 410, and no
+  // customer_id_consent row is written.
+  it('a customer ID sent with either tick is refused as not needed and writes no consent row', async () => {
     const customer = await signup(CONSENT_ID_PHONE, 'CUSTOMER');
-    const res = await inject('POST', '/api/v1/verification/identity', {
-      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id'),
-      consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v1',
-    }, customer.tokens.accessToken);
-    expect(res.statusCode, res.body).toBe(201);
-    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([
-      expect.objectContaining({ documentVersion: 'v1', action: 'granted', subjectType: 'customer' }),
-    ]);
-    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
-      where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v1', locale: 'en-GY' } },
-    });
-    expect(doc.renderedText).toBe('I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.');
+    for (const consentTick of ['customer_id_v1', 'customer_id_v2', 'document_v1']) {
+      const res = await inject('POST', '/api/v1/verification/identity', {
+        idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, `r17-${consentTick}`),
+        consent: true, privacyNoticeVersion: 'v1', consentTick,
+      }, customer.tokens.accessToken);
+      expect(res.statusCode, res.body).toBe(410);
+      expect(res.json().error.code).toBe('CUSTOMER_ID_NOT_NEEDED');
+    }
+    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([]);
   });
 });

@@ -5,7 +5,9 @@ import { Feather } from '@expo/vector-icons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, font, fontSize, radius, space, withAlpha } from '@swift/ui';
-import { useAddToCart, useCart, useReportContent, useToggleFavorite, useUpdateCartItem, useVendor } from '../../../hooks/customer';
+import { useCart, useReportContent, useToggleFavorite, useVendor } from '../../../hooks/customer';
+import { useCartSteppers } from '../../../hooks/useCartSteppers';
+import { isBooking } from '../../../lib/cartSteppers';
 import { ActionSheet } from '../../../kit/action-sheet';
 import { useAuthStore } from '../../../stores/authStore';
 import { requestAuthContinuation } from '../../../navigation/authContinuation';
@@ -14,12 +16,17 @@ import { STORE_REPORT_REASONS } from '../../../lib/reportReasons';
 import { forgivingFilter } from '../../../lib/forgivingSearch';
 import { HERO_PHOTO_WIDTH, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
+import { itemVatNote, storefrontVat, storefrontVatLine, type StorefrontVat } from '../../../lib/storeVat';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
 import { SellerInfo } from '../../../components/SellerInfo';
 import { SectionPhotoHeader } from '../../../components/SectionPhotoHeader';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
 import { STORE_PICKS_TITLE } from '../../../lib/storePick';
+import { useLocationStore } from '../../../stores/locationStore';
+import { afterDismiss } from '../../../kit/after-dismiss';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
+import { branchAddress, branchFactsLine, currentBranchLabel, showsBranchSwitcher, type BrandBranch } from '../../../lib/brandCard';
 import {
   AddMorph,
   CartBar,
@@ -106,22 +113,26 @@ const TILE_W = (SCREEN_W - GUTTER * 2 - space.md * 2) / 3;
  *  on-card add. In-cart shows a mini stepper — shopping without detail hops. */
 function ProductTile({
   item,
-  line,
+  qty,
   onAdd,
   onSetQty,
   onOpen,
   busy,
+  vat = null,
 }: {
   item: any;
-  line: any;
+  /** [TAP-AUDIT] What the customer has tapped to (hooks/useCartSteppers), else the cart's quantity. */
+  qty: number;
   onAdd: () => void;
   onSetQty: (qty: number) => void;
   onOpen: () => void;
   busy: boolean;
+  /** [STORE-VAT] The store's VAT (null for every store but a person-approved VAT store). */
+  vat?: StorefrontVat | null;
 }) {
-  const hasOptions = (item.optionGroups?.length ?? 0) > 0;
+  // [BOOK-POLISH · #2205] A booking is one appointment: its + opens the booking screen (pick a time), never a quantity.
+  const opensItem = (item.optionGroups?.length ?? 0) > 0 || isBooking(item);
   const out = item.stockQuantity === 0;
-  const qty = line?.quantity ?? 0;
   return (
     <View style={{ width: TILE_W }}>
       <Pressable onPress={onOpen}>
@@ -143,6 +154,7 @@ function ProductTile({
       ) : null}
       <View style={{ marginTop: 2, gap: 4 }}>
         <Money amount={item.customerPrice ?? item.basePrice} tone={out ? 'muted' : 'brand'} numberOfLines={1} />
+        {itemVatNote(vat, item) ? <T variant="micro" tone="faint">{itemVatNote(vat, item)}</T> : null}
         {out ? (
           <T variant="micro" tone="warning">
             Sold out
@@ -151,9 +163,9 @@ function ProductTile({
           <View style={{ alignSelf: 'flex-end' }}>
             <AddMorph
               size="sm"
-              qty={hasOptions ? 0 : qty}
+              qty={opensItem ? 0 : qty}
               busy={busy}
-              onAdd={hasOptions ? onOpen : onAdd}
+              onAdd={opensItem ? onOpen : onAdd}
               onInc={() => onSetQty(qty + 1)}
               onDec={() => onSetQty(qty - 1)}
             />
@@ -166,7 +178,7 @@ function ProductTile({
 
 /** Service listing row: what it costs, how long it takes, where it happens —
  *  tapping opens the booking screen (slots), never a qty flow. */
-function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
+function ServiceRow({ item, onOpen, vat = null }: { item: any; onOpen: () => void; vat?: StorefrontVat | null }) {
   const cfg = (item.bookingConfig ?? {}) as { durationMinutes?: number; serviceMode?: string };
   const modeLabel =
     cfg.serviceMode === 'MOBILE' ? 'Comes to you' : cfg.serviceMode === 'BOTH' ? 'Your choice' : 'At their place';
@@ -203,6 +215,7 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
               {/* [law 3] Money is ink — maroon stays on the acts. */}
               <Money amount={item.customerPrice ?? item.basePrice} />
+              {itemVatNote(vat, item) ? <T variant="micro" tone="faint">{itemVatNote(vat, item)}</T> : null}
             </View>
           </View>
           <View style={{ alignItems: 'center', gap: 2 }}>
@@ -236,7 +249,11 @@ function RestaurantStore() {
   const vendorId: string = route.params?.vendorId;
   const { isAuthenticated, wantsAuth, promptLogin } = useAuthStore();
 
-  const vendor = useVendor<any>(vendorId);
+  // [CHAINS PR3] With the customer's place, the branch switcher can say which branch delivers to them.
+  const { latitude: hereLat, longitude: hereLng, status: hereStatus } = useLocationStore();
+  const here = grantedLocationFix(hereLat, hereLng, hereStatus);
+  const vendor = useVendor<any>(vendorId, here ? { lat: here.latitude, lng: here.longitude } : null);
+  const [showBranches, setShowBranches] = useState(false);
   const toggleFav = useToggleFavorite();
   const [showHours, setShowHours] = useState(false);
   const [showPromos, setShowPromos] = useState(false);
@@ -256,10 +273,12 @@ function RestaurantStore() {
   const cart = useCart<any>();
   // [E09] While this store's cart bar floats over the menu, the last row must scroll clear of it.
   const cartClearance = useCartBarClearance({ vendorId });
-  const addToCart = useAddToCart();
-  const updateCartItem = useUpdateCartItem();
+  // [TAP-AUDIT] + and − answer at the tap and add up; only that item has a request out (hooks/useCartSteppers).
+  const steppers = useCartSteppers(cart);
 
   const v = vendor.data;
+  // [STORE-VAT · owner O-5] Only a store whose VAT a person approved sends `vat`; every other store (and an older server) shows none.
+  const storeVat = storefrontVat(v?.vat);
   const categories: any[] = useMemo(() => v?.categories ?? [], [v?.categories]);
   const allItems = useMemo(() => categories.flatMap((c: any) => c.items ?? []), [categories]);
   const recommended = useMemo(() => allItems.filter((i: any) => i.isPopular).slice(0, 8), [allItems]);
@@ -345,6 +364,7 @@ function RestaurantStore() {
       image={itemPhoto(item)}
       name={item.name}
       priceLabel={money(item.customerPrice ?? item.basePrice)}
+      priceNote={itemVatNote(storeVat, item)}
       onPress={() => openItem(item)}
     />
   );
@@ -515,6 +535,28 @@ function RestaurantStore() {
             </View>
           ) : null}
 
+          {/* [CHAINS PR3 · owner 29 Oct 2026] One brand card opened this branch (the best for this customer); they can
+              pick another branch of the same brand. */}
+          {showsBranchSwitcher(v.brand) ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`${currentBranchLabel(v.brand, v.addressLine1 ?? v.name)}. Change branch`}
+              onPress={() => setShowBranches(true)}
+            >
+              {({ pressed }) => (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, paddingHorizontal: GUTTER, marginTop: space.sm, minHeight: 44, opacity: pressed ? 0.75 : 1 }}>
+                  <Feather name="git-branch" size={13} color={color.text.muted} />
+                  <T variant="caption" tone="muted" numberOfLines={1} style={{ flex: 1 }}>
+                    {`${v.brand.name} · ${currentBranchLabel(v.brand, v.addressLine1 ?? v.name)}`}
+                  </T>
+                  <T variant="caption" weight="semibold" tone="brand">
+                    Change
+                  </T>
+                </View>
+              )}
+            </Pressable>
+          ) : null}
+
           {/* Live promos (real active codes) */}
           {promos.length > 0 ? (
             <Pressable onPress={() => setShowPromos(true)}>
@@ -658,14 +700,12 @@ function RestaurantStore() {
                   <ProductTile
                     key={item.id}
                     item={item}
-                    line={lineFor(item.id)}
-                    busy={addToCart.isPending || updateCartItem.isPending}
+                    vat={storeVat}
+                    qty={steppers.qty(item.id, lineFor(item.id))}
+                    busy={false}
                     onOpen={() => openItem(item)}
-                    onAdd={() => guardAuth(() => addToCart.mutate({ vendorId, itemId: item.id, quantity: 1 }))}
-                    onSetQty={(qty) => {
-                      const line = lineFor(item.id);
-                      if (line) updateCartItem.mutate({ id: line.id, quantity: qty });
-                    }}
+                    onAdd={() => guardAuth(() => steppers.set(item.id, lineFor(item.id), steppers.qty(item.id, lineFor(item.id)) + 1, { vendorId, itemId: item.id }))}
+                    onSetQty={(qty) => guardAuth(() => steppers.set(item.id, lineFor(item.id), qty, { vendorId, itemId: item.id }))}
                   />
                 ))}
               </View>
@@ -681,7 +721,7 @@ function RestaurantStore() {
               <SectionHeader title="Services" style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
               <View style={{ paddingHorizontal: GUTTER, paddingTop: space.lg, gap: space.md }}>
                 {allItems.map((item: any) => (
-                  <ServiceRow key={item.id} item={item} onOpen={() => openItem(item)} />
+                  <ServiceRow key={item.id} item={item} vat={storeVat} onOpen={() => openItem(item)} />
                 ))}
               </View>
             </>
@@ -757,32 +797,28 @@ function RestaurantStore() {
                     }}
                   >
                     {cat.items.map((item: any, idx: number) => {
-                      const hasOptions = (item.optionGroups?.length ?? 0) > 0;
+                      // [BOOK-POLISH · #2205] An item with choices, or a booking (one appointment, its time picked on
+                      // the item screen), opens the item: no quantity on the row.
+                      const opensItem = (item.optionGroups?.length ?? 0) > 0 || isBooking(item);
                       const line = lineFor(item.id);
-                      const qty = hasOptions ? 0 : (line?.quantity ?? 0);
+                      const shown = opensItem ? 0 : steppers.qty(item.id, line);
+                      const tapTo = (next: number) => guardAuth(() => steppers.set(item.id, line, next, { vendorId, itemId: item.id }));
                       return (
                         <MenuRow
                           key={item.id}
                           name={item.name}
                           description={item.description}
                           price={item.customerPrice ?? item.basePrice}
+                          priceNote={itemVatNote(storeVat, item)}
                           image={itemPhoto(item)}
                           soldOut={item.stockQuantity === 0}
-                          qty={qty}
-                          busy={addToCart.isPending || updateCartItem.isPending}
+                          qty={shown}
+                          busy={false}
                           last={idx === cat.items.length - 1}
                           onOpen={() => openItem(item)}
-                          onAdd={() =>
-                            hasOptions
-                              ? openItem(item)
-                              : guardAuth(() => addToCart.mutate({ vendorId, itemId: item.id, quantity: 1 }))
-                          }
-                          onInc={() => {
-                            if (line) updateCartItem.mutate({ id: line.id, quantity: (line.quantity ?? 0) + 1 });
-                          }}
-                          onDec={() => {
-                            if (line) updateCartItem.mutate({ id: line.id, quantity: (line.quantity ?? 0) - 1 });
-                          }}
+                          onAdd={() => (opensItem ? openItem(item) : tapTo(shown + 1))}
+                          onInc={() => tapTo(shown + 1)}
+                          onDec={() => tapTo(shown - 1)}
                         />
                       );
                     })}
@@ -801,6 +837,12 @@ function RestaurantStore() {
           ) : null}
 
           {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule (the server's block; none from an older API). */}
+          {/* [STORE-VAT · VAT Act s.90(2)] A person-approved VAT store's prices include VAT, and the page says so. */}
+          {storefrontVatLine(storeVat) ? (
+            <T variant="caption" tone="muted" style={{ marginTop: space.lg, marginHorizontal: GUTTER }}>
+              {storefrontVatLine(storeVat)}
+            </T>
+          ) : null}
           {v.seller ? <SellerInfo seller={v.seller} gutter={GUTTER} /> : null}
         </View>
       </ScrollView>
@@ -808,6 +850,44 @@ function RestaurantStore() {
       {/* [E09] One pinned cart bar for every surface: the storefront passes its
           vendorId so the bar only shows for THIS store's basket. */}
       <CartBar vendorId={vendorId} />
+
+      {/* [CHAINS PR3] The brand's branches, the best for this customer first. */}
+      <PopupCard visible={showBranches} onClose={() => setShowBranches(false)}>
+        <IconChip icon="map-pin" size={56} />
+        <PopupTitle variant="heading" style={{ marginTop: space.md }}>
+          {v.brand ? `${v.brand.name} branches` : 'Branches'}
+        </PopupTitle>
+        <View style={{ alignSelf: 'stretch', marginTop: space.lg }}>
+          {((v.brand?.branches ?? []) as BrandBranch[]).map((b) => (
+            <Pressable
+              key={b.id}
+              accessibilityRole="button"
+              accessibilityLabel={`${b.name}. ${branchAddress(b)}. ${branchFactsLine(b)}`}
+              disabled={b.current}
+              onPress={() => {
+                setShowBranches(false);
+                // The popup tears down first (kit/after-dismiss), then the other branch's page opens.
+                afterDismiss(() => navigation.navigate('Restaurant', { vendorId: b.id }));
+              }}
+            >
+              {({ pressed }) => (
+                <View style={{ paddingVertical: space.sm, opacity: pressed ? 0.75 : 1 }}>
+                  <T variant="label" weight="semibold" numberOfLines={1}>
+                    {b.current ? `${b.name} (this branch)` : b.name}
+                  </T>
+                  <T variant="caption" tone="muted" numberOfLines={1}>
+                    {branchAddress(b)}
+                  </T>
+                  <T variant="caption" tone="muted" numberOfLines={1}>
+                    {branchFactsLine(b)}
+                  </T>
+                </View>
+              )}
+            </Pressable>
+          ))}
+        </View>
+        <PillButton label="Done" size="md" onPress={() => setShowBranches(false)} style={{ alignSelf: 'stretch', marginTop: space.lg }} />
+      </PopupCard>
 
       {/* Operating hours (kit 17) */}
       <PopupCard visible={showHours} onClose={() => setShowHours(false)}>

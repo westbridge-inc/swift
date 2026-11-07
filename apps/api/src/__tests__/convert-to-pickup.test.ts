@@ -134,7 +134,12 @@ describe('POST /orders/:id/convert-to-pickup', () => {
     expect(res.statusCode).toBe(200);
     const d = res.json().data;
     expect(d.fulfillment).toBe('PICKUP');
-    expect(String(d.pickupCode)).toMatch(/^\d{6}$/);
+    // [PICKUP · owner 30 Oct 2026] A code is minted for the takeaway; the answer carries it only when the store
+    // asks for it (store code off — the default — means the counter checks the first name and order number).
+    const row = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, select: { pickupCode: true, vendor: { select: { requirePickupCode: true } } } });
+    expect(String(row.pickupCode)).toMatch(/^\d{6}$/);
+    expect(d.pickupCode).toBe(row.vendor?.requirePickupCode === true ? row.pickupCode : null);
+    expect(Object.keys(d)).not.toContain('vendor');
     expect(Number(d.deliveryFee)).toBe(0);
     expect(Number(d.tipAmount)).toBe(0);
     expect(Number(d.totalAmount)).toBe(4000); // 4900 − 600 fee − 300 tip
@@ -145,6 +150,37 @@ describe('POST /orders/:id/convert-to-pickup', () => {
     });
     expect(log?.note).toContain('switched to pickup');
   });
+
+  // [PICKUP · REVIEW-F S3-1 (b)(c) on #2251] The two switch pushes promise a code only when the store asks for one.
+  // Off (the default): the customer gives their first name and order number; the store checks those.
+  for (const asks of [false, true]) {
+    it(`the switch pushes word the counter check by the store's code setting (code ${asks ? 'on' : 'off'})`, async () => {
+      process.env['DISPATCH_EXHAUSTION'] = '1';
+      const before = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { requirePickupCode: true, name: true, ownerId: true } });
+      await app.prisma.vendor.update({ where: { id: vendorId }, data: { requirePickupCode: asks } });
+      try {
+        const order = await makeOrder();
+        expect((await convert(order.id)).statusCode).toBe(200);
+        const owner = await app.prisma.vendorOwner.findUniqueOrThrow({ where: { id: before.ownerId }, select: { userId: true } });
+        const pushes = await app.prisma.notification.findMany({ where: { userId: { in: [customerId, owner.userId] } }, select: { id: true, userId: true, body: true, data: true } });
+        const forOrder = pushes.filter((n) => (n.data as { orderId?: string } | null)?.orderId === order.id);
+        const toCustomer = forOrder.find((n) => n.userId === customerId)?.body;
+        const toStore = forOrder.find((n) => n.userId === owner.userId)?.body;
+        if (asks) {
+          expect(toCustomer).toBe(`Show ${before.name} your pickup code when you arrive.`);
+          expect(toStore).toBe(`#${order.orderNumber}: no rider is coming — the customer collects it with a pickup code.`);
+        } else {
+          expect(toCustomer).toBe(`Give ${before.name} your first name and order number when you arrive.`);
+          expect(toStore).toBe(`#${order.orderNumber}: no rider is coming — the customer collects it. Check their first name and order number before you hand it over.`);
+          expect(`${toCustomer} ${toStore}`).not.toMatch(/code/i);
+        }
+        // The seeded store's owner is not this file's user: remove the store's push for this order.
+        await app.prisma.notification.deleteMany({ where: { userId: owner.userId, id: { in: forOrder.filter((n) => n.userId === owner.userId).map((n) => n.id) } } });
+      } finally {
+        await app.prisma.vendor.update({ where: { id: vendorId }, data: { requirePickupCode: before.requirePickupCode } });
+      }
+    });
+  }
 
   it('refuses once a rider owns the order — the race is honest', async () => {
     process.env['DISPATCH_EXHAUSTION'] = '1';

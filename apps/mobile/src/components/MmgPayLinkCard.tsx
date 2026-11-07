@@ -5,6 +5,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { withAlpha, color, radius, space } from '@swift/ui';
 import { Card, LabeledInput, PillButton, T } from '../kit';
 import { fmtWhen } from '../lib/stepUp';
+import { mmgHoldSentence } from '../lib/mmgHold';
 
 /**
  * Attach your OWN MMG (Mobile Money Guyana) "pay me" link so customers can pay
@@ -24,6 +25,7 @@ export function MmgPayLinkCard({
   cancelling,
   error,
   readOnly,
+  holdHours,
   onSave,
   onCancelPending,
   who,
@@ -39,6 +41,8 @@ export function MmgPayLinkCard({
   error?: string | null;
   /** A manager sees the link; only the owner may change where the money goes. */
   readOnly?: boolean;
+  /** [owner 30 Oct 2026] The server's hours a link saved now waits (the cool-off; the 1-hour first hold is for a number only). */
+  holdHours?: number | null;
   onSave: (url: string | null) => void;
   onCancelPending?: () => void;
   who: 'store' | 'rides';
@@ -136,7 +140,7 @@ export function MmgPayLinkCard({
           </View>
           {trimmed && dirty ? (
             <T variant="caption" tone="muted" style={{ marginTop: space.sm, ...mutedStyle }}>
-              We’ll text you a code first. The new link goes live after a hold — your current link keeps working until then, and we’ll show you exactly when.
+              {mmgHoldSentence('link', holdHours, !!value)}
             </T>
           ) : null}
           <PillButton

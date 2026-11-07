@@ -25,3 +25,6 @@ export {
 } from '../../../mobile/src/modules/cart/cartPayment';
 // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The accepted order's "Pay $X by MMG to <store>'s MMG number": one parser.
 export { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../mobile/src/lib/mmgStorePayment';
+// [#2252 REVIEW-F S4-1] The order page's status rail: which step is done (Preparing only on a kitchen fact, never by
+// position) and the step the order is at — the phone's timeline rule, one copy (no imports).
+export { orderPrepFacts, orderStepState, orderTimelineIndex } from '../../../mobile/src/modules/orders/timeline-states';

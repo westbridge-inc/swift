@@ -4,6 +4,7 @@ import { log } from '../../utils/logger';
 import { isProduction } from '../../utils/runtime-mode';
 import { getChannels } from '../../providers/notifications/channels';
 import { smtpConfigFromEnv } from '../../providers/notifications/smtp-email';
+import { resendConfigFromEnv } from '../../providers/notifications/resend-email';
 import { smsAccepted } from '../../providers/notifications/sms-outcome';
 import { smsDestinationAllowed } from '../../utils/sms-budget';
 import type { AuditFacts, AuditLogWriter } from '../../lib/audit-writer';
@@ -206,6 +207,9 @@ export function emailChannelConfigured(env: Record<string, string | undefined> =
   const provider = env['EMAIL_PROVIDER'] ?? 'dev';
   if (provider === 'smtp') {
     try { smtpConfigFromEnv(env); return true; } catch { return false; }
+  }
+  if (provider === 'resend') {
+    try { resendConfigFromEnv(env); return true; } catch { return false; }
   }
   // DevEmail records instead of sending; production refuses it at the send.
   if (provider === 'dev') return !isProduction(env);

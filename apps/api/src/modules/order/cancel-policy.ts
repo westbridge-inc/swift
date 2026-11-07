@@ -25,14 +25,39 @@
 // loads boot-config with no services) stay free of services, so nothing heavy (Prisma, queues, notification) may be imported by this file.
 // The food-age fact is read by `readTooLateToDeliver` in dispatch/rescue.ts.
 import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-generation-keys';
+// [BOOK-S3] The switch reader is a pure function with no imports: this file stays light.
+import { instantBookingEnabled } from '../booking/instant-booking';
 
 /** [owner #50 · owner ruling 14 Oct · owner 22 Oct 2026] Minutes after the
  *  driver, rider or provider ACCEPTED a ride, a parcel or a booking during
  *  which the customer cancels it free (`freeWindowEnd`). ONE minute since the
  *  owner's 22 Oct 2026 ruling (was five). Before anyone accepts, the cancel is
  *  free at any age; under LIFECYCLE_V2 a held order nobody holds is free for
- *  its whole hold (ORDER_HOLD_MINUTES — a different, unchanged timer). */
+ *  its whole hold (ORDER_HOLD_MINUTES — a different timer, one minute too
+ *  since 30 Oct 2026). */
 export const FREE_CANCEL_WINDOW_MIN = 1;
+
+/** [BOOK-S3 · owner B1 28 Oct 2026] With INSTANT_BOOKING on, an APPOINTMENT
+ *  (a Services store booking) the business has confirmed cancels free until
+ *  this many minutes before it starts — never less than the one-minute window
+ *  after its confirmation (`FREE_CANCEL_WINDOW_MIN`), so a booking made close
+ *  to its time can still be undone at once. Rides and parcels keep the
+ *  one-minute rule. Switch OFF: bookings keep the one-minute rule too.
+ *  The Terms and refunds-page wording for it is owed by BOOK-S7 (LEGAL_VERSION
+ *  bump + pins); the switch stays off until then. */
+export const APPOINTMENT_FREE_CANCEL_BEFORE_MIN = 120;
+
+/** [BOOK-P3 · COORD ruling 29 Oct 2026 (b) · Terms s7] When the BUSINESS (a store appointment) or the PROVIDER
+ *  (a time booked from a pro's list) moves a confirmed appointment, the customer — who did not choose the new
+ *  time — can cancel it free in the app for this many minutes after being told, even inside the 2-hour
+ *  cut-off. The one number: the Terms, the refunds page and both FAQs say it from here (legal tests tie them).
+ *  INSTANT_BOOKING on only, like the rest of the appointment rule. Never a fee either way. */
+export const APPOINTMENT_MOVED_FREE_CANCEL_MIN = 60;
+
+/** [BOOK-S3 · B1] Does the appointment rule decide this order's free window? */
+function appointmentWindowApplies(order: CancellationSnapshot): order is CancellationSnapshot & { appointmentSlot: Date } {
+  return order.fulfillment === 'APPOINTMENT' && order.appointmentSlot != null && instantBookingEnabled();
+}
 
 /** [owner #52 · #50] How long past its promised moment a RIDE, a PARCEL or a
  *  BOOKING (or the driver, rider or provider serving it) must be before the
@@ -52,11 +77,22 @@ export const STORE_VERY_LATE_AFTER_MIN = 60;
  *  late: the customer would wait on the store forever with no way out. */
 export const STORE_FALLBACK_PROMISE_MIN = 45;
 
+/** [BUG-HUNT-2 G04 · COORD 4 Nov 2026] A ride whose driver marked arrived and nobody boarded is very late this many minutes
+ *  after the arrival: a driver who sits there or drives off leaves nobody stuck. Once the code is verified the passenger is
+ *  aboard and no cancel reaches it. */
+export const TAXI_ARRIVED_VERY_LATE_MIN = 15;
+/** [BUG-HUNT-2 G20 · COORD 4 Nov 2026] A pickup the store marked ready and nobody came for is "not collected" this many
+ *  hours after it was ready (or after its slot, when that is later). From then the store can record it and the customer
+ *  can cancel a cash one. Before this the order had no exit but a false "picked up". */
+export const PICKUP_NOT_COLLECTED_AFTER_HOURS = 24;
+
 /** [owner 17 Oct 2026] How long past its promised moment THIS order must be to
- *  count as very late: a store order `STORE_VERY_LATE_AFTER_MIN`, every other
- *  kind `VERY_LATE_AFTER_MIN`. The one place the number is chosen. */
-export function veryLateAfterMin(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'>): number {
-  return isStoreOrder(order) ? STORE_VERY_LATE_AFTER_MIN : VERY_LATE_AFTER_MIN;
+ *  count as very late: a store order `STORE_VERY_LATE_AFTER_MIN`, a ride at its
+ *  pickup `TAXI_ARRIVED_VERY_LATE_MIN`, every other kind `VERY_LATE_AFTER_MIN`.
+ *  The one place the number is chosen. */
+export function veryLateAfterMin(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'> & Partial<Pick<CancellationSnapshot, 'status'>>): number {
+  if (isStoreOrder(order)) return STORE_VERY_LATE_AFTER_MIN;
+  return order.orderType === 'TAXI' && order.status === 'DRIVER_ARRIVED' ? TAXI_ARRIVED_VERY_LATE_MIN : VERY_LATE_AFTER_MIN;
 }
 
 /** The fields the cancellation decision reads. Structural on purpose: the
@@ -79,6 +115,9 @@ export type CancellationSnapshot = {
   /** A booking's slot, chosen at checkout and reserved by the provider at
    *  acceptance — the booking's promised moment. */
   appointmentSlot?: Date | null;
+  /** [BOOK-P3 · COORD (b)] When the business last moved this appointment (null: never). Opens
+   *  APPOINTMENT_MOVED_FREE_CANCEL_MIN of free cancel after it. */
+  appointmentMovedAt?: Date | null;
   /** [owner #52] The delivery promise made at checkout (ALG-12; revised only
    *  out loud). */
   promisedAt?: Date | null;
@@ -89,6 +128,10 @@ export type CancellationSnapshot = {
   estimatedDeliveryTime?: number | null;
   /** [owner #50] When the driver took the ride (the claim writes it). */
   acceptedAt?: Date | null;
+  /** [BUG-HUNT-2 G04] When the driver arrived at the pickup. Absent: not known, so a ride at the pickup is never very late. */
+  driverArrivedAt?: Date | null;
+  /** [BUG-HUNT-2 G20] When the store marked it ready. Absent: not known to be ready, so never "not collected". */
+  readyAt?: Date | null;
   /** [owner ruling 14 Oct] When the driver, rider or provider took THIS job —
    *  the current assignment: a ride's and a booking's `acceptedAt` (the claim
    *  and the provider's accept write it; a release clears it), a parcel's
@@ -106,6 +149,9 @@ export type CancellationSnapshot = {
    *  Read by the caller with `readTooLateToDeliver` (dispatch/rescue) and
    *  passed in, like `noMoverFound`. Absent means "not known to be true". */
   tooLateToDeliver?: boolean;
+  /** [BUG-HUNT-2 G07] Swift suspended or closed the store, so it cannot hand over a ready pickup. Read by the caller with
+   *  `readStoreCannotHandOver` and passed in, like `noMoverFound`. Absent means "not known to be true". */
+  storeCannotHandOver?: boolean;
   /** [Opus S3-2] How the customer pays. An MMG order may already be paid to the
    *  store outside Swift, so its words never promise "free". Optional: a
    *  caller without it reads as not-MMG. */
@@ -128,13 +174,23 @@ export const AWAITING_STORE_FREE_CANCEL_MESSAGE = 'You can cancel for free until
 /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD Q2] An accepted MMG order the store has not marked "Paid by MMG". */
 export const MMG_UNCONFIRMED_CANCEL_MESSAGE = 'You can cancel until the store confirms your MMG payment.';
 export const TOO_LATE_FREE_CANCEL_MESSAGE = 'Your order is running very late. You can cancel it for free.';
+/** [BUG-HUNT-2 G07] A cash pickup ready at a store Swift paused. */
+export const STORE_PAUSED_CANCEL_MESSAGE = 'Swift paused this store, so it cannot hand over your order. You can cancel it for free.';
+/** [BUG-HUNT-2 G20] A cash pickup nobody collected. "Very late" on purpose: it is the exit Terms s7 names, as the app shows. */
+export const PICKUP_NOT_COLLECTED_CANCEL_MESSAGE = 'Your pickup has been waiting over a day, so it is very late. You can cancel it for free.';
 /** [Opus S3-2 · REPORT-008 F-01] An MMG order may already be paid to the store outside Swift: no cancel surface
  *  promises "free" for it, and the customer is told where any money comes back from. */
 export const MMG_STORE_REFUNDS_SENTENCE = 'If you already sent the MMG payment, the store refunds you directly.';
 /** [owner #46 · Opus S3-1] An MMG store order whose payment already reached the store: the store cancels and
  *  refunds (Swift never holds the money), so the customer is pointed at the store, with its published number. */
 export const MMG_PAID_STORE_CANCELS_CODE = 'MMG_PAID_STORE_CANCELS';
-export const MMG_PAID_STORE_CANCELS_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money.';
+export const MMG_PAID_STORE_CANCELS_MESSAGE = 'This order is already paid by MMG to the store. Contact the store to change or cancel it — the store refunds you directly. Swift never holds the money. If the store does not answer, contact Swift support.';
+
+/** [BUG-HUNT-2 G14a] The same refusal to someone who told Swift they did not pay: never "already paid" beside "you disagree". */
+export const MMG_DISPUTED_CANCEL_MESSAGE = 'You and the store disagree about this payment, so the order is paused until a person at Swift decides. It cannot be cancelled until then.';
+export function mmgPaidCancelMessage(order: { mmgClaimMismatchAt?: Date | null }): string {
+  return order.mmgClaimMismatchAt != null ? MMG_DISPUTED_CANCEL_MESSAGE : MMG_PAID_STORE_CANCELS_MESSAGE;
+}
 
 /** Why a cancel is free right now. */
 export type FreeCancelReason =
@@ -143,7 +199,9 @@ export type FreeCancelReason =
   | 'NOT_ACCEPTED' // [owner #50] a ride, parcel or booking nobody has accepted yet
   | 'IN_WINDOW' // [owner #50 · 22 Oct] inside the one-minute window (or the hold)
   | 'TOO_LATE' // [owner #46/#50/#52] very late
-  | 'MMG_UNCONFIRMED'; // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
+  | 'MMG_UNCONFIRMED' // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
+  | 'STORE_PAUSED' // [BUG-HUNT-2 G07] a cash pickup ready at a store Swift suspended
+  | 'NOT_COLLECTED'; // [BUG-HUNT-2 G20] a cash pickup, ready, and nobody came for it
 
 /** What a customer cancel may do right now: free, or refused. Never a fee. */
 export type CancellationVerdict =
@@ -249,6 +307,22 @@ const plusMinutes = (at: Date, minutes: number) => new Date(at.getTime() + minut
 const latest = (dates: Array<Date | null | undefined>): Date | null =>
   dates.reduce<Date | null>((a, b) => (b != null && (a == null || b.getTime() > a.getTime()) ? b : a), null);
 
+/** [BOOK-P3 · COORD (b) · Terms s7] The free cancel a move by the business or provider opens:
+ *  APPOINTMENT_MOVED_FREE_CANCEL_MIN after the move (the customer is told at once), or until the
+ *  appointment starts if that is sooner. Null when it was never moved by them. */
+function movedWindowEnd(movedAt: Date | null | undefined, start: Date): Date | null {
+  if (!movedAt) return null;
+  const end = plusMinutes(movedAt, APPOINTMENT_MOVED_FREE_CANCEL_MIN);
+  return end.getTime() < start.getTime() ? end : start;
+}
+
+/** [BOOK-P3 · COORD (b)] For the move notices: when the customer's free cancel of an appointment just
+ *  moved by the business or provider (at `movedAt`, to start at `start`) ends — the later of two hours
+ *  before the new start and the post-move window. The moved appointment's own verdict reads the same. */
+export function movedAppointmentFreeCancelEnd(start: Date, movedAt: Date): Date {
+  return latest([plusMinutes(start, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN), movedWindowEnd(movedAt, start)]) as Date;
+}
+
 /** Nobody holds the job. */
 function unassigned(order: CancellationSnapshot): boolean {
   return order.riderId == null && order.driverId == null;
@@ -282,7 +356,17 @@ function notAcceptedYet(order: CancellationSnapshot): boolean {
 function freeWindowEnd(order: CancellationSnapshot): Date | null {
   if (notAcceptedYet(order)) return order.holdExpiresAt ?? null;
   const accepted = order.assignedAt ?? order.acceptedAt ?? order.placedAt;
-  return plusMinutes(accepted, FREE_CANCEL_WINDOW_MIN);
+  const afterAcceptance = plusMinutes(accepted, FREE_CANCEL_WINDOW_MIN);
+  // [BOOK-S3 · owner B1] An appointment: free until two hours before it starts.
+  // [BOOK-P3 · COORD (b)] ... and for APPOINTMENT_MOVED_FREE_CANCEL_MIN after the business moved it.
+  if (appointmentWindowApplies(order)) {
+    return latest([
+      plusMinutes(order.appointmentSlot, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN),
+      afterAcceptance,
+      movedWindowEnd(order.appointmentMovedAt, order.appointmentSlot),
+    ]);
+  }
+  return afterAcceptance;
 }
 
 /**
@@ -300,7 +384,9 @@ function freeWindowEnd(order: CancellationSnapshot): Date | null {
  *  - booking: the slot, while the provider has accepted but not completed it;
  *  - ride: the driver's acceptance, while the driver has not arrived. No
  *    pickup ETA is stored on a ride, so the quoted ETA is taken as zero: very
- *    late = thirty minutes after the driver accepted and still not there;
+ *    late = thirty minutes after the driver accepted and still not there.
+ *    [BUG-HUNT-2 G04] At the pickup: the arrival, and very late fifteen minutes
+ *    after it with nobody aboard;
  *  - parcel: placing (or the end of its hold, or its slot) + the quoted job
  *    minutes, while the rider has not reached the pickup.
  */
@@ -319,7 +405,9 @@ function promisedMoment(order: CancellationSnapshot): Date | null {
     return latest([promise, order.scheduledFor]);
   }
   if (order.orderType === 'TAXI') {
-    if (order.driverId == null || (order.status !== 'DRIVER_ASSIGNED' && order.status !== 'DRIVER_EN_ROUTE')) return null;
+    if (order.driverId == null) return null;
+    if (order.status === 'DRIVER_ARRIVED') return order.driverArrivedAt ?? null;
+    if (order.status !== 'DRIVER_ASSIGNED' && order.status !== 'DRIVER_EN_ROUTE') return null;
     return latest([order.acceptedAt ?? order.placedAt, order.scheduledFor]);
   }
   if (order.orderType === 'COURIER') {
@@ -338,16 +426,45 @@ export function isVeryLate(order: CancellationSnapshot, now: Date = new Date()):
   return promised != null && now.getTime() >= plusMinutes(promised, veryLateAfterMin(order)).getTime();
 }
 
+/** [BUG-HUNT-2 G20] A store pickup, ready, and past `PICKUP_NOT_COLLECTED_AFTER_HOURS` from the later of its ready moment
+ *  and its slot. The cancel verdict, the store's door and the sweep all ask here. */
+export function isPickupNotCollected(
+  order: Pick<CancellationSnapshot, 'status' | 'orderType' | 'fulfillment' | 'readyAt' | 'scheduledFor'>,
+  now: Date = new Date(),
+): boolean {
+  if (!isStoreOrder(order) || order.fulfillment !== 'PICKUP' || order.status !== 'READY_FOR_PICKUP') return false;
+  return pickupWaitingOver(order, PICKUP_NOT_COLLECTED_AFTER_HOURS, now);
+}
+
+/** [BUG-HUNT-2 G20] Has it waited this long, from the later of its ready moment and its slot? */
+export function pickupWaitingOver(order: Pick<CancellationSnapshot, 'readyAt' | 'scheduledFor'>, hours: number, now: Date): boolean {
+  if (order.readyAt == null) return false;
+  return now.getTime() >= (latest([order.readyAt, order.scheduledFor]) as Date).getTime() + hours * 60 * MINUTE_MS;
+}
+
+/** [owner #52] A booking whose provider is very late: a store appointment's and [BOOK-P2] a pro appointment's words. */
+export const APPOINTMENT_TOO_LATE_MESSAGE = 'The provider is running very late. You can cancel the booking for free.';
+
 /** [owner #46/#50/#52] Whose lateness frees the cancel, in the customer's words. */
 function tooLateMessage(order: CancellationSnapshot): string {
-  if (order.fulfillment === 'APPOINTMENT') return 'The provider is running very late. You can cancel the booking for free.';
+  if (order.fulfillment === 'APPOINTMENT') return APPOINTMENT_TOO_LATE_MESSAGE;
+  if (order.orderType === 'TAXI' && order.status === 'DRIVER_ARRIVED') {
+    return `This ride is very late starting: your driver arrived over ${TAXI_ARRIVED_VERY_LATE_MIN} minutes ago and you are not aboard. You can cancel it for free.`;
+  }
   if (order.orderType === 'TAXI') return 'Your driver is running very late. You can cancel the ride for free.';
   if (order.orderType === 'COURIER') return 'Your rider is running very late. You can cancel for free.';
   return TOO_LATE_FREE_CANCEL_MESSAGE;
 }
 
+/** [BOOK-S3 · owner B1] The refusal once an appointment's free window has closed: a store
+ *  appointment's and [BOOK-P2] a pro appointment's, in the same words. */
+export const APPOINTMENT_WINDOW_CLOSED_MESSAGE = `This booking can no longer be cancelled in the app: it starts in less than ${APPOINTMENT_FREE_CANCEL_BEFORE_MIN / 60} hours. Contact the provider to change or cancel it.`;
+
 /** [owner #50] Who the customer contacts instead, in the refusal's words. */
 function windowClosedMessage(order: CancellationSnapshot): string {
+  if (appointmentWindowApplies(order)) {
+    return APPOINTMENT_WINDOW_CLOSED_MESSAGE;
+  }
   const closed = `the ${FREE_CANCEL_WINDOW_MIN}-minute cancellation window has passed`;
   if (order.fulfillment === 'APPOINTMENT') return `This booking can no longer be cancelled in the app: ${closed}. Contact the provider to change or cancel it.`;
   if (order.orderType === 'TAXI') return `This ride can no longer be cancelled in the app: ${closed}. Contact your driver.`;
@@ -367,6 +484,7 @@ function windowClosedMessage(order: CancellationSnapshot): string {
  *  - free when it is very late — past the food-age cutoff with nobody to
  *    carry it (`tooLateToDeliver`), or [owner #52 · 17 Oct] an hour
  *    (`STORE_VERY_LATE_AFTER_MIN`) past its promised time;
+ *  - [BUG-HUNT-2 G20] free for a CASH pickup nobody collected (`isPickupNotCollected`);
  *  - otherwise REFUSED: the customer contacts the store.
  *
  * [owner #50] A RIDE, a PARCEL or a BOOKING once someone has accepted it:
@@ -393,6 +511,10 @@ export function cancellationVerdict(order: CancellationSnapshot, now: Date = new
     if ((unassigned(order) && order.tooLateToDeliver === true) || isVeryLate(order, now)) {
       return { allowed: true, free: true, reason: 'TOO_LATE' };
     }
+    if (order.storeCannotHandOver === true && order.paymentMethod === 'CASH' && order.fulfillment === 'PICKUP' && order.status === 'READY_FOR_PICKUP') {
+      return { allowed: true, free: true, reason: 'STORE_PAUSED' };
+    }
+    if (order.paymentMethod === 'CASH' && isPickupNotCollected(order, now)) return { allowed: true, free: true, reason: 'NOT_COLLECTED' };
     return { allowed: false, free: false, code: STORE_ACCEPTED_CANCEL_CODE, message: STORE_ACCEPTED_CANCEL_MESSAGE };
   }
   const windowEnd = freeWindowEnd(order);
@@ -452,6 +574,9 @@ function mmgAwareMessage(message: string): string {
 // the time, and once it is IN PROGRESS the provider is in the customer's home or
 // on the job, so the app no longer cancels it — the customer contacts the
 // provider (or Swift support), exactly as the Terms (§7) say. There is never a fee.
+// A booking nobody has accepted, and a booking running very late, stay free as for
+// every kind above (Terms §7): a pro who never answers leaves nobody stuck. A started
+// job the customer cannot close is closed by Swift support (POST /admin/service-jobs/:id/close).
 // ---------------------------------------------------------------------------
 
 export const SERVICE_JOB_STARTED_CODE = 'SERVICE_JOB_STARTED';
@@ -462,13 +587,75 @@ export const SERVICE_JOB_STARTED_MESSAGE = 'Your provider has started this job, 
 export const SERVICE_JOB_BOOKED_CODE = 'SERVICE_JOB_BOOKED';
 export const SERVICE_JOB_BOOKED_MESSAGE = 'This job is booked, so it can no longer be cancelled in the app. Contact your provider to change or cancel it.';
 
+/** The facts a service job's cancel rule reads. */
+export type ServiceJobCancelSnapshot = {
+  status: string;
+  /** [BOOK-P2] Set on a job booked from a pro's menu (an appointment); null on a quote job. */
+  offeringId?: string | null;
+  scheduledFor?: Date | null;
+  providerConfirmedAt?: Date | null;
+  /** [BOOK-P3 · COORD (b)] When the provider last moved this list-booked job (null: never). */
+  providerMovedAt?: Date | null;
+};
+
+/** [BOOK-P2 · owner B1] Does the appointment rule decide this job's cancel? A job booked from a
+ *  pro's menu, with its time, while INSTANT_BOOKING is on (switch off: the quote-job rule). */
+function serviceAppointmentApplies(job: ServiceJobCancelSnapshot): job is ServiceJobCancelSnapshot & { offeringId: string; scheduledFor: Date } {
+  return job.offeringId != null && job.scheduledFor != null && instantBookingEnabled();
+}
+
+/** [BOOK-P2 · owner B1] When a booked pro appointment's free cancel ends: two hours before it
+ *  starts, never less than one minute after it was confirmed (at booking, by the pro's menu),
+ *  the store appointment's rule (`freeWindowEnd`). Null when the rule does not apply. */
+export function serviceAppointmentFreeCancelEnd(job: ServiceJobCancelSnapshot): Date | null {
+  if (!serviceAppointmentApplies(job) || job.status !== 'SCHEDULED') return null;
+  const confirmed = job.providerConfirmedAt ?? null;
+  return latest([
+    plusMinutes(job.scheduledFor, -APPOINTMENT_FREE_CANCEL_BEFORE_MIN),
+    confirmed ? plusMinutes(confirmed, FREE_CANCEL_WINDOW_MIN) : null,
+    // [BOOK-P3 · COORD (b)] The provider moved it: free for APPOINTMENT_MOVED_FREE_CANCEL_MIN after.
+    movedWindowEnd(job.providerMovedAt, job.scheduledFor),
+  ]);
+}
+
 /** The customer's cancel of a service job, exactly as the Terms (§7) say: free in the app while it is a request
- *  (REQUESTED or QUOTED); once it is booked (SCHEDULED) or started (IN_PROGRESS), refused with who to contact.
- *  Closed jobs (COMPLETED / CANCELLED) are the route's own "already closed" answer, before this is asked. */
-export function serviceJobCancelVerdict(job: { status: string }): CancellationVerdict {
+ *  (REQUESTED or QUOTED) and while the provider has not confirmed the time; once it is booked (SCHEDULED and
+ *  confirmed), refused with who to contact, and free again once the provider is very late (`VERY_LATE_AFTER_MIN`
+ *  past the time and not started); once started (IN_PROGRESS), refused with who to contact.
+ *  Closed jobs (COMPLETED / CANCELLED) are the route's own "already closed" answer, before this is asked.
+ *  [BOOK-P2 · owner B1] A job booked from a pro's menu (an appointment), while INSTANT_BOOKING is on: free
+ *  until two hours before it starts (never less than one minute after it was confirmed), then refused with
+ *  who to contact; free again once the pro is very late (`VERY_LATE_AFTER_MIN` past the start and not
+ *  started), as for a store appointment. Started: refused, as for every job. Never a fee. */
+export function serviceJobCancelVerdict(job: ServiceJobCancelSnapshot, now: Date = new Date()): CancellationVerdict {
   if (job.status === 'REQUESTED' || job.status === 'QUOTED') return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
   if (job.status === 'IN_PROGRESS') return { allowed: false, free: false, code: SERVICE_JOB_STARTED_CODE, message: SERVICE_JOB_STARTED_MESSAGE };
+  if (serviceAppointmentApplies(job) && job.status === 'SCHEDULED') {
+    const windowEnd = serviceAppointmentFreeCancelEnd(job);
+    if (windowEnd != null && now.getTime() <= windowEnd.getTime()) return { allowed: true, free: true, reason: 'IN_WINDOW' };
+    if (now.getTime() >= plusMinutes(job.scheduledFor, VERY_LATE_AFTER_MIN).getTime()) return { allowed: true, free: true, reason: 'TOO_LATE' };
+    return { allowed: false, free: false, code: CANCEL_WINDOW_CLOSED_CODE, message: APPOINTMENT_WINDOW_CLOSED_MESSAGE };
+  }
+  if (job.status === 'SCHEDULED' && job.providerConfirmedAt == null) return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
+  if (job.status === 'SCHEDULED' && job.scheduledFor != null && now.getTime() >= plusMinutes(job.scheduledFor, VERY_LATE_AFTER_MIN).getTime()) {
+    return { allowed: true, free: true, reason: 'TOO_LATE' };
+  }
   return { allowed: false, free: false, code: SERVICE_JOB_BOOKED_CODE, message: SERVICE_JOB_BOOKED_MESSAGE };
+}
+
+/** [BOOK-P2] A pro appointment's cancel rule in the words the apps show (the customer's copy),
+ *  from the one verdict above, so a screen never offers a cancel the route then refuses. */
+export function serviceAppointmentCancelView(job: ServiceJobCancelSnapshot, now: Date = new Date()): CustomerCancelView {
+  const verdict = serviceJobCancelVerdict(job, now);
+  if (!verdict.allowed) {
+    return { canCancel: false, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: { code: verdict.code, message: verdict.message } };
+  }
+  return {
+    canCancel: true,
+    freeCancellationExpiresAt: verdict.reason === 'IN_WINDOW' ? serviceAppointmentFreeCancelEnd(job)?.toISOString() ?? null : null,
+    cancellationMessage: verdict.reason === 'TOO_LATE' ? APPOINTMENT_TOO_LATE_MESSAGE : null,
+    cancelUnavailable: null,
+  };
 }
 
 /** [owner #46/#50/#52] The verdict in the words the apps show. */
@@ -483,7 +670,11 @@ export function customerCancelView(order: CancellationSnapshot, now: Date = new 
       ? AWAITING_STORE_FREE_CANCEL_MESSAGE
       : verdict.reason === 'MMG_UNCONFIRMED'
         ? MMG_UNCONFIRMED_CANCEL_MESSAGE
-        : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
+        : verdict.reason === 'STORE_PAUSED'
+          ? STORE_PAUSED_CANCEL_MESSAGE
+          : verdict.reason === 'NOT_COLLECTED'
+            ? PICKUP_NOT_COLLECTED_CANCEL_MESSAGE
+            : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
   return {
     canCancel: true,
     freeCancellationExpiresAt: freeCancellationExpiresAt(order, now)?.toISOString() ?? null,

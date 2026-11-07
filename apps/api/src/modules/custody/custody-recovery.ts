@@ -1,16 +1,18 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { openMmgRefundOnReturn, tellOfReturnRefund, type ReturnOutcome } from '../order/mmg-refund-rail';
 import { randomInt, timingSafeEqual } from 'node:crypto';
 import type { CustodyIncidentReason, CustodyRecoveryCase, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { haversineDistance } from '../../utils/distance';
+import { gpsEvidence } from '../cash/cash-rules.service';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs, VEHICLE_PASSENGERS_ONLY } from '../dispatch/concurrency-policy';
 import { vehicleCanCarry } from '../dispatch/dispatch.service';
-import { carriesGoods } from '../../config/vehicle-classes';
+import { carriesGoods, carriesParcels } from '../../config/vehicle-classes';
 import { assertDispatchPairEligible, safetyExcludedMovers } from '../dispatch/pair-safety';
 import { handoverAttemptState } from '../handover/handover-security';
 import { assertActiveMoverAccount, assertMoverRoleAuthority, lockUserRoleAuthority } from '../mover-authority';
@@ -112,10 +114,6 @@ async function notifyRelayCalledOff(
       : `Swift called off the handoff for order ${orderNumber}. You don't need to meet the other rider.`,
     data: { kind: 'custody_relay_cancelled', caseId: kase.id, reason: why },
   }).catch(() => {});
-}
-
-function gpsText(gps: { lat: number; lng: number }): string {
-  return `GPS ${gps.lat.toFixed(5)},${gps.lng.toFixed(5)}`;
 }
 
 async function lockOrderRow(tx: Prisma.TransactionClient, orderId: string): Promise<void> {
@@ -470,7 +468,9 @@ export async function transferCustody(deps: CustodyDeps, input: TransferInput) {
     await tx.orderStatusLog.create({
       data: {
         orderId: order.id, status: order.status, changedBy: input.relayUserId,
-        note: `Custody handed to a relay rider — holder's handoff code verified — ${gpsText(input.gps)}`,
+        // [REVIEW-G2 S4-1 on #2080] The handoff position in the ONE evidence form every mover step uses
+        // (gpsEvidence), so the customer's timeline cut (customer-timeline.ts) removes it.
+        note: `Custody handed to a relay rider — holder's handoff code verified — ${gpsEvidence(input.gps.lat, input.gps.lng)}`,
       },
     });
     // 6. The case resolves; the relay rider is the holder of record.
@@ -551,7 +551,9 @@ export async function caseDetail(prisma: PrismaClient, caseId: string) {
   const riderIds = [kase.holderRiderId, kase.relayRiderId].filter((x): x is string => !!x);
   const riders = await prisma.rider.findMany({
     where: { id: { in: riderIds } },
-    select: { id: true, currentLat: true, currentLng: true, lastLocationUpdate: true, isOnline: true, user: { select: { firstName: true, lastName: true, phone: true } } },
+    // [FOLLOWUPS · COORD privacy ruling 28 Oct] Who holds the goods and whether they are online: the console's custody
+    // page shows nothing more (it never drew the riders' live position), so the live position is not sent at all.
+    select: { id: true, isOnline: true, user: { select: { firstName: true, lastName: true, phone: true } } },
   });
   const trail = await prisma.auditLog.findMany({
     where: { entity: CUSTODY_CASE_ENTITY, entityId: caseId },
@@ -711,7 +713,9 @@ export async function assignRelay(
     const serves = needsCourier ? relay.riderType === 'COURIER' || relay.riderType === 'BOTH' : relay.riderType === 'DELIVERY' || relay.riderType === 'BOTH';
     if (!serves) throw new AppError(400, 'WRONG_SERVICE_TYPE', `That rider does not do ${needsCourier ? 'courier' : 'delivery'} work.`);
     // [Owner ruling 15 Oct 2026] A taxi car carries no goods while car deliveries are off (the claim refuses it too).
-    if (!carriesGoods(relay.vehicleType)) throw new AppError(400, VEHICLE_PASSENGERS_ONLY, 'That rider’s vehicle is a taxi car, and taxi cars carry passengers only for now. Choose another rider.');
+    if (!carriesGoods(relay.vehicleType)) throw new AppError(400, VEHICLE_PASSENGERS_ONLY, 'That rider’s vehicle is a car, and car deliveries are paused right now. Choose another rider.');
+    // [CARS-PLATES · owner 6 Nov 2026] a car never takes a courier parcel (food and shop orders only).
+    if (needsCourier && !carriesParcels(relay.vehicleType)) throw new AppError(400, 'CAR_NO_PARCELS', 'That rider’s vehicle is a car, and cars take food and shop orders only. Choose another rider.');
     if (needsCourier && order.courierPackageSize && !vehicleCanCarry(relay.vehicleType, order.courierPackageSize)) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', 'That rider’s vehicle cannot carry this parcel.');
     }
@@ -762,6 +766,7 @@ export async function confirmReturn(
     where: { orderId: input.orderId, state: 'RETURN_REQUIRED' },
   });
   if (!pre) throw new AppError(409, 'NO_RETURN_PENDING', 'This order has no return waiting to be confirmed.');
+  let owed = null as ReturnOutcome;
   const committed = await deps.orderService.transitionOrderAtomically({
     orderId: input.orderId,
     target: 'RETURNED',
@@ -774,6 +779,8 @@ export async function confirmReturn(
       if (locked.orderType === 'COURIER') {
         await tx.order.update({ where: { id: locked.id }, data: { courierReturnedAt: new Date() } });
       }
+      // [BUG-HUNT-2 G22] The goods are back and the store has the money: owed, in this commit.
+      owed = await openMmgRefundOnReturn(tx, locked.id, input.actor.userId, new Date());
     },
     ...(input.actor.role === 'ADMIN' && input.actor.userId ? {
       operatorAudit: {
@@ -786,6 +793,8 @@ export async function confirmReturn(
   });
   const kase = await deps.prisma.custodyRecoveryCase.findUniqueOrThrow({ where: { id: pre.id } });
   await publishCaseChange(deps, kase, committed.order);
+  // The record stands whatever happens here; both order screens say the same.
+  if (owed) await tellOfReturnRefund(deps.prisma, deps.notifications, owed).catch(() => undefined);
   return kase;
 }
 

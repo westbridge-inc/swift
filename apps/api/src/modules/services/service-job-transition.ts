@@ -7,6 +7,7 @@ import type {
 import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import { insertNoticeFor } from '../../lib/owner-wall-notices';
+import { findActiveBlockBetween } from '../moderation/user-block.service';
 
 export interface ServiceJobTransitionNotice {
   userId: string;
@@ -122,6 +123,10 @@ export async function transitionServiceJob(
 
   const notificationIds: string[] = [];
   for (const notice of input.notices ?? []) {
+    // [SEC-TRUST F2] Contact is symmetric across a block: a lifecycle notice to the other party is not
+    // sent while either has blocked the other. The transition itself still happens (a job can always be
+    // closed); only the push and inbox row across the block are dropped.
+    if (notice.userId !== input.actorUserId && await findActiveBlockBetween(tx, job.tenantId, input.actorUserId, notice.userId)) continue;
     const row = await insertNoticeFor(tx, {
       userId: notice.userId,
       type: notice.type,

@@ -6,6 +6,7 @@ import { runAsSystem } from '../plugins/tenant-context';
 import { isVendorVisible, VISIBLE_VENDOR_SELECT } from '../modules/vendor/vendor-visibility';
 import { feePausePredicate, readFeePause } from '../modules/billing/mmg-pause';
 import { isProviderVerified } from '../modules/services/services.service';
+import { proFeeStanding } from '../modules/services/pro-fee';
 import { canonicalServiceTrade, isServiceCategoryOperational } from '../modules/services/service-catalog';
 import { hiddenAmong, storeHiddenFromCustomers } from '../modules/compliance/prohibited-gate';
 import { MAX_IMAGE_PIXELS, sniffImageType } from './images';
@@ -153,7 +154,8 @@ export async function providerShowsPhoto(app: FastifyInstance, providerId: strin
     if (!provider.portfolioPhotos.includes(stored) && !provider.portfolioPhotos.includes(local)) return false;
     const trade = canonicalServiceTrade(provider.trade);
     if (!trade || !isServiceCategoryOperational(trade)) return false;
-    return isProviderVerified(app.prisma, provider.userId);
+    // [BILL-PRO PR3 · plan G12] A pro who is not listed (PRO_WEEKLY_FEE on: no agreement, or the fee unpaid) shows no photo.
+    return await isProviderVerified(app.prisma, provider.userId) && (await proFeeStanding(app.prisma, provider.userId)).operable;
   });
 }
 

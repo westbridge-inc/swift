@@ -1,15 +1,12 @@
 import { normalizeDocNumber } from '../integrity/normalize';
-import { CERTIFICATE_YEAR_DOC_TYPES, IDENTITY_DOC_TYPES, ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES, REGISTRATION_DOC_TYPES } from './doc-registry';
+import { CERTIFICATE_YEAR_DOC_TYPES, IDENTITY_DOC_TYPES, ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES, OWN_NAME_DOC_TYPE, REGISTRATION_DOC_TYPES } from './doc-registry';
 
 // The two type lists live in the registry's own text (DOC-INV-2); re-exported for this module's callers.
 export { ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES };
 
-/** The synthetic L2 flow always receives a government identity document. */
-const L2_IDENTITY_DOC_TYPE = 'identity_l2';
-const IDENTITY_NUMBER_DOC_TYPES = new Set<string>([
-  ...IDENTITY_DOC_TYPES,
-  L2_IDENTITY_DOC_TYPE,
-]);
+/** [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] The partner identity documents only: the customer's ID (the synthetic
+ *  L2 flow) is gone, so no customer ID number can become an identity key any more. */
+const IDENTITY_NUMBER_DOC_TYPES = new Set<string>([...IDENTITY_DOC_TYPES]);
 
 /**
  * Convert only a declared identity-document identifier into a HARD integrity
@@ -51,7 +48,7 @@ export function approvedIdentityDocumentNumber(
  * person. It lives in its own namespace (`DL:`): a licence number never
  * matches an identity-card number made of the same characters.
  *
- * A CUSTOMER's ID (`identity_l2`) is NOT here, by rule of 11 Oct 2026
+ * A CUSTOMER's ID (`identity_l2`) is NOT here, by rule of 11 Oct 2026 (and since 1 Nov 2026 Swift takes none at all)
  * (coordinator, under the owner's delegation): "no ID-number duplicate check
  * at launch (collects less data; revisit after launch)". The 6 Oct ruling was
  * written for partner and mover documents. So the console asks nothing for a
@@ -73,7 +70,7 @@ export function reviewerTypedDocumentSignal(docType: string, raw: unknown): stri
   return LICENCE_NUMBER_DOC_TYPES.has(docType) ? `DL:${normalized}` : normalized;
 }
 
-export type ReviewerTypedField = 'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind';
+export type ReviewerTypedField = 'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind' | 'ownNameConfirmed';
 
 /** What the console must ask the reviewer for, for this document type. */
 export function reviewerTypedFields(docType: string): ReviewerTypedField[] {
@@ -83,5 +80,7 @@ export function reviewerTypedFields(docType: string): ReviewerTypedField[] {
   if (CERTIFICATE_YEAR_DOC_TYPES.has(docType)) return ['certificateYear'];
   // [R16] a business registration: which kind it is, and for a business name the year it is registered for
   if (REGISTRATION_DOC_TYPES.includes(docType)) return ['registrationKind', 'certificateYear'];
+  // [ROLE-DOCS · owner 21 Oct 2026] an own-name declaration: the reviewer's check of the name against the owner's ID
+  if (docType === OWN_NAME_DOC_TYPE) return ['ownNameConfirmed'];
   return [];
 }

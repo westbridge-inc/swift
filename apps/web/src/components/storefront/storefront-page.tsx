@@ -4,6 +4,7 @@ import { fetchStorefront } from '@/lib/api';
 import { storeMenuForPage } from '@/lib/browse-server';
 import { storefrontVerticalVariables } from '@/lib/design-tokens';
 import { StorefrontExperience } from './storefront-experience';
+import { BranchSwitcher } from './branch-switcher';
 import { canonicalStorePath, requestedItem, type StoreQuery } from './store-path';
 
 type StorefrontRouteProps = {
@@ -44,5 +45,5 @@ export async function StorefrontPage({ params, searchParams }: StorefrontRoutePr
   const liveMenu = await storeMenuForPage(store.id);
   // The store's vertical tint is worked out here, on the server, so the
   // design-token tables are not part of the page's first-load JavaScript.
-  return <StorefrontExperience key={`${store.slug}:${fromQr}`} store={store} returnPath={returnPath} fromQr={fromQr} initialItemId={requestedItem(query)} verticalStyle={storefrontVerticalVariables(store.vendorType)} liveMenu={liveMenu} />;
+  return <StorefrontExperience key={`${store.slug}:${fromQr}`} store={store} returnPath={returnPath} fromQr={fromQr} initialItemId={requestedItem(query)} verticalStyle={storefrontVerticalVariables(store.vendorType)} liveMenu={liveMenu} branches={<BranchSwitcher brand={store.brand} fallback={store.addressLine1 || store.name} />} />;
 }

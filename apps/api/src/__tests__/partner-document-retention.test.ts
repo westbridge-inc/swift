@@ -173,7 +173,8 @@ describe('[R24] a partner\'s personal image goes 30 days after the decision; the
 
   // [REVIEW-F S3-1] An individual service provider's documents are stored with role CUSTOMER
   // (roleKeyToUserRole). They are a partner's documents all the same; only the customer's own ID
-  // (identity_l2) is kept while the account is open.
+  // (identity_l2) is not a partner document. [CHECKLIST-LEGAL · owner 1 Nov 2026 (b)] It is not kept either: its own
+  // daily sweep withdraws and deletes it (customer-id-removed.test.ts), never this partner image policy.
   it('an individual service provider (role CUSTOMER): police clearance and ID images go after 30 days; their own customer ID stays', async () => {
     const provider = await person('CUSTOMER');
     const clearance = await decided(provider, 'CUSTOMER', 'police_clearance', 31);
@@ -195,6 +196,110 @@ describe('[R24] a partner\'s personal image goes 30 days after the decision; the
       await system(() => applyImagePolicy(scoped(), service));
       expect((await docOf(d.id)).imagePurgedAt).not.toBeNull();
     } finally { await setDays('documents.personal_image_days', null); }
+  });
+});
+
+// [DOC-SECURITY G5] The 30-day image rule reached only a document still COMMITTED. A copy replaced before review
+// (SUPERSEDED), an approval later superseded by a renewal, a revoked approval (REVOKED) and a lapsed document
+// (EXPIRED) kept their image for good: no sweep looked at them. Each now loses its image 30 days after it stopped
+// being current, and never sooner than 30 days after the decision on it; through the same path (shred, delete,
+// probe, receipt), with a legal hold winning. The record and the state stay.
+type NoLongerCurrent = 'SUPERSEDED' | 'REVOKED' | 'EXPIRED';
+/** A partner submission that is no longer current: decided `decidedDaysAgo` days ago (null: never decided, it was
+ *  waiting for review), and moved to `state` `changedDaysAgo` days ago. */
+async function retired(userId: string, role: UserRole, docType: string, state: NoLongerCurrent, opts: { decidedDaysAgo: number | null; changedDaysAgo: number; legalHoldId?: string }) {
+  const fileUrl = await stored(userId, docType);
+  const doc = await system(() => app.prisma.verificationDocument.create({ data: {
+    userId, role, docType, fileUrl, expiresAt: new Date(Date.now() + 300 * DAY),
+    ...(opts.decidedDaysAgo === null
+      ? { state: 'REVIEW_QUEUED' as const }
+      : { status: 'APPROVED' as const, reviewedBy: 'retention-test', reviewedAt: new Date(Date.now() - opts.decidedDaysAgo * DAY) }),
+  } }));
+  const changedAt = new Date(Date.now() - opts.changedDaysAgo * DAY);
+  await system(() => app.prisma.verificationDocument.update({ where: { id: doc.id }, data: {
+    state, updatedAt: changedAt,
+    // the replace path marks a replaced copy EXPIRED for status-only readers; a revocation is the latest decision
+    ...(state === 'SUPERSEDED' && opts.decidedDaysAgo === null ? { status: 'EXPIRED' as const, reviewNote: `REPLACED: test ${RUN}` } : {}),
+    ...(state === 'REVOKED' ? { reviewedAt: changedAt, reviewNote: `REVOKED: test ${RUN}` } : {}),
+    ...(opts.legalHoldId ? { legalHoldId: opts.legalHoldId } : {}),
+  } }));
+  const now = await docOf(doc.id);
+  expect(now.state, 'fixture state').toBe(state);
+  expect(now.updatedAt.getTime(), 'fixture clock').toBe(changedAt.getTime());
+  return now;
+}
+
+describe('[DOC-SECURITY G5] a replaced, revoked or expired personal document loses its image too', () => {
+  it('replaced before review, superseded by a renewal, revoked, expired after approval, expired while waiting: each image goes 30 days after it stopped being current, with a probed receipt; the record and the state stay', async () => {
+    const docs = [
+      await retired(await person('DRIVER'), 'DRIVER', 'drivers_licence', 'SUPERSEDED', { decidedDaysAgo: null, changedDaysAgo: 31 }),
+      await retired(await person('VENDOR_OWNER'), 'VENDOR_OWNER', 'owner_national_id', 'SUPERSEDED', { decidedDaysAgo: 40, changedDaysAgo: 35 }),
+      await retired(await person('RIDER'), 'RIDER', 'national_id', 'REVOKED', { decidedDaysAgo: 60, changedDaysAgo: 31 }),
+      await retired(await person('MOVER'), 'MOVER', 'police_clearance', 'EXPIRED', { decidedDaysAgo: 100, changedDaysAgo: 31 }),
+      await retired(await person('CUSTOMER'), 'CUSTOMER', 'police_clearance', 'EXPIRED', { decidedDaysAgo: null, changedDaysAgo: 45 }),
+    ];
+    const run = await system(() => applyImagePolicy(scoped(), service));
+    expect(run.purged).toBe(docs.length);
+    for (const d of docs) {
+      const after = await docOf(d.id);
+      const name = `${d.state}/${d.role}/${d.docType}`;
+      expect(after.imagePurgedAt, name).not.toBeNull();
+      expect(after.fileUrl, name).toBe('');
+      expect(after.purgedAt, name).toBeNull();
+      expect(after.state, name).toBe(d.state);
+      const receipt = await system(() => app.prisma.deletionReceipt.findFirst({ where: { submissionId: d.id } }));
+      expect(receipt?.verificationProbeResult, name).toBe('CONFIRMED_ABSENT');
+      expect(receipt?.deletedBy, name).toBe('partner-image-retention');
+      const object = await system(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: d.fileUrl } }));
+      expect(object.wrappedDek, name).toBeNull();
+      expect(object.shreddedAt, name).not.toBeNull();
+    }
+    // An approval that stopped being current keeps its record, at the state it reached.
+    for (const d of docs.filter((x) => x.reviewedBy)) {
+      expect((await system(() => app.prisma.documentRecord.findUniqueOrThrow({ where: { submissionId: d.id } }))).status).toBe(d.state);
+    }
+    expect((await system(() => applyImagePolicy(scoped(), service))).purged).toBe(0);
+  });
+
+  it('leaves alone: under 30 days since it stopped being current, a decision under 30 days old, a held copy, business and vehicle images, and a customer\'s own ID', async () => {
+    const h = await person('DRIVER');
+    const hold = await holdOn(h);
+    const kept = [
+      await retired(await person('DRIVER'), 'DRIVER', 'drivers_licence', 'SUPERSEDED', { decidedDaysAgo: null, changedDaysAgo: 29 }),
+      await retired(await person('RIDER'), 'RIDER', 'national_id', 'REVOKED', { decidedDaysAgo: 90, changedDaysAgo: 5 }),
+      // never sooner than the decision window, whatever the row's last change says
+      await retired(await person('VENDOR_OWNER'), 'VENDOR_OWNER', 'owner_national_id', 'EXPIRED', { decidedDaysAgo: 10, changedDaysAgo: 40 }),
+      await retired(h, 'DRIVER', 'police_clearance', 'EXPIRED', { decidedDaysAgo: 100, changedDaysAgo: 60, legalHoldId: hold.id }),
+      await retired(await person('VENDOR_OWNER'), 'VENDOR_OWNER', 'business_registration', 'SUPERSEDED', { decidedDaysAgo: 100, changedDaysAgo: 60 }),
+      await retired(await person('DRIVER'), 'DRIVER', 'vehicle_registration', 'EXPIRED', { decidedDaysAgo: 100, changedDaysAgo: 60 }),
+      await retired(await person('CUSTOMER'), 'CUSTOMER', CUSTOMER_ID_DOC_TYPE, 'SUPERSEDED', { decidedDaysAgo: 100, changedDaysAgo: 60 }),
+    ];
+    const run = await system(() => applyImagePolicy(scoped(), service));
+    expect(run.purged).toBe(0);
+    for (const d of kept) {
+      const now = await docOf(d.id);
+      expect(now.imagePurgedAt, `${d.state}/${d.role}/${d.docType}`).toBeNull();
+      expect(now.fileUrl, `${d.state}/${d.role}/${d.docType}`).not.toBe('');
+    }
+  });
+
+  it('the purge path itself refuses a copy still waiting for review or a rejected one (the reaper deletes those), and a held one', async () => {
+    const u = await person('DRIVER');
+    const waiting = await system(async () => app.prisma.verificationDocument.create({ data: {
+      userId: u, role: 'DRIVER', docType: 'drivers_licence', fileUrl: await stored(u, 'drivers_licence'), state: 'REVIEW_QUEUED',
+    } }));
+    const turnedDown = await rejected(await person('DRIVER'), 'DRIVER', 'drivers_licence', 90);
+    const h = await person('RIDER');
+    const hold = await holdOn(h);
+    const held = await retired(h, 'RIDER', 'national_id', 'REVOKED', { decidedDaysAgo: 90, changedDaysAgo: 60, legalHoldId: hold.id });
+    for (const d of [waiting, turnedDown, held]) {
+      expect(await system(() => service.purgeImageAfterReview(d.id, 'partner-image-retention')), d.state ?? d.status).toBe('NOT_PURGED');
+      expect((await docOf(d.id)).fileUrl).not.toBe('');
+    }
+    // ...and a no-longer-current copy goes through it, once.
+    const revoked = await retired(await person('RIDER'), 'RIDER', 'national_id', 'REVOKED', { decidedDaysAgo: 90, changedDaysAgo: 60 });
+    expect(await system(() => service.purgeImageAfterReview(revoked.id, 'partner-image-retention'))).toBe('PURGED');
+    expect(await system(() => service.purgeImageAfterReview(revoked.id, 'partner-image-retention'))).toBe('NOT_PURGED');
   });
 });
 

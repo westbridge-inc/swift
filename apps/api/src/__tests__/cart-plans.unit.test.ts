@@ -37,8 +37,15 @@ function rng(seed: number) {
 
 type Promo = { discountType: string; discountValue: unknown; maxDiscount?: unknown; funder?: string | null; vendorId?: string | null };
 
+/** [owner + COORD rulings 1 Nov 2026] The one deliberate change since main
+ *  4ecd1264: a code's fee basis is the STANDARD fee — no code (free delivery,
+ *  or an amount-off code larger than the order) ever covers the express
+ *  premium; the rule is the same for every type. */
+const promoFeeOf = (p: BasketPlan) => p.standardDeliveryFee;
+
 /** main 4ecd1264 OrderService.checkout + validatePromoCode, the pricing lines
- *  only, verbatim apart from the plan shape ({ vendor: { id } } → vendorId). */
+ *  only, verbatim apart from the plan shape ({ vendor: { id } } → vendorId)
+ *  and promoFeeOf in the three promo lines (the owner's 1 Nov ruling). */
 function mainCheckoutArithmetic(plans: BasketPlan[], promo: Promo | null, tip: number) {
   const tipPlanIndex = plans.findIndex((p) => p.fulfillment === 'DELIVERY');
   const effectiveTip = tipPlanIndex >= 0 ? tip : 0;
@@ -54,10 +61,10 @@ function mainCheckoutArithmetic(plans: BasketPlan[], promo: Promo | null, tip: n
     if (promo.vendorId) {
       const plan = plans.find((p) => p.vendorId === promo.vendorId)!;
       subtotal = plan.subtotal;
-      deliveryFeeBasis = plan.deliveryFee;
+      deliveryFeeBasis = promoFeeOf(plan);
     } else {
       subtotal = plans.reduce((s, p) => s + p.subtotal, 0);
-      deliveryFeeBasis = plans.reduce((s, p) => s + p.deliveryFee, 0);
+      deliveryFeeBasis = plans.reduce((s, p) => s + promoFeeOf(p), 0);
     }
     discount = promoDiscount(promo, { subtotal, deliveryFee: deliveryFeeBasis });
     promoVendorId = promo.vendorId ?? null;
@@ -66,7 +73,7 @@ function mainCheckoutArithmetic(plans: BasketPlan[], promo: Promo | null, tip: n
   const promoFunder = promoTerms?.funder ?? null;
   const promoPlanIdxForCap = promoVendorId ? plans.findIndex((p) => p.vendorId === promoVendorId) : -1;
   const discountCapacity = (promoPlanIdxForCap >= 0 ? [promoPlanIdxForCap] : plans.map((_, i) => i)).reduce(
-    (sum, i) => sum + promoCapacity(promoFunder, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promoTerms?.discountType ?? null),
+    (sum, i) => sum + promoCapacity(promoFunder, { subtotal: plans[i]!.subtotal, deliveryFee: promoFeeOf(plans[i]!) }, promoTerms?.discountType ?? null),
     0,
   );
   discount = Math.min(discount, Math.max(0, discountCapacity));
@@ -80,7 +87,7 @@ function mainCheckoutArithmetic(plans: BasketPlan[], promo: Promo | null, tip: n
   const discountTargets = promoPlanIndex >= 0 ? [promoPlanIndex] : plans.map((_, i) => i);
   for (const i of discountTargets) {
     if (remainingDiscount <= 0) break;
-    const parts = allocatePromo(promoFunder, remainingDiscount, { subtotal: plans[i]!.subtotal, deliveryFee: plans[i]!.deliveryFee }, promoTerms?.discountType ?? null);
+    const parts = allocatePromo(promoFunder, remainingDiscount, { subtotal: plans[i]!.subtotal, deliveryFee: promoFeeOf(plans[i]!) }, promoTerms?.discountType ?? null);
     discountAlloc[i] = parts.total;
     discountParts[i] = parts;
     remainingDiscount -= parts.total;
@@ -112,6 +119,7 @@ function randomBasket(r: () => number) {
       fulfillment,
       subtotal: int(4) === 0 ? 0 : 50 * int(300),
       deliveryFee: fulfillment === 'DELIVERY' && int(2) === 0 ? expressDeliveryFee(standard) : standard,
+      standardDeliveryFee: standard,
     };
   });
   let promo: Promo | null = null;
@@ -163,20 +171,20 @@ describe('priceBasket is main’s checkout arithmetic, unchanged', () => {
 
   it('the tip rides the FIRST delivery plan; a basket with none charges no tip at all', () => {
     const plans: BasketPlan[] = [
-      { vendorId: 'a', fulfillment: 'PICKUP', subtotal: 1000, deliveryFee: 0 },
-      { vendorId: 'b', fulfillment: 'DELIVERY', subtotal: 2000, deliveryFee: 600 },
-      { vendorId: 'c', fulfillment: 'DELIVERY', subtotal: 3000, deliveryFee: 700 },
+      { vendorId: 'a', fulfillment: 'PICKUP', subtotal: 1000, deliveryFee: 0, standardDeliveryFee: 0 },
+      { vendorId: 'b', fulfillment: 'DELIVERY', subtotal: 2000, deliveryFee: 600, standardDeliveryFee: 600 },
+      { vendorId: 'c', fulfillment: 'DELIVERY', subtotal: 3000, deliveryFee: 700, standardDeliveryFee: 700 },
     ];
     const priced = priceBasket({ plans, promo: null, tip: 400 });
     expect(priced.perPlan.map((p) => p.tip)).toEqual([0, 400, 0]);
     expect(priced.grandTotal).toBe(1000 + 2600 + 3700 + 400);
-    const pickupOnly = priceBasket({ plans: plans.map((p) => ({ ...p, fulfillment: 'PICKUP' as const, deliveryFee: 0 })), promo: null, tip: 400 });
+    const pickupOnly = priceBasket({ plans: plans.map((p) => ({ ...p, fulfillment: 'PICKUP' as const, deliveryFee: 0, standardDeliveryFee: 0 })), promo: null, tip: 400 });
     expect(pickupOnly.effectiveTip).toBe(0);
     expect(pickupOnly.grandTotal).toBe(6000);
   });
 
   it('a store code whose store is not in the basket discounts nothing (checkout refuses that cart; the quote shows no phantom discount)', () => {
-    const plans: BasketPlan[] = [{ vendorId: 'a', fulfillment: 'PICKUP', subtotal: 1000, deliveryFee: 0 }];
+    const plans: BasketPlan[] = [{ vendorId: 'a', fulfillment: 'PICKUP', subtotal: 1000, deliveryFee: 0, standardDeliveryFee: 0 }];
     const priced = priceBasket({ plans, promo: { discountType: 'FIXED_AMOUNT', discountValue: 300, funder: 'VENDOR', vendorId: 'elsewhere' }, tip: 0 });
     expect(priced.discount).toBe(0);
     expect(priced.perPlan[0]).toEqual({ discount: 0, tip: 0, total: 1000, allocation: null });
@@ -185,11 +193,13 @@ describe('priceBasket is main’s checkout arithmetic, unchanged', () => {
 
 describe('a single-vendor quote is priced exactly as before', () => {
   /** main 4ecd1264 buildCartResponse, the discount + total lines. */
-  function mainQuoteArithmetic(subtotal: number, deliveryFee: number, promo: Promo | null, tip: number) {
+  function mainQuoteArithmetic(subtotal: number, deliveryFee: number, promo: Promo | null, tip: number, standardDeliveryFee: number) {
     let discount = 0;
     if (promo) {
-      discount = promoDiscount(promo, { subtotal, deliveryFee });
-      discount = Math.min(discount, promoCapacity(promo.funder, { subtotal, deliveryFee }, promo.discountType));
+      // [owner + COORD 1 Nov 2026] A code's fee basis is the standard fee (promoFeeOf above).
+      const feeBasis = standardDeliveryFee;
+      discount = promoDiscount(promo, { subtotal, deliveryFee: feeBasis });
+      discount = Math.min(discount, promoCapacity(promo.funder, { subtotal, deliveryFee: feeBasis }, promo.discountType));
     }
     return { discount, total: orderTotal({ subtotal, deliveryFee, tip, discount }) };
   }
@@ -200,7 +210,7 @@ describe('a single-vendor quote is priced exactly as before', () => {
       const { plans, promo, tip } = randomBasket(r);
       const plan = { ...plans[0]!, fulfillment: 'DELIVERY' as const };
       const applicable = promo ? { ...promo, vendorId: [null, plan.vendorId][n % 2] } : null;
-      const old = mainQuoteArithmetic(plan.subtotal, plan.deliveryFee, applicable, tip);
+      const old = mainQuoteArithmetic(plan.subtotal, plan.deliveryFee, applicable, tip, plan.standardDeliveryFee);
       const priced = priceBasket({ plans: [plan], promo: applicable as BasketPromo | null, tip });
       expect({ discount: priced.discount, total: priced.perPlan[0]!.total }, `case ${n}`).toEqual(old);
     }
@@ -219,7 +229,7 @@ describe('the per-vendor planner', () => {
   });
   const routeKm = async () => ({ km: 3.456789, source: 'haversine' as const });
 
-  it('DELIVERY: canonical km (2 dp) prices the fee; express is the one helper’s 1.5× premium', async () => {
+  it('DELIVERY: canonical km (2 dp) prices the fee; express is the one helper’s flat premium', async () => {
     const plain = await planVendorGroup({ vendor, lines: [line(1200, 1)], fulfillment: 'DELIVERY', destination: { lat: 6.81, lng: -58.17 }, deliveryRates: DEFAULT_DELIVERY_RATES, express: false, routeKm });
     expect(plain.distanceKm).toBe(3.46);
     expect(plain.distanceSource).toBe('haversine');

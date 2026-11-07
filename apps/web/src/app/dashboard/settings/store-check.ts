@@ -24,9 +24,10 @@ export function selectedProfileStore(data: ProfileData | undefined, storeId: str
  * passed AND none of the checked documents has lapsed since (activationValidUntil = the earliest expiry among them).
  */
 export function storeCheckLabel(store: Pick<ProfileStore, 'isVerified' | 'activationValidUntil'>, now = new Date()): string {
-  if (!store.isVerified) return 'Not checked by Swift yet: see your documents in the Swift app';
+  // [OPEN-EARLY PR-2] the store's documents are on this website too (Documents), not only in the Swift app
+  if (!store.isVerified) return 'Not checked by Swift yet: see Documents';
   if (store.activationValidUntil && new Date(store.activationValidUntil).getTime() <= now.getTime()) {
-    return 'A checked document has expired: renew it in the Swift app';
+    return 'A checked document has expired: renew it under Documents';
   }
   return 'Documents checked by Swift';
 }

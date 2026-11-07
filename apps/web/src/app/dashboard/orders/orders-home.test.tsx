@@ -78,7 +78,9 @@ function hubApi(opts: Opts = {}) {
     ] } };
     if (path === '/vendor/hours') return { body: { success: true, data: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })) } };
     if (path === '/vendor/qr') return { body: { success: true, data: { shortUrl: 'https://swift.test/s/SAMPLE', status: 'ACTIVE' } } };
-    if (path === '/vendor/subscription') return { body: { success: true, data: { status: 'ACTIVE', nextBillingDate: '2026-10-18T12:00:00Z' } } };
+    // [FEE-STATUS] As the API answers for a week past its date: its own words (feeStatus), never "Next bill <passed date>".
+    if (path === '/vendor/subscription') return { body: { success: true, data: { status: 'ACTIVE', nextBillingDate: '2026-10-18T12:00:00Z',
+      feeStatus: { state: 'DUE', headline: 'Payment due since 18 Oct 2026', detail: 'GY$15,000 to pay.', date: '2026-10-18T12:00:00.000Z' } } } };
     if (path === '/vendor/orders') return { body: { success: true, data: orders, meta: { total: orders.length } } };
     if (path.startsWith('/vendor/orders/')) return { body: { success: true, data: orders.find((o) => `/vendor/orders/${(o as { id: string }).id}` === path) ?? orders[0] } };
     return { status: 404, body: { success: false } };
@@ -134,6 +136,8 @@ describe('the Orders home copies the app', () => {
     expect(within(guide).getByText('Use the switch below to start taking orders')).toBeTruthy();
     expect(within(guide).getByText('Share your store link')).toBeTruthy();
     expect(await within(guide).findByText('https://swift.test/s/SAMPLE')).toBeTruthy();
+    // [STORE-LINK] As on the phone (VendorOps opens VendorMyQr): the row opens the store's QR page, where the link is copied and shared.
+    expect(within(guide).getByRole('link', { name: /Share your store link/ }).getAttribute('href')).toBe('/dashboard/qr');
     expect(within(guide).getByText('LISTENING FOR ORDERS')).toBeTruthy();
   });
 
@@ -161,10 +165,14 @@ describe('the Orders home copies the app', () => {
     // [BUG-GUARDS C5] The QR and subscription states read as words, never the code.
     expect(tile('My QR & number').textContent).toContain('Active');
     expect(tile('My QR & number').textContent).not.toContain('ACTIVE');
+    // [STORE-LINK] The tile opens the store's QR page (copy, share, the code), as the phone's opens VendorMyQr.
+    expect(tile('My QR & number').getAttribute('href')).toBe('/dashboard/qr');
+    expect(tile('My QR & number').getAttribute('target')).toBeNull();
     await waitFor(() => expect(tile('Order history').textContent).toContain('31 recent orders'));
-    await waitFor(() => expect(tile('Billing').textContent).toMatch(/Next bill \d+ Oct/));
+    await waitFor(() => expect(tile('Billing').textContent).toContain('Payment due since 18 Oct 2026'));
     expect(tile('Billing').getAttribute('href')).toBe('/dashboard/weekly-fee');
-    expect(tile('Billing').textContent).toContain('Active');
+    expect(tile('Billing').textContent).toContain('Payment due');
+    expect(tile('Billing').textContent).not.toMatch(/Next bill|\bActive\b/);
     expect(tile('Billing').textContent).not.toContain('ACTIVE');
   });
 
@@ -324,6 +332,27 @@ describe('the store controls read the real server state', () => {
     expect((screen.getByRole('switch', { name: 'Store open to customers' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('button', { name: /Pause new orders|Resume orders/ })).toBeNull();
     expect(screen.queryByRole('switch', { name: 'Deliver my own orders' })).toBeNull();
+  });
+
+  // [OPEN-EARLY PR-2 · owner 31 Oct 2026] Partners sign up on the website before the apps are out: a store not live yet
+  // shows its OWNER the way to send its documents here; a manager or staff login is never offered it (owner only).
+  it('a store not live yet shows its owner "Upload your documents" (Documents on this website); nobody else', async () => {
+    hubApi({ status: 'PENDING_REVIEW', open: false });
+    const { unmount } = renderWithQuery(<OrdersPage />);
+    expect(await screen.findByText('Not open yet')).toBeTruthy();
+    expect((await screen.findByRole('link', { name: 'Upload your documents' })).getAttribute('href')).toBe('/dashboard/documents');
+    unmount();
+    for (const role of ['MANAGER', 'STAFF'] as const) {
+      hubApi({ status: 'PENDING_REVIEW', open: false, role });
+      const view = renderWithQuery(<OrdersPage />);
+      expect(await screen.findByText('Not open yet')).toBeTruthy();
+      expect(screen.queryByRole('link', { name: 'Upload your documents' })).toBeNull();
+      view.unmount();
+    }
+    hubApi({ status: 'ACTIVE' });
+    renderWithQuery(<OrdersPage />);
+    expect(await screen.findByRole('switch', { name: 'Store open to customers' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Upload your documents' })).toBeNull();
   });
 });
 

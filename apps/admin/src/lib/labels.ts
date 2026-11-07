@@ -28,9 +28,6 @@ export const ENUM_LABELS = {
   VendorType: {
     RESTAURANT: 'Restaurant', SUPERMARKET: 'Supermarket', STORE: 'Store', SERVICE: 'Service business',
   },
-  VendorTier: {
-    UNREGISTERED: 'Unregistered seller', REGISTERED: 'Registered business',
-  },
   OrderStatus: {
     PENDING: 'Waiting to be accepted', ACCEPTED: 'Accepted', PREPARING: 'Being prepared',
     READY_FOR_PICKUP: 'Ready for pickup', RIDER_ASSIGNED: 'Rider assigned',
@@ -76,6 +73,7 @@ export const ENUM_LABELS = {
     DELIVERY_RIDER: 'Delivery rider', COURIER_RIDER: 'Courier rider', TAXI_DRIVER: 'Taxi driver',
     RESTAURANT: 'Restaurant', SUPERMARKET: 'Supermarket', RETAIL_STORE: 'Retail store',
     SERVICE_PROVIDER: 'Service provider',
+    INDEPENDENT_PRO: 'Independent pro',
   },
   BillingEventType: {
     CHARGE_ATTEMPT: 'Weekly fee charge started', CHARGE_ATTEMPT_RECLAIMED: 'Stalled charge restarted',
@@ -89,7 +87,7 @@ export const ENUM_LABELS = {
     RESCUE_INCENTIVE: 'Rescue bonus',
   },
   ClaimStatus: {
-    AUTO_APPROVED: 'Approved automatically', PENDING_REVIEW: 'Waiting for review', APPROVED: 'Approved',
+    AUTO_APPROVED: 'Old rule, needs a person', PENDING_REVIEW: 'Waiting for review', APPROVED: 'Approved',
     REJECTED: 'Rejected', PAID: 'Paid',
   },
   ReturnStatus: {
@@ -149,6 +147,19 @@ export const ENUM_LABELS = {
   AdCreativeStatus: {
     PENDING: 'Waiting for review', APPROVED: 'Approved', REJECTED: 'Rejected',
   },
+  SosStatus: {
+    TRIGGER_PENDING: 'In the grace window', ACTIVE: 'Live', ACKNOWLEDGED: 'Acknowledged', RESOLVED: 'Resolved', CANCELLED: 'Cancelled',
+  },
+  SosTriggerSource: {
+    BUTTON: 'SOS button', CHECKIN_TIMEOUT: 'Missed safety check-in', GUARDIAN_ESCALATION: 'Trip monitoring', OPS_MANUAL: 'Raised by staff',
+  },
+  SosResolutionCode: {
+    SAFE_CONFIRMED: 'Confirmed safe', POLICE_INVOLVED: 'Police involved', MEDICAL: 'Medical help', FALSE_ALARM: 'False alarm', ABUSE: 'Abuse by the other person',
+    UNREACHABLE_CLOSED: 'Could not reach them',
+  },
+  IncidentStatus: {
+    OPEN: 'Waiting for acknowledgement', TRIAGED: 'Acknowledged', INVESTIGATING: 'Being investigated', DECIDED: 'Decided', CLOSED: 'Closed',
+  },
 } as const satisfies Record<string, Record<string, string>>;
 
 export type EnumName = keyof typeof ENUM_LABELS;
@@ -156,7 +167,7 @@ export type EnumName = keyof typeof ENUM_LABELS;
 /** "SOMETHING_NEW" → "Something new". The floor for a value this map has not
  *  been taught yet: never the raw enum (labels.test.ts keeps it unreachable
  *  for the enums above). */
-function humanise(value: string): string {
+export function humanise(value: string): string {
   const words = value.toLowerCase().replaceAll('_', ' ').trim();
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : '—';
 }
@@ -180,7 +191,7 @@ const TONES: Partial<Record<EnumName, Record<string, Tone>>> = {
   },
   PaymentStatus: { CAPTURED: 'good', CLAIMED: 'warn', FAILED: 'bad', UNKNOWN: 'warn', PENDING: 'neutral' },
   SubscriptionStatus: { ACTIVE: 'good', TRIAL: 'info', PAUSED: 'neutral', PAST_DUE: 'warn', SUSPENDED: 'bad', CANCELLED: 'neutral', CHURNED: 'neutral' },
-  ClaimStatus: { AUTO_APPROVED: 'good', PENDING_REVIEW: 'warn', APPROVED: 'good', REJECTED: 'bad', PAID: 'good' },
+  ClaimStatus: { AUTO_APPROVED: 'warn', PENDING_REVIEW: 'warn', APPROVED: 'good', REJECTED: 'bad', PAID: 'good' },
   ReturnStatus: { REQUESTED: 'warn', APPROVED: 'good', REJECTED: 'bad', REFUND_DUE: 'warn', REFUNDED: 'good' },
   VerificationDocumentStatus: { PENDING: 'warn', APPROVED: 'good', REJECTED: 'bad', EXPIRED: 'bad' },
   SupportStatus: { OPEN: 'warn', IN_PROGRESS: 'info', RESOLVED: 'good' },
@@ -188,6 +199,8 @@ const TONES: Partial<Record<EnumName, Record<string, Tone>>> = {
   AdvertiserStatus: { PENDING_REVIEW: 'warn', APPROVED: 'good', REJECTED: 'bad', SUSPENDED: 'bad' },
   AdCreativeStatus: { PENDING: 'warn', APPROVED: 'good', REJECTED: 'bad' },
   ReportStatus: { PENDING: 'warn', REVIEWING: 'info', ACTIONED: 'good', DISMISSED: 'neutral' },
+  SosStatus: { TRIGGER_PENDING: 'warn', ACTIVE: 'bad', ACKNOWLEDGED: 'info', RESOLVED: 'good', CANCELLED: 'neutral' },
+  IncidentStatus: { OPEN: 'warn', TRIAGED: 'info', INVESTIGATING: 'info', DECIDED: 'good', CLOSED: 'neutral' },
 };
 
 export function statusTone(group: EnumName, value: string | null | undefined): Tone {

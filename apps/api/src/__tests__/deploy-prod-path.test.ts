@@ -150,6 +150,9 @@ afterEach(() => rmSync(tmp, { recursive: true, force: true }));
 
 // ── pilot-up.sh ─────────────────────────────────────────────────────────────
 const COMPOSE_TEXT = readFileSync(join(DEPLOY, 'docker-compose.yml'), 'utf8');
+// [DEPLOY-GUARD] The app's own config: the one place its link domain is declared.
+const APP_CONFIG_PATH = join(DEPLOY, '../apps/mobile/app.config.ts');
+const APP_CONFIG_TEXT = readFileSync(APP_CONFIG_PATH, 'utf8');
 const STORE = [...new Set([...COMPOSE_TEXT.matchAll(/_FILE: \/run\/secrets\/([A-Z][A-Z0-9_]*)/g)].map((m) => m[1]!)), 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'].sort();
 
 function preparePilot() {
@@ -166,6 +169,9 @@ function preparePilot() {
   chmodSync(join(here, 'backup.sh'), 0o755);
   mkdirSync(join(tmp, 'repo', 'apps', 'api', 'src', 'utils'), { recursive: true });
   copyFileSync(join(DEPLOY, '../apps/api/src/utils/secret-files.ts'), join(tmp, 'repo', 'apps', 'api', 'src', 'utils', 'secret-files.ts'));
+  // [DEPLOY-GUARD] production reads the app's link domain from the app config.
+  mkdirSync(join(tmp, 'repo', 'apps', 'mobile'), { recursive: true });
+  copyFileSync(APP_CONFIG_PATH, join(tmp, 'repo', 'apps', 'mobile', 'app.config.ts'));
   return here;
 }
 
@@ -173,7 +179,8 @@ const PRODUCTION = {
   PILOT_ENV: 'production', NODE_ENV: 'production', API_HOST: PROD_HOST, MAPS_PROVIDER: 'osrm', OSRM_URL: 'http://osrm:5000',
   BACKUP_BUCKET: 'prod-backups', STORAGE_PROVIDER: 's3', CORS_ORIGIN: 'https://example.org',
   // Production also requires the public origins the API hands out (#1448 review).
-  API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://example.org',
+  // APP_PUBLIC_URL is exactly the domain the app claims for its links (DEPLOY-GUARD).
+  API_PUBLIC_URL: `https://${PROD_HOST}`, APP_PUBLIC_URL: 'https://swiftgy.com',
   // Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
   // No card payment in production until an attorney signs off (owner ruling, 13 Oct).
@@ -188,8 +195,12 @@ const PRODUCTION = {
 };
 const STAGING = { ...PRODUCTION, PILOT_ENV: 'staging', NODE_ENV: 'development', API_HOST: 'api-staging.example.org', STORAGE_PROVIDER: 'local', STORAGE_ALLOW_LOCAL: '1' };
 
-function runPilot(settings: Record<string, string | undefined>, opts: { args?: string[]; env?: Record<string, string> } = {}) {
+function runPilot(settings: Record<string, string | undefined>, opts: { args?: string[]; env?: Record<string, string>; appConfig?: string | null } = {}) {
   const here = preparePilot();
+  // [DEPLOY-GUARD] a fixture's own app config: other text, or none at all (null).
+  const appConfig = join(here, '..', 'apps', 'mobile', 'app.config.ts');
+  if (opts.appConfig === null) rmSync(appConfig);
+  else if (opts.appConfig !== undefined) writeFileSync(appConfig, opts.appConfig);
   writeFileSync(join(here, '.env'), Object.entries(settings).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
   const res = spawnSync('bash', [join(here, 'pilot-up.sh'), ...(opts.args ?? [SHA])], {
     encoding: 'utf8',
@@ -394,6 +405,21 @@ describe('[PROD-PATH] pilot-up.sh: a real production target', () => {
         expect(changedNothing(r.calls)).toEqual([]);
       }
     }
+  });
+
+  // [BUG-HUNT F23] A near miss reads as closed, which on ordering day would hold every partner with no word to anyone.
+  it.each(['true', 'yes', 'on', '2', 'open', '1 '])('PARTNER_APPROVALS_OPEN=%j is refused before anything changes', (value) => {
+    writeFileSync(log, '');
+    const r = runPilot({ ...PRODUCTION, PARTNER_APPROVALS_OPEN: value });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('PARTNER_APPROVALS_OPEN must be 1, 0 or empty');
+    expect(changedNothing(r.calls)).toEqual([]);
+  });
+
+  it.each(['', '0', '1'])('PARTNER_APPROVALS_OPEN=%j passes this check', (value) => {
+    writeFileSync(log, '');
+    const r = runPilot({ ...PRODUCTION, PARTNER_APPROVALS_OPEN: value });
+    expect(r.stderr).not.toContain('PARTNER_APPROVALS_OPEN');
   });
 
   it.each(['CARD_RAIL_V2', 'CARD_RAIL_V2_DRAIN', 'CARD_RAIL_ENROLL', 'ADS_ENABLED'])('production refuses %s unless it is unset or 0, in every mode, before anything changes', (name) => {
@@ -898,6 +924,115 @@ describe('[PROD-PATH] deploy/.env is read once, the way Compose reads it: one pl
   });
 });
 
+// ── [DEPLOY-GUARD] store links and QR codes open the app ──────────────────────
+// Every store share link and printed QR code is {APP_PUBLIC_URL}/s/{code}. The
+// app opens a link only on the domain it claims (apps/mobile/app.config.ts:
+// linkDomain, its associated domains and Android App Links, which the website's
+// AASA and assetlinks files answer for). A production APP_PUBLIC_URL naming any
+// other host (the staging site behind its tester password, www, a typo) prints
+// links that never open the app. Production therefore needs APP_PUBLIC_URL to be
+// exactly https://<that domain>, read from the app config itself so there is
+// one source of truth. Decided and pinned here: no trailing slash (trip-share
+// and check-in links append "/trip/..." to it as text), no www, no port, no
+// path, no http, lower case. Staging is unchanged.
+const LINK_DOMAIN_LINE = /^const linkDomain = process\.env\['SWIFT_LINK_DOMAIN'\] \?\? '([^']*)';$/m;
+const STAGE_ENV: Record<string, Record<string, string>> = {
+  full: {},
+  '--no-public': { DNS_MAP: '', CADDY_STOPPED: '1' },
+  '--data-only': { DNS_MAP: '', API_STOPPED: '1' },
+};
+const stage = (args: string[]) => STAGE_ENV[args.length > 1 ? args[0]! : 'full']!;
+
+describe('[DEPLOY-GUARD] pilot-up.sh: production store links name the domain the app opens', () => {
+  it('the app config declares its link domain on one line, swiftgy.com, and claims it (and www) for /s and /store', () => {
+    expect(APP_CONFIG_TEXT.match(new RegExp(LINK_DOMAIN_LINE.source, 'gm'))).toHaveLength(1);
+    expect(LINK_DOMAIN_LINE.exec(APP_CONFIG_TEXT)?.[1]).toBe('swiftgy.com');
+    expect(APP_CONFIG_TEXT).toContain('associatedDomains: [`applinks:${linkDomain}`, `applinks:www.${linkDomain}`]');
+    expect(APP_CONFIG_TEXT).toContain("{ scheme: 'https', host: linkDomain, pathPrefix: '/s' }");
+    expect(APP_CONFIG_TEXT).toContain("{ scheme: 'https', host: linkDomain, pathPrefix: '/store' }");
+  });
+
+  it('production accepts APP_PUBLIC_URL=https://swiftgy.com exactly, in every stage', () => {
+    for (const args of [[SHA], ['--no-public', SHA], ['--data-only', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args, env: stage(args) });
+      expect(r.status, `${args.join(' ')}: ${r.stderr}`).toBe(0);
+    }
+  });
+
+  const exact = 'PILOT_ENV=production needs APP_PUBLIC_URL=https://swiftgy.com exactly';
+  const notOrigin = "APP_PUBLIC_URL to be the public website's https:// origin";
+  it.each([
+    // the finding: the staging site (tester password; the app never opens it)
+    ['https://staging.swiftgy.com', 'staging name staging.swiftgy.com'],
+    ['https://swiftgy.com/', exact],
+    ['https://www.swiftgy.com', exact],
+    ['https://www.swiftgy.com/', exact],
+    ['https://SwiftGY.com', exact],
+    ['https://api.swiftgy.com', exact],
+    ['https://swift-fixture.com', exact],
+    ['https://example.org', exact],
+    ['http://swiftgy.com', notOrigin],
+    ['https://swiftgy.com:443', notOrigin],
+    ['https://swiftgy.com/s', notOrigin],
+    ['"https://swiftgy.com"', notOrigin],
+  ])('production refuses APP_PUBLIC_URL=%s in every stage, before anything runs', (value, named) => {
+    for (const args of [[SHA], ['--no-public', SHA], ['--data-only', SHA]]) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...PRODUCTION, APP_PUBLIC_URL: value }, { args, env: stage(args) });
+      expect(r.status, args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain(named);
+      expect(r.calls).toEqual([]);
+    }
+  });
+
+  it('the refusal says what is wrong and names the app config it was checked against', () => {
+    const r = runPilot({ ...PRODUCTION, APP_PUBLIC_URL: 'https://www.swiftgy.com' });
+    expect(r.stderr).toContain('apps/mobile/app.config.ts');
+    expect(r.stderr).toContain('no trailing slash, no www');
+    expect(r.stderr).toContain('every store link and printed QR code names it');
+  });
+
+  it("the expected domain comes from the app config: move the app's domain and production follows it", () => {
+    const moved = APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, "const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swift-fixture.com';");
+    expect(moved).not.toBe(APP_CONFIG_TEXT);
+    const old = runPilot(PRODUCTION, { appConfig: moved });
+    expect(old.status).not.toBe(0);
+    expect(old.stderr).toContain('needs APP_PUBLIC_URL=https://swift-fixture.com exactly');
+    expect(old.calls).toEqual([]);
+    writeFileSync(log, '');
+    const followed = runPilot({ ...PRODUCTION, APP_PUBLIC_URL: 'https://swift-fixture.com' }, { appConfig: moved });
+    expect(followed.status, followed.stderr).toBe(0);
+  });
+
+  it.each([
+    ['the app config is missing', null],
+    ['it has no link-domain line', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, '')],
+    ['it has two link-domain lines', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, (line) => `${line}\n${line}`)],
+    ['the line has another shape', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, 'const linkDomain = process.env["SWIFT_LINK_DOMAIN"] ?? "swiftgy.com";')],
+    ['the domain is empty', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, "const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? '';")],
+    ['the domain is not a DNS name', APP_CONFIG_TEXT.replace(LINK_DOMAIN_LINE, "const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com/s';")],
+  ])('production refuses (fail closed) when %s, before anything runs', (_what, appConfig) => {
+    if (appConfig !== null) expect(appConfig).not.toBe(APP_CONFIG_TEXT);
+    const r = runPilot(PRODUCTION, { appConfig });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("cannot read the app's link domain from apps/mobile/app.config.ts");
+    expect(r.calls).toEqual([]);
+  });
+
+  it('staging is unchanged: its own site, a trailing slash, www or none at all, and no app config needed', () => {
+    const cases: Array<[string | undefined, null | undefined]> = [
+      ['https://staging.swiftgy.com', undefined], ['https://www.swiftgy.com/', undefined], [undefined, undefined], ['https://staging.swiftgy.com', null],
+    ];
+    for (const [value, appConfig] of cases) {
+      writeFileSync(log, '');
+      const r = runPilot({ ...STAGING, APP_PUBLIC_URL: value }, { appConfig });
+      expect(r.status, `${value} ${appConfig}: ${r.stderr}`).toBe(0);
+      expect(r.stdout).toContain(`STAGING READY at exact SHA ${SHA}`);
+    }
+  });
+});
+
 describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the production public origins, IPv6 too', () => {
   it.each(['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG'])('refuses %s exported in the shell (Docker would act on another daemon), before anything runs, on staging too', (name) => {
     for (const settings of [PRODUCTION, STAGING]) {
@@ -942,8 +1077,9 @@ describe('[PROD-PATH · #1448 review] pilot-up.sh: one Docker daemon, the produc
     expect(r.calls).toEqual([]);
   });
 
-  it('production accepts its public origins with a trailing slash, and several https CORS origins', () => {
-    const r = runPilot({ ...PRODUCTION, API_PUBLIC_URL: `https://${PROD_HOST}/`, APP_PUBLIC_URL: 'https://example.org/', CORS_ORIGIN: 'https://example.org, https://www.example.org' });
+  it('production accepts its API origin with a trailing slash, and several https CORS origins', () => {
+    // APP_PUBLIC_URL takes no trailing slash: DEPLOY-GUARD below.
+    const r = runPilot({ ...PRODUCTION, API_PUBLIC_URL: `https://${PROD_HOST}/`, CORS_ORIGIN: 'https://example.org, https://www.example.org' });
     expect(r.status, r.stderr).toBe(0);
   });
 
@@ -1353,8 +1489,11 @@ describe('[PROD-PATH · #1448 review] billing-cutover.sh: the backfill through a
 // RLS, a policy, a trigger, a function, a grant, a sequence and the swift_qr
 // schema is dumped with the real pg_dump; restore.sh restores it with the real
 // pg_restore into a scratch database and compares the two with its own SQL.
-// Only `docker compose exec postgres` is a stand-in: it runs the same command
-// on this host against the same server.
+// Only `docker compose exec postgres` (the LIVE side) is a stand-in: it runs the
+// same command on this host against the test server. [SEC-BACKUP F2] The scratch
+// copy is restored for real into restore.sh's throwaway instance (a container of
+// the Postgres image, no network) by a login that is not a superuser there, from
+// a dump signed as backup.sh signs it.
 const PGURL = new URL(process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test');
 const PG = { port: PGURL.port || '5432', user: decodeURIComponent(PGURL.username), password: decodeURIComponent(PGURL.password) };
 const pgEnv = () => ({ PATH: process.env['PATH'] ?? '', PGHOST: '127.0.0.1', PGPORT: PG.port, PGUSER: PG.user, PGPASSWORD: PG.password });
@@ -1380,15 +1519,22 @@ INSERT INTO public.platform_config VALUES ('c1', 'fee', '1', '2026-10-05 00:00:0
 INSERT INTO swift_qr.tokens VALUES ('t1', 'v1');
 `;
 const created: string[] = [];
+const REAL_DOCKER = execFileSync('sh', ['-c', 'command -v docker'], { encoding: 'utf8' }).trim();
+const PG_IMAGE = 'postgis/postgis:16-3.4';
+const instances: string[] = [];
 afterEach(() => {
   for (const db of created.splice(0)) {
     try { psql('postgres', `DROP DATABASE IF EXISTS ${db}`); } catch { /* best effort */ }
+  }
+  for (const name of instances.splice(0)) {
+    spawnSync(REAL_DOCKER, ['rm', '-f', name], { stdio: 'ignore' });
+    spawnSync(REAL_DOCKER, ['volume', 'rm', name], { stdio: 'ignore' });
   }
 });
 
 /** Build a source database, dump it for real, change it with `after` (or not),
  *  then run the real restore.sh against it. */
-function drill(after: string | null, opts: { args?: string[]; fixture?: string } = {}) {
+function drill(after: string | null, opts: { args?: string[]; fixture?: string; tamper?: boolean } = {}) {
   const id = Math.random().toString(36).slice(2, 10);
   const source = `swift_test_rcmp_${id}`;
   const scratch = `swift_test_rscr_${id}`;
@@ -1398,25 +1544,40 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string }
   const here = join(tmp, 'deploy');
   mkdirSync(here, { recursive: true });
   // [#1977] restore.sh replays the erasure ledger with the two SQL files that ship next to it.
-  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
+  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql', 'backup-signature.py']) copyFileSync(join(DEPLOY, f), join(here, f));
   writeFileSync(join(here, '.env'), `POSTGRES_DB=${source}\n`);
   const dump = join(tmp, `${id}.dump`);
   execFileSync('pg_dump', ['-Fc', '-d', source, '-f', dump], { env: pgEnv() });
+  // [SEC-BACKUP F2] Signed as backup.sh signs it, with a key of the test's own.
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'swift-backup-signing', '-f', join(tmp, `${id}.key`)]);
+  const pub = readFileSync(join(tmp, `${id}.key.pub`), 'utf8').split(' ').slice(0, 2).join(' ');
+  writeFileSync(join(tmp, `${id}.allowed`), `swift-backup namespaces="swift-backup" ${pub}\n`, { mode: 0o644 });
+  execFileSync('python3', ['-I', join(DEPLOY, 'backup-signature.py'), 'sign', '--key', join(tmp, `${id}.key`), '--object', dump, '--out', `${dump}.sig`, '--created', '20261028T000000Z']);
+  if (opts.tamper) writeFileSync(dump, Buffer.concat([readFileSync(dump), Buffer.from('\n')]));
   if (after) psql(source, after);
   writeFileSync(join(tmp, 'pgpass'), PG.password);
+  // The LIVE side runs here against the test server; `compose ps` finds no live container, so
+  // `compose config` names the image; every other docker call (the throwaway instance) is real.
   shim('docker', [
     'echo "docker $*" >> "$CALL_LOG"',
+    'if [ "$1" != compose ]; then exec "$REAL_DOCKER" "$@"; fi',
+    'for a in "$@"; do case "$a" in exec) break ;; ps) exit 0 ;; config) printf \'{"services":{"postgres":{"image":"%s"}}}\\n\' "$PG_IMAGE"; exit 0 ;; esac; done',
     'while [ $# -gt 0 ] && [ "$1" != postgres ]; do shift; done',
     '[ $# -gt 0 ] || exit 0',
     'shift',
     'export POSTGRES_USER="$PG_USER" POSTGRES_PASSWORD_FILE="$PG_PASSFILE" PGPORT="$PG_PORT"',
     'exec "$@"',
   ].join('\n'));
+  instances.push(`swift-restore-${scratch}`);
+  // The file's base shims make `sleep` return at once (other suites wait on nothing); the restore
+  // waits for its throwaway instance by the clock, so give it the real one.
+  rmSync(join(tmp, 'bin', 'sleep'), { force: true });
   // [#1977] restore.sh never guesses the Compose project; the stand-in docker ignores it.
   const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? ['--compare-source']), dump, scratch], {
     encoding: 'utf8',
     timeout: 120_000,
-    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port },
+    env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port,
+      REAL_DOCKER, PG_IMAGE, POSTGRES_USER: PG.user, BACKUP_SIGNING_ALLOWED_SIGNERS: join(tmp, `${id}.allowed`) },
   });
   return { ...res, source, scratch };
 }
@@ -1428,6 +1589,10 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
     expect(r.stdout).toMatch(/source \(swift_test_rcmp_\w+\): 3 tables, 4 rows, \d+ columns, RLS enabled on 1, forced on 1, 1 policies, \d+ constraints, \d+ indexes, 1 triggers, 1 functions, 1 views, \d+ grant entries, 1 sequences/);
     expect(r.stdout).toContain('in schemas public and swift_qr the scratch restore equals its source in every table\'s row count and content checksum, column definitions and defaults, RLS switches, policies, constraints, indexes, triggers, function definitions, view definitions and options, grants and sequence positions');
     expect(r.stdout).toContain('RESTORE OK');
+    // [SEC-BACKUP · REVIEW-M S3-1] removed with its volume once the run ends
+    expect(r.stdout).toContain(`the scratch instance swift-restore-${r.scratch} was removed with its volume`);
+    expect(spawnSync(REAL_DOCKER, ['container', 'inspect', `swift-restore-${r.scratch}`], { stdio: 'ignore' }).status).not.toBe(0);
+    expect(spawnSync(REAL_DOCKER, ['volume', 'inspect', `swift-restore-${r.scratch}`], { stdio: 'ignore' }).status).not.toBe(0);
   });
 
   it.each([
@@ -1446,18 +1611,84 @@ describe('[PROD-PATH] restore.sh --compare-source proves contents, on real datab
     ['a view switched to run with its caller\'s rights', `ALTER VIEW public.active_users SET (security_invoker = true)`, 'view|public.active_users|'],
     // Positive control: default privileges were compared already.
     ['a new default privilege', `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC`, 'grant|default|public|'],
-  ])('fails on %s, names it, and keeps the scratch database', (_what, change, named) => {
+  ])('fails on %s, names it, and removes the scratch copy with its instance', (_what, change, named) => {
     const r = drill(change);
     expect(r.status, r.stdout).not.toBe(0);
     expect(r.stdout).toContain('MISMATCH');
     expect(r.stdout).toContain(named);
-    expect(r.stderr).toContain('scratch database retained');
+    // [SEC-BACKUP · REVIEW-M S3-1] a failed comparison does not leave a copy of the data behind
+    expect(r.stderr).toContain('was dropped with its throwaway instance');
+    expect(spawnSync(REAL_DOCKER, ['volume', 'inspect', `swift-restore-${r.scratch}`], { stdio: 'ignore' }).status).not.toBe(0);
     expect(r.stdout).not.toContain('RESTORE OK');
   });
 
-  it('a backup heartbeat written after the dump is not a difference', () => {
-    const r = drill(`INSERT INTO public.platform_config VALUES ('hb', 'last_backup_at', '"2026-10-05"', now())`);
+  it.each([['last_backup_at', '"2026-10-05"'], ['last_backup_offsite', 'true'], ['last_backup_signed', 'true'], ['last_backup_storage_key', '"dedicated"']])(
+    'a backup heartbeat written after the dump is not a difference (%s)', (key, value) => {
+      const r = drill(`INSERT INTO public.platform_config VALUES ('hb', '${key}', '${value}', now())`);
+      expect(r.status, r.stderr + r.stdout).toBe(0);
+    });
+
+  // [BACKUP-FU] PostgreSQL does not always print a definition back the way it read it. On the
+  // migration-built schema three come back different after ANY dump and restore: a CHECK with an
+  // IN list on a varchar column (ANY ((ARRAY[...])::text[]) reads back as ANY (ARRAY[(...)::text])),
+  // and two trigger WHEN clauses with a row-wise IS DISTINCT FROM (nested ORs read back flat). The
+  // same meaning, printed differently: the drill must pass them, and only them.
+  const REPRINTED = String.raw`
+CREATE TABLE public.orders (id text PRIMARY KEY, "cashStatus" varchar(16),
+  CONSTRAINT orders_cash_status CHECK ("cashStatus" IS NULL OR "cashStatus" IN ('RETURNED', 'HELD', 'RESOLVED')));
+CREATE TABLE public.subscriptions (id text PRIMARY KEY, "riderId" text, "driverId" text, "vendorId" text);
+CREATE FUNCTION public.keep_lineage() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE CONSTRAINT TRIGGER subscriptions_lineage AFTER UPDATE ON public.subscriptions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
+  WHEN ((OLD."riderId", OLD."driverId", OLD."vendorId") IS DISTINCT FROM (NEW."riderId", NEW."driverId", NEW."vendorId")) EXECUTE FUNCTION public.keep_lineage();
+CREATE TRIGGER users_closed AFTER UPDATE ON public.users FOR EACH ROW
+  WHEN (NEW.status = 'CLOSED' AND (OLD.status, OLD.balance, OLD.id) IS DISTINCT FROM (NEW.status, NEW.balance, NEW.id)) EXECUTE FUNCTION public.keep_lineage();
+INSERT INTO public.orders VALUES ('o1', 'HELD'), ('o2', NULL);
+INSERT INTO public.subscriptions VALUES ('s1', 'r1', NULL, NULL);
+`;
+
+  it('[BACKUP-FU] passes a copy whose constraint and trigger definitions PostgreSQL only prints differently, and names each one', () => {
+    const r = drill(null, { fixture: FIXTURE + REPRINTED });
     expect(r.status, r.stderr + r.stdout).toBe(0);
+    expect(r.stdout).toContain('compare-source: 3 definitions differ only in how PostgreSQL prints them');
+    for (const name of ['constraint orders.orders_cash_status', 'trigger subscriptions.subscriptions_lineage', 'trigger users.users_closed']) {
+      expect(r.stdout).toContain(name);
+    }
+    expect(r.stdout).toContain('RESTORE OK');
+  });
+
+  it.each([
+    ['a CHECK that allows one more value', `ALTER TABLE public.orders DROP CONSTRAINT orders_cash_status, ADD CONSTRAINT orders_cash_status CHECK ("cashStatus" IS NULL OR "cashStatus" IN ('RETURNED', 'HELD', 'RESOLVED', 'LOST'))`, 'constraint|orders|orders_cash_status|'],
+    ['a CHECK that is no longer validated', `ALTER TABLE public.orders DROP CONSTRAINT orders_cash_status, ADD CONSTRAINT orders_cash_status CHECK ("cashStatus" IS NULL OR "cashStatus" IN ('RETURNED', 'HELD', 'RESOLVED')) NOT VALID`, 'constraint|orders|orders_cash_status|'],
+    ['a trigger that watches one column fewer', `DROP TRIGGER subscriptions_lineage ON public.subscriptions; CREATE CONSTRAINT TRIGGER subscriptions_lineage AFTER UPDATE ON public.subscriptions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN ((OLD."riderId", OLD."driverId") IS DISTINCT FROM (NEW."riderId", NEW."driverId")) EXECUTE FUNCTION public.keep_lineage()`, 'subscriptions_lineage'],
+    ['a trigger that fires at another time', `DROP TRIGGER users_closed ON public.users; CREATE TRIGGER users_closed BEFORE UPDATE ON public.users FOR EACH ROW WHEN (NEW.status = 'CLOSED' AND (OLD.status, OLD.balance, OLD.id) IS DISTINCT FROM (NEW.status, NEW.balance, NEW.id)) EXECUTE FUNCTION public.keep_lineage()`, 'users_closed'],
+    ['a reprinted trigger that is disabled', `ALTER TABLE public.subscriptions DISABLE TRIGGER subscriptions_lineage`, 'subscriptions_lineage'],
+  ])('[BACKUP-FU] still fails on %s among definitions that are only printed differently', (_what, change, named) => {
+    const r = drill(change, { fixture: FIXTURE + REPRINTED });
+    expect(r.status, r.stdout).not.toBe(0);
+    expect(r.stdout).toContain('MISMATCH');
+    expect(r.stdout).toContain(named);
+    expect(r.stderr).toContain('was dropped with its throwaway instance');
+    expect(r.stdout).not.toContain('RESTORE OK');
+  });
+
+  it('[SEC-BACKUP F2] restores into a throwaway instance, never the live cluster, as a login that is not a superuser there', () => {
+    const r = drill(null, { args: ['--compare-source', '--keep-for-inspection'] });
+    expect(r.status, r.stderr + r.stdout).toBe(0);
+    const instance = `swift-restore-${r.scratch}`;
+    expect(r.stdout).toContain(`scratch instance : ${instance} (throwaway, no network`);
+    expect(psql('postgres', `SELECT count(*) FROM pg_database WHERE datname = '${r.scratch}'`).trim()).toBe('0');
+    const inCopy = (sql: string) => execFileSync(REAL_DOCKER, ['exec', instance, 'psql', '-X', '-h', '/var/run/postgresql', '-U', 'swift_restore_admin', '-d', r.scratch, '-qtA', '-c', sql], { encoding: 'utf8' }).trim();
+    expect(inCopy(`SELECT rolsuper FROM pg_roles WHERE rolname = '${PG.user}'`)).toBe('f');
+    expect(inCopy(`SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'public.users'::regclass`)).toBe(PG.user);
+    expect(execFileSync(REAL_DOCKER, ['inspect', '--format', '{{.HostConfig.NetworkMode}}', instance], { encoding: 'utf8' }).trim()).toBe('none');
+  });
+
+  it('[SEC-BACKUP F2] refuses a dump whose bytes differ from what was signed, before any instance exists', () => {
+    const r = drill(null, { tamper: true });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('REFUSED');
+    expect(r.stdout).not.toContain('scratch instance');
+    expect(spawnSync(REAL_DOCKER, ['container', 'inspect', `swift-restore-${r.scratch}`], { stdio: 'ignore' }).status).not.toBe(0);
   });
 
   it('fails when the source has no tables to compare', () => {

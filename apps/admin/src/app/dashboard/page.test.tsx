@@ -27,10 +27,16 @@ const healthy = {
   alerts: { pendingVendors: 0, pastDueSubs: 0, unassignedOrders: 0 },
 };
 
+const WAITING_KEYS = ['opsAlerts', 'supportSafety', 'supportSafetyInProgress', 'documents', 'approvals', 'paymentConfirmations', 'support',
+  'supportInProgress', 'catalogue', 'storeVat', 'custody', 'claimsToDecide', 'claimsToPay', 'claimsAutoToPay', 'returnsToDecide',
+  'refundsOwed', 'moderation'];
+
 function handler(mode: 'ok' | 'fail') {
   return (request: ApiRequest) => {
     if (mode === 'fail') return { status: 503, body: { success: false, error: { code: 'DB_DOWN', message: 'unavailable' } } };
     if (request.url.pathname.includes('orders')) return { body: { success: true, data: [] } };
+    // [ADMIN-AUDIT S2-1] Today's queue counts: a healthy platform has every queue counted, at zero.
+    if (request.url.pathname === '/api/v1/admin/dashboard/waiting') return { body: { success: true, data: { queues: WAITING_KEYS.map((key) => ({ key, count: 0 })), notCounted: [] } } };
     return { body: { success: true, data: healthy } };
   };
 }
@@ -50,7 +56,8 @@ describe('[A-06] a failed dashboard read is never a quiet platform', () => {
     mockApi(handler('fail'));
     renderWithQuery(<DashboardPage />);
 
-    expect(await screen.findByText(/NOT an all-clear/i)).toBeTruthy();
+    // [REVIEW-F #2152 S3-1] Both reads failed here, so both say so (the alerts and the queue counts).
+    expect((await screen.findAllByText(/NOT an all-clear/i)).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/All clear — no active alerts/i)).toBeNull();
   });
 
@@ -119,5 +126,30 @@ describe('[A-07] the revenue figure says what it is', () => {
     renderWithQuery(<DashboardPage />);
     await waitFor(() => expect(screen.queryByText('GY$0')).toBeNull());
     expect(screen.queryByText('Monthly Projection')).toBeNull();
+  });
+});
+
+// [RIDER-SAFE 6 · REVIEW-F #2214 S4-2] The riders card: free riders beside the orders waiting for one,
+// counted in words that read right at one.
+describe('[RIDER-SAFE 6] the riders card counts in plain words', () => {
+  function withSupply(freeRiders: number, waitingForRider: number) {
+    mockApi((request: ApiRequest) => {
+      if (request.url.pathname === '/api/v1/admin/dashboard/overview') {
+        return { body: { success: true, data: { ...healthy, riderSupply: { freeRiders, waitingForRider } } } };
+      }
+      return handler('ok')(request);
+    });
+  }
+
+  it('one order waiting reads "1 order waiting"', async () => {
+    withSupply(1, 1);
+    renderWithQuery(<DashboardPage />);
+    expect(await screen.findByText('1 free · 1 order waiting')).toBeTruthy();
+  });
+
+  it('several read in the plural', async () => {
+    withSupply(2, 7);
+    renderWithQuery(<DashboardPage />);
+    expect(await screen.findByText('2 free · 7 orders waiting')).toBeTruthy();
   });
 });

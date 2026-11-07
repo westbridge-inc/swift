@@ -20,6 +20,9 @@ export function customerServiceCategories(categories: ServiceCategory[]): Servic
 export function providerVerificationPresentation(
   status: { roleVerified?: boolean; categoryUnavailable?: boolean } | undefined,
   isVerified: boolean,
+  /** [BILL-PRO PR5] The server's own answer to "can customers find me?" (GET /providers/me `listed`); an older API
+   *  omits it and the documents decide, as before. */
+  listed?: boolean,
 ): { label: string; description: string; live: boolean } {
   if (status?.categoryUnavailable) {
     return {
@@ -28,6 +31,8 @@ export function providerVerificationPresentation(
       live: false,
     };
   }
+  // [BILL-PRO PR5] Never "Live" while the server says the pro is not listed (the weekly fee or its ticks).
+  if (isVerified && listed === false) return { label: 'Not listed', description: 'Customers can’t find you right now. See below.', live: false };
   if (isVerified) return { label: 'Live', description: 'Customers can find you and send job requests.', live: true };
   return {
     label: status?.roleVerified ? 'Activating' : 'Not live yet',

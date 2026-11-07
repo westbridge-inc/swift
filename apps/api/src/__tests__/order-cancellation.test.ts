@@ -950,7 +950,7 @@ describe('Delivery-window auto-complete uses the canonical transaction', () => {
 describe('free cancellation when the mover search found nobody', () => {
   // [owner #46/#50, 13–14 Oct] No fee exists any more, so the words no longer name one.
   const NO_MOVER_PREVIEW = 'No mover was found. You can cancel for free.';
-  const NO_MOVER_CANCELLED = 'Order cancelled — no mover was found.';
+  const NO_MOVER_CANCELLED = 'Order cancelled — no rider was found.';
 
   /** A food order the store has prepared (well past the free window), out for
    *  a platform rider in delivery generation `generation`, whose search came
@@ -1106,7 +1106,7 @@ describe('free cancellation when the mover search found nobody', () => {
     const empty = await taxi('EXHAUSTED');
     const done = await expectFree(empty.order.id, empty.rider);
     // A ride is a ride in the customer's words, not an "order".
-    expect(done.message).toBe('Ride cancelled — no mover was found.');
+    expect(done.message).toBe('Ride cancelled — no driver was found.');
     const searching = await taxi('SEARCHING');
     await expectFreeButNotNoMover(searching.order.id, searching.rider);
   });

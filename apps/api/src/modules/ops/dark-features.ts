@@ -125,7 +125,7 @@ export const DARK_FEATURES: DarkFeature[] = [
     enabledWhen: '1',
     title: 'The order hold (free-cancel window)',
     whileOff:
-      'An order shows up on the vendor board the instant it is placed, so the store can accept it within seconds of checkout while the app still promises the customer a five-minute free-cancel window: the hidden grace period never exists.',
+      'An order shows up on the vendor board the instant it is placed, so the store can accept it within seconds of checkout while the app still promises the customer a free-cancel hold: the hidden grace period never exists.',
     impact: 'product',
   },
   {
@@ -138,6 +138,18 @@ export const DARK_FEATURES: DarkFeature[] = [
     title: "The store's MMG pay link (replaced by the store's MMG number)",
     whileOff:
       "A customer who chooses MMG pays the store's MMG NUMBER directly, shown on the order once the store accepts; no surface offers or opens a store pay link, a store cannot set a new one, and phones on builds 9-11 (which know only the link) see cash only at checkout. Stored links stay in the database unused. This is the owner's launch decision (17 Oct 2026), not a fault.",
+    impact: 'money',
+  },
+  {
+    // [STORE-VAT · owner O-5, 24 Oct 2026] Built for launch, OFF until switched on deliberately. Even ON, nothing a
+    // customer sees changes for a store until a PERSON approves its GRA VAT certificate.
+    key: 'store_vat',
+    setting: 'STORE_VAT',
+    source: 'env',
+    enabledWhen: '1',
+    title: "A VAT-registered store's VAT (14%, inside its prices, shown on its receipts)",
+    whileOff:
+      "No store can say it is VAT-registered, send its GRA VAT certificate, or be approved for VAT; every store's prices, carts, checkouts and receipts show no VAT, exactly as before. Orders already placed with VAT keep the VAT they froze on their receipts. Swift's own fees stay \"Not a VAT invoice\" either way.",
     impact: 'money',
   },
   {
@@ -163,6 +175,31 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'money',
   },
   {
+    // [O-1 · owner 24 Oct 2026] The Swift call bridge. Ships OFF; on only after a real test call
+    // rings and Press 1 connects on Digicel AND GTT.
+    key: 'call_relay',
+    setting: 'CALL_RELAY',
+    source: 'env',
+    // On only at '1' with blanks ignored (modules/calls/call-relay-switch.ts reads it so).
+    enabledWhenPattern: /^1$/,
+    title: 'Calls through Swift (the call bridge)',
+    whileOff:
+      "Calls are not routed through Swift. Every app, old store builds and new, keeps the other party's number on a live order and dials it directly, exactly as before, and in-app chat works as always. Kept OFF until a real Swift test call rings and Press 1 connects on a Digicel phone and a GTT phone (owner, 24 Oct 2026).",
+    impact: 'product',
+  },
+  {
+    // [O-1 · owner 22 Oct 2026] ON until store builds 9-12 / vc7-vc8 are retired (launch checklist).
+    key: 'counterpart_phones_to_old_apps',
+    setting: 'COUNTERPART_PHONES_TO_OLD_APPS',
+    source: 'env',
+    // On unless the trimmed value is exactly '0' (modules/calls/counterpart-phone.ts reads it so).
+    enabledWhenPattern: /^(?!0$)/,
+    title: "Old app builds still get the other party's number",
+    whileOff:
+      "Takes effect only while CALL_RELAY is on; while the call bridge is off every app keeps the other party's number whatever this says. With the bridge on: no app is sent another person's personal phone number, so phones on store builds 9-12 (iPhone) and vc7-vc8 (Android) show no Call button for the rider, driver, customer or store on a live order and use chat or support instead. Builds that know the Swift call bridge are not affected (with the bridge on they are never sent a number). Set to 0 only when those builds are retired.",
+    impact: 'product',
+  },
+  {
     key: 'web_taxi_booking',
     setting: 'WEB_TAXI_BOOKING',
     source: 'env',
@@ -172,6 +209,17 @@ export const DARK_FEATURES: DarkFeature[] = [
     whileOff:
       "The website's Taxi page shows real fare estimates and says 'Book a taxi in the Swift app'; a ride request from a browser session is refused (TAXI_MOBILE_APP_REQUIRED) and the ride page points to the app for the safety PIN and SOS. Phone booking is unchanged. Kept OFF until web booking passes the app's safety bar and a staging run, then the owner decides (16 Oct 2026).",
     impact: 'safety',
+  },
+  {
+    key: 'instant_booking',
+    setting: 'INSTANT_BOOKING',
+    source: 'env',
+    // The code ignores surrounding blanks (booking/instant-booking.ts): ' 1' is ON there, so it is ON here.
+    enabledWhenPattern: /^1$/,
+    title: 'Instant appointment booking',
+    whileOff:
+      "Booking an appointment is a request, as before: the customer's time is taken only when the business accepts, so two customers can wait on the same free time and the business's accept decides (the other is told the time was taken). No listing can be set to confirm bookings automatically, and a booking keeps the one-minute free-cancel window. On: the time is taken when the customer books; a cash booking of a listing set to confirm automatically is confirmed in the same moment (MMG bookings still wait for the business); a confirmed booking cancels free until two hours before it starts. Already landed: the Terms and refunds wording for instant confirmation and the two-hour cancel window (LEGAL_VERSION 2026-10-28), and the phone app's success popup that follows the server's order status. That popup reaches phones in an over-the-air update after Apple approves build 12; until then build 12 shows 'Booking requested' for a few seconds after an instant booking (the owner accepted this). No shop certificate is needed: Guyana has no hair or beauty shop certificate, so hair and beauty listings book like any other service (owner, 28 Oct 2026, replacing A2). The real-Postgres race tests (several checkouts for one time) run in CI. Kept OFF until a staging run (staging stays frozen while Apple reviews build 12), then the owner's go; the owner has ruled it turns ON in production with the launch deploy (28 Oct 2026, B4, A3, A4, B1, C2).",
+    impact: 'product',
   },
   // ── [row 331 · CONFIG-GUARDS] the kill switches. Each is unset (or 0) in
   // normal running; set to 1 it switches its capability off. The census in
@@ -296,15 +344,25 @@ export const DARK_FEATURES: DarkFeature[] = [
       'An advertiser owed a refund gets nothing back: the refund is recorded as owed, but bookings, inventory, the credit balance and the invoice stay as they were until it is released.',
     impact: 'money',
   },
+  {
+    key: 'partner_approvals',
+    setting: 'PARTNER_APPROVALS_OPEN',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Approving partners (ordering day)',
+    whileOff:
+      'Review goes on, but the last paper a partner needs cannot be approved: it waits in the Review Center, marked held, and no free trial starts and no store goes live. Nothing machine-approves. Open it on ordering day, then approve the batch. Unset means closed in production only.',
+    impact: 'money',
+  },
   // ── [SWITCHES fact-check, 21 Oct] launch switches the code reads that no register named.
   {
     key: 'car_deliveries',
     setting: 'CAR_DELIVERIES',
     source: 'env',
     enabledWhen: '1',
-    title: 'Deliveries by taxi cars (H-plate cars, wagons, buses)',
+    title: 'Deliveries by car (private P-plate cars: deliveries only; H-plate taxis: rides and deliveries)',
     whileOff:
-      "Taxi cars carry passengers only (owner ruling, 15 Oct 2026, until counsel confirms the hire-car licence covers goods): a driver sees no store delivery or parcel offers, cannot grab or claim one, and every store delivery and parcel goes to riders. Passenger rides are unchanged.",
+      "Owner ruling 6 Nov 2026: ON at launch; this is the kill switch. While off, cars carry no goods: a car sees no store delivery or parcel offers, cannot grab or claim one, a private (P) plate car cannot sign up or go online, and every store delivery and parcel goes to bicycles and motorbikes. Taxi rides (H plates only) are unchanged.",
     impact: 'product',
   },
   {
@@ -336,6 +394,16 @@ export const DARK_FEATURES: DarkFeature[] = [
     whileOff:
       'Advertising is closed: no sponsored placement is shown to anyone, and the advertiser routes refuse every request. This is the launch lock (owner ruling, 13 Oct 2026): production refuses to start with it on until an attorney signs off.',
     impact: 'growth',
+  },
+  {
+    key: 'ads_mmg_checkout',
+    setting: 'ADS_MMG_CHECKOUT',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Advertisers pay on the MMG checkout page',
+    whileOff:
+      'Production takes no ad money: no ad invoice is issued and no MMG page opens for one. It stays off until MMG has answered three things: whether one merchant account may sell a second product, what limits apply, and when an ad payment can be reversed.',
+    impact: 'money',
   },
   {
     key: 'owner_rls_bind',
@@ -405,6 +473,13 @@ export function darkFeatureMisconfigurations(env: Record<string, string | undefi
   const out: string[] = [];
   if (env['MALWARE_SCAN'] === 'clamd' && !env['CLAMD_HOST']?.trim()) {
     out.push('MALWARE_SCAN=clamd with no CLAMD_HOST: every upload is refused (UPLOAD_SCAN_UNAVAILABLE) until the scanner is named.');
+  }
+  const approvals = env['PARTNER_APPROVALS_OPEN'];
+  if (approvals !== undefined && approvals !== '' && approvals !== '0' && approvals !== '1') {
+    out.push(`PARTNER_APPROVALS_OPEN=${approvals} reads as closed: only 1 opens it. Partners cannot be approved.`);
+  }
+  if (env['WEB_ORDERING'] === 'live' && approvals !== '1') {
+    out.push('WEB_ORDERING=live with PARTNER_APPROVALS_OPEN not 1: ordering is open and no new partner can be approved. Ordering day opens approvals first.');
   }
   return out;
 }

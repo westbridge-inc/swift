@@ -79,7 +79,7 @@ describe('Advertiser [ads §4/§5]', () => {
   it('a member is unique per (advertiser, user) — the same person is not listed twice', async () => {
     const a = await makeAdvertiser();
     const userId = `u-${nanoid(6)}`;
-    await prisma.advertiserMember.create({ data: { advertiserId: a.id, userId, role: 'OWNER' } });
+    await prisma.advertiserMember.create({ data: { advertiserId: a.id, userId, role: 'OWNER', acceptedAt: new Date() } });
     await expect(
       prisma.advertiserMember.create({ data: { advertiserId: a.id, userId, role: 'MANAGER' } }),
     ).rejects.toThrow();

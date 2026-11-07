@@ -131,6 +131,9 @@ describe('[PT-1] the three tables are walled like every tenant table', () => {
       // decision only move forward; a booking never stands beside a void or refund that may have worked.
       'card_sessions.card_sessions_provider_actions',
       'card_sessions.card_sessions_tenant_matches_user',
+      // [Off-site erasure ledger, #1984] AFTER DELETE: a closed account's card session the erasure deletes is
+      // recorded off-site (ids only), so a backup restore cannot bring it back; writes nothing for open accounts.
+      'card_sessions.erasure_ledger_deleted_row',
       'payment_instruments.payment_instruments_frozen',
       'payment_instruments.payment_instruments_no_delete',
       'payment_instruments.payment_instruments_tenant_matches_user',

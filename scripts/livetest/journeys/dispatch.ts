@@ -1,7 +1,7 @@
 // Dispatch helpers for the mover journeys [TASK-057]: offers are found the way
 // the app finds them (GET offers/current polling), movers keep their position
-// fresh through the suite heartbeat, and express delivery skips the 5-minute
-// hold so a dispatch journey does not wait on it.
+// fresh through the suite heartbeat, and express delivery skips the LIFECYCLE_V2
+// hold (1 minute, ORDER_HOLD_MINUTES) so a dispatch journey does not wait on it.
 
 import type { Session } from '../client.js';
 import { completeCourierFixture } from '../courier-cleanup.js';

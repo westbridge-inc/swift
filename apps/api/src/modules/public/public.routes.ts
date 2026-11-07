@@ -1,3 +1,4 @@
+import { SELLER_VERIFIED_SELECT, sellerVerifiedNow } from '../vendor/seller-verified';
 import { servedPhotoAddress } from '../../utils/photo-address';
 import { FastifyInstance } from 'fastify';
 import { resolvePublicMarketTenant } from '../search/search-scope';
@@ -12,6 +13,7 @@ import { notProhibitedStore, PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visib
 import { adsEnabled } from '../ads/ads-enabled';
 import { hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { publicStorefrontSeller } from '../verification/storefront-seller';
+import { brandBranchesFor } from '../vendor/brand';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -222,6 +224,8 @@ export async function publicRoutes(app: FastifyInstance) {
       where: { slug, ...PUBLIC_WHERE, tenantId, ...PUBLIC_VENDOR_TENANT, ...prohibitedStores },
       select: {
         ...PUBLIC_VENDOR_SELECT,
+        // [P35] Read only to compute isVerified below; never sent (stripped before the spread).
+        ...SELLER_VERIFIED_SELECT,
         // The app already shows guests the street address (pickup needs it);
         // the detail page gets it, the crawlable directory list stays city-level.
         addressLine1: true,
@@ -284,11 +288,19 @@ export async function publicRoutes(app: FastifyInstance) {
     // works, the store's refund rule and the statutory-rights sentence.
     const seller = await publicStorefrontSeller(app.prisma, vendor.id);
 
+    // [P35 · board 4b] "Verified seller" on the website: PUBLIC_WHERE already requires isVerified, and the
+    // documents' wall-clock bound must still hold (seller-verified.ts). The bound itself is not published.
+    const { activationValidUntil, isSynthetic, owner, ...publicVendor } = vendor;
+    // [CHAINS PR3] The brand this store belongs to and the branches a visitor may switch to, under this page's own
+    // rule (public, this tenant, not filed under a banned category). No place is known here: the list keeps its order.
+    const brand = await brandBranchesFor(app.prisma, vendor.id, {}, { ...PUBLIC_WHERE, tenantId, ...PUBLIC_VENDOR_TENANT, ...prohibitedStores });
     return {
       success: true,
       data: {
-        ...vendor,
+        ...publicVendor,
+        isVerified: sellerVerifiedNow({ isVerified: true, activationValidUntil, isSynthetic, owner }),
         seller,
+        brand,
         // Present when the request arrived on a retired slug, so the caller can correct its URL.
         ...(vendor.slug === request.params.slug ? {} : { canonicalSlug: vendor.slug }),
         ...(surface ?? { displayRating: null, ratingBucket: '(0)', ratingCount: 0, topRated: false }),

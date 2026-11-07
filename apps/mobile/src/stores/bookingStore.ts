@@ -5,6 +5,10 @@ export type ServiceVisitMode = 'AT_BUSINESS' | 'MOBILE';
 interface PendingAppointment {
   slotStart: string; // ISO — validated server-side at checkout
   mode?: ServiceVisitMode; // only meaningful when the business offers BOTH
+  /** [BOOK-S6a] The slots answer said this listing confirms cash bookings at
+   *  once (switch on + the business's setting). Drives the cart button's words
+   *  only; never sent to checkout, which is the judge. */
+  instant?: boolean;
 }
 
 interface BookingState {

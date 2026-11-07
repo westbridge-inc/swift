@@ -23,6 +23,7 @@ import { placesRoutes } from './modules/places/places.routes';
 import courierRoutes from './modules/courier/courier.routes';
 import { servicesRoutes } from './modules/services/services.routes';
 import { serviceCatalogRoutes } from './modules/services/service-catalog.routes';
+import { providerFeeRoutes } from './modules/services/provider-fee.routes';
 import { partnerRoutes } from './modules/partner/partner.routes';
 import { setAppLogger } from './utils/logger';
 import { evaluateSchedulerHealth, schedulerStallMs, workerCheckStatus } from './utils/scheduler-health';
@@ -164,9 +165,16 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // Custom plugins
   await app.register(prismaPlugin);
   await app.register(redisPlugin);
+  // [Row 312 · COORD 22 Oct] The upload scanner's payload-failure cool-down is shared by every API
+  // replica (and the worker) through Redis, so a file that crashes clamd on one replica cannot make the
+  // next upload on another look "down".
+  { const { redisScannerCooldown, registerScannerCooldown } = await import('./lib/malware-scan'); registerScannerCooldown(redisScannerCooldown(app.redis)); }
   await app.register(authPlugin);
   await app.register(socketPlugin);
   runtimeReadiness.checkRealtime = app.checkSocketAdapterReady;
+  // [Row 312 · COORD 23 Oct] A photo stored while the scanner was down (the bypass) leaves NO response,
+  // on any surface, before its rescan answers CLEAN (lib/photo-scan-filter.ts). Root hook, before any route.
+  { const { registerUploadPhotoScan } = await import('./lib/photo-scan-filter'); registerUploadPhotoScan(app); }
 
   // Multi-tenancy: give every request a fresh tenant store BEFORE any auth runs,
   // so `authenticate` can bind the caller's tenant without leaking across
@@ -248,8 +256,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
     })().catch(() => {});
     // the condition cleared: close the open page so the outbox stays truthful
     if (!workerHealth.page && beat) {
-      void resolveOpsPage(app.prisma, 'Job scheduler stalled').catch(() => {});
-      void resolveOpsPage(app.prisma, 'Job scheduler never started').catch(() => {});
+      // In order, never-started first: once the stall page reads closed, this probe has finished with both.
+      void (async () => {
+        await resolveOpsPage(app.prisma, 'Job scheduler never started').catch(() => {});
+        await resolveOpsPage(app.prisma, 'Job scheduler stalled').catch(() => {});
+      })();
     }
 
     // `starting` is the worker inside its boot grace: not a failure, and not a
@@ -270,14 +281,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // [Row 312] The upload malware scanner, detail only: 'off' (dark), 'ok', or 'down' (every upload is
     // refused 503 until it answers; the worker's watch pages ops). It never turns the API's status
     // degraded: everything but uploads still works, and the probes must not take the API down with it.
-    const { malwareScannerStatus } = await import('./lib/malware-scan');
+    const { malwareScanBypassOn, malwareScanEnabled, malwareScannerStatus } = await import('./lib/malware-scan');
     const malwareScanner = (await malwareScannerStatus(process.env, { timeoutMs: 2_000 })).state;
+    // [COORD 21 Oct] The emergency switch, so the doctor can shout while it is on.
+    const malwareScanBypass = malwareScanEnabled() && malwareScanBypassOn();
     return {
       status,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
       malwareScanner,
+      malwareScanBypass,
       routing,
       // [PLACES-LOUD] Address search: last known status and the last failure's class and
       // Google status words (never a key or a query). Detail-gated like the rest.
@@ -328,6 +342,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
   await app.register(serviceCatalogRoutes, { prefix: '/api/v1/services' });
+  // [BILL-PRO PR4] A pro's own weekly fee (no fee exists while PRO_WEEKLY_FEE is off).
+  await app.register(providerFeeRoutes, { prefix: '/api/v1/provider' });
   await app.register(partnerRoutes, { prefix: '/api/v1/partner' });
   // [PT-2] Card rail v2 public doors: the provider's return (an observation
   // that never credits by itself) and, off production, the simulator's test
@@ -368,6 +384,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // until TWILIO_WEBHOOK_AUTH_TOKEN and TWILIO_INBOUND_SMS_URL are set.
   const { smsInboundRoutes } = await import('./modules/notification/sms-inbound.routes');
   await app.register(smsInboundRoutes, { prefix: '/api/v1/sms' });
+  // [O-1] The Swift call bridge: the parties' door (signed-in; refuses with
+  // CALL_RELAY_OFF while the switch is off) and the voice provider's webhooks
+  // (signature-checked over the exact URL before the body is used; 503 until
+  // configured; never forward a call back to anyone).
+  const { callsRoutes, callVoiceRoutes } = await import('./modules/calls/calls.routes');
+  await app.register(callsRoutes, { prefix: '/api/v1/calls' });
+  await app.register(callVoiceRoutes, { prefix: '/api/v1/calls/voice' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps

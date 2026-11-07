@@ -62,6 +62,8 @@ export function NearbyScreen() {
             <VendorRow
               image={vendorPhoto(v)}
               name={v.name}
+              brand={v.brand}
+              place={v.addressLine1 ?? v.city}
               meta={
                 <RatingMeta
                   rating={v.displayRating ?? null}

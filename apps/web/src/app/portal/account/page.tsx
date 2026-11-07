@@ -1,9 +1,11 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { cancelPendingMmgPayUrl, getDriverProfile, getRiderProfile, updateDriverProfile } from '@/lib/mover-api';
+import { payLinkHoldLine } from '@/lib/mmg-hold';
 
 export default function AccountPage() {
   const queryClient = useQueryClient();
@@ -49,16 +51,30 @@ export default function AccountPage() {
     onError: (e) => setError((e as Error).message),
   });
 
+  // [WEB-DELETE · owner 1 Nov 2026] The phone's Personal data -> Delete my account (shown even when the profile read fails).
+  const deleteCard = (
+    <div className="sw-card flex flex-wrap items-center gap-3 p-6">
+      <div className="min-w-0 flex-1">
+        <h2 className="font-bold">Your Swift account</h2>
+        <p className="mt-1 text-sm text-[var(--swift-muted)]">Delete your account and the personal data Swift holds about you.</p>
+      </div>
+      <Link href="/portal/account/delete" className="sw-chip text-[var(--swift-red)]">Delete my account</Link>
+    </div>
+  );
+
   if (rider.isLoading || driver.isLoading) return <p className="text-sm text-[var(--swift-muted)]">Loading…</p>;
   // [UI-SWEEP U24] A failed profile read used to render a blank page (the MMG
   // pay-link card simply vanished): say it could not check, as the home does.
   if (rider.isError || driver.isError) {
     return (
-      <DataUnavailable
-        what="your earner profile"
-        error={rider.error ?? driver.error}
-        onRetry={() => { void rider.refetch(); void driver.refetch(); }}
-      />
+      <div className="max-w-2xl space-y-6">
+        <DataUnavailable
+          what="your earner profile"
+          error={rider.error ?? driver.error}
+          onRetry={() => { void rider.refetch(); void driver.refetch(); }}
+        />
+        {deleteCard}
+      </div>
     );
   }
 
@@ -128,7 +144,8 @@ export default function AccountPage() {
                 // [W-31] Changing where your earnings land is not a field edit.
                 const next = mmg.trim();
                 const question = next
-                  ? `Send your future MMG payments to:\n\n${next}\n\nThis replaces ${liveUrl ?? 'no current link'} after a short safety delay.`
+                  // [owner 30 Oct 2026] The server's hours (a pay link waits the cool-off), never a guess.
+                  ? `Send your future MMG payments to:\n\n${next}\n\n${payLinkHoldLine(driver.data?.['mmgPayUrlHoldHours'], liveUrl)}`
                   : 'Remove your MMG pay link? Riders will no longer be able to pay you by MMG.';
                 if (window.confirm(question)) save.mutate();
               }}
@@ -155,6 +172,8 @@ export default function AccountPage() {
           This portal is for the paperwork: earnings, history and documents.
         </p>
       </div>
+
+      {deleteCard}
     </div>
   );
 }

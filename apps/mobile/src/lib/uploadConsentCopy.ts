@@ -4,4 +4,4 @@
  * uploadConsentCopy.test.ts holds the two together.
  */
 export const DOCUMENT_CONSENT_TEXT = 'I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.';
-export const CUSTOMER_ID_CONSENT_TEXT = 'I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.';
+// [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (b)] No customer ID tick: the app no longer asks a customer for an ID.

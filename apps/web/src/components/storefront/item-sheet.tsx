@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Minus, Plus, X } from 'lucide-react';
 import { formatAmount, parseAmount } from '@/lib/money';
 import type { MenuItem, OptionGroup } from '@/lib/customer';
@@ -25,8 +26,17 @@ function optionGuidance(group: OptionGroup): string {
   return `Optional · up to ${group.maxSelect}`;
 }
 
+/** [P35 · board 4b] About three lines of the sheet's description; past this it is clamped behind "Read more". */
+export const SHEET_DESCRIPTION_CLAMP_CHARS = 140;
+
+/** [P35 · board 4b] Who sells the item: "Craft & Kind · Georgetown", and "Verified seller" when a person approved
+ *  the store's papers (the public store page only exists for such a store: public.routes.ts PUBLIC_WHERE). */
+export interface ItemSheetSeller { name: string; city: string | null | undefined; verified: boolean }
+
 export interface ItemSheetProps {
   item: MenuItem & { optionGroups?: OptionGroup[] };
+  /** Absent: the sheet shows no seller line (tests, older callers). */
+  seller?: ItemSheetSeller;
   vendorType: string | null | undefined;
   selectedOptions: Record<string, string[]>;
   onChoose: (_group: OptionGroup, _optionId: string) => void;
@@ -41,7 +51,7 @@ export interface ItemSheetProps {
 }
 
 export function ItemSheet({
-  item, vendorType, selectedOptions, onChoose, quantity, onQuantity, error, busy, cartLoading, unitPrice, onConfirm, onClose,
+  item, seller, vendorType, selectedOptions, onChoose, quantity, onQuantity, error, busy, cartLoading, unitPrice, onConfirm, onClose,
 }: ItemSheetProps) {
   return (
     <Sheet labelledBy="menu-options-title" onClose={onClose} className={styles.sheet}>
@@ -49,7 +59,13 @@ export function ItemSheet({
         <Photo src={item.imageUrl} alt="" vendorType={vendorType} sizes="72px" iconSize={26} className={styles.sheetPhoto} />
         <div className={styles.sheetHeading}>
           <h2 id="menu-options-title" className={styles.modalTitle}>{item.name}</h2>
-          {item.description ? <p className={styles.modalDescription}>{item.description}</p> : null}
+          {seller ? (
+            <p className={styles.sheetSeller}>
+              <span>{seller.city?.trim() ? `${seller.name} · ${seller.city.trim()}` : seller.name}</span>
+              {seller.verified ? <span className="sw-status sw-status-success">Verified seller</span> : null}
+            </p>
+          ) : null}
+          {item.description ? <SheetDescription text={item.description} /> : null}
         </div>
         <button data-modal-initial-focus type="button" className={styles.closeButton} onClick={onClose} aria-label="Close item options">
           <X size={20} aria-hidden="true" />
@@ -124,5 +140,21 @@ export function ItemSheet({
         </div>
       </div>
     </Sheet>
+  );
+}
+
+/** [P35 · board 4b "Read more"] Three lines until asked; a short description is whole, with no button. */
+function SheetDescription({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const clamp = text.trim().length > SHEET_DESCRIPTION_CLAMP_CHARS;
+  return (
+    <>
+      <p className={clamp && !open ? `${styles.modalDescription} ${styles.modalDescriptionClamped}` : styles.modalDescription}>{text}</p>
+      {clamp ? (
+        <button type="button" className={styles.readMore} aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+          {open ? 'Show less' : 'Read more'}
+        </button>
+      ) : null}
+    </>
   );
 }

@@ -293,6 +293,9 @@ describe('[item 20] notifications written for someone else', () => {
     }
     const mine = () => owner.notification.count({ where: { userId: ids.other, body: `erase-${RUN}` } });
     expect(await mine()).toBe(1);
+    // [row 622] The erase action refuses an account that is not erased: the closure writes this tombstone first
+    // in its transaction (owner-wall-erase-guard.test.ts pins the refusal and the order).
+    await owner.user.update({ where: { id: erased }, data: { status: 'DEACTIVATED', phone: `deleted:${erased}` } });
     await asPerson(ids.other, () => app.prisma.$transaction((tx) => eraseOwedRowsInTransaction(tx, erased)));
     expect(await owner.notification.count({ where: { userId: erased } })).toBe(0);
     expect(await mine()).toBe(1);
@@ -562,7 +565,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       for (const m of text.matchAll(/\.\s*notification\s*\.\s*(create|upsert)\s*\(/g)) if (rel !== HELPER) writes.push(`${rel}: notification.${m[1]}`);
       for (let n = (text.match(/\.\s*notification\s*\.\s*createMany\s*\(/g) ?? []).length; n > 0; n -= 1) bump(bulk, rel);
       for (const m of text.matchAll(/\b(insertNoticeFor|upsertNoticeFor)\s*\(/g)) if (!/function\s+$/.test(text.slice(0, m.index))) bump(helperCalls, `${rel} ${m[1]}`);
-      for (const m of text.matchAll(/\b(pendingStaffInvitesOf|closeStaffInvitesOf|staffInviteesOf|publicPhoneAsked|eraseNoticesOf)\s*\(/g)) {
+      for (const m of text.matchAll(/\b(pendingStaffInvitesOf|closeStaffInvitesOf|staffInviteesOf|publicPhoneAsked|noticeHeld|eraseNoticesOf)\s*\(/g)) {
         if (!/function\s+$/.test(text.slice(0, m.index))) bump(actionCalls, `${rel} ${m[1]}`);
       }
       if (rel !== HELPER && /swift_owner_wall_(notice_id|pending_staff_invites|close_staff_invites|staff_invitees|public_phone_asked|erase_notices)/.test(text)) writes.push(`${rel}: calls a notice action by name`);
@@ -580,8 +583,11 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
     // The helper: the ON insert, the ON idempotent insert, and its collision re-insert (REVIEW-M S4-2).
     expect(bulk).toEqual({ [HELPER]: 3, 'modules/admin/admin.routes.ts': 1, 'modules/mover-revocation-outbox.ts': 1, 'modules/safety/incident.service.ts': 1 });
     expect(helperCalls).toEqual({
+      // [BUG-HUNT-2 G01] 'Ride closed by Swift' to both sides, inside the close's transaction
+      'modules/admin/admin.routes.ts insertNoticeFor': 1,
       'modules/auth/auth.service.ts insertNoticeFor': 1,
       'modules/billing/fee-demand-delivery.ts upsertNoticeFor': 1,
+      'modules/cash/delivery-cash-settlement.service.ts insertNoticeFor': 1,
       'modules/cash/door-cash-hold.ts insertNoticeFor': 1,
       'modules/handover/handover-notice.ts upsertNoticeFor': 1,
       'modules/notification/notification.service.ts insertNoticeFor': 1,
@@ -589,11 +595,21 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/rating/vendor-review-visibility.ts insertNoticeFor': 1,
       'modules/rides/driver-pickup.ts upsertNoticeFor': 1,
       'modules/safety/incident.service.ts insertNoticeFor': 1,
+      // [BOOK-P2] a booked pro appointment: 'booking confirmed' to the pro and to the customer, inside the booking's
+      // transaction (a blocked pair is refused before it; a replay returns the first job and writes nothing)
+      'modules/services/pro-booking.routes.ts insertNoticeFor': 1,
       'modules/services/service-job-transition.ts insertNoticeFor': 1,
+      // [STORE-VAT · O-5] the store owner's VAT approved / not approved / withdrawn notice (noticeStore, inside the decision's transaction)
+      'modules/store-vat/store-vat-decisions.ts insertNoticeFor': 1,
       'modules/user/inactivity.ts insertNoticeFor': 1,
+      // [L04 #1550] 'Your email address was changed' to the account itself, inside the change's transaction
+      'modules/user/profile-update.ts insertNoticeFor': 1,
       'modules/vendor/staff-invites.ts insertNoticeFor': 2,
       'modules/vendor/store-pin-move.ts insertNoticeFor': 1,
-      'modules/verification/verification.service.ts insertNoticeFor': 5,
+      // + [FOOD-PERMIT] the food handlers tick notice (askForFoodHandlerTick)
+      // + [RETIER PR-A] the store weekly-fee tick notice (askForStoreFeeTick)
+      // - [CHECKLIST-LEGAL · owner 1 Nov 2026 (a) — a DELIBERATE change] the tier-promotion notice (promoteIfRegistered) is gone with the tier
+      'modules/verification/verification.service.ts insertNoticeFor': 7,
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({
@@ -601,6 +617,9 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/vendor/staff-invites.ts closeStaffInvitesOf': 1,
       'modules/vendor/staff-invites.ts pendingStaffInvitesOf': 1,
       'modules/vendor/staff-invites.ts staffInviteesOf': 1,
+      // [FOOD-PERMIT] the food handlers notice's once-only check, inside the projection's transaction
+      // + [RETIER PR-A] the store weekly-fee notice's once-only check, the same way
+      'modules/verification/verification.service.ts noticeHeld': 2,
       'modules/verification/verification.service.ts publicPhoneAsked': 1,
     });
     // Plain accessors left: the person's own inbox (customer routes, the service's mark-read/count, the vendor's own alerts,
@@ -610,7 +629,9 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/user/customer.routes.ts': 3,
       'modules/vendor/staff-invites.ts': 8,
       'modules/vendor/vendor.routes.ts': 2,
-      'modules/verification/verification.service.ts': 1,
+      // + [FOOD-PERMIT] the wall-OFF branch of the food handlers notice's once-only check (askForFoodHandlerTick)
+      // + [RETIER PR-A] the wall-OFF branch of the store weekly-fee notice's once-only check (askForStoreFeeTick)
+      'modules/verification/verification.service.ts': 3,
     });
     // Raw SQL: the retention sweep (a system job) and the invitee's own invite lock.
     expect(rawSql).toEqual({ 'modules/compliance/retention.service.ts': 2, 'modules/vendor/staff-invites.ts': 1 });

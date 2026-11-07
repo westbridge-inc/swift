@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { beforeEach, describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -18,6 +18,7 @@ import { OrderService } from '../modules/order/order.service';
 import { ONLY_ITEM_LEFT_COPY } from '../modules/order/substitution-view';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { freshOrderPlaceBudget } from './helpers/order-place-budget';
 
 // ---------------------------------------------------------------------------
 // [O-4 · owner 22 Oct 2026] "Accept the whole order without ticking each item;
@@ -107,14 +108,14 @@ const pushes = (orderId: string) => sys(async () => (await app.prisma.notificati
   .filter((n) => JSON.stringify(n.data ?? {}).includes(orderId)));
 
 /** A real checkout: rice ×1 and beans ×2 from the grocer (or only the rice). */
-async function placeOrder(paymentMethod: 'MOBILE_MONEY' | 'CASH' = 'CASH', opts: { onlyRice?: boolean } = {}) {
+async function placeOrder(paymentMethod: 'MOBILE_MONEY' | 'CASH' = 'CASH', opts: { onlyRice?: boolean; promoCode?: string; pickup?: boolean } = {}) {
   expect((await call('DELETE', '/api/v1/customer/cart', customer.token)).statusCode).toBe(200);
   const lines: ReadonlyArray<readonly [string, number]> = opts.onlyRice ? [[grocer.rice, 1]] : [[grocer.rice, 1], [grocer.beans, 2]];
   for (const [itemId, quantity] of lines) {
     const added = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId: grocer.vendorId, itemId, quantity });
     expect(added.statusCode, added.body).toBe(201);
   }
-  const body = paymentMethod === 'MOBILE_MONEY' ? { paymentMethod, mmgPayTo: 'STORE_NUMBER' } : { paymentMethod };
+  const body = { ...(paymentMethod === 'MOBILE_MONEY' ? { paymentMethod, mmgPayTo: 'STORE_NUMBER' } : { paymentMethod }), ...(opts.promoCode ? { promoCode: opts.promoCode } : {}), ...(opts.pickup ? { fulfillmentSelections: { [grocer.vendorId]: 'PICKUP' } } : {}) };
   const res = await call('POST', '/api/v1/customer/checkout', customer.token, body, { 'idempotency-key': `swo-${nanoid(10)}` });
   expect(res.statusCode, res.body).toBe(200);
   const orderId = (res.json().data as { order: { id: string } }).order.id;
@@ -173,6 +174,8 @@ async function purgeFixtures() {
     } while (cursor !== '0');
   });
 }
+
+beforeEach(() => freshOrderPlaceBudget(app.redis));
 
 beforeAll(async () => {
   vi.stubEnv('STORE_MMG_PAY_LINK', '');
@@ -276,6 +279,35 @@ describe('[O-4] "Out of stock" before accepting asks the customer', () => {
     expect((await ready(orderId)).statusCode).toBe(200);
   });
 
+  // [COORD ruling R2 on REVIEW-M #2043 S4-3] A promo that needed a minimum basket STAYS applied when the store's
+  // "Out of stock" takes the basket under that minimum: the customer never pays more because the store could not
+  // supply an item. The whole line comes off the total and the discount is kept.
+  it('a minimum-basket promo stays applied when an out-of-stock item takes the basket under the minimum', async () => {
+    const code = `SWO${nanoid(6).toUpperCase().replace(/[^A-Z0-9]/g, '0')}`;
+    await sys(() => app.prisma.promoCode.create({ data: {
+      code, description: '500 off a basket of 4,000 or more', discountType: 'FIXED_AMOUNT', discountValue: 500, minOrderAmount: 4000,
+      applicableTo: [], validFrom: new Date(Date.now() - DAY), validUntil: new Date(Date.now() + DAY), maxUsesPerUser: 5,
+      vendorId: grocer.vendorId, funder: 'VENDOR',
+    } }));
+    // (a promo is not offered on a cash DELIVERY order yet: a pickup order carries it)
+    const orderId = await placeOrder('CASH', { promoCode: code, pickup: true });
+    const before = await orderRow(orderId);
+    expect(Number(before.discount)).toBe(500);
+    const rice = before.items.find((l) => l.itemId === grocer.rice)!;
+    // without the rice the basket is under the promo's minimum
+    expect(Number(before.subtotalCustomer) - Number(rice.totalCustomer)).toBeLessThan(4000);
+    expect((await outOfStock(orderId, rice.id)).statusCode).toBe(200);
+    expect((await answer(orderId, rice.id, true)).statusCode).toBe(200);
+    const after = await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: { promoRedemption: true } }));
+    expect(Number(after.discount)).toBe(500);
+    expect(after.promoCodeId).toBe(before.promoCodeId);
+    expect(after.promoRedemption).not.toBeNull();
+    expect(Number(after.totalAmount)).toBe(Number(before.totalAmount) - Number(rice.totalCustomer));
+    const accepted = await accept(orderId);
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    expect(Number(accepted.json().data.totalAmount)).toBe(Number(after.totalAmount));
+  });
+
   it('"Cancel order" is the free cancel a waiting order already has; a decline on a removal question is refused', async () => {
     const orderId = await placeOrder();
     const rice = await lineOf(orderId, grocer.rice);
@@ -373,6 +405,75 @@ describe('[O-4] MMG: the total may change only before acceptance and before any 
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
     expect((await lineOf(orderId, grocer.rice)).subStatus).toBe('NONE');
+  });
+});
+
+// [REVIEW-M S4-1 on #2043 · card switch-on prerequisite] Card and bank transfer are prepaid rails, both
+// OFF (checkout takes cash or MMG only), so these orders are written as a future rail would leave them.
+// Exactly like MMG: the total may change in-app only before the store accepts and before any payment;
+// after that it is fixed, nothing comes off, and the store settles item changes with the customer.
+describe('[REVIEW-M S4-1] card / bank transfer: the total may change only before acceptance and before any payment', () => {
+  const FIXED_COPY = 'This order’s total can’t change in-app once the store has accepted it or a payment exists — the store settles item changes with you directly.';
+  const RAILS = ['CARD', 'BANK_TRANSFER'] as const;
+  /** A real cash checkout, then the rail (and payment facts) a prepaid rail would have written. */
+  const placeOn = async (paymentMethod: (typeof RAILS)[number], data: Record<string, unknown> = {}) => {
+    const orderId = await placeOrder('CASH');
+    await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { paymentMethod, ...data } }));
+    return orderId;
+  };
+
+  it.each(RAILS)('a waiting %s order with nothing paid: "Continue without it" lowers the total (the same window as MMG)', async (rail) => {
+    const orderId = await placeOn(rail);
+    const before = await orderRow(orderId);
+    const rice = before.items.find((l) => l.itemId === grocer.rice)!;
+    expect((await outOfStock(orderId, rice.id)).statusCode).toBe(200);
+    expect((await answer(orderId, rice.id, true)).statusCode).toBe(200);
+    expect(Number((await orderRow(orderId)).totalAmount)).toBe(Number(before.totalAmount) - Number(rice.totalCustomer));
+  });
+
+  it.each(RAILS)('after acceptance a %s total stays fixed: "Out of stock" is refused and nothing comes off', async (rail) => {
+    const orderId = await placeOn(rail);
+    expect((await accept(orderId)).statusCode).toBe(200);
+    const before = await orderRow(orderId);
+    const rice = before.items.find((l) => l.itemId === grocer.rice)!;
+    const refused = await outOfStock(orderId, rice.id);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error).toMatchObject({ code: 'MMG_ADJUSTMENT_UNAVAILABLE', message: FIXED_COPY });
+    const after = await orderRow(orderId);
+    expect({ sub: after.items.find((l) => l.id === rice.id)!.subStatus, total: Number(after.totalAmount) }).toEqual({ sub: 'NONE', total: Number(before.totalAmount) });
+  });
+
+  it.each(RAILS)('a waiting %s order already paid keeps its total fixed: no removal question is asked', async (rail) => {
+    const orderId = await placeOn(rail, { paymentStatus: 'CAPTURED' });
+    const rice = await lineOf(orderId, grocer.rice);
+    const refused = await outOfStock(orderId, rice.id);
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    expect((await lineOf(orderId, grocer.rice)).subStatus).toBe('NONE');
+  });
+
+  it.each(RAILS)('a swap asked while a %s order could still change, then paid: the customer can neither approve nor decline, and no answer WITHDRAWS it', async (rail) => {
+    const orderId = await placeOn(rail);
+    const before = await orderRow(orderId);
+    const rice = before.items.find((l) => l.itemId === grocer.rice)!;
+    expect((await offerSwap(orderId, rice.id, grocer.riceB)).statusCode).toBe(200);
+    await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } }));
+
+    const view = (await customerView(orderId)).items.find((i) => i.id === rice.id)!;
+    expect(view['substitution']).toMatchObject({ kind: 'SWAP', decisions: { approve: false, reject: false }, settlementGuidance: FIXED_COPY, ifNoAnswer: 'WITHDRAW' });
+    for (const approve of [true, false]) {
+      const refused = await answer(orderId, rice.id, approve);
+      expect(refused.statusCode, refused.body).toBe(409);
+      expect(refused.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    }
+
+    const due = (await lineOf(orderId, grocer.rice)).substituteDecideBy!;
+    await sys(() => sweepSubstitutionDeadlines(app.prisma, app.io, { now: new Date(due.getTime() + 1_000), orderService: new OrderService(app.prisma, app.io, undefined, undefined, app.redis) }));
+    const after = await orderRow(orderId);
+    const line = after.items.find((l) => l.id === rice.id)!;
+    expect({ sub: line.subStatus, swap: line.substituteItemId, total: Number(after.totalAmount), status: after.status })
+      .toEqual({ sub: 'NONE', swap: null, total: Number(before.totalAmount), status: 'PENDING' });
+    expect((await pushes(orderId)).map((n) => n.title)).toContain(`${rice.name}: the swap question closed`);
   });
 });
 

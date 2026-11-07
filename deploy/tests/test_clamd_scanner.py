@@ -41,7 +41,7 @@ def mem_mib(value: str) -> int:
     return int(number) * (1024 if unit == "g" else 1)
 
 
-def render(env_text: str = "", files=("docker-compose.yml",)):
+def render(env_text: str = "", files=("docker-compose.yml",), profiles=()):
     """`docker compose config --format json` of the real files (client-side; no daemon state)."""
     with tempfile.TemporaryDirectory() as tmp:
         here = Path(tmp) / "deploy"
@@ -52,6 +52,8 @@ def render(env_text: str = "", files=("docker-compose.yml",)):
         args = ["docker", "compose", "--project-directory", str(here)]
         for name in files:
             args += ["-f", str(here / name)]
+        for profile in profiles:
+            args += ["--profile", profile]
         result = subprocess.run(args + ["config", "--format", "json"], text=True, capture_output=True, timeout=60,
                                 env={k: v for k, v in os.environ.items() if k not in ("MALWARE_SCAN", "NODE_ENV")})
         if result.returncode != 0 and "unknown" in result.stderr.lower():
@@ -66,10 +68,11 @@ class ClamdServiceContract(unittest.TestCase):
         image = re.search(r"(?m)^    image: (\S+)$", service_block(COMPOSE, "clamd")).group(1)
         self.assertRegex(image, PINNED)
 
-    def test_private_network_only_no_port_no_route(self):
+    def test_own_networks_only_no_port_no_route(self):
         block = service_block(COMPOSE, "clamd")
         self.assertNotRegex(block, r"(?m)^    (ports|expose):")
-        self.assertRegex(block, r"(?m)^    networks: \[private\]$")
+        # [COORD 21 Oct] Not the shared private network: its own internal one (+ its own egress).
+        self.assertRegex(block, r"(?m)^    networks: \[scanner, scanner-egress\]$")
         # Caddy, the only public entrance, never proxies to the scanner.
         self.assertNotIn("clamd", (DEPLOY / "Caddyfile").read_text())
 
@@ -85,7 +88,7 @@ class ClamdServiceContract(unittest.TestCase):
         checks = int(re.search(r'FRESHCLAM_CHECKS: "(\d+)"', block).group(1))
         # More than daily, never more than hourly (the mirror's rate limit).
         self.assertTrue(2 <= checks <= 24, checks)
-        self.assertNotIn("CLAMAV_NO_FRESHCLAMD", block)
+        self.assertNotRegex(block, r"(?m)^      CLAMAV_NO_FRESHCLAMD:")  # the live scanner updates
 
     def test_healthcheck_passes_only_with_signatures_loaded(self):
         block = service_block(COMPOSE, "clamd")
@@ -132,8 +135,17 @@ class ClamdRenderedByCompose(unittest.TestCase):
         clamd = services["clamd"]
         self.assertRegex(clamd["image"], PINNED)
         self.assertNotIn("ports", clamd)
-        self.assertEqual(sorted(clamd["networks"]), ["private"])
+        self.assertEqual(sorted(clamd["networks"]), ["scanner", "scanner-egress"])
         self.assertIn("test", clamd["healthcheck"])
+        # [COORD 21 Oct] Only the api and the worker share the scanner's internal network; the
+        # egress network is clamd's alone; nothing else (database, proxy, site, console) reaches it.
+        self.assertEqual(model["networks"]["scanner"].get("internal"), True)
+        self.assertEqual(model["networks"]["scanner"]["name"], "swift_scanner")
+        on_scanner = sorted(n for n, s in services.items() if "scanner" in (s.get("networks") or {}))
+        self.assertEqual(on_scanner, ["api", "clamd", "worker"])
+        self.assertEqual(sorted(n for n, s in services.items() if "scanner-egress" in (s.get("networks") or {})), ["clamd"])
+        for name in ("api", "worker"):
+            self.assertEqual(sorted(services[name]["networks"]), ["private", "scanner"], name)
         for name in ("api", "worker"):
             env = services[name]["environment"]
             self.assertEqual(env["MALWARE_SCAN"], "clamd", name)
@@ -149,6 +161,18 @@ class ClamdRenderedByCompose(unittest.TestCase):
         self.assertEqual(clamd["environment"]["CLAMAV_NO_FRESHCLAMD"], "true")
         self.assertNotIn("ports", clamd)
         self.assertTrue(model["networks"]["private"].get("internal"))
+        # The copy's scanner: its own project's internal network only, no egress.
+        self.assertEqual(list(clamd["networks"]), ["scanner"])
+        self.assertTrue(model["networks"]["scanner"].get("internal"))
+        self.assertTrue(model["networks"]["scanner"]["name"].startswith("swift-rehearsal_"))
+
+
+class JourneysReachTheScanner(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("docker"), "Docker CLI not installed")
+    def test_copy_journeys_api_uses_the_copys_scanner_network(self):
+        model = render(files=("docker-compose.yml", "docker-compose.wall.yml", "docker-compose.rehearsal.yml", "docker-compose.journeys-copy.yml"), profiles=("journeys-copy",))
+        self.assertEqual(sorted(model["services"]["api-journeys"]["networks"]), ["private", "scanner"])
+        self.assertTrue(model["networks"]["scanner"]["name"].startswith("swift-rehearsal_"))
 
 
 class PilotUpOrdersTheScanner(unittest.TestCase):
@@ -172,7 +196,7 @@ class PilotUpOrdersTheScanner(unittest.TestCase):
     def test_proof_uses_the_api_image_on_the_private_network(self):
         proof = self.text[self.text.index("SCANNER_PROOF"):]
         proof = proof[:proof.index("\nfi\n")]
-        self.assertIn('--network swift-pilot-private --entrypoint node "swift-api:$SHA"', proof)
+        self.assertIn('--network swift_scanner --entrypoint node "swift-api:$SHA"', proof)
         self.assertIn("UPLOAD_REJECTED", proof)
         self.assertIn("dist/lib/malware-scan.js", proof)
 

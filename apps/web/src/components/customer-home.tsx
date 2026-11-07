@@ -3,7 +3,7 @@
 import { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
-import { CircleCheck, Search, X } from 'lucide-react';
+import { CircleCheck, Search } from 'lucide-react';
 import { getAddresses, getHome, getPublicHome, type HomeFeed, type PopularItem, type Vendor } from '@/lib/customer';
 import { BROWSE_STALE_MS, fromPage, homeFeedKey, type GuestRead } from '@/lib/browse-keys';
 import { isHomeFeed } from '@/lib/app-rules';
@@ -11,9 +11,9 @@ import { currentCoords } from '@/lib/geolocate';
 import { readShellPerson, shellPersonKey } from '@/lib/shell-data';
 import { signInPath } from '@/lib/customer-routes';
 import { useCustomerSession } from '@/components/customer-session';
-import { Avatar, MoreButton, MoreMenu, PRESS } from '@/components/customer-shell';
+import { MoreButton, MoreMenu, PRESS } from '@/components/customer-shell';
+import { Avatar } from '@/components/account-chrome';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
-import { Modal } from '@/components/modal';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
 import { EmptyNote, ItemCard, SectionHead, VendorCard, VendorHeroCard, VendorSquareCard, VENDOR_GRID } from '@/components/order-ui';
@@ -24,6 +24,8 @@ import { lazyRetry } from '@/lib/chunk-retry';
 // where (the phone app's Home has one location pill). Its code loads with the
 // page's other split code, as the app frame's bar does on the other pages.
 const OrderingContextBar = lazyRetry(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
+// [PERF · 6 Nov 2026] "Scan a store's Swift code" opens only on a tap: its own chunk, off the home's first load (perf budget).
+const ScanHelp = lazyRetry(() => import('@/components/scan-help'));
 
 /**
  * [Q7b · WEB-REDESIGN] HOME — what swiftgy.com opens on, in the owner's
@@ -210,7 +212,7 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
       )}
 
       {more ? <MoreMenu guest={status === 'guest'} returnPath={() => '/'} onClose={() => setMore(false)} /> : null}
-      {scanHelp ? <ScanHelp onClose={() => setScanHelp(false)} /> : null}
+      {scanHelp ? <Suspense fallback={null}><ScanHelp onClose={() => setScanHelp(false)} /></Suspense> : null}
     </div>
   );
 }
@@ -323,21 +325,5 @@ function PopularRail({ items }: { items: PopularItem[] }) {
         ))}
       </Rail>
     </section>
-  );
-}
-
-function ScanHelp({ onClose }: { onClose: () => void }) {
-  return (
-    <Modal labelledBy="scan-help-title" onClose={onClose} className="bg-[var(--swift-card)] px-6 pb-6 pt-5">
-        <div className="flex items-start gap-3">
-          <span className="grid h-12 w-12 flex-none place-items-center rounded-2xl bg-[var(--swift-red-50)] text-[var(--swift-red-600)]"><Pictogram name="scan" size={24} /></span>
-          <div className="flex-1">
-            <h2 id="scan-help-title" className="sw-title">Scan a store’s Swift code</h2>
-            <p className="sw-caption mt-1 text-[15px] leading-[22px]">Point your phone’s camera at the Swift code on a store’s counter or flyer. It opens that store here, ready to order.</p>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close" data-modal-initial-focus className="sw-icon-btn"><X size={20} aria-hidden /></button>
-        </div>
-        <button type="button" onClick={onClose} className="sw-btn sw-btn-block mt-5">Got it</button>
-    </Modal>
   );
 }
