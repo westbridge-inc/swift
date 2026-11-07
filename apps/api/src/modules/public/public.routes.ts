@@ -14,6 +14,7 @@ import { adsEnabled } from '../ads/ads-enabled';
 import { hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { publicStorefrontSeller } from '../verification/storefront-seller';
 import { brandBranchesFor } from '../vendor/brand';
+import { applyOpenNow, storeOpenNow } from '../vendor/store-hours';
 
 /**
  * Public storefronts — the ONLY unauthenticated catalog surface.
@@ -187,12 +188,13 @@ export async function publicRoutes(app: FastifyInstance) {
     // queries — a deactivation between them served one more response, and the
     // web's 300s fetch cache stretched that race into a real stale window.
     // The relational predicate makes liveness part of the SAME read.
-    const vendors = await app.prisma.vendor.findMany({
+    // [STORE-HOURS] "Open" as checkout decides it: the switch AND the store's weekly hours.
+    const vendors = await applyOpenNow(app.prisma, await app.prisma.vendor.findMany({
       where: { ...where, ...PUBLIC_VENDOR_TENANT },
       select: PUBLIC_VENDOR_SELECT,
       orderBy: [{ isFeatured: 'desc' }, { averageRating: 'desc' }, { totalRatings: 'desc' }],
       take: 200,
-    });
+    }));
 
     // One batched read for the whole page, then the SAME mapper every other
     // surface uses — so the storefront directory, the app and search cannot
@@ -298,6 +300,8 @@ export async function publicRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...publicVendor,
+        // [STORE-HOURS] Open as checkout decides it: the switch AND today's hours (Guyana time).
+        isCurrentlyOpen: storeOpenNow({ isCurrentlyOpen: vendor.isCurrentlyOpen, isSynthetic }, vendor.operatingHours, new Date()),
         isVerified: sellerVerifiedNow({ isVerified: true, activationValidUntil, isSynthetic, owner }),
         seller,
         brand,

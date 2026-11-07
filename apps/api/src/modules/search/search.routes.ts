@@ -18,6 +18,7 @@ import { fillFromTiers, nameMatcher, searchTiers, type Tier } from './forgiving-
 import { SEARCH_DB_BUDGET_MS, boundedRead, isOutOfTime } from './search-budget';
 import { consoleRoleOf } from '../auth/console-role';
 import { brandFactsFor, collapseBrands } from '../vendor/brand';
+import { applyItemStoreOpenNow, applyOpenNow, hoursOpenByVendor } from '../vendor/store-hours';
 
 // [B2] ONE wire contract whichever engine answered. The route used to hand
 // clients raw Meilisearch hits on the fast path and raw Prisma rows on the
@@ -220,7 +221,8 @@ export async function searchRoutes(app: FastifyInstance) {
       ...(ctx.cuisine && { cuisineTypes: { has: ctx.cuisine } }),
     };
     const byName = nameFirst(ctx.q);
-    const rows = await fillFromTiers({
+    // [STORE-HOURS] "Open" as checkout decides it (switch AND the store's weekly hours), before the open-first order.
+    const rows = await applyOpenNow(app.prisma, await fillFromTiers({
       tiers: tiersFor(ctx.q, VENDOR_COLUMNS, ctx.slips),
       ...timed('search.vendors'),
       fetch: (where, take, deadline) => boundedRead(app.prisma, deadline, (db) => db.vendor.findMany({
@@ -249,7 +251,7 @@ export async function searchRoutes(app: FastifyInstance) {
       },
       limit: ctx.limit,
       exclude: ctx.exclude,
-    });
+    }));
     // R8: the star surface rides the ONE mapper on this path too, so both
     // engines speak the same displayRating/topRated contract.
     const surfaces = await ratingSurfaces(app.prisma, 'VENDOR', rows.map((v) => v.id));
@@ -318,7 +320,8 @@ export async function searchRoutes(app: FastifyInstance) {
       limit: ctx.limit,
       exclude: ctx.exclude,
     });
-    return openFirst(rows.map(toItemHit), itemStoreOpen);
+    // [STORE-HOURS] A dish's store is "open" as checkout decides it (switch AND hours).
+    return openFirst(await applyItemStoreOpenNow(app.prisma, rows.map(toItemHit)), itemStoreOpen);
   }
 
   // Universal search — searches vendors AND items
@@ -402,8 +405,11 @@ export async function searchRoutes(app: FastifyInstance) {
         const listedLive = await listableItemsForVendors(app.prisma, tenantId, liveItems.filter((i) => inLaunchMarket(i.vendor)));
         // open-now as the DATABASE says, for stores and for each dish's store —
         // the hit's copy may predate an opening or a closing
-        const vendorOpen = new Map(liveVendors.filter(inLaunchMarket).map((v) => [v.id, v.isCurrentlyOpen]));
-        const itemStoreOpenNow = new Map(listedLive.map((i) => [i.id, i.vendor.isCurrentlyOpen]));
+        // [STORE-HOURS] and as checkout decides it: the switch AND the store's weekly hours.
+        const hoursOpen = await hoursOpenByVendor(app.prisma, [...liveVendors.map((v) => v.id), ...listedLive.map((i) => i.vendorId)]);
+        const openNow = (vendorId: string, switchOn: boolean) => switchOn && hoursOpen.get(vendorId) !== false;
+        const vendorOpen = new Map(liveVendors.filter(inLaunchMarket).map((v) => [v.id, openNow(v.id, v.isCurrentlyOpen)]));
+        const itemStoreOpenNow = new Map(listedLive.map((i) => [i.id, openNow(i.vendorId, i.vendor.isCurrentlyOpen)]));
         const visibleVendors = openFirst(
           vendorHits.filter((v) => vendorOpen.has(v.id)).map((v) => ({ ...v, isCurrentlyOpen: vendorOpen.get(v.id)! })),
           storeOpen,
@@ -494,7 +500,7 @@ export async function searchRoutes(app: FastifyInstance) {
       ...(hiddenOnly.length > 0 ? { id: { notIn: hiddenOnly } } : {}),
     };
 
-    const [vendors, items] = await Promise.all([
+    const [vendorRows, itemRows] = await Promise.all([
       fillFromTiers({
         tiers,
         ...timed('suggestions.vendors'),
@@ -530,6 +536,10 @@ export async function searchRoutes(app: FastifyInstance) {
     ]);
 
     // `isCurrentlyOpen` (additive): the suggested store's — or the dish's store's — open state now.
+    // [STORE-HOURS] As checkout decides it: the switch AND the store's weekly hours.
+    const hoursOpen = await hoursOpenByVendor(app.prisma, [...vendorRows.map((v) => v.id), ...itemRows.map((i) => i.vendorId)]);
+    const vendors = vendorRows.map((v) => (v.isCurrentlyOpen && hoursOpen.get(v.id) === false ? { ...v, isCurrentlyOpen: false } : v));
+    const items = itemRows.map((i) => (i.vendor.isCurrentlyOpen && hoursOpen.get(i.vendorId) === false ? { ...i, vendor: { ...i.vendor, isCurrentlyOpen: false } } : i));
     const suggestions = [
       ...openFirst(vendors, storeOpen).map((v) => ({ text: v.name, type: 'vendor' as const, isCurrentlyOpen: v.isCurrentlyOpen })),
       ...openFirst(items, (i) => i.vendor.isCurrentlyOpen).map((i) => ({ text: i.name, type: 'item' as const, isCurrentlyOpen: i.vendor.isCurrentlyOpen })),
@@ -573,7 +583,10 @@ export async function searchRoutes(app: FastifyInstance) {
     const marketItems = items.filter((i) => inLaunchMarket(i.vendor));
     // [§8 · review S2-PRE] the shared listing gate for every caller, as the Market feed
     // [GUARDRAILS §8] The exact last pass: a prohibited row is never returned, whatever the cached list said.
-    const listable = await withoutHidden(app.prisma, await listableItemsForVendors(app.prisma, tenantId, marketItems));
+    // [STORE-HOURS] A store closed by its weekly hours is not "tryable right now" either.
+    const hoursOpen = await hoursOpenByVendor(app.prisma, marketItems.map((i) => i.vendorId));
+    const listable = (await withoutHidden(app.prisma, await listableItemsForVendors(app.prisma, tenantId, marketItems)))
+      .filter((i) => hoursOpen.get(i.vendorId) !== false);
     return {
       success: true,
       // ItemHit plus the one field that makes it *trending* — a superset, never
@@ -655,7 +668,9 @@ export async function searchRoutes(app: FastifyInstance) {
     }
 
     // [DS982] A store whose committed pin lies outside the launch market is never nearby.
-    const inRadius = sortByDistance(vendors.filter(inLaunchMarket), userLat, userLng).filter((v) => v.distance <= radiusKm);
+    // [STORE-HOURS] Open now as checkout decides it: a store closed by its weekly hours is not nearby-open.
+    const hoursOpen = await hoursOpenByVendor(app.prisma, vendors.map((v) => v.id));
+    const inRadius = sortByDistance(vendors.filter(inLaunchMarket).filter((v) => hoursOpen.get(v.id) !== false), userLat, userLng).filter((v) => v.distance <= radiusKm);
     // [CHAINS PR3] One card per brand (its best branch for this customer), before the page is cut.
     const nearby = (await oneCardPerBrand(inRadius, userLat, userLng))
       .slice(0, limit)

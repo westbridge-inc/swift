@@ -25,6 +25,7 @@ import { STORE_ACCEPT_PATH, STORE_REJECTABLE_STATUSES } from '../order/order-sta
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
+import { ownStoreHoursView } from './store-hours';
 import { PickingService } from '../order/picking.service';
 import { lineOptionsAsMade } from '../order/substitution-view';
 import { makeDispatchService } from '../dispatch/dispatch.service';
@@ -1596,6 +1597,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       // send it as such only on this word. Not a secret (customers see the VAT-inclusive prices); the VAT record stays the owner's.
       vatAddsToPrices: storeAddsVatToPrices(vendor),
       vatRatePercent: STORE_VAT_RATE_PERCENT,
+      // [STORE-HOURS · owner 6 Nov 2026] Additive: the open switch is on but the store's own weekly hours close it now
+      // (checkout refuses), and when they open next ("tomorrow at 8:00 am"). The switch itself is never changed.
+      ...ownStoreHoursView(vendor),
     }));
     const visible = access.role === 'OWNER'
       ? safeVendors
