@@ -15,6 +15,10 @@ import { guyanaDayKey } from '../utils/guyana-day';
 import { AccountService } from '../modules/user/account.service';
 import { AuthService } from '../modules/auth/auth.service';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // Trial-integrity Phase 5 — the graph's customer-side jobs (spec Part 5/6/8):
 // A5 promo/referral farming dies per HUMAN, A6 cash-fraud strikes follow the
 // cluster, DPA erasure purges identity data (tombstones founder-gated OFF),

@@ -50,7 +50,7 @@ function inject(method: 'GET' | 'POST', url: string, payload?: Record<string, un
 
 async function taxiDriver(phone: string) {
   const registrationProof = await registrationProofFor(app, phone);
-  const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, phone, registrationProof, firstName: 'Police', lastName: 'Consent', role: 'MOVER' });
+  const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true, phone, registrationProof, firstName: 'Police', lastName: 'Consent', role: 'MOVER' });
   expect(res.statusCode, res.body).toBe(201);
   const data = res.json().data as { user: { id: string }; tokens: { accessToken: string } };
   await signupSelfieFixture(app.prisma, data.user.id);

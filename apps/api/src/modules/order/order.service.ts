@@ -8,6 +8,7 @@ import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { promoUsesByPersonWhere } from '../promo/promo-uses';
+import { assertPromoNotSwiftPaid } from '../promo/swift-paid';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -1768,8 +1769,10 @@ export class OrderService {
         await tx.$queryRaw`SELECT id FROM "promo_codes" WHERE id = ${promoCodeId} FOR UPDATE`;
         const fresh = await tx.promoCode.findUniqueOrThrow({
           where: { id: promoCodeId },
-          select: { currentUses: true, maxUses: true, maxUsesPerUser: true },
+          select: { currentUses: true, maxUses: true, maxUsesPerUser: true, funder: true },
         });
+        // [Ruling 1 Nov 2026] The enforcement point refuses a Swift-paid code too (swift-paid.ts).
+        assertPromoNotSwiftPaid(fresh);
         if (fresh.maxUses && fresh.currentUses >= fresh.maxUses) {
           throw new AppError(400, 'USED_PROMO', 'This promo code has reached its usage limit');
         }
@@ -3724,6 +3727,9 @@ export class OrderService {
       throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
     }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
+    // [Ruling 1 Nov 2026 · REVIEW-M N1] A Swift-paid code, even an old row still marked active, is never
+    // redeemed: Swift never holds or moves order money (promo/swift-paid.ts).
+    assertPromoNotSwiftPaid(promo);
 
     const now = new Date();
     if (now < promo.validFrom || now > promo.validUntil) {

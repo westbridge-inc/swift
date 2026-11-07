@@ -2,6 +2,7 @@ import type { OnAudit } from '../../lib/audit-writer';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { promoFundingGauge } from '../../plugins/observability';
+import { assertSwiftPaidPromoWritable } from './swift-paid';
 
 /**
  * [M-32] A promo's terms are a law, not a form.
@@ -162,6 +163,11 @@ export async function updatePromoTerms(prisma: PrismaClient, promoCodeId: string
     await tx.$queryRaw`SELECT id FROM "promo_codes" WHERE id = ${promoCodeId} FOR UPDATE`;
     const existing = await tx.promoCode.findUnique({ where: { id: promoCodeId } });
     if (!existing) throw new NotFoundError('PromoCode', promoCodeId);
+    // [Ruling 1 Nov 2026] A Swift-paid code may only be switched off while they are off: no new
+    // terms, no new dates, no switching it back on.
+    const onlySwitchesOff = patch.isActive === false
+      && Object.entries(patch).every(([k, v]) => k === 'isActive' || v === undefined);
+    if (!onlySwitchesOff) assertSwiftPaidPromoWritable(existing);
     assertPromoTerms(mergedPromoTerms(existing, patch));
     const termsChanged = TERM_FIELDS.some((f) => patch[f] !== undefined);
     const promo = await tx.promoCode.update({
@@ -193,6 +199,7 @@ export async function rollbackPromoTerms(prisma: PrismaClient, promoCodeId: stri
     await tx.$queryRaw`SELECT id FROM "promo_codes" WHERE id = ${promoCodeId} FOR UPDATE`;
     const existing = await tx.promoCode.findUnique({ where: { id: promoCodeId } });
     if (!existing) throw new NotFoundError('PromoCode', promoCodeId);
+    assertSwiftPaidPromoWritable(existing); // [Ruling 1 Nov 2026] restoring terms is a change too
     const target = toVersion ?? existing.termsVersion - 1;
     if (target < 1 || target >= existing.termsVersion) {
       throw new AppError(400, 'NO_SUCH_VERSION', `Version ${target} is not a prior version of this promo (the live version is ${existing.termsVersion})`);

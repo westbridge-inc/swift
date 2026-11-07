@@ -289,6 +289,9 @@ export interface Promo {
   isActive: boolean;
   validFrom: string;
   validUntil: string;
+  /** Who pays the discount: VENDOR = the store's own code; PLATFORM = Swift-paid (switched off, never applies). */
+  funder: 'PLATFORM' | 'VENDOR';
+  vendorId: string | null;
 }
 
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>

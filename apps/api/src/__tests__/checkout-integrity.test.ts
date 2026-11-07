@@ -13,6 +13,10 @@ import { expressDeliveryFee } from '../utils/markup';
 import { readDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // Pre-launch audit gaps: (1) checkout money math was only asserted "> 0" —
 // a rounding/percentage regression could ship green; here we pin exact

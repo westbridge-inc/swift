@@ -387,7 +387,7 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
     const registrationProof = verified.json().data.registrationProof;
     const res = await app.inject({
       method: 'POST', url: '/api/v1/auth/register',
-      payload: { phone: nativePhone, registrationProof, firstName: 'New', lastName: `Native${RUN}`, acceptTerms: true },
+      payload: { phone: nativePhone, registrationProof, firstName: 'New', lastName: `Native${RUN}`, acceptTerms: true, ageConfirmed: true },
     });
     expect(res.statusCode, res.body).toBe(201);
     userIds.push(res.json().data.user.id);
@@ -404,7 +404,7 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
     const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: iosPhone, code } });
     const res = await app.inject({
       method: 'POST', url: '/api/v1/auth/register', headers: { 'x-client-platform': 'ios' },
-      payload: { phone: iosPhone, registrationProof: verified.json().data.registrationProof, firstName: 'New', lastName: `Ios${RUN}`, acceptTerms: true },
+      payload: { phone: iosPhone, registrationProof: verified.json().data.registrationProof, firstName: 'New', lastName: `Ios${RUN}`, acceptTerms: true, ageConfirmed: true },
     });
     expect(res.statusCode, res.body).toBe(201);
     userIds.push(res.json().data.user.id);

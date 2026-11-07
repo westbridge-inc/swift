@@ -21,6 +21,10 @@ import ExcelJS from 'exceljs';
 import type { Server } from 'socket.io';
 import { rateLimitKey } from '../utils/rate-limit-key';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // [POS-SYNC] Re-uploading a till export updates the store.
 //

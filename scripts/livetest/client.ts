@@ -8,7 +8,7 @@
 //     each have their own 5/min per-IP bucket.
 //     - existing account -> { isNewUser:false, user, tokens }  (login)
 //     - new account      -> { isNewUser:true, phone, registrationProof }
-//   register {phone, registrationProof, firstName, lastName, role, countryCode, acceptTerms}
+//   register {phone, registrationProof, firstName, lastName, role, countryCode, acceptTerms, ageConfirmed}
 //     -> { user, tokens }
 //   partner/become {role, business?|vehicle?}  (vendors/movers)
 
@@ -126,7 +126,7 @@ export async function signupOrLogin(
     lastName: who.lastName,
     role: who.role,
     countryCode: 'GY',
-    acceptTerms: true,
+    acceptTerms: true, ageConfirmed: true,
   });
   const rd = reg.json?.data;
   if (!rd?.tokens?.accessToken) {

@@ -242,7 +242,7 @@ describe('the route takes the source address the TRUST_PROXY way, never from a r
     const res = await instance.inject({
       method: 'POST', url: '/api/v1/auth/register', remoteAddress,
       headers: { 'x-forwarded-for': forwardedFor },
-      payload: { phone, registrationProof: proof, firstName: 'Net', lastName: `Route${nanoid(4)}`, acceptTerms: true },
+      payload: { phone, registrationProof: proof, firstName: 'Net', lastName: `Route${nanoid(4)}`, acceptTerms: true, ageConfirmed: true },
     });
     expect(res.statusCode, res.body).toBe(201);
     userIds.push(res.json().data.user.id);

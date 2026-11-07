@@ -12,6 +12,10 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { computeOrderTotal, lineTotal, orderTotal, promoDiscount, subtotalOf } from '../utils/order-total';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // [ALG-24 · ALG-INV-1] Order-total determinism.
 //

@@ -96,6 +96,7 @@ import { LIVE_SOS_STATUSES } from '../safety/sos.service';
 import { hasTaxiPassengerCustody } from '../rides/passenger-custody';
 import { assertMayEndRide } from '../rides/end-ride-authority';
 import { assertPromoTerms, recordPromoTermsVersion, rollbackPromoTerms, updatePromoTerms } from '../promo/promo-terms';
+import { assertSwiftPaidPromoWritable } from '../promo/swift-paid';
 import {
   assertNoZoneOverlap, ZONE_FARE_MAX, ZONE_FARE_MIN, ZONE_ID_MAX, ZONE_ID_MIN, ZONE_ID_PATTERN, ZONE_TAXI_PER_KM_MAX, ZONE_TAXI_PER_KM_MIN,
 } from '../rides/fare-zones';
@@ -4425,6 +4426,9 @@ export async function adminRoutes(app: FastifyInstance) {
 
   app.post('/promos', { preHandler: [platformControlGuard] }, async (request) => {
     const body = createPromoSchema.parse(request.body);
+    // [Ruling 1 Nov 2026 · REVIEW-M N1] An admin code is Swift-paid (funder PLATFORM, below), and
+    // Swift-paid codes are off until Swift has a payout path: refused in plain words, nothing written.
+    assertSwiftPaidPromoWritable({ funder: 'PLATFORM' });
 
     // Ensure code is unique and uppercase
     const existingCode = await app.prisma.promoCode.findUnique({ where: { code: body.code.toUpperCase() } });

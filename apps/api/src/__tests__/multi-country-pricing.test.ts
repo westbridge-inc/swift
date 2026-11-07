@@ -138,7 +138,7 @@ describe('public auth stays inside the launch market', () => {
     // The register-level gate still holds on its own, with a proof minted
     // directly — the only way a foreign number can hold one now.
     const registrationProof = await mintedRegistrationProofFor(app, phone);
-    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
       phone,
       registrationProof,
       firstName: 'Port',
@@ -152,7 +152,7 @@ describe('public auth stays inside the launch market', () => {
   it('a Guyana number stays GY even if the client claims a future market', async () => {
     const phone = testPhone();
     const registrationProof = await registrationProofFor(app, phone);
-    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
       phone,
       registrationProof,
       firstName: 'George',

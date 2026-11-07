@@ -230,8 +230,13 @@ describe('a Swift-paid free-delivery code covers the normal fee, never the expre
   it('the words that describe a free-delivery code say the express extra is not included', () => {
     const routes = readFileSync(join(REPO, 'apps/api/src/modules/user/customer.routes.ts'), 'utf8');
     expect(routes).toContain("description = `Free delivery (express still adds $${EXPRESS_DELIVERY_SURCHARGE.toLocaleString()} GYD)`;");
-    const admin = readFileSync(join(REPO, 'apps/admin/src/app/promos/page.tsx'), 'utf8');
-    expect(admin).toContain(`'Free delivery (the normal delivery fee; an express order still pays its GY$${GYD(EXPRESS_DELIVERY_SURCHARGE)})'`);
+    // [Ruling 1 Nov 2026] The admin console no longer makes codes (every code it made was Swift-paid, and Swift-paid
+    // codes are off), so its free-delivery confirmation is gone. Its words now say no code can be made there, and it
+    // offers no create call at all; nothing on it promises a free-delivery code covers the express extra.
+    const admin = readFileSync(join(REPO, 'apps/admin/src/app/promos/page.tsx'), 'utf8').replace(/\s+/g, ' ');
+    expect(admin).toContain('Swift-paid promo codes are switched off.');
+    expect(admin).not.toMatch(/createPromo|Create promo/i);
+    expect(admin).not.toMatch(/Free delivery \(/);
   });
 });
 

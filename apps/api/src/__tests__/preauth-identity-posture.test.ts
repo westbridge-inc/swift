@@ -222,7 +222,7 @@ describe('[L04 · R1 · OTA-016] sign-in under the production CONTRACT posture',
     expect(verified.statusCode, verified.body).toBe(200);
     expect(verified.json().data.isNewUser).toBe(true);
     const registered = await post('/register', {
-      phone, firstName: 'New', lastName: 'Signup', acceptTerms: true, registrationProof: verified.json().data.registrationProof,
+      phone, firstName: 'New', lastName: 'Signup', acceptTerms: true, ageConfirmed: true, registrationProof: verified.json().data.registrationProof,
     });
     expect(registered.statusCode, registered.body).toBe(201);
     const created = await owner.user.findUniqueOrThrow({ where: { phone }, select: { id: true, tenantId: true } });

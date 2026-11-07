@@ -6,7 +6,8 @@ import { AGE_TICK_LABEL } from './ageTickCopy';
 // ---------------------------------------------------------------------------
 // [Owner ruling 15 Oct 2026] The phone sign-up (build 12) carries a required, unticked "I am 18 or older"
 // tick. The words are the ones the API anchors the consent-ledger row to, and the Register button stays
-// off until it is ticked. Builds 9-11 have no tick; the server still admits them (no field sent).
+// off until it is ticked. The server refuses any sign-up without the tick (builds 9-11, which had none,
+// never reached the public stores).
 // ---------------------------------------------------------------------------
 
 const API_AGE = readFileSync(join(process.cwd(), '..', 'api', 'src', 'modules', 'auth', 'age-declaration.ts'), 'utf8');
