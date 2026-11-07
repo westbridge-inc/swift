@@ -70,6 +70,7 @@ const faultyLedger: ServiceDayLedger = {
 };
 const users: string[] = [];
 const orderIds: string[] = [];
+const tenantIds: string[] = [];
 
 type Person = { id: string; token: string; phone: string; sessionId: string; deviceId: string };
 async function person(n: number, roles: string[], active: string, extra: Record<string, unknown> = {}, phone = gyPhone()): Promise<Person> {
@@ -165,6 +166,7 @@ afterAll(async () => {
     await app.prisma.session.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.customer.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
+    if (tenantIds.length) await app.prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
   });
   for (const key of await app.redis.keys(`${CALL_DAY_PREFIX}*`)) await app.redis.del(key);
   await app.close();
@@ -365,23 +367,36 @@ describe('[INAPP-CALLS] starting a call: the bridge\'s party rules, one budget w
 describe('[INAPP-CALLS] the tenant wall: another operator\'s person never reaches this operator\'s order', () => {
   it('a person of tenant B named as the customer of a swift-default order gets 404 / no token, and no row', async () => {
     const tenantId = `inapp-tenant-b-${nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
-    await system(() => app.prisma.tenant.create({ data: { id: tenantId, name: 'Inapp tenant B', slug: tenantId, isActive: true } }));
-    const phone = testPhone();
-    const u = await system(() => app.prisma.user.create({ data: {
-      phone, firstName: 'Inapp', lastName: 'TenantB', roles: ['CUSTOMER'] as never, activeRole: 'CUSTOMER' as never,
-      countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, tenantId,
-    } as never }));
-    users.push(u.id);
-    const token = app.jwt.sign({ userId: u.id, role: 'CUSTOMER', jti: nanoid(8) });
-    await system(() => app.prisma.session.create({ data: { userId: u.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `inapp-b-${NUM}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
-    const o = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: u.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
-    const res = await start(token, o.id, 'rider');
-    expect(res.statusCode, res.body).toBe(404);
-    expect((await regToken(token)).statusCode).toBe(403);
-    expect(await rowsFor(o.id)).toHaveLength(0);
-    await system(async () => {
-      await app.prisma.session.deleteMany({ where: { userId: u.id } });
-    });
+    // A second live operator. It is removed at the end of THIS test (finally below): while it exists the public
+    // operator is ambiguous for every suite sharing the database (platform promo codes and the public market refuse).
+    await system(() => app.prisma.tenant.create({ data: { id: tenantId, name: 'Inapp tenant B', slug: tenantId, isActive: true, kind: 'PRODUCTION' } }));
+    tenantIds.push(tenantId);
+    try {
+      const phone = testPhone();
+      const u = await system(() => app.prisma.user.create({ data: {
+        phone, firstName: 'Inapp', lastName: 'TenantB', roles: ['CUSTOMER'] as never, activeRole: 'CUSTOMER' as never,
+        countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, tenantId,
+      } as never }));
+      users.push(u.id);
+      const token = app.jwt.sign({ userId: u.id, role: 'CUSTOMER', jti: nanoid(8) });
+      await system(() => app.prisma.session.create({ data: { userId: u.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `inapp-b-${NUM}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
+      const o = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: u.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
+      const res = await start(token, o.id, 'rider');
+      expect(res.statusCode, res.body).toBe(404);
+      expect((await regToken(token)).statusCode).toBe(403);
+      expect(await rowsFor(o.id)).toHaveLength(0);
+    } finally {
+      await system(async () => {
+        const theirs = await app.prisma.user.findMany({ where: { tenantId }, select: { id: true } });
+        const ids = theirs.map((t) => t.id);
+        const orders = await app.prisma.order.findMany({ where: { customerId: { in: ids } }, select: { id: true } });
+        await app.prisma.callSession.deleteMany({ where: { orderId: { in: orders.map((x) => x.id) } } });
+        await app.prisma.order.deleteMany({ where: { id: { in: orders.map((x) => x.id) } } });
+        await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
+        await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+        await app.prisma.tenant.delete({ where: { id: tenantId } });
+      });
+    }
   });
 });
 
