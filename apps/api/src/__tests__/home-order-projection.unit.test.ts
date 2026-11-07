@@ -102,6 +102,9 @@ async function harness(vendors = [vendor(1), vendor(2)]) {
       return [{ id: 'popular-item', name: 'Synthetic dish', imageUrl: null, basePrice: 1000, vendorId: v.id, vendor: v }];
     }) },
     actorRatingStat: { findMany: vi.fn(async (args: unknown) => { note('ratings', args); return []; }) },
+    // [STORE-HOURS] Home reads "open now" per request with each store's weekly hours (never from the cached
+    // candidates): its own read of the hours table, not a discovery read. No fixture store has hours set.
+    operatingHours: { findMany: vi.fn(async (args: unknown) => { note('hours', args); return []; }) },
     user: { findUnique: vi.fn(async (args: { where: { id: string } }) => {
       note('country', args, args.where.id); return { countryCode: 'GY' };
     }) },

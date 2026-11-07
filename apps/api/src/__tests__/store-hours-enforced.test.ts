@@ -10,6 +10,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { wordFreeTag } from './helpers/fixture-ids';
 import { guyanaDayKey, guyanaWallClockParts, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import {
   clockMinutes, hoursAllowNow, nextOpeningWords, ownStoreHoursView, storeOpenNow, type HoursRow,
@@ -176,7 +177,7 @@ async function makeStore(name: string, hours: HoursRow[], flags: Partial<{ isCur
   const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
   const v = await app.prisma.vendor.create({
     data: {
-      ownerId: vo.id, name: `HRS ${name} ${nanoid(6)}`, slug: `hrs-${name.toLowerCase()}-${nanoid(8).toLowerCase()}`, vendorType: 'SERVICE',
+      ownerId: vo.id, name: `HRS ${name} ${wordFreeTag(6)}`, slug: `hrs-${name.toLowerCase()}-${nanoid(8).toLowerCase()}`, vendorType: 'SERVICE',
       phone: `${PHONE_PREFIX}${String(900 - vendorIds.length).padStart(3, '0')}`, addressLine1: '9 Clock Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8013, longitude: -58.1551, status: 'ACTIVE', isVerified: true,
       isCurrentlyOpen: flags.isCurrentlyOpen ?? true, acceptingOrders: true,

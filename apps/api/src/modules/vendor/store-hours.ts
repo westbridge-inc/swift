@@ -119,11 +119,16 @@ export async function hoursOpenByVendor(db: Db, vendorIds: readonly string[], no
   const out = new Map<string, boolean>();
   const ids = [...new Set(vendorIds)];
   if (ids.length === 0) return out;
-  const rows = await db.vendor.findMany({
-    where: { id: { in: ids } },
-    select: { id: true, isSynthetic: true, operatingHours: { select: HOURS_SELECT, orderBy: { dayOfWeek: 'asc' } } },
+  // One read of the hours table (never a second read of the store rows a list already chose). The App Review fiction's
+  // hours are not read: a store with no hours keeps its switch.
+  const rows = await db.operatingHours.findMany({
+    where: { vendorId: { in: ids }, vendor: { isSynthetic: false } },
+    select: { vendorId: true, ...HOURS_SELECT },
+    orderBy: { dayOfWeek: 'asc' },
   });
-  for (const r of rows) out.set(r.id, storeOpenNow({ isCurrentlyOpen: true, isSynthetic: r.isSynthetic }, r.operatingHours ?? [], now));
+  const byVendor = new Map<string, HoursRow[]>();
+  for (const { vendorId, ...h } of rows) byVendor.set(vendorId, [...(byVendor.get(vendorId) ?? []), h]);
+  for (const [vendorId, hours] of byVendor) out.set(vendorId, hoursAllowNow(hours, now));
   return out;
 }
 

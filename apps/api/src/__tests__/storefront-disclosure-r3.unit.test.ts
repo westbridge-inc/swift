@@ -87,6 +87,8 @@ async function fixture(status = 'ACTIVE') {
     // This privacy fixture has no global pause, repair rows or held clocks.
     // Preserve the tripwire for every unmodelled database delegate.
     platformConfig: { findUnique: async () => null, findMany: async () => [] },
+    // [STORE-HOURS] The branch switcher reads "open now" with each branch's weekly hours: no fixture store has hours set.
+    operatingHours: { findMany: async () => [] },
     // [#1541] The projection takes billing's payer -> subscriptions locks first. This double accepts exactly those two
     // statements and nothing else; the database activation suite proves their order against settlement.
     $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
