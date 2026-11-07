@@ -207,6 +207,9 @@ const fx = vi.hoisted(() => {
       invalidateQueries: vi.fn(async () => undefined),
       removeQueries: vi.fn(),
       resetQueries: vi.fn(async () => undefined),
+      // [SPEED 6 Nov] The tab bar's quiet-moment wait (navigation/warmTabs) reads these.
+      isFetching: vi.fn(() => 0),
+      getQueryCache: () => ({ subscribe: () => () => undefined }),
     },
     switchRole: vi.fn(),
     toastError: vi.fn(),
@@ -1059,6 +1062,7 @@ describe('the store tabs pause while hidden (every store type)', () => {
     for (const screen of screens) {
       expect(screen.props.options?.freezeOnBlur, `${screen.props.name} is not exempt from the pause`).not.toBe(false);
       expect(screen.props.options?.unmountOnBlur, `${screen.props.name} keeps its state`).toBeUndefined();
+      // [SPEED 6 Nov] At first paint; the other tabs mount hidden later, once Swift is quiet (VendorStack.warmTabs.navigation.test).
       expect(screen.props.options?.lazy, `${screen.props.name} mounts on first visit`).not.toBe(false);
     }
     // The new-order layer is a sibling of the tabs, not inside one.
