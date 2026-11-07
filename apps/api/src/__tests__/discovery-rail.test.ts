@@ -112,6 +112,22 @@ describe('law D: no dead taps', () => {
     expect(chinese.availableVendors).toBeGreaterThanOrEqual(1);
   });
 
+  it('[STORE-HOURS] a store whose own weekly hours close it now never counts (switch on) — the rule checkout refuses by', async () => {
+    const burgers = async () => {
+      resetDiscoveryCacheForTests();
+      const data = (await rail('?vertical=FOOD')).json().data;
+      return (data.categories as Array<{ slug: string; availableVendors: number }>).find((c) => c.slug === 'burgers')?.availableVendors ?? 0;
+    };
+    const before = await burgers();
+    const shut = await makeMemberVendor('burgers', { open: true });
+    await app.prisma.operatingHours.createMany({
+      data: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ vendorId: shut.id, dayOfWeek, openTime: '', closeTime: '', isClosed: true })),
+    });
+    expect(await burgers()).toBe(before);
+    await makeMemberVendor('burgers', { open: true }); // no hours set: the switch alone decides (unchanged)
+    expect(await burgers()).toBe(before + 1);
+  });
+
   it('geo filtering respects the vendor\'s own delivery radius', async () => {
     resetDiscoveryCacheForTests();
     // A bakery ~50km away with a 10km radius: in the anywhere view, absent nearby.

@@ -60,6 +60,7 @@ import { businessCannotConfirmBooking, vendorOperateRefusal, type StoreRoleVerif
 import { bookingChangeForOrderTransition, syncOrderBookings } from '../booking/order-coupling';
 import { canonicalSlotStart } from '../booking/availability';
 import { assertOneAppointment, isAppointmentOnlyGroup, storeFlagsAllowCheckout } from '../booking/appointment-checkout';
+import { storeHoursRefusal } from '../vendor/store-hours';
 import { orderingRestriction, CashRulesService, TAXI_FARE_OUTCOME_ENFORCED_AT, COURIER_CASH_OUTCOME_ENFORCED_AT } from '../cash/cash-rules.service';
 import { resolveSelectedOptions, optionsUnitPrice, OptionSelectionError, normalizeItemNote, rebuildSelectionFromSnapshot, selectionKey, validateSelectedOptions, type OptionSelection, type ResolvedOption } from './options';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kitchen-capacity';
@@ -1100,8 +1101,16 @@ export class OrderService {
       const vendor = items[0]!.item.vendor;
       // [BOOK-FU3 · COORD 29 Oct] "Closed right now" does not refuse a booking-only
       // group (a booking is for a later time); not ACTIVE or orders paused still do.
-      if (!storeFlagsAllowCheckout(vendor, isAppointmentOnlyGroup(items))) {
+      const appointmentOnly = isAppointmentOnlyGroup(items);
+      if (!storeFlagsAllowCheckout(vendor, appointmentOnly)) {
         throw new AppError(400, 'VENDOR_CLOSED', `${vendor.name} is currently not accepting orders`);
+      }
+      // [STORE-HOURS · owner 6 Nov 2026] The switch on is not enough: the store's own weekly hours (a day marked
+      // closed, or a time outside its hours) refuse too, with the same code older apps already handle. A booking-only
+      // group keeps its exception (a booking is for a later time).
+      if (!appointmentOnly) {
+        const hoursRefusal = await storeHoursRefusal(this.prisma, vendor, now);
+        if (hoursRefusal) throw hoursRefusal;
       }
       // [REPORT-012 F-012-05] The derived vendor flags are not the whole
       // authority: checkout re-evaluates SUBSCRIPTION operability live. This
@@ -1641,6 +1650,11 @@ export class OrderService {
           || (lockedVendor.activationValidUntil != null && lockedVendor.activationValidUntil <= now)
         ) {
           throw new AppError(400, 'VENDOR_CLOSED', `${lockedVendor.name} is currently not accepting orders`);
+        }
+        // [STORE-HOURS] The same hours rule, re-read with the store's row held (hours saved mid-checkout count).
+        if (!bookingOnly) {
+          const hoursRefusal = await storeHoursRefusal(tx, { id: planVendorId, name: lockedVendor.name }, now);
+          if (hoursRefusal) throw hoursRefusal;
         }
         const visit = plans.find((plan) => plan.vendor.id === planVendorId)?.homeVisit;
         if (visit) {

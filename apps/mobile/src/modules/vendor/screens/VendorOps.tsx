@@ -386,6 +386,8 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
   const missingPhotos = items.filter((i: any) => !i.imageUrl).length;
   const shortUrl = (qrQ.data as any)?.shortUrl;
   const open = !!store.isCurrentlyOpen;
+  // [STORE-HOURS] The switch is on but the store's own weekly hours close it now (server word; absent on an older server).
+  const byHours = open && store.closedByHoursNow === true;
 
   return (
     <BoardFirstRun listening={reachable}>
@@ -419,10 +421,12 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
       ) : null}
       <BoardFirstRunRow
         index={canManage ? 2 : 1}
-        label={open ? 'You are open' : 'Your store is closed'}
-        done={open}
+        label={byHours ? 'Closed by your hours' : open ? 'You are open' : 'Your store is closed'}
+        done={open && !byHours}
         detail={
-          open
+          byHours
+            ? (store.opensNext ? `Customers can order ${store.opensNext}` : 'Your weekly hours say closed now')
+            : open
             ? 'Customers can order right now'
             : canManage
               ? 'Use the switch below to start taking orders'
@@ -498,10 +502,12 @@ function storeStatusEyebrow(store: any, inPreview: boolean) {
   const schedule = today && !today.isClosed
     ? [formatBusinessTime(today.openTime), formatBusinessTime(today.closeTime)].filter(Boolean).join('–')
     : null;
-  const status = !open ? 'CLOSED' : accepting ? 'OPEN' : 'OPEN · ORDERS PAUSED';
+  // [STORE-HOURS] The switch is on but the store's own hours close it now: customers cannot order (checkout refuses).
+  const byHours = open && store?.closedByHoursNow === true;
+  const status = !open ? 'CLOSED' : byHours ? 'CLOSED BY YOUR HOURS' : accepting ? 'OPEN' : 'OPEN · ORDERS PAUSED';
   return {
     label: schedule ? `${status} · TODAY ${schedule}` : status,
-    tone: !open ? ('muted' as const) : accepting ? ('success' as const) : ('warning' as const),
+    tone: !open || byHours ? ('muted' as const) : accepting ? ('success' as const) : ('warning' as const),
   };
 }
 
@@ -963,18 +969,20 @@ export function VendorOps({ store, navigation }: any) {
   const newOrders = orders.filter((o) => isNew(o.status)).sort(expressFirst);
   const inProgress = orders.filter((o) => !isNew(o.status)).sort(expressFirst);
   const status = storeStatusEyebrow({ ...store, isCurrentlyOpen: open }, inPreview);
+  // [STORE-HOURS] The switch is on but the store's own weekly hours close it now (server word; absent on an older server).
+  const closedByHours = open && store.closedByHoursNow === true;
   const storeStatusText = (
     <View style={{ flex: 1, paddingRight: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-        <View style={{ width: space.md, height: space.md, borderRadius: radius.full, backgroundColor: !inPreview && open && accepting ? color.success : color.text.muted }} />
+        <View style={{ width: space.md, height: space.md, borderRadius: radius.full, backgroundColor: !inPreview && open && accepting && !closedByHours ? color.success : color.text.muted }} />
         <T variant="body" weight="bold">
-          {inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}
+          {inPreview ? 'Not open yet' : !open ? 'Store closed' : closedByHours ? 'Closed by your hours' : accepting ? 'Open for orders' : 'Orders paused'}
         </T>
       </View>
       <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
         {inPreview
           ? 'Your store opens for orders once verification is approved.'
-          : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
+          : !open ? 'Not currently open to customers' : closedByHours ? (store.opensNext ? `Customers can order ${store.opensNext}` : 'Your weekly hours say closed now') : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders'}
       </T>
     </View>
   );

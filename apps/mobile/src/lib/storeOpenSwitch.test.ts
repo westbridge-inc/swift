@@ -69,7 +69,9 @@ describe('[PERF row 562] VendorOps draws the shown state, locked until the answe
   it('the switch, its spoken state, the status words and the header all read it', () => {
     expect(screen).toContain('<AvailabilitySwitch value={!inPreview && open} disabled={inPreview || toggleOpen.isPending}');
     expect(screen).toContain('accessibilityState={{ checked: !inPreview && open, disabled: inPreview || toggleOpen.isPending, busy: toggleOpen.isPending }}');
-    expect(screen).toContain("{inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused'}");
+    // [STORE-HOURS] The switch on with the store's own hours closing it now says so (server word closedByHoursNow).
+    expect(screen).toContain("{inPreview ? 'Not open yet' : !open ? 'Store closed' : closedByHours ? 'Closed by your hours' : accepting ? 'Open for orders' : 'Orders paused'}");
+    expect(screen).toContain('const closedByHours = open && store.closedByHoursNow === true;');
     expect(screen).toContain('const status = storeStatusEyebrow({ ...store, isCurrentlyOpen: open }, inPreview);');
   });
 

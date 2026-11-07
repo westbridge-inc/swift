@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { estimateDrivingDistance } from '../../utils/distance';
+import { applyOpenNow } from './store-hours';
 
 // ---------------------------------------------------------------------------
 // [CHAINS PR3 · owner 29 Oct 2026] "One brand card ('Royal Castle') opening the nearest open branch that delivers to
@@ -40,7 +41,8 @@ export async function brandFactsFor(db: Db, vendorIds: readonly string[]): Promi
       isCurrentlyOpen: true, acceptingOrders: true, latitude: true, longitude: true, deliveryRadius: true,
     },
   });
-  for (const r of rows) {
+  // [STORE-HOURS] A branch is "open" as checkout decides it (switch AND its weekly hours).
+  for (const r of await applyOpenNow(db, rows)) {
     if (!r.owner.brandName) continue;
     const { owner, ownerId, ...row } = r;
     out.set(r.id, { ownerId, name: owner.brandName!, row });
@@ -122,7 +124,7 @@ export async function brandBranchesFor(
     select: { id: true, name: true, slug: true, addressLine1: true, city: true, isCurrentlyOpen: true, acceptingOrders: true, latitude: true, longitude: true, deliveryRadius: true },
     take: 60,
   });
-  const ranked = rows
+  const ranked = (await applyOpenNow(db, rows))
     .map((r, i) => ({ r, i, rank: branchRank(r, point) }))
     .sort((a, b) => better(a.rank, b.rank) || a.i - b.i)
     .map(({ r }) => {

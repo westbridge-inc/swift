@@ -341,6 +341,8 @@ export function StoreStatusCard({ store, manager, owner = false, readFailed = fa
   ]);
   const open = !!store.isCurrentlyOpen;
   const accepting = !!store.acceptingOrders;
+  // [STORE-HOURS] The switch is on but the store's own weekly hours close it now: customers cannot order until then.
+  const byHours = open && store.closedByHoursNow === true;
   // A store that is not live yet (being reviewed) cannot open: as in the app,
   // the switch is locked and Pause is not offered.
   const inPreview = store.status != null && store.status !== 'ACTIVE';
@@ -385,9 +387,9 @@ export function StoreStatusCard({ store, manager, owner = false, readFailed = fa
   const locked = readFailed || unconfirmed || openMut.isPending || ordersMut.isPending;
   const text = (
     <span className="min-w-0 flex-1">
-      <span className="flex items-center gap-2 font-semibold"><span className={`h-2.5 w-2.5 rounded-full ${open && accepting ? 'bg-[var(--swift-success)]' : 'bg-[var(--swift-muted)]'}`} aria-hidden="true" />
-        {holdTitle ?? (inPreview ? 'Not open yet' : !open ? 'Store closed' : accepting ? 'Open for orders' : 'Orders paused')}</span>
-      <span className="sw-caption mt-1 block">{holdBody ?? (inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders')}</span>
+      <span className="flex items-center gap-2 font-semibold"><span className={`h-2.5 w-2.5 rounded-full ${open && accepting && !byHours ? 'bg-[var(--swift-success)]' : 'bg-[var(--swift-muted)]'}`} aria-hidden="true" />
+        {holdTitle ?? (inPreview ? 'Not open yet' : !open ? 'Store closed' : byHours ? 'Closed by your hours' : accepting ? 'Open for orders' : 'Orders paused')}</span>
+      <span className="sw-caption mt-1 block">{holdBody ?? (inPreview ? 'Your store opens for orders once verification is approved.' : !open ? 'Not currently open to customers' : byHours ? (store.opensNext ? `Customers can order ${store.opensNext}` : 'Your weekly hours say closed now') : accepting ? 'Accepting new orders' : 'You’re open but not taking new orders')}</span>
     </span>
   );
   return (

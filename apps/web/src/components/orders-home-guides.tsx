@@ -35,6 +35,8 @@ export function FirstOrderGuide({ store, manager, listening }: { store: HubStore
   const missingPhotos = items.filter((i) => !i.imageUrl).length;
   const shortUrl = qrQ.data?.shortUrl ?? undefined;
   const open = !!store.isCurrentlyOpen;
+  // [STORE-HOURS] The switch is on but the store's own weekly hours close it now: customers cannot order until then.
+  const byHours = open && store.closedByHoursNow === true;
   return (
     <section aria-label="Your first order" className="rounded-2xl bg-[var(--swift-red-600)] p-6 text-white">
       <p className="text-[11px] font-bold tracking-[0.1em] opacity-80">YOUR FIRST ORDER</p>
@@ -49,8 +51,8 @@ export function FirstOrderGuide({ store, manager, listening }: { store: HubStore
           <GuideRow index={1} label={`Add photos to your ${catalogue}`} done={missingPhotos === 0}
             detail={missingPhotos === 0 ? `All ${items.length} items have a photo` : `Photos missing on ${missingPhotos} of ${items.length} items`} href="/dashboard/inventory" />
         ) : null}
-        <GuideRow index={manager ? 2 : 1} label={open ? 'You are open' : 'Your store is closed'} done={open}
-          detail={open ? 'Customers can order right now' : manager ? 'Use the switch below to start taking orders' : 'Ask a manager or owner to open the store'} />
+        <GuideRow index={manager ? 2 : 1} label={byHours ? 'Closed by your hours' : open ? 'You are open' : 'Your store is closed'} done={open && !byHours}
+          detail={byHours ? (store.opensNext ? `Customers can order ${store.opensNext}` : 'Your weekly hours say closed now') : open ? 'Customers can order right now' : manager ? 'Use the switch below to start taking orders' : 'Ask a manager or owner to open the store'} />
         {/* [STORE-LINK] As the phone (VendorOps opens VendorMyQr): the store's QR page, where the link is copied and shared. */}
         {manager && <GuideRow index={3} label="Share your store link" detail={shortUrl ?? (qrQ.isError ? 'Link unavailable — try again shortly' : 'Loading your live store link')} href="/dashboard/qr" />}
       </div>

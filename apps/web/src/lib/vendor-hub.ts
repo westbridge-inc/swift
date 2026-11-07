@@ -240,10 +240,12 @@ export function storeStatusEyebrow(store: any, inPreview: boolean) {
   const schedule = today && !today.isClosed
     ? [formatBusinessTime(today.openTime), formatBusinessTime(today.closeTime)].filter(Boolean).join('–')
     : null;
-  const status = !open ? 'CLOSED' : accepting ? 'OPEN' : 'OPEN · ORDERS PAUSED';
+  // [STORE-HOURS] The switch is on but the store's own hours close it now: customers cannot order (checkout refuses).
+  const byHours = open && store?.closedByHoursNow === true;
+  const status = !open ? 'CLOSED' : byHours ? 'CLOSED BY YOUR HOURS' : accepting ? 'OPEN' : 'OPEN · ORDERS PAUSED';
   return {
     label: schedule ? `${status} · TODAY ${schedule}` : status,
-    tone: !open ? ('muted' as const) : accepting ? ('success' as const) : ('warning' as const),
+    tone: !open || byHours ? ('muted' as const) : accepting ? ('success' as const) : ('warning' as const),
   };
 }
 

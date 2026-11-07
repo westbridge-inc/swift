@@ -5,6 +5,7 @@ import { bindBrowseTenant, requireRequestTenant } from '../search/search-scope';
 import { customerPoint } from './customer-point';
 import { legacyCategoryMark } from './legacy-category-mark';
 import { classifyCategory } from '../compliance/prohibited-items';
+import { storeOpenNow, type HoursRow } from '../vendor/store-hours';
 
 // ---------------------------------------------------------------------------
 // Customer-facing discovery endpoints (#17 Part 8) — the rail's data source.
@@ -87,8 +88,12 @@ export async function discoveryRoutes(app: FastifyInstance) {
     const geoJoin = query.lat != null && query.lng != null
       ? Prisma.sql`AND (6371 * acos(least(1, cos(radians(${query.lat})) * cos(radians(v.latitude)) * cos(radians(v.longitude) - radians(${query.lng})) + sin(radians(${query.lat})) * sin(radians(v.latitude))))) <= v."deliveryRadius"`
       : Prisma.sql``;
-    const rows = await app.prisma.$queryRaw<Array<{ categoryId: string; n: bigint }>>(
-      Prisma.sql`SELECT vc."categoryId", COUNT(DISTINCT vc."vendorId") AS n
+    // [STORE-HOURS] Each store's weekly hours ride the same read, so THE open-now rule (store-hours.ts) is applied
+    // to exactly the rows this SQL admitted.
+    const rows = await app.prisma.$queryRaw<Array<{ categoryId: string; vendorId: string; isSynthetic: boolean | null; hours: HoursRow[] | null }>>(
+      Prisma.sql`SELECT DISTINCT vc."categoryId", vc."vendorId", v."isSynthetic",
+         (SELECT jsonb_agg(jsonb_build_object('dayOfWeek', h."dayOfWeek", 'openTime', h."openTime", 'closeTime', h."closeTime", 'isClosed', h."isClosed"))
+            FROM "operating_hours" h WHERE h."vendorId" = v.id) AS hours
        FROM "vendor_discovery_categories" vc
        JOIN "vendors" v ON v.id = vc."vendorId"
          AND v."tenantId" = ${tenantId}
@@ -96,10 +101,16 @@ export async function discoveryRoutes(app: FastifyInstance) {
          ${geoJoin}
        JOIN "tenants" t ON t.id = v."tenantId" AND t."isActive" = true
          ${publicMode ? Prisma.sql`AND t.kind = 'PRODUCTION'` : Prisma.empty}
-       WHERE vc."tenantId" = ${tenantId}
-       GROUP BY vc."categoryId"`,
+       WHERE vc."tenantId" = ${tenantId}`,
     );
-    const counts = new Map(rows.map((r) => [r.categoryId, Number(r.n)]));
+    // [STORE-HOURS · owner 6 Nov 2026] "Open now" is the switch AND the store's weekly hours, as checkout decides it:
+    // a store closed by its hours does not count towards a chip.
+    const now = new Date();
+    const counts = new Map<string, number>();
+    for (const r of rows) {
+      if (!storeOpenNow({ isCurrentlyOpen: true, isSynthetic: r.isSynthetic }, r.hours ?? [], now)) continue;
+      counts.set(r.categoryId, (counts.get(r.categoryId) ?? 0) + 1);
+    }
 
     const categories = await app.prisma.discoveryCategory.findMany({
       where: {

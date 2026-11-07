@@ -34,7 +34,9 @@ function store(id: string, tenant: Row): Row {
     estimatedPrepTime: 10, averageRating: 4, totalRatings: 1, minOrderAmount: 0, totalOrders: 1,
     deliveryRadius: 4, distanceKm: null,
     // [CHAINS PR3] the brand columns every customer list reads to show one card per brand: this store has no brand
-    ownerId: `owner-${id}`, owner: { brandName: null }, brandListedAlone: false };
+    ownerId: `owner-${id}`, owner: { brandName: null }, brandListedAlone: false,
+    // [STORE-HOURS] the weekly hours every "open now" reads with the switch: none set (the switch alone decides)
+    isSynthetic: false, operatingHours: [] };
 }
 
 async function fixture() {

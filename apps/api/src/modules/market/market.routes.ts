@@ -5,6 +5,7 @@ import { z } from '../../lib/zod';
 import { catalogueVendorInTenant } from '../vendor/vendor-visibility';
 import { bindBrowseTenant, decodeScopedCursor, encodeScopedCursor, requireRequestTenant } from '../search/search-scope';
 import { ITEM_HIT_SELECT, toItemHit, type ItemHit } from '../search/item-hit';
+import { applyItemStoreOpenNow } from '../vendor/store-hours';
 import { AppError } from '../../utils/errors';
 import { marketGate, thresholdsFrom } from './launch-depth';
 import { hiddenItemIds, withoutHidden } from '../compliance/prohibited-gate';
@@ -264,7 +265,8 @@ export async function marketRoutes(app: FastifyInstance) {
     }
 
     const page = listable.slice(0, q.limit);
-    const items: ItemHit[] = page.map(toItemHit);
+    // [STORE-HOURS] Each dish's store is "open" as checkout decides it (switch AND the store's weekly hours).
+    const items: ItemHit[] = await applyItemStoreOpenNow(app.prisma, page.map(toItemHit));
     const last = page[page.length - 1];
 
     return {
