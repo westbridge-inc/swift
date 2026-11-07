@@ -193,10 +193,10 @@ describe('[MC-PR3] test data is left out of every admin list when the console as
 
 describe('[MC-PR3 · security review] "TEST-" names are reserved for test accounts (+5920…) at the API boundary', () => {
   it('signup refuses a "TEST-" first name for a real number with 400 RESERVED_NAME — before any signup proof is spent', async () => {
-    const res = await app.inject({ method: 'POST', url: '/api/v1/auth/register', payload: { phone: `+59261${DIGITS}99`, firstName: 'TEST-Hidden', lastName: 'Person', acceptTerms: true, registrationProof: 'x'.repeat(43) } });
+    const res = await app.inject({ method: 'POST', url: '/api/v1/auth/register', payload: { phone: `+59261${DIGITS}99`, firstName: 'TEST-Hidden', lastName: 'Person', acceptTerms: true, ageConfirmed: true, registrationProof: 'x'.repeat(43) } });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('RESERVED_NAME');
-    const fixture = await app.inject({ method: 'POST', url: '/api/v1/auth/register', payload: { phone: `+5920${DIGITS}99`, firstName: 'TEST-Journey', lastName: 'Person', acceptTerms: true, registrationProof: 'x'.repeat(43) } });
+    const fixture = await app.inject({ method: 'POST', url: '/api/v1/auth/register', payload: { phone: `+5920${DIGITS}99`, firstName: 'TEST-Journey', lastName: 'Person', acceptTerms: true, ageConfirmed: true, registrationProof: 'x'.repeat(43) } });
     expect(fixture.json().error?.code).not.toBe('RESERVED_NAME');
   });
 

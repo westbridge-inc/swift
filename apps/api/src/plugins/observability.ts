@@ -512,8 +512,9 @@ export const placesCallsCounter = new client.Counter({
 // Notification delivery failures [SWIFT-100]: channel sends fail-soft (they must
 // never break the request path), but a SILENT failure of the last-resort rung
 // means a vendor/ops nudge vanished with no trace. Count every post-retry
-// failure so the rate is visible. Labels: channel = sms|push, stage =
-// escalation (vendor-alert ladder) | direct (OTP/fallback) | send (fan-out).
+// failure so the rate is visible. Labels: channel = sms|push|email|fanout, stage =
+// escalation (vendor-alert ladder) | direct (OTP/fallback) | send (fan-out) |
+// email_change (the account-email-changed notice).
 export const notificationFailuresCounter = new client.Counter({
   name: 'swift_notification_failures_total',
   help: 'Notification deliveries that failed after retries, by channel and stage',

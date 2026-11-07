@@ -1,6 +1,4 @@
-import type { FastifyRequest } from 'fastify';
 import type { ConsentDocumentType } from '../legal/consent.service';
-import { browserClientOf } from './browser-session';
 
 /**
  * [Owner ruling 15 Oct 2026 · Terms "You must be at least 18 years old" · Privacy §8 "Children"]
@@ -8,12 +6,12 @@ import { browserClientOf } from './browser-session';
  * the consent ledger, anchored to these exact words (their own versioned document), in the same
  * transaction that creates the account.
  *
- * Which clients must send it:
- *  - the website (a browser client): always — it ships with the tick;
- *  - any client that sends `ageConfirmed` (the phone app from build 12): it must be `true`.
- * Phone builds 9, 10 and 11 send no such field and keep signing up; their accounts get no age row
- * (nothing is fabricated). Once build 12 is the oldest phone build in use, requiring it from every
- * client is a one-line change here (launch checklist).
+ * Every client must send it, ticked (`ageConfirmed: true`): a sign-up without it is refused before
+ * the one-use signup proof is spent, so ticking and retrying works. The website always sends it, and
+ * so does the phone app from build 12 (RegisterScreen sends `ageConfirmed` on every sign-up; its
+ * Register button stays off until the tick is given). Build 12 is the first phone build in the public
+ * stores; builds 9-11, which omitted the field, never reached them and were let through only until
+ * build 12 was approved (launch checklist, 7 Nov 2026).
  */
 export const AGE_DECLARATION_TYPE: ConsentDocumentType = 'age_declaration';
 export const AGE_DECLARATION_VERSION = 'v1';
@@ -22,10 +20,7 @@ export const AGE_DECLARATION_V1 = 'I am 18 or older.';
 
 export const AGE_CONFIRMATION_MESSAGE = 'You must be 18 or older to create a Swift account. Tick "I am 18 or older" to continue.';
 
-/** True when this sign-up must carry the ticked 18+ declaration (see the rule above). */
-export function ageConfirmationRequired(
-  request: Pick<FastifyRequest, 'headers'>,
-  body: { ageConfirmed?: boolean },
-): boolean {
-  return body.ageConfirmed !== undefined || browserClientOf(request) !== null;
+/** True when this sign-up carries the ticked 18+ declaration every sign-up needs (see the rule above). */
+export function ageConfirmed(body: { ageConfirmed?: boolean }): boolean {
+  return body.ageConfirmed === true;
 }

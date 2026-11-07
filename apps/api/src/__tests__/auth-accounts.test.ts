@@ -151,7 +151,7 @@ async function ensureMoverProfiles(userId: string) {
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR', countryCode = 'GY') {
   const registrationProof = await registrationProofFor(app, phone);
   signupProofs.set(phone, registrationProof);
-  return inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+  return inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
     phone,
     registrationProof,
     firstName: 'Step3',
@@ -172,7 +172,7 @@ describe('Country picker', () => {
 
 describe('Signup — OTP mandatory, role + country aware', () => {
   it('rejects registration without a verified OTP', async () => {
-    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
       phone: MOVER_PHONE,
       firstName: 'No',
       lastName: 'Otp',
@@ -193,7 +193,7 @@ describe('Signup — OTP mandatory, role + country aware', () => {
     // Defence in depth: register refuses the same number with the same code
     // even when handed a proof minted directly — the only way one can exist.
     const registrationProof = await mintedRegistrationProofFor(app, WAITLIST_PHONE);
-    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
       phone: WAITLIST_PHONE, // UK prefix — derives no Caribbean market
       registrationProof,
       firstName: 'Wait',
@@ -233,7 +233,7 @@ describe('Signup — OTP mandatory, role + country aware', () => {
 
   it('the registration window is single-use', async () => {
     // MOVER_PHONE's capability was consumed by the successful signup.
-    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+    const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
       phone: MOVER_PHONE,
       registrationProof: signupProofs.get(MOVER_PHONE),
       firstName: 'Replay',

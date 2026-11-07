@@ -80,7 +80,8 @@ const LEDGER: Record<string, { count: number; why: string }> = {
   'modules/user/inactivity.ts': { count: 1, why: INTERNAL },
   'modules/user/legal-name.ts': { count: 1, why: `${INTERNAL} (the reserved-name rule on support's name door)` },
   'modules/user/mover-object-erasure.ts': { count: 1, why: INTERNAL },
-  'modules/user/profile-update.ts': { count: 1, why: OWN },
+  // [L04 #1550] the profile answer, and the account's own phone told of an email change.
+  'modules/user/profile-update.ts': { count: 2, why: OWN },
   'modules/user/upload-erasure.ts': { count: 2, why: INTERNAL },
   'modules/verification/compliance-audit.service.ts': { count: 2, why: OPS },
   'modules/verification/duplicate-holders.ts': { count: 1, why: INTERNAL },

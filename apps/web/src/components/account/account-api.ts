@@ -27,6 +27,7 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
     }, { redirectOnExpired: false });
     return response.data as T;
   } catch (error) {
+    if (error instanceof ApiRequestError && error.status === 403 && error.code === 'STEP_UP_REQUIRED') throw error;
     const curated = error instanceof ApiRequestError && error.status >= 400 && error.status < 500
       && customerErrorCodes.has(error.code ?? '');
     throw new Error(curated ? error.message : 'Something went wrong. Please try again.');

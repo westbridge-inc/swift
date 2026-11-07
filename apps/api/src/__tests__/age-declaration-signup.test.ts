@@ -16,10 +16,10 @@ import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling 15 Oct 2026 · Terms "You must be at least 18 years old" · Privacy §8] A sign-up
-// carries a required "I am 18 or older" tick: the website now, the phone app from build 12. The
-// server records it in the consent ledger (anchored to the exact words) and refuses a sign-up from
-// the website, or from any client that sends the field, without it. Phone builds 9, 10 and 11 send
-// no such field and must keep signing up (GUARDRAILS §7: never break a live store build).
+// carries a required "I am 18 or older" tick: the website and the phone app (build 12, the first
+// store build, sends it on every sign-up). The server records it in the consent ledger (anchored to
+// the exact words) and refuses ANY sign-up without it, from any client. Builds 9-11 (which omitted
+// the field) never reached the public stores; they were let through until build 12 was approved.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -125,13 +125,20 @@ describe('the 18+ tick is recorded and required [owner ruling 15 Oct 2026]', () 
     userIds.push(retried.json().data.user.id);
   });
 
-  it('phone builds 9, 10 and 11 (no such field) still sign up, and no age row is fabricated for them', async () => {
+  it('a phone sign-up that leaves the field out is refused in plain words, creates nothing, and a ticked retry works', async () => {
     const phone = newPhone();
-    const res = await nativeRegister(phone, await registrationProofFor(app, phone), {});
-    expect(res.statusCode, res.body).toBe(201);
-    const id = res.json().data.user.id as string;
+    const proof = await registrationProofFor(app, phone);
+    const refused = await nativeRegister(phone, proof, {});
+    expect(refused.statusCode, refused.body).toBe(400);
+    expect(refused.json().error.code).toBe('AGE_CONFIRMATION_REQUIRED');
+    expect(refused.json().error.message).toBe('You must be 18 or older to create a Swift account. Tick "I am 18 or older" to continue.');
+    expect(await runWithoutTenant(() => app.prisma.user.count({ where: { phone } }), 'test-read:age-declaration')).toBe(0);
+
+    const retried = await nativeRegister(phone, proof, { ageConfirmed: true });
+    expect(retried.statusCode, retried.body).toBe(201);
+    const id = retried.json().data.user.id as string;
     userIds.push(id);
-    expect((await ledger(id)).map((r) => r.documentType)).toEqual(['privacy_policy', 'terms_of_service']);
+    expect((await ledger(id)).map((r) => r.documentType)).toEqual(['age_declaration', 'privacy_policy', 'terms_of_service']);
   });
 
   it('the website must send the tick: without it the sign-up is refused before the continuation is spent', async () => {

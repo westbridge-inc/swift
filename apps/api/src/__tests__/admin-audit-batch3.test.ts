@@ -12,6 +12,10 @@ import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { testPhone } from './helpers/fixture-ids';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // [ADM-002 · batch 3] RETIRING THE LEGACY `audit()` ROW WITHOUT LOSING WHAT IT
 // CARRIED.

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -247,6 +247,9 @@ describe('Checkout scoping', () => {
   });
 
   it('platform-wide (admin) codes still discount the whole basket', async () => {
+    // [Ruling 1 Nov 2026] Swift-paid codes are OFF by default (promo/swift-paid.ts): this case covers the dormant path.
+    process.env['SWIFT_PAID_PROMOS'] = '1';
+    onTestFinished(() => { delete process.env['SWIFT_PAID_PROMOS']; });
     await app.prisma.promoCode.create({
       data: {
         code: `PLAT${nanoid(4).replace(/[^A-Za-z0-9]/g, 'Y').toUpperCase()}`,

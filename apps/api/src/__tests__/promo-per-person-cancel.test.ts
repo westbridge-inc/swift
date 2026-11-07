@@ -14,6 +14,10 @@ import { normalizeDocNumber } from '../modules/integrity/normalize';
 import { OrderService } from '../modules/order/order.service';
 import { promoUsesByPersonWhere } from '../modules/promo/promo-uses';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // [Row 29 · DS109 S3] The per-person promo cap counted only orders that were
 // not CANCELLED or REFUNDED, so a customer could place an order with a

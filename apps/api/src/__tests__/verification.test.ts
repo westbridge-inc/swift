@@ -91,7 +91,7 @@ function inject(method: 'GET' | 'POST' | 'PUT', url: string, payload?: unknown, 
 
 async function signup(phone: string, role: 'CUSTOMER' | 'MOVER' | 'VENDOR') {
   const registrationProof = await registrationProofFor(app, phone);
-  const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+  const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
     phone,
     registrationProof,
     firstName: 'Step4',

@@ -12,6 +12,10 @@ import { scanInferredRefunds } from '../modules/order/refund-review';
 import { refundsAwaitingReviewGauge } from '../plugins/observability';
 import { walkOrderStatus } from './helpers/order-status-walk';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // [M-33] End to end: the allocation is written at checkout, the return
 // consumes it, and a legacy order is routed to review.

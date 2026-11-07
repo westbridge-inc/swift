@@ -602,6 +602,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       // [STORE-VAT · O-5] the store owner's VAT approved / not approved / withdrawn notice (noticeStore, inside the decision's transaction)
       'modules/store-vat/store-vat-decisions.ts insertNoticeFor': 1,
       'modules/user/inactivity.ts insertNoticeFor': 1,
+      // [L04 #1550] 'Your email address was changed' to the account itself, inside the change's transaction
+      'modules/user/profile-update.ts insertNoticeFor': 1,
       'modules/vendor/staff-invites.ts insertNoticeFor': 2,
       'modules/vendor/store-pin-move.ts insertNoticeFor': 1,
       // + [FOOD-PERMIT] the food handlers tick notice (askForFoodHandlerTick)

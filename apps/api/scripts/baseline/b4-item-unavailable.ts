@@ -48,7 +48,7 @@ async function loginByOtp(phone: string): Promise<string> {
         firstName: 'ELV1',
         lastName: 'MartOwner',
         role: 'VENDOR',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       t = pickToken(r.json);
     }

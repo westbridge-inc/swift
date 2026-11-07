@@ -13,6 +13,10 @@ import { cashMathForOffer } from '../modules/dispatch/dispatch.service';
 import { fixtureTag, testPhone } from './helpers/fixture-ids';
 import { renderReceiptHtml } from '../modules/order/receipt';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // [Owner ruling, 1 Nov 2026] Store/food EXPRESS = the normal delivery fee + a
 // flat GYD 1,000, any distance; all of the extra goes to the rider.

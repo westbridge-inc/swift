@@ -9,6 +9,10 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // H11 (pre-launch audit): promo caps were a read-then-check with no lock —
 // validatePromoCode ran before the order transaction, so two concurrent

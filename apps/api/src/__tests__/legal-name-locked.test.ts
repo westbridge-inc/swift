@@ -11,6 +11,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerAuthRoutes } from './helpers/auth-routes-harness';
 import { loginWithOtp } from './helpers/otp';
+import { grantStepUp } from './helpers/step-up';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { changeLegalName } from '../modules/user/legal-name';
@@ -94,6 +95,8 @@ describe('[F21] a name a person checked is locked in the apps', () => {
 
   it('sending the same name back is no change: an email edit still saves', async () => {
     const u = await makeUser([['drivers_licence', 'APPROVED']]);
+    // [L04 #1550] A real email change takes a fresh code on this session: grant it, so the name rule is what is graded.
+    await grantStepUp(app, u.token);
     const res = await save(u.token, { firstName: 'Original', lastName: 'Person', email: `name-${nanoid(6).toLowerCase()}@example.com`.replace(/[^a-z0-9@.-]/g, 'x') });
     expect(res.statusCode, res.body).toBe(200);
   });

@@ -208,7 +208,7 @@ describe('Auth Routes', () => {
     it('creates a new user and returns tokens', async () => {
       // OTP at signup is mandatory — prove phone ownership first
       const registrationProof = await registrationProofFor(app, testPhone);
-      const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+      const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
         phone: testPhone,
         registrationProof,
         firstName: 'Test',
@@ -226,7 +226,7 @@ describe('Auth Routes', () => {
     });
 
     it('does not reveal an existing phone to a caller without its signup continuation', async () => {
-      const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+      const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
         phone: '+5926003000', // Existing test customer
         registrationProof: 'A'.repeat(43),
         firstName: 'Dup',
@@ -244,7 +244,7 @@ describe('Auth Routes', () => {
         phone,
         firstName: 'Other',
         lastName: 'Device',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       expect(stolen.statusCode).toBe(403);
       expect(stolen.json().error.code).toBe('REGISTRATION_PROOF_REQUIRED');
@@ -255,7 +255,7 @@ describe('Auth Routes', () => {
         registrationProof,
         firstName: 'Verified',
         lastName: 'Device',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       expect(owner.statusCode, owner.body).toBe(201);
     });
@@ -269,7 +269,7 @@ describe('Auth Routes', () => {
         registrationProof,
         firstName: 'Wrong',
         lastName: 'Phone',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       expect(wrongPhone.statusCode).toBe(403);
       expect(await app.prisma.user.findUnique({ where: { phone: otherPhone } })).toBeNull();
@@ -279,7 +279,7 @@ describe('Auth Routes', () => {
         registrationProof,
         firstName: 'Right',
         lastName: 'Phone',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       expect(rightPhone.statusCode, rightPhone.body).toBe(201);
     });
@@ -287,7 +287,7 @@ describe('Auth Routes', () => {
     it('[CST-192-01] two concurrent registrations can spend a continuation only once', async () => {
       const phone = continuationPhones[3]!;
       const registrationProof = await registrationProofFor(app, phone);
-      const payload = { phone, registrationProof, firstName: 'One', lastName: 'Winner', acceptTerms: true };
+      const payload = { phone, registrationProof, firstName: 'One', lastName: 'Winner', acceptTerms: true, ageConfirmed: true };
       const results = await Promise.all([
         inject('POST', '/api/v1/auth/register', payload),
         inject('POST', '/api/v1/auth/register', payload),
@@ -307,7 +307,7 @@ describe('Auth Routes', () => {
         registrationProof: oldProof,
         firstName: 'Old',
         lastName: 'Proof',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       expect(oldAttempt.statusCode).toBe(403);
       expect(await app.prisma.user.findUnique({ where: { phone } })).toBeNull();
@@ -317,7 +317,7 @@ describe('Auth Routes', () => {
         registrationProof: newProof,
         firstName: 'New',
         lastName: 'Proof',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       expect(newest.statusCode, newest.body).toBe(201);
     });
@@ -366,7 +366,7 @@ describe('Auth Routes', () => {
         registrationProof: newProof,
         firstName: 'Newer',
         lastName: 'Ceremony',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       expect(registered.statusCode, registered.body).toBe(201);
     });
@@ -398,7 +398,7 @@ describe('Auth Routes', () => {
           registrationProof,
           firstName: 'Consent',
           lastName: 'Given',
-          acceptTerms: true,
+          acceptTerms: true, ageConfirmed: true,
         });
         expect(res.statusCode).toBe(201);
         const row = await app.prisma.user.findUnique({ where: { phone: consentPhone } });
@@ -412,6 +412,7 @@ describe('Auth Routes', () => {
           orderBy: { documentType: 'asc' },
         });
         expect(ledger.map((r) => [r.documentType, r.action, r.documentVersion])).toEqual([
+          ['age_declaration', 'granted', 'v1'], // [owner 15 Oct 2026] the 18+ tick every sign-up carries
           ['privacy_policy', 'granted', LEGAL_VERSION],
           ['terms_of_service', 'granted', LEGAL_VERSION],
         ]);
@@ -439,24 +440,34 @@ describe('Auth Routes', () => {
         expect(res.json().error.code).toBe('CONSENT_REQUIRED');
       });
 
-      it('the compat kill-switch (CONSENT_REQUIRED=0) admits old clients and fabricates nothing', async () => {
+      it('the compat kill-switch (CONSENT_REQUIRED=0) admits a Terms-less sign-up and fabricates nothing; it never waives the 18+ tick', async () => {
         process.env['CONSENT_REQUIRED'] = '0';
         try {
           const registrationProof = await registrationProofFor(app, noConsentPhone);
-          const res = await inject('POST', '/api/v1/auth/register', {
+          // [Owner ruling 15 Oct 2026] The 18+ tick is required from every client; this switch is about the Terms only.
+          const noTick = await inject('POST', '/api/v1/auth/register', {
             phone: noConsentPhone,
             registrationProof,
             firstName: 'Old',
             lastName: 'Client',
           });
+          expect(noTick.statusCode).toBe(400);
+          expect(noTick.json().error.code).toBe('AGE_CONFIRMATION_REQUIRED');
+          const res = await inject('POST', '/api/v1/auth/register', {
+            phone: noConsentPhone,
+            registrationProof,
+            firstName: 'Old',
+            lastName: 'Client',
+            ageConfirmed: true,
+          });
           expect(res.statusCode).toBe(201);
           const row = await app.prisma.user.findUnique({ where: { phone: noConsentPhone } });
           expect(row?.acceptedTermsAt).toBeNull();
           expect(row?.tosVersion).toBeNull();
-          // No consent claimed → no ledger rows fabricated.
-          expect(await app.prisma.consentRecord.count({
+          // No Terms consent claimed → no Terms or Privacy rows fabricated; only the tick that was given.
+          expect((await app.prisma.consentRecord.findMany({
             where: { subjectType: 'customer', subjectId: row!.id },
-          })).toBe(0);
+          })).map((r) => r.documentType)).toEqual(['age_declaration']);
         } finally {
           delete process.env['CONSENT_REQUIRED'];
         }
@@ -503,7 +514,7 @@ describe('Auth Routes', () => {
       const phone = '+5929998866';
       try {
         const registrationProof = await registrationProofFor(app, phone);
-        const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
+        const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true, ageConfirmed: true,
           phone,
           registrationProof,
           firstName: 'Sanitize',

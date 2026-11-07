@@ -140,9 +140,9 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // [SEC-PII] A person's own deletion request: delayed by an open review (why and when), then done. Informational,
     // standard like the other account notices; never a loud class.
     'erasure_delayed', 'erasure_completed',
-    // Account security: the password changed and other devices were signed out;
+    // Account security: the email or password changed (other devices signed out on a password change);
     // password sign-in paused after many wrong attempts
-    'password_changed', 'password_sign_in_paused',
+    'email_changed', 'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
     'low_stock', 'staff_added', 'staff_invite', 'staff_joined', 'ad_team_invite', 'review_response', 'rating_removed', 'category_request_resolved',
     'category_backfill_review', 'vendor_needs_public_phone', 'vendor_needs_food_handler_tick', 'vendor_needs_weekly_fee_tick', 'support_update', 'store_pin_moved',

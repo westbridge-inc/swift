@@ -91,7 +91,7 @@ async function signupCustomer(phone: string): Promise<{ token: string; userId: s
   const registrationProof = verified.json().data.registrationProof;
   const reg = await app.inject({
     method: 'POST', url: '/api/v1/auth/register',
-    payload: { phone, registrationProof, firstName: 'Asha', lastName: 'Persaud', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true },
+    payload: { phone, registrationProof, firstName: 'Asha', lastName: 'Persaud', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true, ageConfirmed: true },
     headers: { 'content-type': 'application/json' },
   });
   expect(reg.statusCode, reg.body).toBe(201);

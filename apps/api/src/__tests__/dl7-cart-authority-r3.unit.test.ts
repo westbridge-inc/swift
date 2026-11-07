@@ -5,6 +5,10 @@ import { runWithTenant } from '../plugins/tenant-context';
 import { hostRoutes, orderStore, prismaDouble, recordingIo, recordingRedis, type Row } from './helpers/service-vertical-doubles';
 import { queryRow, type Query } from './helpers/dl7-predicate-double';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // Actual route/service callers, with predicates evaluated against nested rows.
 // No middleware, real database, Redis or transaction semantics are certified here.
 async function fixture() {

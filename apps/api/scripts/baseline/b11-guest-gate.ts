@@ -104,7 +104,7 @@ async function main() {
         lastName: 'TierProbe',
         role: 'CUSTOMER',
         countryCode: 'GY',
-        acceptTerms: true,
+        acceptTerms: true, ageConfirmed: true,
       });
       probeToken = registered.json?.data?.tokens?.accessToken ?? registered.json?.data?.token;
     }

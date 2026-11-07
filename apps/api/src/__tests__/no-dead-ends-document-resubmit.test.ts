@@ -111,7 +111,7 @@ beforeAll(async () => {
   const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: OWNER_PHONE, code }, headers: { 'content-type': 'application/json' } });
   const reg = await app.inject({
     method: 'POST', url: '/api/v1/auth/register',
-    payload: { phone: OWNER_PHONE, registrationProof: verified.json().data.registrationProof, firstName: 'Resubmit', lastName: 'Owner', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true },
+    payload: { phone: OWNER_PHONE, registrationProof: verified.json().data.registrationProof, firstName: 'Resubmit', lastName: 'Owner', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true, ageConfirmed: true },
     headers: { 'content-type': 'application/json' },
   });
   expect(reg.statusCode, reg.body).toBe(201);

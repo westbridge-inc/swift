@@ -45,7 +45,7 @@ async function signupCustomer(phone: string): Promise<string> {
   const reg = await app.inject({
     method: 'POST',
     url: '/api/v1/auth/register',
-    payload: { phone, registrationProof, firstName: 'Test', lastName: 'Partner', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true },
+    payload: { phone, registrationProof, firstName: 'Test', lastName: 'Partner', countryCode: 'GY', role: 'CUSTOMER', acceptTerms: true, ageConfirmed: true },
     headers: { 'content-type': 'application/json' },
   });
   return JSON.parse(reg.body).data.tokens.accessToken;

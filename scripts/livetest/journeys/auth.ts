@@ -30,7 +30,7 @@ export async function registerFresh(ctx: Ctx, slot: string, role: 'CUSTOMER' | '
   const p = await newSignupProof(ctx, slot);
   if (!p) return null;
   const r = await POST('/auth/register', {
-    phone: p.phone, registrationProof: p.proof, firstName: `TEST-${slot}`, lastName: 'Journey', role, countryCode: 'GY', acceptTerms: true,
+    phone: p.phone, registrationProof: p.proof, firstName: `TEST-${slot}`, lastName: 'Journey', role, countryCode: 'GY', acceptTerms: true, ageConfirmed: true,
   });
   const d = r.json?.data;
   if (!d?.tokens?.accessToken) return null;
@@ -62,7 +62,7 @@ export const AUTH_01: Journey<Ctx> = {
     rec.expect('send-otp accepts a Guyana number (dev SMS channel)', send!, 200, undefined, `expiresIn=${send!.json?.data?.expiresIn}`);
     rec.require('verify-otp turns a fresh fictional +592 number into a signup continuation', !!p, p ? `${p.phone} → isNewUser + registrationProof` : 'no fresh number in 4 tries');
     const reg = await POST('/auth/register', {
-      phone: p!.phone, registrationProof: p!.proof, firstName: 'TEST-Auth01', lastName: 'Journey', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true,
+      phone: p!.phone, registrationProof: p!.proof, firstName: 'TEST-Auth01', lastName: 'Journey', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true, ageConfirmed: true,
     });
     const user = reg.json?.data?.user;
     rec.expect('register creates the account', reg, 201);
@@ -74,10 +74,10 @@ export const AUTH_01: Journey<Ctx> = {
 
     // registration replay: the continuation was consumed.
     const replay = await POST('/auth/register', {
-      phone: p!.phone, registrationProof: p!.proof, firstName: 'TEST-Replay', lastName: 'Journey', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true,
+      phone: p!.phone, registrationProof: p!.proof, firstName: 'TEST-Replay', lastName: 'Journey', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true, ageConfirmed: true,
     });
     rec.deny('replaying a consumed registration proof', replay, [403], ['REGISTRATION_PROOF_REQUIRED']);
-    const noProof = await POST('/auth/register', { phone: freshPhone(ctx.runId, 'auth01-noproof'), firstName: 'X', lastName: 'Y', role: 'CUSTOMER', acceptTerms: true });
+    const noProof = await POST('/auth/register', { phone: freshPhone(ctx.runId, 'auth01-noproof'), firstName: 'X', lastName: 'Y', role: 'CUSTOMER', acceptTerms: true, ageConfirmed: true });
     rec.deny('register without any proof', noProof, [403], ['REGISTRATION_PROOF_REQUIRED']);
 
     // bad/expired OTP: a code for a number with no live OTP, and a wrong code after a real send.
@@ -100,7 +100,7 @@ export const AUTH_01: Journey<Ctx> = {
     if (ukProof) {
       // Not a TEST- name: since #1716 a TEST- name on a non-fixture phone is refused
       // (RESERVED_NAME) before the country check, which is what this case proves.
-      const ukReg = await POST('/auth/register', { phone: uk, registrationProof: ukProof, firstName: 'Uk', lastName: 'Journey', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true });
+      const ukReg = await POST('/auth/register', { phone: uk, registrationProof: ukProof, firstName: 'Uk', lastName: 'Journey', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true, ageConfirmed: true });
       rec.deny('a non-Guyana number cannot register (even claiming GY)', ukReg, [400], ['COUNTRY_NOT_ACTIVE']);
     } else {
       rec.deny('a non-Guyana number is refused at verify', ukv, [400, 403], undefined, 'no continuation issued');

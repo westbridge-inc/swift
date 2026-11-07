@@ -13,6 +13,7 @@ import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-ca
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
 import { promoUsesByPersonWhere } from '../promo/promo-uses';
+import { assertPromoNotSwiftPaid, promoUsable } from '../promo/swift-paid';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { readOrderPlacementBudget, refundOrderPlacement, reserveOrderPlacement, velocityGuard, type OrderPlacementReservation } from '../integrity/velocity';
@@ -512,7 +513,8 @@ async function buildCartResponse(
     : null;
   // Old carts can predate the attachment wall. Their saved pointer grants
   // neither access to another tenant's terms nor a discount on this quote.
-  const promoCodeRecord = storedPromoCode && await promoBelongsToCallerTenant(app.prisma, storedPromoCode, userId)
+  // [Ruling 1 Nov 2026] Nor does a Swift-paid code: checkout would refuse it (promo/swift-paid.ts).
+  const promoCodeRecord = storedPromoCode && promoUsable(storedPromoCode) && await promoBelongsToCallerTenant(app.prisma, storedPromoCode, userId)
     ? storedPromoCode : null;
   // The fee is about where the order is GOING: the chosen delivery address
   // wins over device coords (those are only a fallback before an address is
@@ -1791,12 +1793,13 @@ export async function customerRoutes(app: FastifyInstance) {
       select: {
         code: true, description: true, discountType: true,
         discountValue: true, minOrderAmount: true, validUntil: true,
-        maxUses: true, currentUses: true,
+        maxUses: true, currentUses: true, funder: true,
       },
       orderBy: { createdAt: 'desc' },
       take: 20,
     }))
-      .filter((p) => p.maxUses == null || p.currentUses < p.maxUses)
+      // [Ruling 1 Nov 2026] A Swift-paid code is never advertised: checkout would refuse it.
+      .filter((p) => promoUsable(p) && (p.maxUses == null || p.currentUses < p.maxUses))
       .slice(0, 5)
       .map((p) => ({
         code: p.code, description: p.description, discountType: p.discountType,
@@ -4009,6 +4012,8 @@ export async function customerRoutes(app: FastifyInstance) {
       throw new AppError(404, 'INVALID_PROMO', 'Promo code not found');
     }
     if (!promo.isActive) throw new AppError(400, 'INVALID_PROMO', 'This promo code is no longer active');
+    // [Ruling 1 Nov 2026] A Swift-paid code is never accepted, so never attached (promo/swift-paid.ts).
+    assertPromoNotSwiftPaid(promo);
 
     const now = new Date();
     if (now < promo.validFrom) throw new AppError(400, 'INVALID_PROMO', 'This promo code is not yet valid');

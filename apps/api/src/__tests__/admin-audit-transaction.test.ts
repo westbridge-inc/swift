@@ -15,6 +15,10 @@ import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-appr
 import { refusalName, refuseAuditWhere, dropAuditRefusal } from './helpers/audit-refusal';
 import { testPhone } from './helpers/fixture-ids';
 
+// [Ruling 1 Nov 2026] Swift-paid (PLATFORM) promo codes are OFF by default (promo/swift-paid.ts). This file
+// also covers that dormant path, kept for after launch, so it turns the switch on for itself.
+process.env['SWIFT_PAID_PROMOS'] = '1';
+
 // ---------------------------------------------------------------------------
 // [ADM-002] THE AUDIT ROW IS WRITTEN AFTER COMMIT AND MAY FAIL SILENTLY.
 //
