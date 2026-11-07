@@ -624,7 +624,7 @@ export class PickingService {
       // whole approval rolls back; the customer is told why here, the store by the notice after the transaction.
       if (order.paymentMethod === 'CASH' && order.riderId && delta > 0) {
         throw new AppError(409, 'SUBSTITUTE_RAISES_RIDER_CASH',
-          'A rider has already taken this order and agreed to pay the store the amount they were shown, so a dearer swap cannot be added. Refund this item, or ask the store for a same-price option.');
+          'A rider has already taken this order and agreed to pay the store the amount they were shown, so a dearer swap cannot be added. Decline this swap (the item comes off your order), or ask the store for a same-price option.');
       }
       if (order.paymentMethod === 'CASH' && order.riderId && delta < 0) {
         await new FloatService(tx).release(tx, order.riderId, -delta);
@@ -869,11 +869,8 @@ export class PickingService {
     return 'cancelled';
   }
 
-  /** [O-4 · REVIEW-G S4-2 on #2043] Asking the customer before accepting answered the store's
-   *  new-order alert. When the customer answers (or the question times out), the store team is
-   *  told at once that the order can be accepted now. One push, no SMS ladder. */
   /** [O1 · reviewer B S2] A dearer swap the customer said yes to was refused because a rider already holds the cash
-   *  order: the store hears why, so it offers a same-price option or refunds the item. A notice, never the decision. */
+   *  order: the store hears why, so it offers a same-price option or the item comes off. A notice, never the decision. */
   private async tellStoreSwapRefusedForRider(order: { id?: string; vendorId: string | null; orderNumber: string }, itemName: string): Promise<void> {
     if (!order.vendorId || !order.id) return;
     try {
@@ -893,6 +890,9 @@ export class PickingService {
     }
   }
 
+  /** [O-4 · REVIEW-G S4-2 on #2043] Asking the customer before accepting answered the store's
+   *  new-order alert. When the customer answers (or the question times out), the store team is
+   *  told at once that the order can be accepted now. One push, no SMS ladder. */
   private async tellStoreTheCustomerAnswered(
     order: { id?: string; status: string; vendorId: string | null; orderNumber: string },
     what: string,

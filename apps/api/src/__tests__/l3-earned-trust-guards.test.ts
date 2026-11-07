@@ -94,7 +94,7 @@ async function partnerDoc(userId: string, docType: string, byPerson: boolean) {
 }
 
 describe('[CHECKLIST-LEGAL Q2] L3 never raises a rider\'s float by itself', () => {
-  // [O1] Guyana has no cap since the owner's 5 Nov ruling (every level the same), which would make this rule pass
+  // [O1] Guyana's limit is GY$100,000 at every level since the owner's 7 Nov ruling (every level the same), which would make this rule pass
   // without proving anything: these cases size the float on a market whose levels differ, as the pegged ones do.
   let gyBefore: { floatL1: unknown; floatL2: unknown; floatL3: unknown } | null = null;
   beforeAll(async () => {

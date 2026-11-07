@@ -69,7 +69,7 @@ describe('[ROLE-DOCS] the lists and the registry no longer ask for the removed d
     // installer's GEI licence: role-docs-trades.unit.test.ts; 2026-10-24.1 a registered restaurant's food handler's
     // certificate optional: food-handlers.unit.test.ts; 2026-10-29.1 the department-store fee at 45,000:
     // dept-price.unit.test.ts; 2026-11-01.1 the self-declared tier's lists gone: unregistered-tier-removed.test.ts;
-    // 2026-11-07.1 Guyana's rider cash limit open and the store's 10 minutes: rider-cash-no-limit.test.ts)
+    // 2026-11-07.1 Guyana's rider cash limit at GY$100,000 and the store's 10 minutes: rider-cash-no-limit.test.ts)
     expect(PLATFORM_CONFIG_VERSION).toBe('2026-11-07.1');
   });
 

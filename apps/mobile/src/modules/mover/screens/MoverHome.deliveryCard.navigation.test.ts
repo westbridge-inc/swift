@@ -127,7 +127,8 @@ describe('[CARS-DELIVER PR4] a delivery card in taxi mode', () => {
     await draw();
     await press('Accept delivery');
     expect(fx.accept.RIDER).toHaveBeenCalledTimes(1);
-    expect(fx.accept.RIDER.mock.calls[0]![0]).toEqual({ orderId: 'ord-food-1', offerAttemptId: 'att-1' });
+    // [O1 · riders choose] the accept sends back the pay-the-store cash the card showed (cashMath.payToVendor)
+    expect(fx.accept.RIDER.mock.calls[0]![0]).toEqual({ orderId: 'ord-food-1', offerAttemptId: 'att-1', payToVendor: 4800 });
     expect(fx.accept.DRIVER).not.toHaveBeenCalled();
     await press('Decline');
     await act(async () => { await new Promise((r) => setTimeout(r, 5)); });

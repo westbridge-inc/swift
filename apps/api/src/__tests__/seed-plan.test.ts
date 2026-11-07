@@ -109,8 +109,8 @@ describe('[R048-005] the plan applies once; a replay changes nothing', () => {
     // 2026-10-21.1, the own-name store lists added as 2026-10-21.2, and the solar installer's GEI licence as
     // 2026-10-22.1, and [FOOD-PERMIT · owner 24 Oct] a registered restaurant's food handler's certificate optional as
     // 2026-10-24.1, and [DEPT-PRICE · owner 29 Oct] the department-store weekly fee at 45,000 as 2026-10-29.1, and
-    // [CHECKLIST-LEGAL · owner 1 Nov] the self-declared tier's three lists removed as 2026-11-01.1, and [O1 · owner 5 and
-    // 7 Nov] Guyana's rider cash limit open and the store's 10 minutes to accept as 2026-11-07.1
+    // [CHECKLIST-LEGAL · owner 1 Nov] the self-declared tier's three lists removed as 2026-11-01.1, and [O1 · owner
+    // 7 Nov] Guyana's rider cash limit at GY$100,000 and the store's 10 minutes to accept as 2026-11-07.1
     // (production follows only when the owner signs a new seed plan; no boot check compares versions).
     expect(desiredPlatformConfig().version).toBe('2026-11-07.1');
   });
