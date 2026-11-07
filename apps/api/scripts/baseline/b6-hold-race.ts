@@ -94,7 +94,7 @@ async function ensureRoster() {
       firstName: 'ELV1',
       lastName: 'Customer',
       role: 'CUSTOMER',
-      acceptTerms: true,
+      acceptTerms: true, ageConfirmed: true,
     });
     token = pickToken(r.json);
     if (!token) {

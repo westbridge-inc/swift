@@ -229,7 +229,7 @@ describe('GOLD-6 · AUTH-01 — happy path: send-otp → verify-otp → register
       lastName: 'Pilot',
       role: 'CUSTOMER',
       countryCode: 'GY',
-      acceptTerms: true,
+      acceptTerms: true, ageConfirmed: true,
     });
     expect(registered.statusCode, registered.body).toBe(201);
     const regData = registered.json().data;
@@ -280,9 +280,11 @@ describe('GOLD-6 · AUTH-01 — happy path: send-otp → verify-otp → register
     // Consent is ledgered with the exact legal version, in the same
     // transaction as the account.
     const consents = await sys(() => app.prisma.consentRecord.findMany({ where: { subjectId: user.id } }));
-    expect(consents.map((c) => c.documentType).sort()).toEqual(['privacy_policy', 'terms_of_service']);
+    // [Owner ruling 15 Oct 2026] the 18+ tick every sign-up carries is a ledger row too.
+    expect(consents.map((c) => c.documentType).sort()).toEqual(['age_declaration', 'privacy_policy', 'terms_of_service']);
     expect(consents.every((c) =>
-      c.subjectType === 'customer' && c.action === 'granted' && c.documentVersion === LEGAL_VERSION)).toBe(true);
+      c.subjectType === 'customer' && c.action === 'granted'
+      && c.documentVersion === (c.documentType === 'age_declaration' ? 'v1' : LEGAL_VERSION))).toBe(true);
     // The /me tenant view agrees with the account's real tenant row.
     const tenant = await sys(() => app.prisma.tenant.findUniqueOrThrow({ where: { id: 'swift-default' } }));
     expect(me.json().data.user.tenant).toEqual({ kind: tenant.kind });
@@ -401,7 +403,7 @@ describe('GOLD-6 · AUTH-01 — registration replay', () => {
     const verified = await post('/api/v1/auth/verify-otp', { phone: phoneNumber, code });
     expect(verified.statusCode, verified.body).toBe(200);
     const proof = verified.json().data.registrationProof as string;
-    const payload = { phone: phoneNumber, registrationProof: proof, firstName: 'Replay', lastName: 'Once', acceptTerms: true };
+    const payload = { phone: phoneNumber, registrationProof: proof, firstName: 'Replay', lastName: 'Once', acceptTerms: true, ageConfirmed: true };
 
     // Wrong party FIRST, while the proof is still live [DS245 G6A1]: the proof
     // is phone-bound, so another number cannot spend it. (Tried after the
@@ -431,7 +433,7 @@ describe('GOLD-6 · AUTH-01 — registration replay', () => {
     expect(rows[0]!.id).toBe(userId);
     expect(await sys(() => app.prisma.customer.count({ where: { userId } }))).toBe(1);
     expect(await sys(() => app.prisma.session.count({ where: { userId } }))).toBe(1);
-    expect(await sys(() => app.prisma.consentRecord.count({ where: { subjectId: userId, action: 'granted' } }))).toBe(2);
+    expect(await sys(() => app.prisma.consentRecord.count({ where: { subjectId: userId, action: 'granted' } }))).toBe(3); // Terms, Privacy, 18+
     expect(await sys(() => app.prisma.signupAttempt.count({
       where: { phoneHash: hashSignal(normalizePhone(phoneNumber)) },
     }))).toBe(1);

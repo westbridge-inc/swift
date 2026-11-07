@@ -1,93 +1,56 @@
-import { screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { screen, within } from '@testing-library/react';
+import { describe, expect, it } from 'vitest';
 import PromosPage from './page';
-import { mockApi, renderWithQuery, requestsByMethod, type ApiReply, type ApiRequest } from '@/test/test-utils';
+import { mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
 // ---------------------------------------------------------------------------
-// [A-22] Every field in the promo editor is programmatically labelled.
-//
-// The labels were rendered but never associated — no `htmlFor`, no `id` — so a
-// screen reader announced each one as an unnamed edit box, and clicking a label
-// did nothing. `getByLabelText` is exactly the query that fails when a control
-// has no accessible name, which is why it is the assertion.
+// [Ruling 1 Nov 2026 · REVIEW-M N1] Swift-paid promo codes are switched off. Every code this console
+// made was Swift-paid (funder PLATFORM), so the console no longer offers to make one: the server
+// refuses it, and an old Swift-paid row never discounts an order. The page says so in plain words,
+// lists every code with who pays for it, and never calls an old Swift-paid row "Active".
 // ---------------------------------------------------------------------------
-function handler() {
+
+const row = (over: Record<string, unknown>) => ({
+  id: 'p1', code: 'WELCOME10', description: '10% off', discountType: 'PERCENTAGE', discountValue: 10,
+  minOrderAmount: null, maxDiscount: null, maxUses: null, currentUses: 0, isActive: true,
+  validFrom: '2026-11-01T04:00:00.000Z', validUntil: '2026-12-01T03:59:59.999Z', funder: 'PLATFORM', vendorId: null, ...over,
+});
+
+function handler(data: unknown[]) {
   return (request: ApiRequest) => {
-    if (request.url.pathname === '/api/v1/admin/promos') {
-      return { body: { success: true, data: [] } };
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/promos') {
+      return { body: { success: true, data } };
     }
     throw new Error(`Unexpected request: ${request.method} ${request.url}`);
   };
 }
 
-describe('[A-22] the promo editor names its fields', () => {
-  it('every control has an accessible name a label points at', async () => {
-    mockApi(handler());
-    const { user } = renderWithQuery(<PromosPage />);
-
-    await user.click(await screen.findByRole('button', { name: /create promo/i }));
-
-    for (const label of ['Code', 'Description', 'Type', 'Valid from', 'Valid until']) {
-      expect(screen.getByLabelText(label), label).toBeTruthy();
-    }
-    // The value field renames itself with the type, and stays labelled either way.
-    expect(screen.getByLabelText('Value (%)')).toBeTruthy();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// [U62] "New promo code" was not a dialog, and a stray click on the backdrop
-// threw the typed form away. It is the shared dialog now; once anything is
-// typed only Cancel closes it. Creating goes through the reason panel, and the
-// form comes back, values kept, if the operator cancels or is refused.
-// ---------------------------------------------------------------------------
-describe('[U62] the new promo form is a dialog that keeps what was typed', () => {
-  it('is a labelled dialog; a stray backdrop click does not close a typed form', async () => {
-    mockApi(handler());
-    const { user } = renderWithQuery(<PromosPage />);
-    await user.click(await screen.findByRole('button', { name: /create promo/i }));
-    expect(screen.getByRole('dialog', { name: 'New promo code' })).toBeTruthy();
-    await user.type(screen.getByLabelText('Code'), 'welcome10');
-    await user.click(screen.getByTestId('promo-form-overlay'));
-    expect(screen.getByRole('dialog', { name: 'New promo code' })).toBeTruthy();
-    expect((screen.getByLabelText('Code') as HTMLInputElement).value).toBe('WELCOME10');
+describe('[Ruling 1 Nov 2026] the console cannot make a Swift-paid promo code', () => {
+  it('offers no way to create one, and says why in plain words', async () => {
+    const fetchMock = mockApi(handler([]));
+    renderWithQuery(<PromosPage />);
+    expect(await screen.findByText('No promo codes yet')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /create/i })).toBeNull();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const note = screen.getByRole('note');
+    expect(note.textContent).toMatch(/Swift-paid promo codes are switched off\./);
+    expect(note.textContent).toMatch(/Swift never holds or moves order money/);
+    expect(note.textContent).toMatch(/A store can still make its own promo code in the Swift app/);
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
   });
 
-  it('Create asks why in the panel; a refusal brings the form back with the values kept', async () => {
-    const fetchMock = mockApi((request: ApiRequest): ApiReply => {
-      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/promos') return { body: { success: true, data: [] } };
-      if (request.method === 'POST' && request.url.pathname === '/api/v1/admin/promos') {
-        return { status: 409, body: { success: false, error: { code: 'PROMO_CODE_TAKEN', message: 'That code is already in use.' } } };
-      }
-      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
-    });
-    const { user } = renderWithQuery(<PromosPage />);
-    await user.click(await screen.findByRole('button', { name: /create promo/i }));
-    await user.type(screen.getByLabelText('Code'), 'welcome10');
-    await user.type(screen.getByLabelText('Description'), '10% off your first order');
-    await user.click(screen.getByRole('button', { name: 'Create' }));
-
-    const panel = await screen.findByRole('dialog', { name: /Create the promo code WELCOME10\?/ });
-    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Launch week welcome offer agreed with the owner');
-    await user.click(within(panel).getByRole('button', { name: 'Create promo code' }));
-    expect((await within(panel).findByRole('alert')).textContent).toContain('That code is already in use.');
-    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1);
-    await user.click(within(panel).getByRole('button', { name: 'Close' }));
-    await waitFor(() => expect(screen.getByRole('dialog', { name: 'New promo code' })).toBeTruthy());
-    expect((screen.getByLabelText('Code') as HTMLInputElement).value).toBe('WELCOME10');
-  });
-});
-
-// [REVIEW-F #2155 S4-b] The new promo's days default to today in Guyana (the server reads a bare day as a Guyana day):
-// cut from the UTC clock, a promo made on a Guyana evening started tomorrow.
-describe('[ADMIN-AUDIT S3-4] a new promo starts today in Guyana', () => {
-  afterEach(() => { vi.useRealTimers(); });
-  it('on the evening of 27 Oct (Guyana) the form says from 27 Oct, for 30 days', async () => {
-    vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-28T01:00:00Z') }); // 21:00 on 27 Oct in Georgetown
-    mockApi(handler());
-    const { user } = renderWithQuery(<PromosPage />);
-    await user.click(await screen.findByRole('button', { name: /create promo/i }));
-    expect((screen.getByLabelText('Valid from') as HTMLInputElement).value).toBe('2026-10-27');
-    expect((screen.getByLabelText('Valid until') as HTMLInputElement).value).toBe('2026-11-26');
+  it('an old Swift-paid row reads "Off (Swift-paid)" even if its own switch is on; a store’s code reads Active', async () => {
+    mockApi(handler([
+      row({ id: 'p1', code: 'OLDSWIFT', funder: 'PLATFORM', isActive: true }),
+      row({ id: 'p2', code: 'STORE20', funder: 'VENDOR', vendorId: 'v1', isActive: true }),
+    ]));
+    renderWithQuery(<PromosPage />);
+    const swiftRow = (await screen.findByText('OLDSWIFT')).closest('tr')!;
+    expect(within(swiftRow).getByText('Swift')).toBeTruthy();
+    expect(within(swiftRow).getByText('Off (Swift-paid)')).toBeTruthy();
+    expect(within(swiftRow).queryByText('Active')).toBeNull();
+    const storeRow = screen.getByText('STORE20').closest('tr')!;
+    expect(within(storeRow).getByText('The store')).toBeTruthy();
+    expect(within(storeRow).getByText('Active')).toBeTruthy();
   });
 });

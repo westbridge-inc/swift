@@ -1,4 +1,4 @@
-import { fireEvent, screen, within } from '@testing-library/react';
+import { screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 
@@ -31,7 +31,7 @@ describe('[ADMIN-AUDIT S3-4] Subscribers dates in words', () => {
 });
 
 // [REVIEW-F #2155 S3-1 + S4-4] Two pages still wrote dates themselves: the Store VAT queue cut the UTC day off an ISO
-// string, and the promo confirmation repeated the typed YYYY-MM-DD values.
+// string, and the promo confirmation repeated the typed YYYY-MM-DD values (that form is gone: see the promo test).
 describe('[ADMIN-AUDIT S3-4] Store VAT and promo dates in words', () => {
   it('a certificate sent on the evening of 27 Oct (Guyana) says 27 Oct, in words', async () => {
     mockApi((r) => {
@@ -46,20 +46,21 @@ describe('[ADMIN-AUDIT S3-4] Store VAT and promo dates in words', () => {
     expect(await screen.findByText('Certificate sent 27 Oct 2026 (not decided yet)')).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
-  it('the promo confirmation says the days it runs in words', async () => {
+  // [Ruling 1 Nov 2026] The console no longer makes promo codes (Swift-paid codes are off), so the confirmation is
+  // gone; the list's expiry day is the date it still writes, in words and Guyana time.
+  it('a promo code’s last day is listed in words, in Guyana time', async () => {
     mockApi((r) => {
-      if (r.url.pathname === '/api/v1/admin/promos' && r.method === 'GET') return { body: { success: true, data: [] } };
+      if (r.url.pathname === '/api/v1/admin/promos' && r.method === 'GET') return { body: { success: true, data: [{
+        id: 'p1', code: 'STORE20', description: '20% off', discountType: 'PERCENTAGE', discountValue: 20, minOrderAmount: null,
+        maxDiscount: null, maxUses: null, currentUses: 0, isActive: true, funder: 'VENDOR', vendorId: 'v1',
+        // 03:59:59Z on 1 Dec is 23:59 on 30 Nov in Georgetown (UTC-4).
+        validFrom: '2026-11-01T04:00:00.000Z', validUntil: '2026-12-01T03:59:59.999Z',
+      }] } };
       throw new Error(`Unexpected request: ${r.method} ${r.url}`);
     });
-    const { user } = renderWithQuery(<PromosPage />);
-    await user.click(await screen.findByRole('button', { name: /create promo/i }));
-    await user.type(screen.getByLabelText('Code'), 'welcome10');
-    await user.type(screen.getByLabelText('Description'), '10% off your first order');
-    fireEvent.change(screen.getByLabelText('Valid from'), { target: { value: '2026-11-01' } });
-    fireEvent.change(screen.getByLabelText('Valid until'), { target: { value: '2026-11-30' } });
-    await user.click(screen.getByRole('button', { name: 'Create' }));
-    const panel = await screen.findByRole('dialog', { name: /Create the promo code WELCOME10\?/ });
-    expect(within(panel).getByText(/valid 1 Nov 2026 to 30 Nov 2026\./)).toBeTruthy();
-    expect(panel.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    renderWithQuery(<PromosPage />);
+    const line = (await screen.findByText('STORE20')).closest('tr')!;
+    expect(within(line).getByText('30 Nov 2026')).toBeTruthy();
+    expect(line.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
   });
 });

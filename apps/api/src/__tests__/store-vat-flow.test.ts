@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -533,6 +533,9 @@ describe('7b. who paid for a discount decides the store’s VAT', () => {
   };
 
   it('a discount SWIFT pays for: the store’s VAT stays on the full goods price (cart, order, receipt)', async () => {
+    // [Ruling 1 Nov 2026] Swift-paid codes are OFF by default (promo/swift-paid.ts): this case covers the dormant path.
+    process.env['SWIFT_PAID_PROMOS'] = '1';
+    onTestFinished(() => { delete process.env['SWIFT_PAID_PROMOS']; });
     const code = await promo('PLATFORM');
     const quote = await quoteWith(code.id);
     expect(quote.discount).toBe(200);
