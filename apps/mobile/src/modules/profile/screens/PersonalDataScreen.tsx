@@ -61,11 +61,16 @@ export function PersonalDataScreen({ route, navigation }: any = {}) {
       if (!operationUser || operationUser.id !== owner.userId) {
         throw new AuthSessionBoundaryError();
       }
-      const res = await customerApi.updateProfile({
+      // [L04 #1550] A real email change needs a fresh code on this session: a
+      // 403 STEP_UP_REQUIRED opens the code sheet and retries THIS body once.
+      // The retry carries the session as it is then (a refreshed token is
+      // fine; another account or sign-in is not).
+      const body = {
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         ...(email.trim() ? { email: email.trim() } : {}),
-      }, owner);
+      };
+      const res = await stepUp.withStepUp(() => customerApi.updateProfile(body, requireAuthSessionForPrincipal(owner)))();
       requireAuthSessionForPrincipal(owner);
       const updated = res.data?.data;
       if (updated && !setUserIfCurrent(owner, {
@@ -148,7 +153,8 @@ export function PersonalDataScreen({ route, navigation }: any = {}) {
     );
   }
 
-  const err = save.isError
+  // A dismissed code sheet, or a session that changed underneath, is not a save error.
+  const err = save.isError && !isStepUpDismissed(save.error) && !(save.error instanceof AuthSessionBoundaryError)
     ? ((save.error as any)?.response?.data?.error?.message ?? 'Could not save. Try again.')
     : undefined;
 

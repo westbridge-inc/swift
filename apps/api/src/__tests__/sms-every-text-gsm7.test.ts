@@ -132,6 +132,7 @@ const SMS_TEXT_FILES: Record<string, { min: number; why: string }> = {
   'modules/safety/sos.service.ts': { min: 0, why: 'SOS closed notice to emergency contacts (sosClosedContactText)' },
   'modules/safety/trip-share.service.ts': { min: 2, why: 'trip-share link' },
   'modules/user/inactivity.ts': { min: 1, why: 'inactive-account notice' },
+  'modules/user/profile-update.ts': { min: 1, why: 'email-changed notice to the phone on the account' },
   'modules/billing/billing.service.ts': { min: 5, why: 'weekly-fee texts (feeSms / sms)' },
   'modules/billing/billing-notice-delivery.ts': { min: 1, why: 'billing history text' },
   'modules/safety/guardian-delivery.ts': { min: 0, why: 'passenger check-in text (passengerCheckinSms)' },
