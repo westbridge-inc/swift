@@ -616,26 +616,31 @@ export class PickingService {
       await recomputeOrderVat(tx, orderId);
 
       // [REPORT-006 F-006-05] Committed float tracks the LIVE cash subtotal a
-      // rider fronts. A dearer substitute must still fit the exposure cap
-      // (guarded commit — fail closed, never silently exceed); a cheaper one
-      // releases the difference now, or the terminal release under-unwinds
-      // and the rider's float headroom leaks forever.
-      if (order.paymentMethod === 'CASH' && order.riderId && delta !== 0) {
-        const float = new FloatService(tx);
-        if (delta > 0) {
-          const withinCap = await float.commit(tx, order.riderId, delta);
-          if (!withinCap) {
-            throw new AppError(409, 'SUBSTITUTE_FLOAT_EXCEEDED', 'Your rider can’t front the extra cash for that substitute — refund the line or ask the store for a same-price option.');
-          }
-        } else {
-          await float.release(tx, order.riderId, -delta);
-        }
+      // rider fronts: a cheaper substitute releases the difference now, or the
+      // terminal release under-unwinds and the rider's float headroom leaks.
+      // [O1 · reviewer B S2 · riders choose] A DEARER one on a CASH order a rider already holds is refused: the rider
+      // agreed to pay the store the amount they were shown, and a swap must never add cash to their job without their
+      // say (before a rider holds it, the claim checks the shown amount instead: cash-limit assertCashShown). The
+      // whole approval rolls back; the customer is told why here, the store by the notice after the transaction.
+      if (order.paymentMethod === 'CASH' && order.riderId && delta > 0) {
+        throw new AppError(409, 'SUBSTITUTE_RAISES_RIDER_CASH',
+          'A rider has already taken this order and agreed to pay the store the amount they were shown, so a dearer swap cannot be added. Refund this item, or ask the store for a same-price option.');
+      }
+      if (order.paymentMethod === 'CASH' && order.riderId && delta < 0) {
+        await new FloatService(tx).release(tx, order.riderId, -delta);
       }
 
       await tx.orderStatusLog.create({
         data: { orderId, status: order.status as PickableStatus, changedBy: customerId, note: `Substitution approved: ${fresh.substituteName}` },
       });
       return { vendorId: order.vendorId };
+    }).catch(async (error: unknown) => {
+      // [O1 · reviewer B S2] The store is told why the swap it offered did not go through (the customer has the
+      // refusal itself); nothing changed, the question stays open for a refund or a same-price option.
+      if (error instanceof AppError && error.code === 'SUBSTITUTE_RAISES_RIDER_CASH') {
+        await this.tellStoreSwapRefusedForRider(line.order, line.name);
+      }
+      throw error;
     });
 
     this.emitPickState(approved.vendorId, orderId, lineId, { subStatus: 'APPROVED' });
@@ -867,6 +872,27 @@ export class PickingService {
   /** [O-4 · REVIEW-G S4-2 on #2043] Asking the customer before accepting answered the store's
    *  new-order alert. When the customer answers (or the question times out), the store team is
    *  told at once that the order can be accepted now. One push, no SMS ladder. */
+  /** [O1 · reviewer B S2] A dearer swap the customer said yes to was refused because a rider already holds the cash
+   *  order: the store hears why, so it offers a same-price option or refunds the item. A notice, never the decision. */
+  private async tellStoreSwapRefusedForRider(order: { id?: string; vendorId: string | null; orderNumber: string }, itemName: string): Promise<void> {
+    if (!order.vendorId || !order.id) return;
+    try {
+      const team = await storeTeam(this.prisma, order.vendorId);
+      if (!team) return;
+      for (const userId of ringRecipients(team)) {
+        await this.notifications.send({
+          userId,
+          type: 'ORDER_UPDATE',
+          title: `Order #${order.orderNumber}: the swap could not be added`,
+          body: `${itemName}: the customer said yes to the dearer swap, but a rider has already taken this cash order and agreed to pay you the amount they were shown. Offer a same-price option or refund the item.`,
+          data: { kind: 'vendor_customer_answered', orderId: order.id, orderNumber: order.orderNumber, audience: 'business' },
+        });
+      }
+    } catch {
+      // A notice, never the decision: the refusal already stands.
+    }
+  }
+
   private async tellStoreTheCustomerAnswered(
     order: { id?: string; status: string; vendorId: string | null; orderNumber: string },
     what: string,

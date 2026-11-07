@@ -911,21 +911,6 @@ export function MoverHomeScreen({ navigation }: any) {
             <DStat icon="percent" value="0%" label="Commission" />
           </View>
 
-          {/* [O1 · owner 5 Nov 2026] No rider cash limit: the rider chooses each cash job from its amount. */}
-          {!profile?.float && profile?.cashNoLimit === true ? (
-            <DCard style={{ marginTop: space.md }}>
-              <T variant="caption" weight="bold" style={{ color: dk.muted }}>
-                CASH JOBS
-              </T>
-              <T variant="body" weight="bold" style={{ marginTop: 2, color: dk.text }}>
-                No cash limit
-              </T>
-              <T variant="caption" style={{ color: dk.muted, marginTop: space.sm }}>
-                You choose which cash jobs to take. Each one shows the cash you pay the store before you accept.
-              </T>
-            </DCard>
-          ) : null}
-
           {/* D.3 — cash float headroom */}
           {profile?.float ? (
             <DCard style={{ marginTop: space.md }}>
@@ -1086,7 +1071,7 @@ export function MoverHomeScreen({ navigation }: any) {
           job={jobs.find((j) => j.id === offer.orderId)}
           kind={offerKind}
           accepting={answerAccept.isPending}
-          onAccept={() => !answerAccept.isPending && answerAccept.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
+          onAccept={() => !answerAccept.isPending && answerAccept.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId, ...(offer.cashMath ? { payToVendor: Number(offer.cashMath.payToVendor) } : {}) }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {

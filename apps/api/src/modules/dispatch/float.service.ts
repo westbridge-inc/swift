@@ -1,5 +1,4 @@
 import { PrismaClient, Prisma, TrustLevel } from '@prisma/client';
-import { isNoCashLimit } from './cash-limit';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
 
@@ -27,9 +26,6 @@ export function riderFloatForOrder(order: {
   const amount = Number(order.subtotalBase);
   return Number.isFinite(amount) && amount > 0 ? amount : 0;
 }
-
-// [O1] The ruled "no cap" and its helpers live in cash-limit.ts (no imports, so the seed spine can read it).
-export { RIDER_CASH_NO_LIMIT, isNoCashLimit, BOARD_GRAB_UNSHOWN_CASH_MAX } from './cash-limit';
 
 /**
  * D.3 rider float-limit gate.
@@ -87,8 +83,7 @@ export function floatAdvice(
   const available = Math.max(0, limit - committed);
   const usedPct = limit > 0 ? Math.min(1, committed / limit) : 0;
   const soft = Math.min(1, Math.max(0.1, Number.isFinite(softPct) ? softPct : 0.7));
-  // [O1] No cap: nothing to warn about, ever.
-  if (limit <= 0 || isNoCashLimit(limit)) {
+  if (limit <= 0) {
     return { level: 'ok', limit, committed, available, usedPct, sentence: null };
   }
   if (available <= 0) {

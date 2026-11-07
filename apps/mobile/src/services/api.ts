@@ -1116,7 +1116,11 @@ export const riderApi = {
     api.post(`/rider/orders/${id}/accept`, typeof payToVendor === 'number' ? { payToVendor } : {}),
   // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
   // this path acks the offer so it's never scored as a timeout [SWIFT-016].
-  acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  // [O1 · riders choose] `payToVendor`: the store cash the offer card SHOWED (its cashMath), sent back so the server
+  // refuses an accept whose cash went up since, or a bigger cash job whose amount the card never showed.
+  acceptOffer: (orderId: string, offerAttemptId?: string, payToVendor?: number) => api.post('/rider/offers/accept', {
+    orderId, ...(offerAttemptId ? { offerAttemptId } : {}), ...(typeof payToVendor === 'number' ? { payToVendor } : {}),
+  }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   // Golden-rule handover: GPS is mandatory server-side (claims are impossible
   // without it) — an empty body 400s.

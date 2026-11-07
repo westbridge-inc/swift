@@ -3,7 +3,7 @@ import { applySeedPlan, buildSeedPlan, type ApplyOptions, type ApplyResult, type
 import { isProduction } from '../../utils/runtime-mode';
 import { DEFAULT_DELIVERY_RATES } from '../../utils/markup';
 import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
-import { RIDER_CASH_NO_LIMIT } from '../dispatch/cash-limit';
+import { GUYANA_RIDER_CASH_LIMIT } from '../dispatch/cash-limit';
 
 /**
  * The platform SPINE — the rows a Swift database cannot function without,
@@ -100,12 +100,12 @@ import { RIDER_CASH_NO_LIMIT } from '../dispatch/cash-limit';
  *  Only a registered business, or a trader under their own name (the *_OWN_NAME lists), joins. Nothing else moves.
  *  Until the owner-signed seed applies this version, a stored copy still names the three lists; nothing reads them
  *  (country-config RETIRED_LIST_KEYS, doc-registry RETIRED_REGISTRY_LIST_KEYS).
- *  2026-11-07.1 [O1 · owner 5 Nov 2026 05:00Z; owner 7 Nov 2026 ~01:55Z]: 2026-11-01.1 with (1) Guyana's rider cash
- *  limit OPEN: floatL1, floatL2 and floatL3 at RIDER_CASH_NO_LIMIT (dispatch/cash-limit), "the business decides on
- *  huge orders; riders choose"; the inactive pegged markets keep their own figures; and (2) a store gets 10 minutes to
- *  accept a new order before it cancels by itself (order_auto_reject_minutes 10, was 5). One owner-signed seed applies
- *  both. Until it does, production keeps GY$8,000 / 20,000 / 40,000 and 5 minutes; a rider already on the old figure
- *  moves to no limit at their next go-online (FloatService.recomputeForUser). */
+ *  2026-11-07.1 [O1 · owner 7 Nov 2026 ~04:10Z (replacing "no cap" of 5 Nov); owner 7 Nov ~01:55Z]: 2026-11-01.1
+ *  with (1) Guyana's rider cash limit GY$100,000 at every trust level (floatL1/L2/L3 = GUYANA_RIDER_CASH_LIMIT,
+ *  dispatch/cash-limit; riders see each job's cash and choose); the inactive pegged markets keep their own figures;
+ *  and (2) a store gets 10 minutes to accept a new order before it cancels by itself (order_auto_reject_minutes 10,
+ *  was 5). One owner-signed seed applies both. Until it does, production keeps GY$8,000 / 20,000 / 40,000 and 5
+ *  minutes; a rider already on an old figure moves to the new one at their next go-online (recomputeForUser). */
 export const PLATFORM_CONFIG_VERSION = '2026-11-07.1';
 
 /**
@@ -170,7 +170,7 @@ const peggedMarketAnchor = {
 // The same for taxi: the pegged markets keep the launch taxi card (GYD) they
 // were derived from. Guyana's own fare is DEFAULT_TAXI_RATES (below).
 const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
-// [O1] The same for the rider cash float (GYD): the pegged markets keep the launch figures, Guyana has no cap.
+// [O1] The same for the rider cash float (GYD): the pegged markets keep the launch figures; Guyana's is its own.
 const peggedFloatAnchor = { l1: 8000, l2: 20000, l3: 40000 };
 
 /**
@@ -358,11 +358,11 @@ export function desiredPlatformConfig(): DesiredConfig {
     isActive: true,
     usdExchangeRate: gydPerUsd,
     idGateThresholdUsd: 50,
-    // [O1 · owner 5 Nov 2026 05:00Z] No rider cash limit at any trust level: riders choose (every offer shows the
-    // cash to pay the store before they accept), and the store decides on huge orders.
-    floatL1: RIDER_CASH_NO_LIMIT,
-    floatL2: RIDER_CASH_NO_LIMIT,
-    floatL3: RIDER_CASH_NO_LIMIT,
+    // [O1 · owner 7 Nov 2026 ~04:10Z] GY$100,000 of store cash at once, at every trust level. Riders choose: every
+    // offer and board row shows the cash to pay the store before they accept.
+    floatL1: GUYANA_RIDER_CASH_LIMIT,
+    floatL2: GUYANA_RIDER_CASH_LIMIT,
+    floatL3: GUYANA_RIDER_CASH_LIMIT,
     subscriptionTiers: guyanaTiers,
     documentChecklists: guyanaChecklists,
     taxiRates: guyanaTaxiRates,
@@ -389,7 +389,7 @@ export function desiredPlatformConfig(): DesiredConfig {
     perMin: peggedTaxiAnchor.perMin / gydPerUsd,
     minimum: peggedTaxiAnchor.minimum / gydPerUsd,
   };
-  // [O1] The pegged markets keep the float figures they were launched from (Guyana's no-cap ruling is Guyana's alone).
+  // [O1] The pegged markets keep the float figures they were launched from (Guyana's GY$100,000 is Guyana's alone).
   const USD_FLOAT = { l1: peggedFloatAnchor.l1 / gydPerUsd, l2: peggedFloatAnchor.l2 / gydPerUsd, l3: peggedFloatAnchor.l3 / gydPerUsd };
   const niceRound = (n: number) => {
     if (n >= 1000) return Math.round(n / 100) * 100;

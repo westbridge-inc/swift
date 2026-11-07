@@ -9,49 +9,38 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { makeDispatchService, type DispatchService } from '../modules/dispatch/dispatch.service';
-import { floatAdvice } from '../modules/dispatch/float.service';
 import { desiredPlatformConfig, PLATFORM_CONFIG_VERSION, seedFxRate } from '../modules/ops/platform-config';
 import { AUTO_REJECT_KEY, vendorResponseSlaMinutes } from '../modules/order/response-sla';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 
 // ---------------------------------------------------------------------------
-// [O1 · owner ruling 5 Nov 2026 05:00Z] "Rider cash limit OPEN, no cap; the business decides on huge orders; riders
-// choose." Until now Guyana's riders could front at most GY$8,000 (L1) of store cash, so a cash delivery above it
-// passed checkout and no rider could take it.
+// [O1 · owner ruling 7 Nov 2026 ~04:10Z, replacing "no cap" of 5 Nov] Guyana's rider cash limit is GY$100,000 at every
+// trust level (was GY$8,000 / 20,000 / 40,000); riders see the amount of every cash job and choose.
 //
-//  1. The seed plan sets Guyana's floatL1/L2/L3 to the no-cap value: one finite whole number that fits DECIMAL(12,2)
-//     and an int32 (never Infinity, NaN or null). The inactive pegged markets keep their figures.
-//  2. A rider sized under the old setting moves to no cap at their next go-online.
-//  3. Dispatch offers a GY$250,000 cash job to a rider with no cap, never to one still capped at GY$8,000.
-//  4. Riders choose with the amount in view: the board shows the cash to pay the store (as the offer card does), and
-//     a board grab is refused when the amount changed since it was shown, or when an app that shows none grabs a job
-//     above the old GY$8,000 board (it takes it from the offer card instead).
-//  5. No surface states the stored number: the profile sends no float card and says cashNoLimit.
+//  1. The seed plan sets Guyana's floatL1/L2/L3 to 100,000. The inactive pegged markets keep their figures.
+//  2. A rider sized under the old setting moves to the new limit at their next go-online, and their float card says so.
+//  3. Dispatch offers a GY$90,000 cash job to a rider with the new limit, never to one still on GY$8,000, and offers
+//     a job above GY$100,000 to nobody.
+//  4. Riders choose with the amount in view [reviewers A S2-1/S2-2]: the board and the offer card show the cash to pay
+//     the store, the accept sends back the amount shown, and the claim refuses cash that went up since it was shown,
+//     or more than GY$8,000 the card never showed (an older app, or an offer whose cash split the server cannot state,
+//     e.g. a discount).
 // [owner 7 Nov 2026 ~01:55Z] In the same seed: a store has 10 minutes (was 5) to accept a new order.
 // ---------------------------------------------------------------------------
 
-const NO_LIMIT = 1_000_000_000;
-const DECIMAL_12_2_MAX = 9_999_999_999.99;
+const LIMIT = 100_000;
 const SPOT = { lat: 8.2, lng: -59.78 }; // Mabaruma, far from every other suite
 const DAY = 24 * 60 * 60 * 1000;
-const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'rider-cash-no-limit-fixture');
+const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'rider-cash-limit-fixture');
 
-describe('[O1] the seed plan: Guyana has no rider cash limit; the store gets 10 minutes', () => {
+describe('[O1] the seed plan: GY$100,000 rider cash limit; the store gets 10 minutes', () => {
   const spine = desiredPlatformConfig();
   const gy = spine.countries.find((c) => c.code === 'GY')!;
 
-  it('floatL1, floatL2 and floatL3 are the no-cap value, a finite whole number that fits every float column', async () => {
-    const { RIDER_CASH_NO_LIMIT } = (await import('../modules/dispatch/float.service')) as { RIDER_CASH_NO_LIMIT?: number };
-    expect(RIDER_CASH_NO_LIMIT).toBe(NO_LIMIT);
+  it('floatL1, floatL2 and floatL3 are GY$100,000', () => {
     for (const level of ['floatL1', 'floatL2', 'floatL3'] as const) {
-      const v = gy.policy[level] as number;
-      expect(v, level).toBe(NO_LIMIT);
-      expect(Number.isInteger(v)).toBe(true);
-      // committedFloat never passes floatLimit (the guarded commit), so the sum stays in DECIMAL(12,2) too.
-      expect(v).toBeLessThanOrEqual(DECIMAL_12_2_MAX);
-      // the batch planner's integer capacity (Math.round(availableFloat))
-      expect(v).toBeLessThan(2 ** 31);
-      expect(gy.create[level]).toBe(v);
+      expect(gy.policy[level], level).toBe(LIMIT);
+      expect(gy.create[level], level).toBe(LIMIT);
     }
   });
 
@@ -70,17 +59,12 @@ describe('[O1] the seed plan: Guyana has no rider cash limit; the store gets 10 
   });
 
   it('is a new configuration version', () => {
-    expect(PLATFORM_CONFIG_VERSION).not.toBe('2026-11-01.1');
+    expect(PLATFORM_CONFIG_VERSION).toBe('2026-11-07.1');
     expect(spine.version).toBe(PLATFORM_CONFIG_VERSION);
-  });
-
-  it('a rider with no cap is never told about a float', () => {
-    expect(floatAdvice({ floatLimit: NO_LIMIT, committedFloat: NO_LIMIT - 1 })).toMatchObject({ level: 'ok', sentence: null });
-    expect(floatAdvice({ floatLimit: NO_LIMIT, committedFloat: NO_LIMIT })).toMatchObject({ level: 'ok', sentence: null });
   });
 });
 
-describe('[O1] dispatch, the board, the grab and the profile with no cap', () => {
+describe('[O1] dispatch, the board, the offer and the profile under the GY$100,000 limit', () => {
   let app: FastifyInstance;
   let dispatch: DispatchService;
   let vendorId = '';
@@ -126,14 +110,14 @@ describe('[O1] dispatch, the board, the grab and the profile with no cap', () =>
   }
 
   /** A cash food order ready at the store: the rider pays the store `goods` at pickup. */
-  async function makeCashOrder(goods: number) {
+  async function makeCashOrder(goods: number, discount = 0) {
     const order = await sys(() => app.prisma.order.create({
       data: {
         orderNumber: `CASH-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
         customerId, vendorId, status: 'READY_FOR_PICKUP', readyAt: new Date(),
         pickupAddress: 'Cash Store', pickupLat: SPOT.lat, pickupLng: SPOT.lng,
         deliveryAddress: 'Mabaruma homes', deliveryLat: SPOT.lat + 0.004, deliveryLng: SPOT.lng + 0.004,
-        subtotalBase: goods, subtotalMarkup: 0, subtotalCustomer: goods, deliveryFee: 500, totalAmount: goods + 500,
+        subtotalBase: goods, subtotalMarkup: 0, subtotalCustomer: goods, deliveryFee: 500, discount, totalAmount: goods + 500 - discount,
         paymentMethod: 'CASH',
         items: { create: [{ itemId, name: 'Party order', quantity: 1, basePrice: goods, markedUpPrice: goods, markupAmount: 0, totalBase: goods, totalMarkup: 0, totalCustomer: goods }] },
       },
@@ -209,68 +193,120 @@ describe('[O1] dispatch, the board, the grab and the profile with no cap', () =>
     else process.env['NODE_ENV'] = envBefore;
   }, 120_000);
 
-  it('a rider sized at GY$8,000 before the seed has no cap from their next go-online', async () => {
+  /** The rider's live offer card, read as the app reads it. */
+  const currentOffer = async (token: string) => (await call('GET', '/api/v1/rider/offers/current', token)).json().data.offer as
+    { orderId: string; offerAttemptId?: string; cashMath?: { payToVendor: number } | null } | null;
+  /** Takes a rider out of the pool once their case is done, so the next case's offer goes where it says. */
+  const park = (riderId: string) => sys(() => app.prisma.rider.update({ where: { id: riderId }, data: { isOnline: false, isAvailable: false, locationSessionId: null } }));
+  const acceptOffer = (token: string, orderId: string, extra: Record<string, unknown> = {}) =>
+    call('POST', '/api/v1/rider/offers/accept', token, { orderId, ...extra });
+
+  it('a rider sized at GY$8,000 before the seed has GY$100,000 from their next go-online, and the float card says so', async () => {
     const r = await makeRider(8000, 50, false);
     const go = await call('POST', '/api/v1/rider/go-online', r.token, { latitude: SPOT.lat, longitude: SPOT.lng });
     expect(go.statusCode, go.body).toBe(200);
-    expect(Number((await riderRow(r.riderId)).floatLimit)).toBe(NO_LIMIT);
+    expect(Number((await riderRow(r.riderId)).floatLimit)).toBe(LIMIT);
+    const profile = (await call('GET', '/api/v1/rider/profile', r.token)).json().data;
+    expect(profile.float).toMatchObject({ limit: LIMIT, committed: 0, available: LIMIT });
   });
 
-  it('the profile shows no float card and says there is no cash limit; a capped rider keeps the card', async () => {
-    const open = await makeRider(NO_LIMIT, 60);
-    const res = await call('GET', '/api/v1/rider/profile', open.token);
-    expect(res.statusCode, res.body).toBe(200);
-    expect(res.json().data).toMatchObject({ cashNoLimit: true, float: null });
-    // Nothing the app renders carries the stored number (the raw row column is data, never shown).
-    expect(JSON.stringify(res.json().data.float)).not.toContain(String(NO_LIMIT));
-
-    const capped = await makeRider(8000, 70);
-    const old = (await call('GET', '/api/v1/rider/profile', capped.token)).json().data;
-    expect(old.cashNoLimit).toBe(false);
-    expect(old.float).toMatchObject({ limit: 8000, committed: 0, available: 8000 });
-  });
-
-  it('dispatch offers a GY$250,000 cash job to a rider with no cap, never to a nearer rider capped at GY$8,000', async () => {
+  it('dispatch offers a GY$90,000 cash job to a rider with the new limit, never to a nearer rider on GY$8,000; above the limit, nobody', async () => {
     const capped = await makeRider(8000, 20);
-    const open = await makeRider(NO_LIMIT, 600);
-    const big = await makeCashOrder(250_000);
+    const open = await makeRider(LIMIT, 600);
+    const big = await makeCashOrder(90_000);
     expect((await dispatch.dispatchOrder(big.id)).offered).toBe(open.riderId);
-    // …and a small one still goes to the nearest rider, capped or not.
     const small = await makeCashOrder(2_000);
     expect((await dispatch.dispatchOrder(small.id)).offered).toBe(capped.riderId);
+    const free = await makeRider(LIMIT, 300);
+    const tooBig = await makeCashOrder(LIMIT + 1_000);
+    expect((await dispatch.dispatchOrder(tooBig.id)).offered).toBeUndefined();
+    expect(Number((await riderRow(free.riderId)).committedFloat)).toBe(0);
   });
 
-  it('riders choose with the amount in view: the board shows it, and a grab must match what was shown', async () => {
-    const r = await makeRider(NO_LIMIT, 40);
-    const big = await makeCashOrder(250_000);
+  it('the board shows the cash; a grab is refused when it went up since it was shown, or when none was shown above GY$8,000', async () => {
+    const r = await makeRider(LIMIT, 40);
+    const job = await makeCashOrder(90_000);
     const board = await call('GET', '/api/v1/rider/orders/available', r.token);
     expect(board.statusCode, board.body).toBe(200);
-    const row = (board.json().data as Array<{ id: string; cashMath: unknown }>).find((o) => o.id === big.id);
-    expect(row?.cashMath).toEqual({ collectFromCustomer: 250_500, payToVendor: 250_000, youKeep: 500 });
+    const row = (board.json().data as Array<{ id: string; cashMath: unknown }>).find((o) => o.id === job.id);
+    expect(row?.cashMath).toEqual({ collectFromCustomer: 90_500, payToVendor: 90_000, youKeep: 500 });
 
-    // An app that showed no amount (an older app) cannot take a job above the board it was built under.
-    const blind = await call('POST', `/api/v1/rider/orders/${big.id}/accept`, r.token, {});
+    const blind = await call('POST', `/api/v1/rider/orders/${job.id}/accept`, r.token, {});
     expect(blind.statusCode, blind.body).toBe(409);
     expect(blind.json().error).toMatchObject({ code: 'CASH_AMOUNT_NOT_SHOWN' });
-    expect(blind.json().error.message).toContain('GY$250,000');
-    // An amount that is not the order's (the basket changed since it was shown) is refused with the new amount.
-    const stale = await call('POST', `/api/v1/rider/orders/${big.id}/accept`, r.token, { payToVendor: 200_000 });
+    expect(blind.json().error.message).toContain('GY$90,000');
+    expect(blind.json().error.message).not.toContain('update');
+    const stale = await call('POST', `/api/v1/rider/orders/${job.id}/accept`, r.token, { payToVendor: 80_000 });
     expect(stale.statusCode, stale.body).toBe(409);
     expect(stale.json().error).toMatchObject({ code: 'CASH_AMOUNT_CHANGED' });
-    expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: big.id } }))).riderId).toBeNull();
+    expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: job.id } }))).riderId).toBeNull();
     expect(Number((await riderRow(r.riderId)).committedFloat)).toBe(0);
 
-    // The amount shown: taken, with no cap in the way, and the cash committed exactly.
-    const take = await call('POST', `/api/v1/rider/orders/${big.id}/accept`, r.token, { payToVendor: 250_000 });
+    const take = await call('POST', `/api/v1/rider/orders/${job.id}/accept`, r.token, { payToVendor: 90_000 });
     expect(take.statusCode, take.body).toBe(200);
-    expect(Number((await riderRow(r.riderId)).committedFloat)).toBe(250_000);
+    expect(Number((await riderRow(r.riderId)).committedFloat)).toBe(90_000);
   });
 
   it('an older app keeps the board it had: a cash job up to GY$8,000 is still taken without an amount', async () => {
-    const r = await makeRider(NO_LIMIT, 45);
+    const r = await makeRider(LIMIT, 45);
     const order = await makeCashOrder(8_000);
     const take = await call('POST', `/api/v1/rider/orders/${order.id}/accept`, r.token, {});
     expect(take.statusCode, take.body).toBe(200);
     expect(Number((await riderRow(r.riderId)).committedFloat)).toBe(8_000);
+  });
+
+  it('[A S2-1] an offer whose cash went up while it was out is refused; the amount shown is taken', async () => {
+    const r = await makeRider(LIMIT, 30);
+    const job = await makeCashOrder(50_000);
+    expect((await dispatch.dispatchOrder(job.id)).offered).toBe(r.riderId);
+    const card = await currentOffer(r.token);
+    expect(card?.cashMath?.payToVendor).toBe(50_000);
+    // A dearer substitute approved while the card is out: the store cash goes up by 10,000.
+    await sys(() => app.prisma.order.update({ where: { id: job.id }, data: { subtotalBase: 60_000, subtotalCustomer: 60_000, totalAmount: 60_500 } }));
+    const up = await acceptOffer(r.token, job.id, { offerAttemptId: card!.offerAttemptId, payToVendor: 50_000 });
+    expect(up.statusCode, up.body).toBe(409);
+    expect(up.json().error).toMatchObject({ code: 'CASH_AMOUNT_CHANGED' });
+    expect(up.json().error.message).toContain('GY$60,000');
+    expect((await sys(() => app.prisma.order.findUniqueOrThrow({ where: { id: job.id } }))).riderId).toBeNull();
+    expect(Number((await riderRow(r.riderId)).committedFloat)).toBe(0);
+
+    await park(r.riderId);
+    const r2 = await makeRider(LIMIT, 35);
+    const shown = await makeCashOrder(50_000);
+    expect((await dispatch.dispatchOrder(shown.id)).offered).toBe(r2.riderId);
+    const card2 = await currentOffer(r2.token);
+    const ok = await acceptOffer(r2.token, shown.id, { offerAttemptId: card2!.offerAttemptId, payToVendor: card2!.cashMath!.payToVendor });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(Number((await riderRow(r2.riderId)).committedFloat)).toBe(50_000);
+  });
+
+  it('[A S2-1] an older app that sends no amount takes an offer up to GY$8,000, never above', async () => {
+    const r = await makeRider(LIMIT, 25);
+    const job = await makeCashOrder(50_000);
+    expect((await dispatch.dispatchOrder(job.id)).offered).toBe(r.riderId);
+    const blind = await acceptOffer(r.token, job.id);
+    expect(blind.statusCode, blind.body).toBe(409);
+    expect(blind.json().error).toMatchObject({ code: 'CASH_AMOUNT_NOT_SHOWN' });
+    expect(Number((await riderRow(r.riderId)).committedFloat)).toBe(0);
+
+    await park(r.riderId);
+    const r2 = await makeRider(LIMIT, 27);
+    const small = await makeCashOrder(6_000);
+    expect((await dispatch.dispatchOrder(small.id)).offered).toBe(r2.riderId);
+    const ok = await acceptOffer(r2.token, small.id);
+    expect(ok.statusCode, ok.body).toBe(200);
+  });
+
+  it('[A S2-2] an offer whose cash split cannot be shown (a discount) is never taken above GY$8,000', async () => {
+    const r = await makeRider(LIMIT, 22);
+    const job = await makeCashOrder(20_000, 1_000);
+    expect((await dispatch.dispatchOrder(job.id)).offered).toBe(r.riderId);
+    const card = await currentOffer(r.token);
+    expect(card?.cashMath ?? null).toBeNull(); // the card shows no cash, so the app sends none back
+    const res = await acceptOffer(r.token, job.id, { offerAttemptId: card!.offerAttemptId });
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'CASH_AMOUNT_NOT_SHOWN' });
+    expect(res.json().error.message).toContain('GY$20,000');
+    expect(Number((await riderRow(r.riderId)).committedFloat)).toBe(0);
   });
 });

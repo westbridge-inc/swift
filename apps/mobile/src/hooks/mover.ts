@@ -539,7 +539,12 @@ export function useAcceptJob(kind: MoverKind) {
 export function useAcceptOffer(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => unwrap(svc(kind).acceptOffer(orderId, offerAttemptId)), onSuccess: () => refreshAfterJobStep(qc) });
+  // [O1] A rider's accept sends back the store cash the card showed; a driver's takes the card alone.
+  const m = useMutation({
+    mutationFn: ({ orderId, offerAttemptId, payToVendor }: { orderId: string; offerAttemptId?: string; payToVendor?: number }) =>
+      unwrap(kind === 'RIDER' ? riderApi.acceptOffer(orderId, offerAttemptId, payToVendor) : driverApi.acceptOffer(orderId, offerAttemptId)),
+    onSuccess: () => refreshAfterJobStep(qc),
+  });
   return pv ? PV.previewMutation() : m;
 }
 /** Explicit pass on a dispatch offer — tells the cascade to move to the next

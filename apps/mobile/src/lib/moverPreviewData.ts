@@ -29,8 +29,9 @@ export const PREVIEW_PROFILE = {
   vehicleColor: 'Silver',
   licensePlate: 'PREVIEW',
   rideClass: 'ECONOMY',
-  // [O1 · owner 5 Nov 2026] No rider cash limit, so the preview shows no cash-float ceiling (a driver has none
-  // anyway; Home reads `profile?.float` defensively).
+  // Riders show a cash-float ceiling on Home; a driver has none, but the field
+  // is read defensively (`profile?.float`). [O1 · owner 7 Nov 2026] The sample uses Guyana's GY$100,000 limit.
+  float: { available: 60000, limit: 100000, committed: 40000 },
 };
 
 /** Verification status: a fully-approved mover (so the GO button reads eligible,

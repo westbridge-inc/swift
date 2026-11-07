@@ -133,7 +133,6 @@ import { maskOrderPartyPhones, maskRowUserPhones, ORDER_CONTACT_PARTIES, revealO
 import { PROOF_PHOTO_NAMES, openProofPhoto } from './order-proof-photo';
 import { moverUserOf, PAYER_INCLUDE, subscriptionTenantWhere } from '../subscription/subscription-owner';
 import { readDeliveryPause, setDeliveryPause } from '../dispatch/delivery-pause';
-import { isNoCashLimit } from '../dispatch/cash-limit';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2961,10 +2960,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ...c,
         usdExchangeRate: Number(c.usdExchangeRate),
         idGateThresholdUsd: Number(c.idGateThresholdUsd),
-        // [O1] The ruled "no cap" is sent as null and shown as "No limit", never as its stored number.
-        floatL1: isNoCashLimit(c.floatL1) ? null : Number(c.floatL1),
-        floatL2: isNoCashLimit(c.floatL2) ? null : Number(c.floatL2),
-        floatL3: isNoCashLimit(c.floatL3) ? null : Number(c.floatL3),
+        floatL1: Number(c.floatL1),
+        floatL2: Number(c.floatL2),
+        floatL3: Number(c.floatL3),
       })),
     };
   });
