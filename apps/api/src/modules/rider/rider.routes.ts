@@ -12,13 +12,17 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { carriesGoods, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveriesEnabled, carriesGoods, carriesParcels, isPassengerVehicle, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carDeliveryLivePreview, hasTaxiTwin, isCarDeliveryProfile, isTaxiTwin, lockCarDeliveryAuthority, syncCarDeliveryProfile } from '../driver/car-deliveries';
+import { isHirePlate, PRIVATE_CAR_H_PLATE, PRIVATE_CAR_H_PLATE_COPY } from '../verification/hire-plate';
+import { normalizeRegistrationMark } from '../verification/subjects';
+import { returnToTaxiAndDeliveries } from '../driver/car-deliveries-return';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
 import { noteLiveEta } from '../eta/promise';
 import { z } from '../../lib/zod';
-import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
+import { Prisma, RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { riderDispatchableStatusesFor, riderDispatchReadinessFilter, withheldAwaitingReadiness, dispatchHoldExpired } from '../dispatch/dispatch-trigger';
 import { earningsWindow, jobsIn } from '../order/earnings-window';
@@ -29,10 +33,10 @@ import { CashRulesService, customerTrustSummaries, gpsEvidence } from '../cash/c
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
-import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
+import { makeDispatchService, vehicleCanCarry, vehicleCanCarryParcel } from '../dispatch/dispatch.service';
 import { FloatService, riderFloatForOrder, floatAdvice } from '../dispatch/float.service';
 import { explainEarning } from '../../utils/explain-earning';
-import { passengersOnlyRefusal, riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
+import { carNoParcelsClaim, passengersOnlyRefusal, riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
@@ -69,6 +73,7 @@ import {
   assertMoverRoleAuthority,
   assertActiveMoverAccount,
   lockAndRetireDriverSupply,
+  completeUserRoleAuthorityTransition,
   lockUserRoleAuthority,
   staleMoverAuthorityError,
 } from '../mover-authority';
@@ -560,6 +565,17 @@ export async function riderRoutes(app: FastifyInstance) {
     if (body.vehicleType !== undefined && body.vehicleType !== rider.vehicleType) {
       throw new AppError(409, 'USE_VEHICLE_CHANGE', 'Change your vehicle from the vehicle screen — a new vehicle needs its own documents.');
     }
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car takes food and shop orders only: it never signs up for courier parcels.
+    if (body.riderType !== undefined && body.riderType !== 'DELIVERY' && isPassengerVehicle(rider.vehicleType)) throw carNoParcelsClaim();
+    // [CARS-PLATES · REVIEW-G22 S2-1] A delivery car never takes an H (hire) plate of its own: an H plate is a taxi car's,
+    // so only the taxi car's own twin (the account's taxi profile on that very plate) carries one. Refused before step-up.
+    if (body.licensePlate !== undefined && isPassengerVehicle(rider.vehicleType) && isHirePlate(body.licensePlate)
+      && normalizeRegistrationMark(body.licensePlate) !== normalizeRegistrationMark(rider.licensePlate ?? '')) {
+      const taxi = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { vehicleType: true, licensePlate: true } });
+      if (!isTaxiTwin({ vehicleType: rider.vehicleType, licensePlate: body.licensePlate }, taxi)) {
+        throw new AppError(400, PRIVATE_CAR_H_PLATE, PRIVATE_CAR_H_PLATE_COPY);
+      }
+    }
     // [High #9 · DS109] Changing the plate, make, model, year or colour re-identifies the vehicle the rider operates.
     // Step-up first (the same proof as a money surface), the old vehicle links close so
     // GO re-checks the EXACT new vehicle, and live supply retires now — a retyped plate
@@ -651,6 +667,12 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!isVehicleOffered(rider.vehicleType)) {
       throw new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Change your vehicle to go online.');
     }
+    // [CARS-DELIVER] A car's delivery profile goes online only while CAR_DELIVERIES is on (the kill switch).
+    // [CARS-PLATES · owner 6 Nov] The taxi car's twin goes online only as its owner's verified taxi car; a private
+    // (P) plate car on its own delivery papers, like any rider.
+    const carDelivery = isCarDeliveryProfile(rider.vehicleType);
+    if (carDelivery && !carDeliveriesEnabled()) throw passengersOnlyRefusal();
+    const taxiTwin = carDelivery && await hasTaxiTwin(app.prisma, request.user.userId);
     if (!locationSessionId) {
       throw new AppError(401, 'UNAUTHORIZED', 'This device session is no longer active');
     }
@@ -672,7 +694,11 @@ export async function riderRoutes(app: FastifyInstance) {
     // legacy flag; known invalid evidence also refuses an unchanged legacy profile.
     // Fast-fail preview for honest copy — the AUTHORITATIVE check re-runs
     // inside the locked transaction below [EV-ACT-16 TOCTOU].
-    const verified = await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
+    // [CARS-DELIVER] A taxi car previews the taxi verdict on the car its taxi profile names today (the
+    // delivery profile is re-synced to that car under the locks below).
+    const verified = taxiTwin
+      ? await carDeliveryLivePreview(app.prisma, request.user.userId)
+      : await verification.riderLiveOperation(request.user.userId, rider.vehicleType);
     if (!verified) {
       throw goOnlineRefusal('DOCUMENTS', 'RIDER');
     }
@@ -756,16 +782,36 @@ export async function riderRoutes(app: FastifyInstance) {
       // revocation committing after the preview above can no longer slip a
       // stale "verified" through to the online write. The legacy flag comes
       // from the LOCKED profile snapshot, not the preview.
+      // [CARS-DELIVER] The delivery profile goes online as the car the taxi profile names now (Rider -> Driver).
+      // [CARS-PLATES] Only the twin mirrors (sync refuses if it stopped being one); a private car is its own car.
+      if (taxiTwin) await syncCarDeliveryProfile(tx, request.user.userId);
       const liveDocuments = await lockMoverDocuments(tx, request.user.userId, 'RIDER');
       assertMoverDocuments(liveDocuments);
+      const carDocuments = carDelivery ? await lockCarDeliveryAuthority(tx, request.user.userId) : null;
+      if (carDocuments) assertMoverDocuments(carDocuments);
+      // [REVIEW-G #2138 NOTE] Identity locks are per profile (liveness.service): delivery GO on the taxi's car also
+      // refuses while the TAXI profile is identity-locked or safety-suspended (its row is locked just above), so
+      // switching to the same car's deliveries never gets around a lock. Selfie-check freshness stays this
+      // profile's own (assertShiftLiveness above): a check passed on one profile never refreshes the other.
+      if (carDelivery) {
+        const taxi = await tx.driver.findUnique({
+          where: { userId: request.user.userId },
+          select: { lastLivenessPassAt: true, livenessLockedAt: true, safetySuspendedAt: true },
+        });
+        if (taxi?.livenessLockedAt) assertShiftLiveness(taxi);
+        if (taxi) assertNotSafetySuspended(taxi);
+      }
       const retiredDriverId = await lockAndRetireDriverSupply(tx, request.user.userId);
       const available = (await riderLiveLegCount(tx, rider.id)) < (await riderStackingCapacity(app.prisma));
       const activated = await tx.$queryRaw<Array<{ isOnline: boolean; isAvailable: boolean }>>`
         UPDATE riders SET "isOnline" = true, "isAvailable" = ${available},
           "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
           "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
+          -- [CARS-DELIVER PR4] Deliveries the mover chose themselves never send them back to taxi work.
+          "returnsToTaxi" = false,
           "updatedAt" = clock_timestamp()
         WHERE id = ${rider.id} AND ${documentDeadlineSql(liveDocuments)}
+          AND ${carDocuments ? documentDeadlineSql(carDocuments) : Prisma.sql`TRUE`}
         RETURNING "isOnline", "isAvailable"`;
       if (!activated[0]) throw expiredDocumentAuthority();
       await tx.user.update({
@@ -849,6 +895,26 @@ export async function riderRoutes(app: FastifyInstance) {
 
     if (!rider.isOnline && !rider.currentOrderId) {
       return { success: true, data: { accepted: false, reason: 'OFFLINE' } };
+    }
+
+    // [CARS-DELIVER PR4 · COORD 26 Oct] A delivery taken from "taxi + deliveries" is done: the first heartbeat
+    // after its last leg returns the account to taxi work (car-deliveries-return.ts). The phone is told, so it
+    // refetches and its location stream follows the taxi profile.
+    if (rider.returnsToTaxi && rider.isOnline && !rider.currentOrderId) {
+      const back = await returnToTaxiAndDeliveries(app.prisma, request.user.userId, locationSessionId, { latitude, longitude });
+      if (back) {
+        await completeUserRoleAuthorityTransition(app, {
+          userId: request.user.userId, riderId: rider.id, driverId: null, activeRole: 'DRIVER', lastMoverRole: 'DRIVER',
+        }).catch((error) => request.log.warn({ err: error, riderId: rider.id }, 'return to taxi cleanup failed'));
+        if (back === 'RETURNED') {
+          const driverRow = await app.prisma.driver.findUnique({ where: { userId: request.user.userId }, select: { id: true } });
+          if (driverRow) {
+            await app.redis.set(`driver:location_db_ts:${driverRow.id}`, Date.now().toString())
+              .catch((error) => request.log.warn({ err: error, driverId: driverRow.id }, 'return to taxi Redis bookkeeping failed'));
+          }
+        }
+        return { success: true, data: { accepted: false, reason: 'RETURNED_TO_TAXI' } };
+      }
     }
 
     // Migration compatibility is first-writer-wins for a legacy null owner;
@@ -1174,6 +1240,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // (vehicleCanCarry reads the switch; an unsized order is asked too).
     const carriable = candidates.filter((order) => {
       const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
+      // [CARS-PLATES · owner 6 Nov 2026] a car's board never shows a courier parcel (food and shop orders only).
+      if (order.orderType === 'COURIER') return vehicleCanCarryParcel(rider.vehicleType, requiredSize);
       return vehicleCanCarry(rider.vehicleType, requiredSize);
     });
     const orders = await safeBoardOrders(app.prisma, carriable, request.user.userId, 'RIDER');
@@ -1417,6 +1485,8 @@ export async function riderRoutes(app: FastifyInstance) {
     // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] A taxi car takes no goods work while the
     // CAR_DELIVERIES switch is off, said in its own words before any size rule (the claim refuses it too).
     if (!carriesGoods(rider.vehicleType)) throw passengersOnlyRefusal();
+    // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] A car takes food and shop orders only: never a courier parcel.
+    if (order.orderType === 'COURIER' && !carriesParcels(rider.vehicleType)) throw carNoParcelsClaim();
 
     // SWIFT-062: the board-grab entrance must respect vehicle capability too — a
     // parcel can't be grabbed by a mover whose vehicle can't carry it (the offer

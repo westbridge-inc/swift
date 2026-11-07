@@ -271,8 +271,8 @@ export class CardRailService {
             || current.nextBillingDate.getTime() !== priced.periodStart.getTime()) {
             throw new AppError(409, 'MOVER_FEE_PRICE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
           }
-          // [OWNER RULING 8 Oct (2) · owner #62] A Pay now pays the next unpaid
-          // week: one week ahead at most, refused before any page exists.
+          // [OWNER RULING 8 Oct (2) · owner 6 Nov 2026] A Pay now pays the next unpaid
+          // week: four weeks ahead at most, refused before any page exists.
           await assertPayAheadRoom(tx, sub.id, priced.amount, now, 'partner');
         }
         await lockBillingAuthority(tx, sub.id);
@@ -1039,7 +1039,7 @@ export class CardRailService {
       data: { kind: 'billing_banked', subscriptionId: session.subscriptionId },
       dedupeKey: `card-paynow-banked:${paymentId}`,
     }).catch(() => {});
-    // [OWNER RULING 8 Oct (2) · owner #62] Kept, never refused; past one week ahead the operators refund the excess.
+    // [OWNER RULING 8 Oct (2) · owner 6 Nov 2026] Kept, never refused; past the four-week limit the operators refund the excess.
     await this.billing.pageIfPayAheadOverCap(session.subscriptionId);
   }
 

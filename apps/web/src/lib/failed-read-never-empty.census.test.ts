@@ -296,6 +296,10 @@ const KNOWN: Record<string, string> = {
   'components/checkout/checkout.tsx | () => { if (live) setRiderNotice(null); }': 'A hint before ordering only: a failed rider read says nothing and blocks nothing; checkout itself decides and shows its refusal in the server\'s words.',
   'app/dashboard/settings/kitchen-capacity-card.tsx | No limit. Set one if too many orders at once wou': 'The words for the stored setting (maxConcurrentOrders null = no limit); the card renders them only after the profile read has the store (it returns nothing on a failed read, where the page says it could not load).',
   'app/(app)/order/search/page.tsx | () => { if (sequence.current === request) setSug': 'Type-ahead suggestions only: they vanish on a failure and say nothing; the search itself reports its own failure.',
+  // [PERF · 6 Nov 2026] The weekly-fee page's lower half, moved to its own chunk: the parent (weekly-fee.tsx) draws it
+  // only with `sub` from a read that succeeded (loading and error return before it), so these say "none", never "failed".
+  'components/weekly-fee-history.tsx | No recent checkouts.': 'Drawn only from a weekly-fee read that succeeded (weekly-fee.tsx returns its own error before mounting this part).',
+  'components/weekly-fee-history.tsx | No receipts yet.': 'Drawn only from a weekly-fee read that succeeded (weekly-fee.tsx returns its own error before mounting this part).',
 };
 
 const ALL = sources(SRC).flatMap((p) => scan(relative(SRC, p), readFileSync(p, 'utf8')));

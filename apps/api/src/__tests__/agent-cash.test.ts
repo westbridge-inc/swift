@@ -396,22 +396,22 @@ describe('cross-channel dedupe (edge 2 / scenario G core)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// [OWNER #62 · 14 Oct (was four weeks, 8 Oct) + OWNER RULING 8 Oct (4)] Weekly
-// fees are paid one week at a time (at most the coming week is held), and
+// [OWNER 6 Nov 2026 (up to four weeks ahead; was one week, owner #62) + OWNER
+// RULING 8 Oct (4)] Weekly fees may be paid up to four weeks ahead, and
 // production credits no fee by hand or by agent
 // (BILLING_TOPUP_HOLD=1). Agent money is never refused or dropped once it is
 // Swift's: past the cap, or under the hold, it is recorded and held for a
 // person, who refunds it. An admin attaching it is refused in plain words.
 // ---------------------------------------------------------------------------
-describe('[owner #62] agent money: one week ahead at most, and held in production', () => {
-  it('the coming week credits; a second week is held for a person (PAY_AHEAD_LIMIT), never credited', async () => {
+describe('[owner 6 Nov] agent money: four weeks ahead at most, and held in production', () => {
+  it('four coming weeks credit; a fifth is held for a person (PAY_AHEAD_LIMIT), never credited', async () => {
     const { sub, san } = await makeVendorSub();
-    expect(track(await svc.ingest(inbound(san))).status).toBe('accepted');
-    expect(Number((await prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(2100);
+    for (let week = 1; week <= 4; week += 1) expect(track(await svc.ingest(inbound(san))).status).toBe('accepted');
+    expect(Number((await prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(4 * 2100);
     const second = track(await svc.ingest(inbound(san)));
     expect(second).toMatchObject({ status: 'received_unmatched', failureCode: 'PAY_AHEAD_LIMIT' });
-    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(1);
-    expect(Number((await prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(2100);
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(4);
+    expect(Number((await prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id } })).balance)).toBe(4 * 2100);
     // The provider transaction is not marked credited: a person can still refund it.
     const row = await prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: second.paymentId } });
     expect(row.status).toBe('UNMATCHED');
@@ -421,7 +421,7 @@ describe('[owner #62] agent money: one week ahead at most, and held in productio
     await expect(svc.attach(second.paymentId, sub.id, 'admin-test')).rejects.toMatchObject({ statusCode: 409, code: 'PAY_AHEAD_LIMIT' });
     // [review S4] An attach is whole or nothing: the words say refund it.
     await expect(svc.attach(second.paymentId, sub.id, 'admin-test')).rejects.toThrow(/attached whole or not at all: refund it to the partner/);
-    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(1);
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(4);
   });
 
   it('at the cap, an admin attaching an observation another channel already credited is told it is reconciled — never asked to refund it', async () => {
@@ -437,7 +437,7 @@ describe('[owner #62] agent money: one week ahead at most, and held in productio
     // The webhook saw the payment with a mistyped Swift Number: held for a person.
     const first = track(await svc.ingest(inbound(unknown, { channel: 'MMG_AGENT_WEBHOOK', mmgTxnId: txn })));
     expect(first).toMatchObject({ status: 'received_unmatched', failureCode: 'SAN_UNKNOWN' });
-    // MMG's statement credits that same transaction: the coming week, the cap [owner #62].
+    // MMG's statement credits that same transaction: the coming week.
     expect(track(await svc.ingest(inbound(san, { channel: 'MMG_SETTLEMENT_FILE', mmgTxnId: txn }))).status).toBe('accepted');
     // Attaching the first observation moves no money and is not a refund case.
     expect(await svc.attach(first.paymentId, sub.id, 'admin-test')).toMatchObject({ status: 'reconciled' });

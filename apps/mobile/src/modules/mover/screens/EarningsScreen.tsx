@@ -24,6 +24,8 @@ import {
 } from '../../../stores/authStore';
 import {
   cashInHandThisWeek,
+  otherProfileKind,
+  otherProfileWeek,
   earningLabel,
   earningRows,
   earningsWindowTotal,
@@ -283,10 +285,10 @@ function EarningsTools({
   statementError: boolean;
 }) {
   const source = serverRecord(sub);
-  // [OWNER RULING 8 Oct, NO "WALLET" · owner #62, NO PAYING AHEAD] Money paid
-  // before its week starts is shown as the next weekly fee being paid, never
-  // "paid ahead" or a count of weeks; the action is "Pay weekly fee". Swift
-  // holds no money for anyone: this is Swift's own fee, paid early.
+  // [OWNER RULING 8 Oct, NO "WALLET" · owner 6 Nov 2026, up to four weeks ahead]
+  // Money paid before its week starts is shown as the next weekly fees being
+  // paid, never "paid ahead"; the action is "Pay weekly fee". Swift holds no
+  // money for anyone: this is Swift's own fee, paid early.
   const paidAhead = serverNumber(source?.['walletBalanceGyd']);
   const showPaidAhead = paidAhead != null && paidAhead > 0;
   const weeks = weeksCovered(paidAhead, serverNumber(source?.['weeklyFeeGyd'] ?? source?.['customRate'] ?? source?.['weeklyRate']));
@@ -299,7 +301,7 @@ function EarningsTools({
             <T variant="numM">{money(paidAhead)}</T>
           </View>
           {weeks >= 1 ? (
-            <T variant="caption" tone="muted">Your next weekly fee is already paid</T>
+            <T variant="caption" tone="muted">{weeks >= 2 ? `Your next ${weeks} weekly fees are already paid` : 'Your next weekly fee is already paid'}</T>
           ) : null}
         </View>
       ) : null}
@@ -379,8 +381,12 @@ export function EarningsScreen({ navigation }: any) {
   const historyQ = useEarnings<unknown>(kind);
   // [SPEED 30 Oct] Figures from memory (opened again, or read ahead from Home) say so until Swift answers.
   const checkingLatest = useCheckingLatest(summaryQ);
+  // [CARS-DELIVER PR4 · REVIEW-M #2138 S4-3] An account with a taxi AND a car delivery profile also sees the other
+  // profile's week, read from that profile's own summary (asked for only for such an account). [REVIEW-F delta S3-1]
+  const otherKind = otherProfileKind({ kind, dual: mover.dual, carDeliveryProfile: mover.carDeliveryProfile });
+  const otherSummaryQ = useEarningsSummary<unknown>(otherKind);
   // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
-  const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch()]));
+  const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch(), ...(otherKind ? [otherSummaryQ.refetch()] : [])]));
   const stats = useMoverStats(kind);
   const subQ = useMoverSubscription(kind);
   const ledgerQ = useCashSettlements(kind);
@@ -432,6 +438,7 @@ export function EarningsScreen({ navigation }: any) {
     : countDetail(allTimeJobs, 'job', 'jobs');
   // [Board 13a "CASH COLLECTED"] The server's figure; undefined (older API) leaves the tile out.
   const cashThisWeek = cashInHandThisWeek(summaryQ.data);
+  const other = otherKind ? otherProfileWeek(otherKind, otherSummaryQ.data) : undefined;
 
   return (
     <Screen>
@@ -494,6 +501,14 @@ export function EarningsScreen({ navigation }: any) {
                 ? 'Cash collected this week: the fares passengers paid you in cash.'
                 : 'Cash collected this week, after paying stores for the goods.'}
             </T>
+          ) : null}
+          {other ? (
+            <Card style={{ marginTop: space.md }}>
+              <T variant="micro" tone="muted">{other.title}</T>
+              <T variant="numM" style={{ marginTop: space.xs }}>{money(other.total)}</T>
+              {other.cash ? <T variant="caption" tone="muted">{other.cash}</T> : null}
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{other.note}</T>
+            </Card>
           ) : null}
 
           {breakdown ? (

@@ -8,17 +8,24 @@ import type { DispatchPool } from './dispatch.service';
 import type { PrismaClient } from '@prisma/client';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { algoValue } from '../algo/algo-config';
-import { carriesGoods } from '../../config/vehicle-classes';
+import { carriesGoods, carriesParcels, isPassengerVehicle } from '../../config/vehicle-classes';
+import { lockCarDeliveryAuthority } from '../driver/car-deliveries';
 import { AppError } from '../../utils/errors';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
 
-/** [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] The code and words a taxi car is refused goods
- *  work in, at the grab and at every claim, while the CAR_DELIVERIES switch is off (config/vehicle-classes). */
+/** [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] The code and words a car is refused goods
+ *  work in, at the grab and at every claim, while the CAR_DELIVERIES switch is off (config/vehicle-classes).
+ *  [CARS-PLATES · owner 6 Nov 2026] Cars deliver at launch (P plates deliveries only, H plates taxi and deliveries);
+ *  the switch stays as the kill switch, and these words say only what is true while it is off. */
 export const VEHICLE_PASSENGERS_ONLY = 'VEHICLE_PASSENGERS_ONLY';
+/** [CARS-PLATES · owner 6 Nov 2026] The claim's refusal of a courier parcel to a car (food and shop orders only). */
+export function carNoParcelsClaim(): AppError {
+  return new AppError(403, 'CAR_NO_PARCELS', 'Cars take food and shop orders only on Swift. Courier parcels go to bicycles and motorbikes.');
+}
 export function passengersOnlyRefusal(): AppError {
   return new AppError(403, VEHICLE_PASSENGERS_ONLY,
-    'Taxi cars carry passengers only on Swift for now, so this vehicle cannot take deliveries or parcels.');
+    'Car deliveries are paused on Swift right now, so this vehicle cannot take deliveries or parcels.');
 }
 
 /**
@@ -146,7 +153,17 @@ export async function reserveRiderLeg(
   // takes no goods while CAR_DELIVERIES is off. Read under the profile lock lockMoverDocuments just took.
   const locked = await tx.rider.findUniqueOrThrow({ where: { id: riderId }, select: { vehicleType: true } });
   if (!carriesGoods(locked.vehicleType)) throw passengersOnlyRefusal();
+  // [CARS-PLATES · owner 6 Nov 2026 ~05:20Z] Every claim door passes here: a car never claims a courier parcel.
+  if (!carriesParcels(locked.vehicleType)) {
+    const claimed = await tx.order.findUnique({ where: { id: orderId }, select: { orderType: true } });
+    if (claimed?.orderType === 'COURIER') throw carNoParcelsClaim();
+  }
   assertMoverDocuments(documents);
+  // [CARS-DELIVER] A taxi car's delivery profile claims only as its owner's verified taxi car: the taxi
+  // document verdict on the same car (car-deliveries.ts), read under this Rider lock (Rider -> Driver).
+  // [CARS-PLATES] null for a private (P) plate delivery car: its own delivery papers above are its whole gate.
+  const carDocuments = isPassengerVehicle(locked.vehicleType) ? await lockCarDeliveryAuthority(tx, rider.userId) : null;
+  if (carDocuments) assertMoverDocuments(carDocuments);
   const rows = await tx.$executeRaw`
     UPDATE "riders" r SET
       "currentOrderId" = COALESCE(r."currentOrderId", ${orderId}),
@@ -158,6 +175,7 @@ export async function reserveRiderLeg(
     FROM "users" u
     WHERE r."id" = ${riderId}
       AND ${documentDeadlineSql(documents)}
+      AND ${carDocuments ? documentDeadlineSql(carDocuments) : Prisma.sql`TRUE`}
       AND u."id" = r."userId"
       AND u."status" = 'ACTIVE'
       AND u."activeRole"::text IN ('MOVER', 'RIDER')

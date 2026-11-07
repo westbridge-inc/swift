@@ -18,8 +18,8 @@ describe('the weekly-fee receipt names its seller', () => {
   });
 
   it('each recent checkout card shows it, and the site writes neither the name nor the address itself', () => {
-    const card = readFileSync(join(process.cwd(), 'src', 'components', 'weekly-fee.tsx'), 'utf8');
+    const card = readFileSync(join(process.cwd(), 'src', 'components', 'weekly-fee-history.tsx'), 'utf8');
     expect(card).toMatch(/checkoutSeller\(shown\) \? <p[^>]*data-testid="fee-seller">\{checkoutSeller\(shown\)\}<\/p> : null/);
-    expect(card + readFileSync(join(process.cwd(), 'src', 'lib', 'weekly-fee.ts'), 'utf8')).not.toMatch(/Westbridge|Lot 165/);
+    expect(card + readFileSync(join(process.cwd(), 'src', 'components', 'weekly-fee.tsx'), 'utf8') + readFileSync(join(process.cwd(), 'src', 'lib', 'weekly-fee.ts'), 'utf8')).not.toMatch(/Westbridge|Lot 165/);
   });
 });

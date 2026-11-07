@@ -83,7 +83,7 @@ Otherwise it is `off`. Reading the subscription never fails because of the card 
 
 **`payNow`** buttons read `Pay <currency> <amount, grouped> by card`.
 - When a week is owed, the amount is that week.
-- When nothing is due, it is the next week (one week ahead at most, owner #62).
+- When nothing is due, it is the next week (four weeks ahead at most, owner 6 Nov 2026).
 
 ## 4. Cards
 
@@ -222,7 +222,7 @@ type CardSessionView = {
 |---|---|---|
 | `OPEN` | the partner has not finished on the page, or the provider has not answered yet | "Finish on the card page." After returning: "Checking with the bank…" |
 | `UNKNOWN` | the provider has not answered; Swift keeps asking (Pay now only) | "Checking with the bank. Don't pay again." |
-| `SUCCEEDED` | ENROLL: the card is saved. PAY_NOW: the provider took the payment and it is booked | ENROLL: "Card added: VISA ending 4242." PAY_NOW, `advanced`: "Paid: <amount> received." PAY_NOW, `banked`: "Payment received. It is kept for your next weekly fee." (owner ruling 8 Oct: never "wallet", "top up" or "balance"; owner #62: never "paid ahead") |
+| `SUCCEEDED` | ENROLL: the card is saved. PAY_NOW: the provider took the payment and it is booked | ENROLL: "Card added: VISA ending 4242." PAY_NOW, `advanced`: "Paid: <amount> received." PAY_NOW, `banked`: "Payment received. It is kept for your next weekly fee." (owner ruling 8 Oct: never "wallet", "top up" or "balance"; owner #62, kept after 6 Nov 2026: never "paid ahead") |
 | `FAILED` | the bank declined, or the card has expired | "The card was not added." / "The payment didn't go through. You can try again." |
 | `EXPIRED` | the page ran out of time with nothing done | "This page expired. You can start again." |
 | `CANCELLED` | the provider could not open the page | "Try again in a moment." |

@@ -89,6 +89,14 @@ describe('fee status words [FEE-STATUS]', () => {
     expect(`${s.headline} ${s.detail}`).not.toMatch(/wallet|balance|paid ahead|top.?up/i);
   });
 
+  it('[owner 6 Nov] up to four weeks paid: the whole weeks it pays are counted, never rounded up', () => {
+    const fee = 15_000;
+    expect(words({ paidAhead: 4 * fee, amountDue: 0 }).detail).toBe('Your next 4 weekly fees are already paid.');
+    expect(words({ paidAhead: 2.5 * fee, amountDue: 0 }).detail).toBe('Your next 2 weekly fees are already paid.');
+    expect(words({ paidAhead: 1.9 * fee, amountDue: 0 }).detail).toBe('Your next weekly fee is already paid.');
+    expect(words({ paidAhead: 4 * fee, amountDue: 0 }).detail).not.toMatch(/wallet|balance|paid ahead|top.?up/i);
+  });
+
   it('no state ever pairs a passed date with "until" or "next"', () => {
     const past = new Date('2026-10-14T00:26:00Z');
     const shapes: Array<Partial<FeeStatusFacts>> = [

@@ -123,8 +123,9 @@ export function feeStatusWords(f: FeeStatusFacts, now: Date): FeeStatus {
       : f.feeWaived
         ? 'Your next weekly fee is waived.'
         : f.weeklyFee > 0 && f.paidAhead >= f.weeklyFee
-          // [OWNER RULING 8 Oct, NO "WALLET" · owner #62] never a wallet, a balance or "paid ahead".
-          ? 'Your next weekly fee is already paid.'
+          // [OWNER RULING 8 Oct, NO "WALLET"] never a wallet, a balance or "paid ahead". [owner 6 Nov 2026] Up to four
+          // weeks can be paid: the whole weeks the money received pays are counted (never rounded up).
+          ? weeksPaidLine(Math.floor(f.paidAhead / f.weeklyFee + 1e-9))
           : null;
     // "Paid until" only on a captured payment's word; otherwise the date is the next fee's, nothing more.
     return f.paidThroughProven
@@ -210,4 +211,9 @@ export async function feeStatusFor(
     currencyCode: sub.currencyCode, amountDue: fee.amountDueGyd, weeklyFee: fee.weeklyFeeGyd, paidAhead: fee.walletBalanceGyd,
     paidThroughProven: !!paid, checking, feePaused, closureHoldAt: sub.closureHoldAt ?? null,
   }, now);
+}
+
+/** [owner 6 Nov 2026] The whole weekly fees already paid before they start, in words. */
+export function weeksPaidLine(weeks: number): string {
+  return weeks >= 2 ? `Your next ${weeks} weekly fees are already paid.` : 'Your next weekly fee is already paid.';
 }

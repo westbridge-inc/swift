@@ -14,7 +14,7 @@ import { LEGAL_URL } from '@/lib/legal-url';
 import { becomePartner, signOwnName } from '@/lib/customer-account';
 import { ownNameStoreType } from '@/lib/own-name-store-type';
 import { AGREEMENT, agreementAsk, businessAsk, EXAMPLE, LIMIT, taxiAsk } from '@/lib/signup-fields';
-import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT, type MoverRole } from '@/lib/signup-roles';
+import { isCarVehicle, isHirePlate, MOVER_VEHICLES, PRIVATE_CAR_H_PLATE, PRIVATE_CAR_NOTE, riderVehicles, TAXI_DOOR_PRIVATE_CAR, TAXI_PLATE_ERROR, TAXI_PLATE_HINT, type MoverRole } from '@/lib/signup-roles';
 import { BIKE_WITH_A_MOTOR } from '@/lib/bike-with-a-motor';
 import type { StoreLocationPicker as StoreLocationPickerComponent } from '@/components/store-location-picker';
 import { loadStorePicker } from './store-picker-loader';
@@ -92,8 +92,10 @@ function usePartnerTerms() {
     if (typeof e?.code === 'string' && e.code.startsWith('WEEKLY_FEE_')) setFeeEpoch((n) => n + 1);
     throw e;
   });
-  const feeBlock = (feeRole: 'VENDOR' | 'MOVER', type: string): ReactNode => (WeeklyFee
-    ? <WeeklyFee key={feeEpoch} role={feeRole} type={type} onChange={setFee} />
+  /** [CARS-PLATES] `car`: a private (P) plate car is priced as a delivery rider, and the block says whether the server
+   *  lets private cars deliver (the delivery door then offers a car). */
+  const feeBlock = (feeRole: 'VENDOR' | 'MOVER', type: string, car?: { privateCar: boolean; onPrivateCars: (_open: boolean) => void }): ReactNode => (WeeklyFee
+    ? <WeeklyFee key={feeEpoch} role={feeRole} type={type} onChange={setFee} privateCar={car?.privateCar} onPrivateCars={car?.onPrivateCars} />
     : feeLoadFailed
       ? <button type="button" className={styles.roleButton} onClick={() => setFeeLoadFailed(false)}>Couldn’t load your weekly fee — try again</button>
       : <p role="status" className={styles.smallCopy}>{FEE_LOADING.ask}</p>);
@@ -250,20 +252,29 @@ export function VehicleStep({ shell, mover, draft, onDraft, note = null }: { she
   useEffect(() => { onDraft(veh); }, [veh, onDraft]);
   const terms = usePartnerTerms();
   const { agree, setAgree, fee } = terms;
+  // [CARS-PLATES · owner 6 Nov 2026] While the server says private cars deliver (told by the fee block), the delivery
+  // door also offers a car on a private (P) plate: delivery work only, at the rider's fee. The taxi door keeps the H rule.
+  const [carsDeliver, setCarsDeliver] = useState(false);
+  const vehicles = mover === 'RIDER' ? riderVehicles(carsDeliver) : MOVER_VEHICLES.DRIVER;
+  const privateCar = mover === 'RIDER' && isCarVehicle(veh.vehicleType);
+  const withDetails = mover === 'DRIVER' || privateCar;
   // A Driver's vehicles are taxis (car / wagon car): their plate starts with H.
   const taxiPlateWrong = !!veh.licensePlate.trim() && MOVER_VEHICLES.DRIVER.some((v) => v.value === veh.vehicleType) && !isHirePlate(veh.licensePlate);
+  // [CARS-PLATES] …and a private car's plate does not (an H car is a taxi: it signs up at the taxi door).
+  const privatePlateWrong = privateCar && !!veh.licensePlate.trim() && isHirePlate(veh.licensePlate);
+  const plateWrong = mover === 'DRIVER' ? taxiPlateWrong : privatePlateWrong;
   // [WEB-ONBOARDING] the first missing detail; a non-H taxi plate says why under the plate box (the red line is the ask)
-  const vehicleAsk = mover === 'DRIVER'
-    ? (taxiPlateWrong ? null : taxiAsk(veh, vehicleYearAccepted(veh.year)) ?? terms.agreementWait(AGREEMENT.mover))
+  const vehicleAsk = withDetails
+    ? (plateWrong ? null : taxiAsk(veh, vehicleYearAccepted(veh.year)) ?? terms.agreementWait(AGREEMENT.mover))
     : terms.agreementWait(AGREEMENT.mover);
   const doVehicle = () => wrap(async () => {
     if (fee.ask) throw new Error(fee.ask);
     if (!agree) throw new Error(agreementAsk(AGREEMENT.mover));
-    if (!MOVER_VEHICLES[mover].some((v) => v.value === veh.vehicleType)) throw new Error('Choose your vehicle');
+    if (!vehicles.some((v) => v.value === veh.vehicleType)) throw new Error('Choose your vehicle');
     // A rider's bike needs no make or plate here (the documents step asks for
-    // what the vehicle needs); a taxi's details are required by the server.
+    // what the vehicle needs); a car's details (taxi or private) are required by the server.
     const weeklyFee = fee.ack && { weeklyFeeAck: fee.ack };
-    await terms.feeChecked(becomePartner(mover === 'DRIVER'
+    await terms.feeChecked(becomePartner(withDetails
       ? { role: 'MOVER', acceptAgreement: true, ...weeklyFee, vehicleType: veh.vehicleType, vehicle: { make: veh.make.trim(), model: veh.model.trim(), year: Number(veh.year), color: veh.color.trim(), licensePlate: veh.licensePlate.trim() } }
       : { role: 'MOVER', acceptAgreement: true, ...weeklyFee, vehicleType: veh.vehicleType }));
     done('/portal');
@@ -274,30 +285,33 @@ export function VehicleStep({ shell, mover, draft, onDraft, note = null }: { she
       <h1 id="signup-title" className={styles.heading}>{mover === 'DRIVER' ? 'Your taxi' : 'How you deliver'}</h1>
       {note ? <p className={styles.bodyCopy} role="status">{note}</p> : null}
       <div className={styles.field}><label htmlFor="vehicle-type" className={styles.label}>Vehicle</label><select id="vehicle-type" value={veh.vehicleType} onChange={(e) => setVeh({ ...veh, vehicleType: e.target.value })} className={styles.input}>
-        {MOVER_VEHICLES[mover].map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
+        {vehicles.map((v) => <option key={v.value} value={v.value}>{v.label}</option>)}
       </select></div>
-      {mover === 'DRIVER' ? (
+      {withDetails ? (
         <>
-          {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
-          <p className={styles.smallCopy}>{TAXI_TWO_LICENCES}</p>
+          {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up; [CARS-PLATES] a private car is
+              a delivery car: deliveries only, on the delivery rider's papers */}
+          <p className={styles.smallCopy}>{privateCar ? PRIVATE_CAR_NOTE : TAXI_TWO_LICENCES}</p>
           <div className={styles.field}><label htmlFor="vehicle-make" className={styles.label}>Make</label><input id="vehicle-make" maxLength={LIMIT.make} placeholder={EXAMPLE.make} value={veh.make} onChange={(e) => setVeh({ ...veh, make: e.target.value })} className={styles.input} /></div>
           <div className={styles.field}><label htmlFor="vehicle-model" className={styles.label}>Model</label><input id="vehicle-model" maxLength={LIMIT.model} placeholder={EXAMPLE.model} value={veh.model} onChange={(e) => setVeh({ ...veh, model: e.target.value })} className={styles.input} /></div>
           <div className={styles.field}><label htmlFor="vehicle-year" className={styles.label}>Year</label><input id="vehicle-year" inputMode="numeric" maxLength={LIMIT.year} placeholder={EXAMPLE.year} value={veh.year} onChange={(e) => setVeh({ ...veh, year: e.target.value })} className={styles.input} /></div>
           <div className={styles.field}><label htmlFor="vehicle-color" className={styles.label}>Colour</label><input id="vehicle-color" maxLength={LIMIT.color} placeholder={EXAMPLE.color} value={veh.color} onChange={(e) => setVeh({ ...veh, color: e.target.value })} className={styles.input} /></div>
-          <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" autoCapitalize="characters" maxLength={LIMIT.plate} placeholder={EXAMPLE.plate} value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} aria-describedby="vehicle-plate-rule" aria-invalid={taxiPlateWrong || undefined} />
+          <div className={styles.field}><label htmlFor="vehicle-plate" className={styles.label}>Licence plate</label><input id="vehicle-plate" autoCapitalize="characters" maxLength={LIMIT.plate} placeholder={EXAMPLE.plate} value={veh.licensePlate} onChange={(e) => setVeh({ ...veh, licensePlate: e.target.value })} className={styles.input} aria-describedby="vehicle-plate-rule" aria-invalid={plateWrong || undefined} />
             {/* [Owner ruling 11 Oct 2026 — H-PLATE] said where the plate is typed; the server refuses a non-H taxi plate too */}
-            <p id="vehicle-plate-rule" className={taxiPlateWrong ? styles.error : styles.smallCopy} role={taxiPlateWrong ? 'alert' : undefined}>{taxiPlateWrong ? TAXI_PLATE_ERROR : TAXI_PLATE_HINT}</p></div>
+            {privateCar
+              ? <p id="vehicle-plate-rule" className={plateWrong ? styles.error : styles.smallCopy} role={plateWrong ? 'alert' : undefined}>{plateWrong ? PRIVATE_CAR_H_PLATE : PRIVATE_CAR_NOTE}</p>
+              : <p id="vehicle-plate-rule" className={plateWrong ? styles.error : styles.smallCopy} role={plateWrong ? 'alert' : undefined}>{plateWrong ? TAXI_PLATE_ERROR : TAXI_PLATE_HINT}{plateWrong && carsDeliver ? ` ${TAXI_DOOR_PRIVATE_CAR}` : ''}</p>}</div>
         </>
       ) : (
         // [CHECKLIST-LEGAL · owner ruling 1 Nov 2026 (c)] a bicycle is pedal only; a bike with a motor is a motorbike
         <p className={styles.smallCopy}>{BIKE_WITH_A_MOTOR}</p>
       )}
-      {terms.feeBlock('MOVER', veh.vehicleType)}
+      {terms.feeBlock('MOVER', veh.vehicleType, { privateCar, onPrivateCars: setCarsDeliver })}
       <PartnerAgreement name={AGREEMENT.mover} doc="driver-agreement" agree={agree} onChange={setAgree} />
       {mover === 'DRIVER' ? (
         <button type="button" onClick={() => void doVehicle()} disabled={busy || !!fee.ask || !agree || !veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || taxiPlateWrong || !vehicleYearAccepted(veh.year)} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create driver account'}</button>
       ) : (
-        <button type="button" onClick={() => void doVehicle()} disabled={busy || !!fee.ask || !agree} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create rider account'}</button>
+        <button type="button" onClick={() => void doVehicle()} disabled={busy || !!fee.ask || !agree || (privateCar && (!veh.make.trim() || !veh.model.trim() || !veh.color.trim() || !veh.licensePlate.trim() || privatePlateWrong || !vehicleYearAccepted(veh.year)))} className={styles.primaryButton}>{busy ? 'Setting up…' : 'Create rider account'}</button>
       )}
       {askLine(vehicleAsk)}
       <p className={styles.smallCopy}>You’ll upload your documents in your earner dashboard before going online.</p>

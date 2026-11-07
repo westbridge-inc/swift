@@ -1243,6 +1243,12 @@ export const driverApi = {
   updateProfile: (data: { mmgPayUrl?: string | null }) => api.put('/driver/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/driver/profile/mmg-pay-url/pending'),
+  // [CARS-DELIVER] "Deliveries too": can this taxi car also take store deliveries, and is it set up?
+  // { available, enabled, reason, vehicle }. An older server answers 404 (the card stays hidden).
+  carDeliveries: () => api.get('/driver/deliveries'),
+  addCarDeliveries: () => api.post('/driver/deliveries'),
+  // [CARS-DELIVER PR4] "Taxi rides and deliveries": store delivery offers also come while the taxi is online and free.
+  setCarDeliveriesMode: (takesDeliveries: boolean) => api.put('/driver/deliveries/mode', { takesDeliveries }),
   // [TAXI multi-stop] `capabilities` is sent ONLY when the caller passes it —
   // that is, only when the server has advertised rides with stops (CONTRACT
   // §6.4). Without it the body is exactly today's { latitude, longitude }.
@@ -1667,8 +1673,9 @@ export function weeklyFeeApi(family: import('../lib/weeklyFee').FeeFamily, sessi
     ? capturedVendorAuthConfig(current(), storeId, { headers })
     : capturedAuthConfig(current(), { headers });
   return {
-    start: async (key: string): Promise<import('../lib/weeklyFee').CheckoutStart> => {
-      const response = await api.post(base, {}, config({ 'Idempotency-Key': key }));
+    start: async (key: string, weeks?: number): Promise<import('../lib/weeklyFee').CheckoutStart> => {
+      // [owner 6 Nov 2026] `weeks` only when the server offered a choice; an older API takes one week.
+      const response = await api.post(base, weeks === undefined ? {} : { weeks }, config({ 'Idempotency-Key': key }));
       current(); return response.data.data;
     },
     /** Back to MMG's page: only the named checkout's open page, never a new checkout. */

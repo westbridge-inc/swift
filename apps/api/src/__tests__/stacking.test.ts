@@ -1,4 +1,4 @@
-import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
+import { currentTaxiSplitDocuments, verifiedTaxiCarProfile } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -242,9 +242,12 @@ describe('S4 — the rulebook judges every pairing', () => {
   it('R4 — summed cash beyond the float cap refuses the stack, naming R4', async () => {
     // [Owner ruling 15 Oct 2026] TRANSFORMED: this case's rider is a car, which takes goods only while the
     // CAR_DELIVERIES switch is on; it is on for this case so the case still measures R4 alone.
+    // [CARS-DELIVER] TRANSFORMED again: a car delivers only as its owner's verified taxi car, so the car gets
+    // its taxi profile and current taxi papers — the case still measures R4 alone.
     vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     await setCapacity(2);
     const { rider } = await makeRider('CAR');
+    await verifiedTaxiCarProfile(app.prisma, rider.id);
     await app.prisma.rider.update({ where: { id: rider.id }, data: { floatLimit: 5000 } });
     const customer = await makeCustomer();
 

@@ -17,7 +17,7 @@ import { inPersonChannel, inPersonRail, IN_PERSON_CHANNELS, inPersonMethodOf } f
 import { amountDueNow } from './amount-due';
 import { feePauseHoldsBilling } from './mmg-pause';
 import { referenceOnRecord } from './mmg-fee-reversal';
-import { PAY_AHEAD_LIMIT, PAY_AHEAD_MAX_WEEKS, readPayAhead, type PayAheadPosition } from './pay-ahead';
+import { limitedByRise, PAY_AHEAD_LIMIT, PAY_AHEAD_LIMIT_WORDS, PAY_AHEAD_MAX_WEEKS, PAY_AHEAD_MAX_WEEKS_WORD, readPayAhead, riseDay, type PayAheadPosition } from './pay-ahead';
 import { weeklyFeeAmount } from './subscription-fee';
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,8 @@ import { weeklyFeeAmount } from './subscription-fee';
 //   4. One reference credits once: the event key and topup_commands.providerRef
 //      are unique, and a reference Swift already has on record for any other
 //      money is refused (referenceOnRecord).
-//   5. The partner's rules are the MMG door's: PAYABLE, the one-week limit, the
+//   5. The partner's rules are the MMG door's: PAYABLE, the four-week limit (a monthly cash, cheque or transfer
+//      payment for up to four weeks fits it; owner 6 Nov 2026), the
 //      collection authority (a mover's one fee), no payment beside one being
 //      confirmed, no money taken while the fee is paused, and at least what is due
 //      when a week is due (a part payment would bill, fail and send a failure
@@ -128,15 +129,26 @@ const ALREADY_RECORDED = 'That reference is already on record. One reference cre
 const HAND_BACK = 'If you already took it, hand it back.';
 
 /**
- * [M15-R2 S4-1] Over the one-week limit, in this door's words. The shared admin wording says "refund", which here can
- * be read as Refund credit: that pays out the partner's real earlier credit and books a payout against cash that never
- * came in. Nothing was recorded, so the money was never Swift's: hand it back, like every other refusal at this door.
+ * [M15-R2 S4-1] Over the four-week limit (or, under a told rise, past the weeks before it), in this door's words. The
+ * shared admin wording says "refund", which here can be read as Refund credit: that pays out the partner's real earlier
+ * credit and books a payout against cash that never came in. Nothing was recorded, so the money was never Swift's: hand
+ * it back, like every other refusal at this door.
  */
 function overPayAheadLimit(position: PayAheadPosition): AppError {
-  const details = { maxWeeks: PAY_AHEAD_MAX_WEEKS, roomGyd: position.room, currencyCode: position.currencyCode };
+  const rise = limitedByRise(position);
+  const details = {
+    maxWeeks: PAY_AHEAD_MAX_WEEKS, roomGyd: position.room, currencyCode: position.currencyCode,
+    ...(rise ? { riseFrom: position.riseFrom!.toISOString() } : {}),
+  };
+  const most = formatMoney(Math.floor(position.room), 'GYD', { whole: true });
+  if (rise) {
+    return new AppError(409, PAY_AHEAD_LIMIT, position.room > 0
+      ? `This account's weekly fee goes up from the fee due on ${riseDay(position)}, and only weeks before that day can be paid now. Nothing was recorded. Take at most ${most}; if you already took more, hand the rest back.`
+      : `This account's weekly fee goes up from the fee due on ${riseDay(position)}, and every week before that day is already paid. Nothing was recorded: do not take this money. ${HAND_BACK}`, details);
+  }
   return new AppError(409, PAY_AHEAD_LIMIT, position.room > 0
-    ? `This would pay more than one week ahead on this account. Nothing was recorded. Take at most ${formatMoney(Math.floor(position.room), 'GYD', { whole: true })}; if you already took more, hand the rest back.`
-    : `The next weekly fee on this account is already paid, and Swift takes one week at a time. Nothing was recorded: do not take this money. ${HAND_BACK}`, details);
+    ? `This would pay more than ${PAY_AHEAD_MAX_WEEKS_WORD} weeks ahead on this account. Nothing was recorded. Take at most ${most}; if you already took more, hand the rest back.`
+    : `This account is already paid as far as Swift takes it, ${PAY_AHEAD_LIMIT_WORDS}. Nothing was recorded: do not take this money. ${HAND_BACK}`, details);
 }
 
 function decisionRefusal(reason: Exclude<FeePaymentDecision['reason'], null>): AppError {

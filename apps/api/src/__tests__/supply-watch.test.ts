@@ -118,7 +118,7 @@ describe('supply watcher', () => {
       data: {
         userId: du.id,
         vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2021, vehicleColor: 'Yellow',
-        licensePlate: `SW${nanoid(5)}`,
+        licensePlate: `HSW${nanoid(5)}`,
         driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
         isOnline: true, isAvailable: true, documentsVerified: true,
         rideClass: 'ECONOMY' as never,
@@ -177,7 +177,7 @@ describe('[TAXI-FLOW 22 Oct 2026] the watcher’s own car is not "drivers are ba
       data: {
         userId: me.id,
         vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2021, vehicleColor: 'Yellow',
-        licensePlate: `SW${nanoid(5)}`,
+        licensePlate: `HSW${nanoid(5)}`,
         driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
         isOnline: true, isAvailable: true, documentsVerified: true,
         rideClass: 'ECONOMY' as never,
@@ -220,7 +220,7 @@ describe('[TAXI-FLOW 22 Oct 2026] the watcher’s own car is not "drivers are ba
       data: {
         userId: du.id,
         vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2021, vehicleColor: 'Yellow',
-        licensePlate: `SW${nanoid(5)}`,
+        licensePlate: `HSW${nanoid(5)}`,
         driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
         isOnline: true, isAvailable: true, documentsVerified: true,
         rideClass: 'ECONOMY' as never,

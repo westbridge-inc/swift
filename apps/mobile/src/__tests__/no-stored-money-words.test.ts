@@ -83,27 +83,36 @@ describe('no stored-money words on any screen [owner ruling 8 Oct]', () => {
   });
 });
 
-// [OWNER #62 · 14 Oct, NO PAYING AHEAD] "shouldn't they just pay the weekly
-// fee, no paying ahead": partners pay one week at a time, so no screen offers
-// or describes paying ahead or covering several weeks — the website's
-// published legal pages included.
-const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\b(?:two|three|four|five|several|many|\d+) weeks ahead\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
+// [OWNER #62 · 14 Oct, NO PAYING AHEAD → OWNER 6 Nov 2026, UP TO FOUR WEEKS AHEAD]
+// Partners may now pay up to four weeks ahead. A screen may say THE limit, read
+// from the API's one constant (apps/api billing/pay-ahead.ts PAY_AHEAD_MAX_WEEKS):
+// "up to four weeks ahead". No screen offers any other number of weeks,
+// "several" or "many" weeks, "paid ahead" (a week paid early is "already paid"),
+// or paying ahead without the limit — the website's published legal pages included.
+const PAYING_AHEAD_WORDS = /\bpaid ahead\b|\bpay(?:ing)? ahead\b|\bcovers? (?:\d+|several|many|up to) weeks\b|\b(?:two|three|four|five|six|seven|eight|nine|ten|several|many|\d+) weeks ahead\b|\bweeks of weekly fees\b|\bcoming weekly fees?\b/i;
+const MAX_WEEKS = Number(/export const PAY_AHEAD_MAX_WEEKS = (\d+);/.exec(readFileSync(root('../api/src/modules/billing/pay-ahead.ts'), 'utf8'))![1]);
+const MAX_WORD = ['zero', 'one', 'two', 'three', 'four', 'five', 'six'][MAX_WEEKS] ?? String(MAX_WEEKS);
+const THE_LIMIT = new RegExp(`\\b(?:up to|more than) (?:${MAX_WORD}|${MAX_WEEKS}) weeks ahead\\b`, 'gi');
 
-describe('no screen offers paying ahead [owner #62]', () => {
-  it('the phone app, the website and the admin console never say "paid ahead" or several weeks', () => {
+describe('no screen offers paying ahead past the four-week limit [owner 6 Nov]', () => {
+  it('the phone app, the website and the admin console never say "paid ahead" or weeks ahead other than the limit', () => {
     const list = SURFACES.flatMap((dir) => files(root(dir)));
     expect(list.length).toBeGreaterThan(600);
-    const hits = list.flatMap((file) => screenWords(file, readFileSync(file, 'utf8'), PAYING_AHEAD_WORDS, [])
+    expect(MAX_WEEKS).toBe(4);
+    const hits = list.flatMap((file) => screenWords(file, readFileSync(file, 'utf8'), PAYING_AHEAD_WORDS, [THE_LIMIT])
       .map((hit) => `${relative(root('../..'), file)}:${hit.line} ${hit.text}`));
     expect(hits).toEqual([]);
   }, 120_000);
 
   it('the detector sees the words in strings, templates and markup', () => {
-    const probe = (code: string) => screenWords('probe.tsx', code, PAYING_AHEAD_WORDS, []).length > 0;
+    const probe = (code: string) => screenWords('probe.tsx', code, PAYING_AHEAD_WORDS, [THE_LIMIT]).length > 0;
     expect(probe("export const i = 'Fee paid ahead — covers 2 weeks';")).toBe(true);
     expect(probe('export const B = () => <T>FEE PAID AHEAD</T>;')).toBe(true);
     expect(probe('export const c = (n: number) => `It pays a coming weekly fee (${n}).`;')).toBe(true);
     expect(probe("export const d = 'Your next weekly fee is already paid.';")).toBe(false);
     expect(probe("// fee paid ahead\nexport const payAhead = 'PAY_AHEAD_LIMIT';")).toBe(false);
+    expect(probe("export const e = 'You can pay up to four weeks ahead.';")).toBe(false);
+    expect(probe("export const f = 'You can pay up to six weeks ahead.';")).toBe(true);
+    expect(probe('export const g = () => <T>Pay ahead for as long as you like</T>;')).toBe(true);
   });
 });

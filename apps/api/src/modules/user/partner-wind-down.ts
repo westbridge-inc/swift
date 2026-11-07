@@ -108,7 +108,7 @@ export const BLOCKER_MESSAGE: Record<PartnerBlocker, string> = {
     'A weekly-fee payment is still in progress or being confirmed with MMG. Wait for it to finish, or open Get help to have it resolved, then return here to delete your account.',
   // [Owner ruling 2026-10-07] Unused credit is refunded by support (recorded
   // in the admin console), then the account can be deleted. [Owner ruling
-  // 8 Oct, NO "WALLET"; owner #62, NO PAYING AHEAD] It is named as money
+  // 8 Oct, NO "WALLET"; owner 6 Nov 2026, up to four weeks ahead] It is named as money
   // paid for weekly fees that have not started.
   FEE_CREDIT:
     'You have {amount} paid for weekly fees that have not started. Open Get help and we\u2019ll refund it, then your account can be deleted.',

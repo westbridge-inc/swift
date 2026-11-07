@@ -103,6 +103,17 @@ const CENSUS: Record<string, { verdict: Verdict; why: string }> = {
     verdict: 'UNTOUCHED',
     why: 'one-time cutover preparation against the singular pointer as it existed; historical, and correct for what it did.',
   },
+  // [CARS-PLATES · re-applied CARS-DELIVER PR4 #2138] "taxi + deliveries": both read the taxi pointer only as "the taxi
+  // is on a ride" (currentRideId, one leg by law) and count the delivery profile's live legs from the orders table (the
+  // seam's own truth), never from currentOrderId; nothing here enumerates or moves jobs.
+  'apps/api/src/modules/driver/car-deliveries-supply.ts': {
+    verdict: 'UNTOUCHED',
+    why: 'the offer gate and the promotion: the taxi must be free (currentRideId null, one leg by law), and the delivery profile must hold no live leg, counted from orders (liveLegs) — one job at a time, so a stacked leg can never be added from taxi work.',
+  },
+  'apps/api/src/modules/driver/car-deliveries-return.ts': {
+    verdict: 'UNTOUCHED',
+    why: 'the return to taxi work happens only when the delivery profile has no live leg (counted from orders, not the pointer) and the taxi holds no ride (currentRideId, one leg by law).',
+  },
   'apps/api/src/modules/partner/partner.service.ts': {
     verdict: 'UNTOUCHED',
     why: '[VEHICLES] the vehicle change refuses while the mover is busy: a rider is busy when the pointer is set OR riderLiveLegCount (the seam) counts a live leg, so stacked legs are covered by the seam, not the pointer; a driver is busy on currentRideId, one leg by law (moverCapacity DRIVER is a literal 1). It never enumerates or moves jobs.',
@@ -189,7 +200,8 @@ describe('the singular-pointer census [B2 / SWIFT_CONCURRENCY §15.4]', () => {
     // 2026-08-29: the six MUST_MIGRATE files became five MIGRATED and one
     // UNTOUCHED-by-law (taxi). Zero MUST_MIGRATE is the state Band B was for.
     // 2026-09-24: +1 UNTOUCHED — the vehicle change's busy check (partner.service.ts).
-    expect(counts).toEqual({ SEAM: 1, MIGRATED: 5, UNTOUCHED: 7, NAME_ONLY: 2 });
+    // 2026-11-06: +2 UNTOUCHED — "taxi + deliveries" (car-deliveries-supply.ts, car-deliveries-return.ts; CARS-PLATES).
+    expect(counts).toEqual({ SEAM: 1, MIGRATED: 5, UNTOUCHED: 9, NAME_ONLY: 2 });
   });
 
   it('every entry carries a reason someone can act on', () => {

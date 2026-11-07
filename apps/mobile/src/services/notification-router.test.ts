@@ -620,6 +620,7 @@ const CENSUS: Case[] = [
   { k: 'ad_review_sla_risk', d: { creativeId: 'c1' }, to: null, why: 'admins' },
   { k: 'ad_campaign_killed_ops', d: { campaignId: 'c1' }, to: null, why: 'admins' },
   { k: 'ad_house_link_off', d: { houseAdId: 'h1' }, to: null, why: 'admins' },
+  { k: 'call_daily_cap', to: null, why: 'admins — Swift-wide daily call cap reached (calls.routes.ts), once per UTC day' },
   { k: 'ad_refund_payout_task', d: { campaignId: 'c1' }, to: null, why: 'admins' },
   { k: 'ad_campaign_paid', d: { campaignId: 'c1', invoiceNumber: 'INV-1' }, to: null, why: 'admins' },
   { k: 'sos_marked_safe', d: { sosAlertId: 'a1' }, to: null, why: 'admins' },

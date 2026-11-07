@@ -5,7 +5,10 @@ export { feeDate, feeMoney, feeStatusOf };
 export type { FeeStatus, FeeStatusState };
 export type FeeFamily = 'vendor' | 'rider' | 'driver' | 'provider';
 export type CheckoutState = 'OPEN' | 'CONFIRMING' | 'CONFIRMED' | 'NOT_PAID' | 'EXPIRED' | 'HELD';
-export type PayAction = { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD' } | { id: 'MMG_CHECKOUT' | 'CARD'; state: 'off' };
+/** [owner 6 Nov 2026] One number of weeks the server says fits now, and what it costs. */
+export interface WeekOption { weeks: number; amountGyd: number }
+/** `weekOptions`: 1 to 4 weeks, each only when it fits now. Absent from an older API: one week only. */
+export type PayAction = { id: 'MMG_CHECKOUT'; state: 'live'; amountGyd: number; currencyCode: 'GYD'; weekOptions?: WeekOption[] } | { id: 'MMG_CHECKOUT' | 'CARD'; state: 'off' };
 export interface CheckoutStatus {
   ref: string; status: CheckoutState; amountGyd: number; currencyCode: 'GYD';
   createdAt: string; expiresAt: string; confirmedAt: string | null; subscriptionStatus: string;
@@ -72,9 +75,10 @@ export function pollDelay(elapsed: number, state?: CheckoutState): number | null
   if (state === 'CONFIRMED' || state === 'NOT_PAID' || state === 'HELD' || elapsed >= 660_000) return null;
   return elapsed < 60_000 ? 3_000 : 15_000;
 }
-export interface FeeFailure { status?: number; code?: string; details?: { ref?: string } }
+export interface FeeFailure { status?: number; code?: string; message?: string; details?: { ref?: string } }
 export interface FeeTransport {
-  start(_key: string): Promise<CheckoutStart>;
+  /** `weeks` only when the server offered a choice of weeks (an older API takes one week). */
+  start(_key: string, _weeks?: number): Promise<CheckoutStart>;
   /** Back to MMG's page: the server may only hand back THIS checkout's open page. */
   reopen(_ref: string, _key: string): Promise<CheckoutStart>;
   read(_ref: string): Promise<CheckoutStatus>;
@@ -100,13 +104,14 @@ export class FeeCheckoutSession {
   private emit(patch: Partial<CheckoutView>) { if (this.active) { this.view = { ...this.view, ...patch }; this.changed(this.view); } }
   activate() { this.active = true; }
   dispose() { this.active = false; this.generation++; clearTimeout(this.timer); }
-  async pay() {
+  async pay(weeks?: number) {
     if (!this.active || this.view.busy || this.view.blocked) return;
     this.generation++; clearTimeout(this.timer);
     this.emit({ busy: true, error: '', checkout: null, returned: false });
     this.retryKey ??= this.key();
     try {
-      const started = await this.transport.start(this.retryKey);
+      // A retry of the same tap keeps its key; another choice of weeks is another key (never the first choice's answer).
+      const started = await this.transport.start(this.retryKey + (weeks ?? ''), weeks);
       if (!this.active) return;
       this.retryKey = undefined;
       // Only the opaque reference survives the browser call. Never cache its URL.
@@ -130,8 +135,11 @@ export class FeeCheckoutSession {
       } else if (f.status === 403 || f.code === 'PAY_ACTION_OFF') {
         this.emit({ blocked: true }); this.transport.refresh();
       } else {
-        this.emit({ error: f.code === 'PAY_AHEAD_LIMIT' ? 'Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.' : f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.' });
-        if (f.code === 'SUBSCRIPTION_NOT_FOUND') this.transport.refresh();
+        // [owner 6 Nov 2026] Any other refusal (409: past the four-week limit or before a higher fee, another MMG payment
+        // for another amount open, the fee changed): the server's own words say what can be paid, and the fee is read again.
+        const refused = f.status === 409;
+        this.emit({ error: refused && f.message || (f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.') });
+        if (refused || f.code === 'SUBSCRIPTION_NOT_FOUND') this.transport.refresh();
       }
     } finally { this.emit({ busy: false }); }
   }

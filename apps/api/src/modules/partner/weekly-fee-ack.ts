@@ -3,7 +3,7 @@ import type { Prisma, PrismaClient, VehicleType } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import type { ConsentDocumentType } from '../legal/consent.service';
 import { browserClientOf } from '../auth/browser-session';
-import { moverRoleFor } from '../../config/vehicle-classes';
+import { moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
 import { partnerRateFor, PricingConfigError, type PartnerTier, type SubscriptionTiers } from '../country/country-config.service';
 import { DEPARTMENT_TRIAL_DAYS, TRIAL_DAYS } from '../subscription/trial-length';
 import { OPERATOR } from '../legal/operator';
@@ -32,7 +32,7 @@ import { OPERATOR } from '../legal/operator';
  */
 export const WEEKLY_FEE_ACK_TYPE: ConsentDocumentType = 'weekly_fee_acknowledgement';
 /** The words served now, and the only version a NEW tick is taken on (assertWeeklyFeeAck). */
-export const WEEKLY_FEE_ACK_VERSION = 'v3';
+export const WEEKLY_FEE_ACK_VERSION = 'v4';
 /**
  * [WEB-ONBOARDING · owner ruling 1 Nov 2026 (D3)] The versions whose tick still stands. v2 only adds the website as a
  * place to pay ("How you pay"); nothing about the fee changed, so a partner who ticked v1 is not asked again: a store
@@ -40,8 +40,11 @@ export const WEEKLY_FEE_ACK_VERSION = 'v3';
  * are read across these. The ledger keeps each row anchored to the words it was given to. v3 adds a way to pay
  * [OWNER 5 Nov 2026] and says the price rule exactly (a cut needs no 14-day wait; REVIEW-G18 S3-1); the fee itself and
  * how it is changed are the same, and the cut rule only ever works in the partner's favour, so a v1 or v2 tick stands.
+ * [PAYAHEAD-4W · owner 6 Nov 2026] v4 lets the partner pay up to four weeks ahead (a choice, never required) and says how
+ * a price change treats weeks paid ahead; the fee itself is the same and every change is in the partner's favour (more
+ * ways to pay; a paid week keeps its price; a cut reaches weeks paid ahead), so a v1, v2 or v3 tick stands.
  */
-export const WEEKLY_FEE_ACK_HONOURED_VERSIONS: readonly string[] = ['v1', 'v2', 'v3'];
+export const WEEKLY_FEE_ACK_HONOURED_VERSIONS: readonly string[] = ['v1', 'v2', 'v3', 'v4'];
 
 /**
  * The v1 words, in the order they were shown until 1 Nov 2026. Never edited: rows already in the ledger are anchored
@@ -124,9 +127,36 @@ export const WEEKLY_FEE_ACK_TEXT_V3 = [
   WEEKLY_FEE_TERMS_V3.tick,
 ].join('\n');
 
+/**
+ * [PAYAHEAD-4W · owner ruling 6 Nov 2026 "one month at a time", replaces owner #62] The v4 words, two lines changed from
+ * v3 (v3 was live on production, so it is never edited):
+ *  - "How you pay": up to four weeks ahead (billing/pay-ahead.ts PAY_AHEAD_MAX_WEEKS; the MMG checkout offers 1 to 4
+ *    weeks), instead of "one week at a time";
+ *  - "If the price changes": a cut reaches weeks already paid ahead (billing.service applyCardPriceCuts moves the rate;
+ *    money paid ahead is charged at the rate of the week it pays) and the difference counts toward later fees. A rise
+ *    never reaches a week already paid (applyHeldFeeRiseInTx; pay-ahead.ts riseFrom). Same words as the agreements.
+ * Everything else is v3's, word for word.
+ */
+const V4_CHANGED: Readonly<Record<string, string>> = {
+  'How you pay': `In the Swift app or on swiftgy.com, on MMG’s checkout page, for one week or up to four weeks ahead. Or in person, directly to ${OPERATOR.name}, by cash, cheque or bank transfer: a cheque counts once it clears, a payment counts once Swift records it, and you get a receipt. Never give it to anyone else. Paying by card is not offered yet.`,
+  'If the price changes': 'If the price goes up, Swift tells you in the app at least 14 days before, and the new price applies only from your first weekly fee due after that, never to a week you have already paid. If it goes down, the lower price applies from your next weekly fee not yet charged, even one you have already paid for, with a notice in the app; what you paid above it counts toward your later weekly fees.',
+};
+export const WEEKLY_FEE_TERMS_V4 = {
+  items: WEEKLY_FEE_TERMS_V3.items.map((item) => {
+    const text = V4_CHANGED[item.heading];
+    return text === undefined ? item : { heading: item.heading, text };
+  }),
+  tick: WEEKLY_FEE_TERMS_V3.tick,
+} as const;
+
+export const WEEKLY_FEE_ACK_TEXT_V4 = [
+  ...WEEKLY_FEE_TERMS_V4.items.map((item) => `${item.heading}: ${item.text}`),
+  WEEKLY_FEE_TERMS_V4.tick,
+].join('\n');
+
 /** The words of WEEKLY_FEE_ACK_VERSION: what is served, and what a new tick is published and anchored to. */
-export const WEEKLY_FEE_TERMS = WEEKLY_FEE_TERMS_V3;
-export const WEEKLY_FEE_ACK_TEXT = WEEKLY_FEE_ACK_TEXT_V3;
+export const WEEKLY_FEE_TERMS = WEEKLY_FEE_TERMS_V4;
+export const WEEKLY_FEE_ACK_TEXT = WEEKLY_FEE_ACK_TEXT_V4;
 
 export interface WeeklyFeeTerms { version: string; items: { heading: string; text: string }[]; tick: string }
 
@@ -159,7 +189,9 @@ export function assertWeeklyFeeAck(required: boolean, ack: WeeklyFeeAck | undefi
 }
 
 /** Who sign-up prices: a mover by the vehicle, a new store by its type (no catalogue yet: the first step). */
-export type FeeSubject = { role: 'MOVER'; vehicleType: VehicleType } | { role: 'VENDOR'; vendorType: string };
+/** [CARS-PLATES · owner 6 Nov 2026] `moverRole`: the work the vehicle gets when its plate decides it (a private-plate
+ *  car is a delivery rider and pays the rider's weekly fee, owner 04:30Z); absent, the vehicle's own role. */
+export type FeeSubject = { role: 'MOVER'; vehicleType: VehicleType; moverRole?: MoverRole } | { role: 'VENDOR'; vendorType: string };
 
 export interface SignupQuote { amount: number; currencyCode: string; tier: PartnerTier }
 
@@ -171,7 +203,7 @@ export async function signupQuote(db: PrismaClient | Prisma.TransactionClient, u
   const tiers = config.subscriptionTiers as unknown as SubscriptionTiers;
   const { rate, tier } = subject.role === 'VENDOR'
     ? partnerRateFor(tiers, { kind: 'VENDOR', isService: subject.vendorType === 'SERVICE', activeListings: 0 })
-    : partnerRateFor(tiers, { kind: moverRoleFor(subject.vehicleType), vehicleType: subject.vehicleType });
+    : partnerRateFor(tiers, { kind: subject.moverRole ?? moverRoleFor(subject.vehicleType), vehicleType: subject.vehicleType });
   return { amount: rate, currencyCode: config.currencyCode, tier };
 }
 

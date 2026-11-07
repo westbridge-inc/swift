@@ -14,6 +14,10 @@ import { OPERATOR } from './operator';
  *
  * [BILL-PRO] An entry with `audience: 'provider'` changes only what an independent service provider (a pro: a person
  * with a provider profile) agrees to. It asks pros, and nobody else, for a fresh tick, and only a pro sees its summary.
+ *
+ * [PAYAHEAD-4W · 2026-11-06] An entry with `audience: 'partner'` changes only the partner agreements (the Mover and the
+ * Business Agreement): it asks every partner (a rider, a driver, a store owner, or a pro) for a fresh tick, and only a
+ * partner sees its summary. A customer, whose Terms and Privacy Policy changed only by their date, is not asked.
  */
 export const MATERIAL_CHANGES: ReadonlyArray<MaterialChange> = [
   {
@@ -91,6 +95,16 @@ export const MATERIAL_CHANGES: ReadonlyArray<MaterialChange> = [
       'Privacy: order and job chat is deleted one year after the order or job ended, unless it is still needed; resolved support tickets after 3 years; closed safety records after 7 years.',
       `Partners: the weekly fee can be paid on swiftgy.com, or directly to ${OPERATOR.name}, in person by cash or cheque, or by bank transfer, never through an agent; a payment counts once Swift records it. Each branch of a business pays its own weekly fee.`,
       'Also: a taxi fare can go directly to the driver\u2019s own MMG where the driver offers it.',
+    ],
+  },
+  {
+    // [PAYAHEAD-4W · owner ruling 6 Nov 2026 "one month at a time" (replaces owner #62) · MATERIAL: what a partner may
+    // pay ahead, and how a price change treats weeks paid ahead, change in the partner agreements' fee section]
+    version: '2026-11-06',
+    audience: 'partner',
+    summary: [
+      'Partners: you can now pay the weekly fee up to four weeks ahead (it was one week at a time). Money received beyond that is returned to you, and if you close your account, every week you paid for that has not started is refunded.',
+      'Partners: if the weekly fee goes up, a week you paid for before we told you keeps the old fee; once we have told you, Swift takes payment only for weeks before the change. If it goes down, the lower fee applies even to weeks you have already paid for, and the difference counts toward your later weekly fees.',
     ],
   },
 ];
@@ -179,11 +193,22 @@ export function compareLegalVersions(a: string, b: string): number {
   return Number(x[2] ?? 0) - Number(y[2] ?? 0);
 }
 
-type MaterialChange = { version: string; summary: readonly string[]; audience?: 'provider' };
+type MaterialChange = { version: string; summary: readonly string[]; audience?: 'provider' | 'partner' };
 
 /** The newest material version for everyone that is already being served, or null (provider-only entries excluded). */
 export function materialVersion(current: string = LEGAL_VERSION, changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES): string | null {
   const live = changes.filter((c) => !c.audience && compareLegalVersions(c.version, current) <= 0);
+  return live.reduce<string | null>((newest, c) => (newest === null || compareLegalVersions(c.version, newest) > 0 ? c.version : newest), null);
+}
+
+/** [PAYAHEAD-4W] Who signs a partner agreement: a mover (legacy RIDER / DRIVER too), a store owner, or a pro. */
+function isPartner(roles: readonly UserRole[], isPro: boolean): boolean {
+  return isPro || roles.some((r) => r === 'MOVER' || r === 'RIDER' || r === 'DRIVER' || r === 'VENDOR_OWNER');
+}
+
+/** [PAYAHEAD-4W] The newest partner-only material version already served, or null. */
+export function partnerMaterialVersion(current: string = LEGAL_VERSION, changes: ReadonlyArray<MaterialChange> = MATERIAL_CHANGES): string | null {
+  const live = changes.filter((c) => c.audience === 'partner' && compareLegalVersions(c.version, current) <= 0);
   return live.reduce<string | null>((newest, c) => (newest === null || compareLegalVersions(c.version, newest) > 0 ? c.version : newest), null);
 }
 
@@ -238,15 +263,21 @@ export function acceptanceStatus(
   const material = materialVersion(current, changes);
   const accepted = user.tosVersion;
   const proNeeds = proNeedsAcceptance(user.pro, current);
-  const needsAcceptance = accepted === null || (material !== null && compareLegalVersions(accepted, material) < 0) || proNeeds;
+  // [PAYAHEAD-4W] A partner-only change asks partners (and pros) alone.
+  const partner = isPartner(user.roles, !!user.pro);
+  const partnerMaterial = partner ? partnerMaterialVersion(current, changes) : null;
+  const needsAcceptance = accepted === null || (material !== null && compareLegalVersions(accepted, material) < 0)
+    || (partnerMaterial !== null && compareLegalVersions(accepted, partnerMaterial) < 0) || proNeeds;
   // Every material change since the version this person accepted, oldest first — someone who skipped
   // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest. A provider-only change is
   // shown to a pro who has not accepted it (their own Business Agreement version), and to nobody else.
   const served = (c: MaterialChange) => compareLegalVersions(c.version, current) <= 0;
   const proAccepted = user.pro?.acceptedVersion ?? null;
-  const summary = changes.filter((c) => served(c) && (c.audience
+  const summary = changes.filter((c) => served(c) && (c.audience === 'provider'
     ? proNeeds && (proAccepted === null || compareLegalVersions(c.version, proAccepted) > 0)
-    : accepted !== null && compareLegalVersions(c.version, accepted) > 0))
+    : c.audience === 'partner'
+      ? partner && accepted !== null && compareLegalVersions(c.version, accepted) > 0
+      : accepted !== null && compareLegalVersions(c.version, accepted) > 0))
     .sort((a, b) => compareLegalVersions(a.version, b.version)).flatMap((c) => c.summary);
   return {
     currentVersion: current,

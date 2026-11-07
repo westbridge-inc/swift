@@ -21,7 +21,7 @@ import { NotificationService } from '../notification/notification.service';
 import { CashRulesService, gpsEvidence, orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { goodsSizeCarriableToday } from '../../config/vehicle-classes';
+import { parcelSizeCarriableToday } from '../../config/vehicle-classes';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
@@ -229,7 +229,8 @@ export default async function courierRoutes(app: FastifyInstance) {
    *  carry (the largest size while car deliveries are off) is refused at its quote and at its request, before
    *  anything is written: never booked, dispatched to nobody and stranded. */
   const assertParcelCarriable = (packageSize: string) => {
-    if (!goodsSizeCarriableToday(packageSize)) {
+    // [CARS-PLATES · owner 6 Nov 2026] cars never carry parcels, so a parcel only a car could carry is refused here.
+    if (!parcelSizeCarriableToday(packageSize)) {
       throw new AppError(409, 'PARCEL_TOO_BIG', 'No vehicle on Swift can carry a parcel this size right now. Choose a smaller size if it fits, or send it another way.');
     }
   };

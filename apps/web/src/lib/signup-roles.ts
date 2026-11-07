@@ -26,6 +26,21 @@ export function isHirePlate(plate: string): boolean {
   return plate.toUpperCase().replace(/[\s-]+/g, '').startsWith('H');
 }
 
+/** [CARS-PLATES · owner 6 Nov 2026] P-plate (private) cars deliver only; H-plate (hire) cars drive taxi rides and
+ *  deliver too. While the server says private cars deliver (price list `privateCars.on`), the delivery door also offers
+ *  a car on a private plate; the taxi door keeps the H rule. The words match the server and the app. */
+export const PRIVATE_CAR_VEHICLES: { value: string; label: string }[] = [
+  { value: 'CAR', label: 'Car (private P plate)' },
+  { value: 'WAGON_CAR', label: 'Wagon Car (private P plate)' },
+];
+export function riderVehicles(privateCarsOpen: boolean): { value: string; label: string }[] {
+  return privateCarsOpen ? [...MOVER_VEHICLES.RIDER, ...PRIVATE_CAR_VEHICLES] : MOVER_VEHICLES.RIDER;
+}
+export const isCarVehicle = (vehicleType: string) => vehicleType === 'CAR' || vehicleType === 'WAGON_CAR';
+export const PRIVATE_CAR_NOTE = 'A private (P) plate car can do deliveries only. Taxi rides need an H plate.';
+export const PRIVATE_CAR_H_PLATE = 'This is an H (hire) plate. Sign up under “Drive a taxi with Swift” to take taxi rides, and add deliveries in your account.';
+export const TAXI_DOOR_PRIVATE_CAR = 'A private (P) plate car can sign up under “Deliver with Swift” to do deliveries.';
+
 /** [OPEN-EARLY · owner 31 Oct 2026] The partner doors a link may open straight onto: /signup?as=business|rider|driver.
  *  Only these three. Ordering is never preselected by a link, so `?as=` can never open the customer door
  *  (the public site keeps it closed before launch). */

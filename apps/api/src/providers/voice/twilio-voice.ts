@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { twilioSignature } from '../../modules/notification/sms-inbound.routes';
 import type { CallProvider, CallStep, PlaceCallInput, ProviderEvent, ProviderWebhook } from './call-provider';
+import { dialableNumber } from './dialable';
 
 /**
  * [O-1] Twilio, adapter #1 of the call bridge. Dependency-free like the SMS
@@ -52,6 +53,9 @@ export class TwilioVoiceProvider implements CallProvider {
   ) {}
 
   async placeCall(input: PlaceCallInput): Promise<{ providerCallId: string }> {
+    // [REVIEW-M17 S1-1] The backstop: whatever a caller of this hands in, Twilio is never asked to ring a number
+    // the dial guard refuses (never echoed).
+    if (!dialableNumber(input.to, input.callerId)) throw new Error('Twilio call refused: not a dialable number');
     const auth = Buffer.from(`${this.config.apiKeySid}:${this.config.apiKeySecret}`).toString('base64');
     const body = new URLSearchParams({
       To: input.to,
@@ -122,6 +126,8 @@ export class TwilioVoiceProvider implements CallProvider {
           + `${say(step.noInput)}<Hangup/>`,
         ));
       case 'dial':
+        // [REVIEW-M17 S1-1] The backstop on leg 2: a number the dial guard refuses is never put in a <Dial>.
+        if (!dialableNumber(step.to, step.callerId)) return twiml(doc('<Hangup/>'));
         return twiml(doc(
           `${say(step.say)}<Dial callerId="${xml(step.callerId)}" timeout="${step.ringSeconds}" timeLimit="${step.limitSeconds}" ${NEVER_RECORD} action="${xml(step.done)}" method="POST">`
           + `<Number url="${xml(step.screen)}" method="POST">${xml(step.to)}</Number></Dial>`,

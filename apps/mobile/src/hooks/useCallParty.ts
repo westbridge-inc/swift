@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { openExternal } from '../lib/openExternal';
 import { toast } from '../kit/toast';
-import { CALL_WORDS, bridgeErrorText, callChoice, saveNumberTip, type CallConfig, type CallTarget } from '../lib/callBridge';
+import { CALL_WORDS, bridgeErrorText, callChoice, callerLine, type CallConfig, type CallTarget } from '../lib/callBridge';
 
 // [O-1] One answer per app run for a few minutes: the switch changes rarely, and a failed read means
 // "behave as today" (dial the number the server sent, if any) — never a dead Call button.
@@ -50,7 +50,7 @@ export function useCallParty(input: { orderId?: string | null; target: CallTarge
     setBusy(true);
     try {
       await (await calls()).bridge(orderId, target);
-      toast.success(CALL_WORDS.started, [CALL_WORDS.startedHow, saveNumberTip(config?.callerId)].filter(Boolean).join(' '));
+      toast.success(CALL_WORDS.started, [CALL_WORDS.startedHow, callerLine(config?.callerId)].filter(Boolean).join(' '));
     } catch (e) {
       const code = (e as { response?: { data?: { error?: { code?: string } } } })?.response?.data?.error?.code;
       toast.error(CALL_WORDS.failedTitle, bridgeErrorText(code, target));
