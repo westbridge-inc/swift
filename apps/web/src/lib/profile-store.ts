@@ -11,6 +11,10 @@ export interface HubStore {
   goLive?: StoreGoLive | null;
   /** [REVIEW-LIGHT2 #2306] Why a SUSPENDED store is held (BILLING, ADMIN, WIND_DOWN), the app's storeHoldOf input. */
   suspensionSource?: string | null;
+  /** [STORE-HOURS] The open switch is on but the store's own weekly hours close it now (checkout refuses), and when
+   *  they open next ("tomorrow at 8:00 am"). Absent on an older server. */
+  closedByHoursNow?: boolean;
+  opensNext?: string | null;
 }
 
 /** GET /vendor/profile answers `{ id, userId, vendors: [...], myRole }`; the store

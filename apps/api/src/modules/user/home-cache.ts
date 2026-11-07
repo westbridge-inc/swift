@@ -70,6 +70,9 @@ const discoverySchema = z.object({
     displayRating: z.number().finite().nullable(), ratingBucket: z.string(),
     ratingCount: z.number().int().nonnegative(), topRated: z.boolean(),
     categories: z.array(categorySchema).max(5),
+    // [STORE-HOURS] The store's weekly hours ("open now" is worked out per request); null = the switch alone decides.
+    // Required: a feed cached before this field existed is a miss, never read as "no hours".
+    openHours: z.array(z.object({ dayOfWeek: z.number().int(), openTime: z.string(), closeTime: z.string(), isClosed: z.boolean() }).strict()).max(14).nullable(),
   }).passthrough()).max(500),
   popularItems: z.array(z.object({
     id: z.string(), name: z.string(), imageUrl: z.string().nullable(), price: z.number().finite(),

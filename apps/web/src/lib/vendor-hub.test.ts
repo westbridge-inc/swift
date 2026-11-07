@@ -64,6 +64,9 @@ describe('the web board helpers are the app\'s, word for word', () => {
     expect(hoursSummary(DAY_LABELS.map((_, dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })))).toBe('Daily · 8:00 AM–10:00 PM');
     expect(hoursSummary([])).toBeNull();
     expect(storeStatusEyebrow({ isCurrentlyOpen: false }, false).label).toBe('CLOSED');
+    // [STORE-HOURS] Switch on, but the store's own hours close it now (the server's closedByHoursNow).
+    expect(storeStatusEyebrow({ isCurrentlyOpen: true, acceptingOrders: true, closedByHoursNow: true }, false)).toEqual({ label: 'CLOSED BY YOUR HOURS', tone: 'muted' });
+    expect(storeStatusEyebrow({ isCurrentlyOpen: true, acceptingOrders: true }, false)).toEqual({ label: 'OPEN', tone: 'success' });
     expect(billingHeadline(null)).toBe('Subscription not active');
     // [FEE-STATUS] The tile read "Next bill 13 Oct" on 25 October: it now says what the API says, and
     // without the API's words names the state, never a date it cannot vouch for.

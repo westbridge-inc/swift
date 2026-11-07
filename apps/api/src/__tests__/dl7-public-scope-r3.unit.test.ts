@@ -52,7 +52,8 @@ async function fixture() {
   // [S2-1 time bound] search reads run in a short transaction that first sets a local statement timeout.
   const tx: { client?: unknown } = {};
   const prisma = prismaDouble(orderStore([]), {
-    vendor: { findMany: readVendors }, item: { findMany: readItems, count: async (q: Query) => (await readItems(q)).length },
+    // [STORE-HOURS] "Open now" reads each store's weekly hours: no fixture store has hours set.
+    vendor: { findMany: readVendors }, operatingHours: { findMany: async () => [] }, item: { findMany: readItems, count: async (q: Query) => (await readItems(q)).length },
     actorRatingStat: { findMany: async () => [] }, platformConfig: { findUnique: async () => null, findMany: async () => [] },
     $executeRaw: async () => 1, $transaction: async (fn: (client: unknown) => unknown) => fn(tx.client),
   });

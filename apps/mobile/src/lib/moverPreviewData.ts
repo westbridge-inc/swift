@@ -30,8 +30,8 @@ export const PREVIEW_PROFILE = {
   licensePlate: 'PREVIEW',
   rideClass: 'ECONOMY',
   // Riders show a cash-float ceiling on Home; a driver has none, but the field
-  // is read defensively (`profile?.float`), so a benign value is fine either way.
-  float: { available: 40000, limit: 60000, committed: 20000 },
+  // is read defensively (`profile?.float`). [O1 · owner 7 Nov 2026] The sample uses Guyana's GY$100,000 limit.
+  float: { available: 60000, limit: 100000, committed: 40000 },
 };
 
 /** Verification status: a fully-approved mover (so the GO button reads eligible,

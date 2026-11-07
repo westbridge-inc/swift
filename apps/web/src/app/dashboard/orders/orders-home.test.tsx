@@ -17,6 +17,8 @@ type Role = 'OWNER' | 'MANAGER' | 'STAFF';
 interface Opts {
   role?: Role; lifetime?: number; open?: boolean; accepting?: boolean; selfDelivery?: boolean;
   orders?: unknown[]; storeRoles?: Record<string, Role>; status?: string; vendorType?: string; holdProfileRefetch?: Promise<{ body: unknown }>; failProfileRefetch?: boolean;
+  /** [STORE-HOURS] The server's word: the switch is on but the store's own hours close it now. */
+  closedByHours?: { opensNext: string | null };
 }
 
 const writes: Array<{ method: string; path: string; body: unknown }> = [];
@@ -59,6 +61,7 @@ function hubApi(opts: Opts = {}) {
           {
             id: 'store-1', name: 'Sample Kitchen', vendorType, status, isVerified: true,
             isCurrentlyOpen: open, acceptingOrders: accepting, selfDeliveryEnabled: selfDelivery,
+            ...(opts.closedByHours ? { closedByHoursNow: true, opensNext: opts.closedByHours.opensNext } : {}),
             operatingHours: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })),
             _count: { orders: lifetime, items: 3 },
           },
@@ -291,6 +294,17 @@ describe('the store controls read the real server state', () => {
     expect(screen.getByRole('switch', { name: 'Store open to customers' }).getAttribute('aria-checked')).toBe('true');
     await view.user.click(screen.getByRole('button', { name: 'Pause new orders' }));
     await waitFor(() => expect(writes).toEqual([{ method: 'PUT', path: '/vendor/vendor/toggle-orders', body: { acceptingOrders: false } }]));
+  });
+
+  it('[STORE-HOURS] switch on but the store\'s own hours close it now: never "Open for orders"; says when customers can order', async () => {
+    hubApi({ open: true, accepting: true, closedByHours: { opensNext: 'tomorrow at 8:00 am' } });
+    renderWithQuery(<OrdersPage />);
+    expect(await screen.findByText('Closed by your hours')).toBeTruthy();
+    expect(screen.getByText('Customers can order tomorrow at 8:00 am')).toBeTruthy();
+    expect(screen.queryByText('Open for orders')).toBeNull();
+    expect(screen.getByText(/^CLOSED BY YOUR HOURS( · TODAY .+)?$/)).toBeTruthy();
+    // The switch is the store's own and stays on.
+    expect(screen.getByRole('switch', { name: 'Store open to customers' }).getAttribute('aria-checked')).toBe('true');
   });
 
   it('a paused store says so and offers to resume', async () => {

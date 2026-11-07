@@ -121,6 +121,8 @@ export async function guestSearchApp(max = 200) {
   const db = {
     platformConfig: delegate(pauseRecords), billingDunningClock: delegate(pauseClocks),
     tenant: delegate(tenants), vendor: delegate(vendors), item: delegate(items),
+    // [STORE-HOURS] "Open now" reads each store's weekly hours: no fixture store has hours set.
+    operatingHours: { findMany: vi.fn(async () => []) },
     actorRatingStat: { findMany: vi.fn(async () => []) },
     session: { findUnique: vi.fn(async ({ where }: Row) => sessions.get(where.token) ?? null) },
     user: { findUnique: vi.fn(async ({ where }: Row) => users.get(where.id) ?? null) },
