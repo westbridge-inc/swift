@@ -37,7 +37,7 @@ const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Frid
 const CLOCK = /^(\d{1,2})(?:\s*[:.h]\s*(\d{2}))?\s*(a\.?\s*m\.?|p\.?\s*m\.?|a|p)?$/i;
 
 /** A typed time ("08:00", "8:30", "8pm", "20.15", "24:00"): minutes after midnight, and whether it said am/pm. */
-function clockReading(text: string | null | undefined): { minutes: number; meridiem: boolean } | null {
+function clockReading(text: string | null | undefined): { minutes: number; meridiem: boolean; leadingZero: boolean } | null {
   const m = CLOCK.exec((text ?? '').trim());
   if (!m) return null;
   let hour = Number(m[1]);
@@ -50,7 +50,7 @@ function clockReading(text: string | null | undefined): { minutes: number; merid
   } else if (hour > 24 || (hour === 24 && minute > 0)) {
     return null;
   }
-  return { minutes: hour * 60 + minute, meridiem: Boolean(meridiem) };
+  return { minutes: hour * 60 + minute, meridiem: Boolean(meridiem), leadingZero: /^0\d$/.test(m[1]!) };
 }
 
 /** Minutes after midnight for a typed time; null when it cannot be read. */
@@ -63,10 +63,9 @@ type DayWindow = 'CLOSED' | 'ALL_DAY' | { open: number; close: number };
 /**
  * One day's window. No row for a day that other days have = closed (the store page says "Closed today").
  *
- * The phone's hours editor is free text, so "8:00 - 10:00" may mean 8 am to 10 pm. When neither time says am/pm and
- * the closing time is 1:00 to 12:00, it is read whichever way keeps the store open LONGER: as typed, or with the
- * closing time in the evening (12:00 as midnight). A store's typing never closes it early; at worst it is shown open
- * (and its switch still decides) for hours it meant to be closed.
+ * The phone's hours editor is free text, so "9:00 - 5:00" means 9 am to 5 pm. A CLOSING time with no am/pm whose hour
+ * is 1 to 11, written without a leading zero, is read as pm. Opening times are read as typed, and 24-hour values
+ * ("02:00", "22:00") and am/pm stay exactly as written.
  */
 function dayWindow(hours: readonly HoursRow[], dayOfWeek: number): DayWindow {
   const row = hours.find((h) => h.dayOfWeek === dayOfWeek);
@@ -75,13 +74,9 @@ function dayWindow(hours: readonly HoursRow[], dayOfWeek: number): DayWindow {
   const c = clockReading(row.closeTime);
   if (o === null || c === null) return 'ALL_DAY'; // unreadable times: the switch decides
   const open = o.minutes;
-  let close = c.minutes;
-  if (open === close) return 'ALL_DAY'; // "00:00 - 00:00": round the clock
-  if (!o.meridiem && !c.meridiem && close >= 60 && close <= 720) {
-    const evening = close === 720 ? 1440 : close + 720;
-    const asTyped = close > open ? close - open : close + 1440 - open;
-    if (evening > open && evening - open > asTyped) close = evening;
-  }
+  const closeHour = Math.floor(c.minutes / 60);
+  const close = !c.meridiem && !c.leadingZero && closeHour >= 1 && closeHour <= 11 ? c.minutes + 720 : c.minutes;
+  if (open === close) return 'ALL_DAY'; // "00:00 - 00:00", "12:00 - 12:00": round the clock
   return { open, close };
 }
 

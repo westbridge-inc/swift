@@ -95,18 +95,25 @@ describe('[STORE-HOURS] the rule, at fixed Guyana times', () => {
     expect(hoursAllowNow(week(() => open('00:00', '00:00')), gy(2026, 11, 9, 3))).toBe(true);
   });
 
-  it('times typed without am/pm are read the way that never closes a store early', () => {
-    // "8:00 - 10:00" on the phone's free-text editor may mean 8 am to 10 pm: it is open at 9 pm.
-    expect(hoursAllowNow(week(() => open('8:00', '10:00')), gy(2026, 11, 9, 21))).toBe(true);
-    expect(hoursAllowNow(week(() => open('8:00', '10:00')), gy(2026, 11, 9, 23))).toBe(false);
-    // "8:00 - 12:00" may mean 8 am to midnight.
-    expect(hoursAllowNow(week(() => open('8:00', '12:00')), gy(2026, 11, 9, 23, 30))).toBe(true);
-    // "10:00 - 2:00" is longer as typed (10 am to 2 am) than as 10 am to 2 pm: open at 1 am.
-    expect(hoursAllowNow(week(() => open('10:00', '2:00')), gy(2026, 11, 10, 1))).toBe(true);
-    // am/pm said, or a closing time after noon, is read exactly as written.
-    expect(hoursAllowNow(week(() => open('8:00 am', '10:00 am')), gy(2026, 11, 9, 21))).toBe(false);
-    expect(hoursAllowNow(week(() => open('08:00', '22:00')), gy(2026, 11, 9, 22, 30))).toBe(false);
-    expect(hoursAllowNow(week(() => open('18:00', '02:00')), gy(2026, 11, 9, 12))).toBe(false);
+  // [owner/coordinator rule] A CLOSING time with no am/pm and an hour of 1-11 (no leading zero) is pm; opening times,
+  // 24-hour values and am/pm are read as typed. [typed open, typed close, [Guyana hour, open?]...]
+  const TYPED: Array<[string, string, Array<[number, boolean]>]> = [
+    ['9:00', '5:00', [[8, false], [9, true], [16, true], [17, false], [2, false]]], // 9 am - 5 pm
+    ['8:00', '10:00', [[7, false], [8, true], [21, true], [22, false]]], // 8 am - 10 pm
+    ['11:00', '2:00', [[10, false], [11, true], [13, true], [14, false], [1, false]]], // 11 am - 2 pm
+    ['7:00', '7:00', [[6, false], [7, true], [18, true], [19, false]]], // 7 am - 7 pm
+    ['12:00', '12:00', [[0, true], [6, true], [12, true], [23, true]]], // all day
+    ['6:00', '11:00', [[5, false], [6, true], [22, true], [23, false]]], // 6 am - 11 pm
+    ['18:00', '02:00', [[17, false], [18, true], [23, true], [1, true], [2, false], [12, false]]], // overnight, unchanged
+    ['08:00', '22:00', [[7, false], [8, true], [21, true], [22, false]]], // 24-hour, unchanged
+    ['8:00 am', '10:00 am', [[7, false], [8, true], [9, true], [10, false], [21, false]]], // am/pm, unchanged
+    ['8:00', '5:00 pm', [[7, false], [8, true], [16, true], [17, false]]],
+    ['morning', 'late', [[3, true], [15, true]]], // unreadable: open (the switch decides)
+  ];
+  it.each(TYPED)('typed "%s" - "%s" is read as the store means it', (from, to, cases) => {
+    const hours = week(() => open(from, to));
+    // Tuesday 10 Nov 2026; the small hours follow Monday's (same) hours.
+    for (const [hour, expected] of cases) expect(hoursAllowNow(hours, gy(2026, 11, 10, hour)), `${from}-${to} at ${hour}:00`).toBe(expected);
   });
 
   it('says when it opens next', () => {
