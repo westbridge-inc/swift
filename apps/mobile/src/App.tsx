@@ -44,7 +44,7 @@ import { useAppStore } from './stores/appStore';
 import { useDeviceLocation } from './hooks/useDeviceLocation';
 import { PillButton, Screen, T } from './kit';
 import { SwiftMark } from './components/SwiftLogo';
-import { startInAppVoice } from './services/inAppVoice';
+import { startInAppVoiceIfRegistered } from './services/inAppVoice';
 
 // One app-lifetime cache boundary, before persisted auth hydration or queries.
 // Logout/account switch/token rejection still use the existing auth lifecycle.
@@ -52,10 +52,11 @@ bindQueryCacheScope(queryClient, useAuthStore);
 
 // Hold the native splash until the brand fonts are ready (avoids a System-font flash).
 SplashScreen.preventAutoHideAsync().catch(() => {});
-// [INAPP-CALLS] As early as the bundle runs: on a build with the calling module, the iPhone's PushKit registry
-// (a VoIP push that launched the app must reach CallKit at once) and the call-screen template. A no-op on
-// builds 11/12 (no module) and never throws.
-void startInAppVoice();
+// [INAPP-CALLS] As early as the bundle runs, and only on a phone that has registered for in-app calls before:
+// the iPhone's PushKit registry (a VoIP push that launched the app must reach CallKit at once, before any network
+// answer) and the call-screen template. A phone that never registered cannot get a VoIP push, so nothing starts.
+// A no-op on builds 11/12 (no module) and never throws.
+void startInAppVoiceIfRegistered();
 
 // SWIFT-013: capture uncaught JS errors (timers/async/event handlers) at the
 // RN global handler before the first render, so nothing crashes silently.

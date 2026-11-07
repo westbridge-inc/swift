@@ -17,6 +17,7 @@ import {
   issueSessionToken,
   startInAppCall,
   type InAppDeps,
+  type InAppRegistry,
   type InAppStepName,
 } from './inapp-calls';
 
@@ -40,6 +41,30 @@ export interface InAppRoutesOptions {
   provider?: (twilio: InAppCallsConfig['twilio']) => CallProvider;
   /** Tests may inject the service's daily list; by default it is the bridge's list in Redis (one budget). */
   ledger?: ServiceDayLedger;
+  /** Tests may inject the registered-phones list; by default it lives in Redis. */
+  registry?: InAppRegistry;
+}
+
+export const INAPP_REGISTRY_PREFIX = 'swift:inapp-reg:';
+/** A phone re-registers every ten minutes while a call control is on screen; a binding not refreshed in 30 days is
+ *  treated as gone (the bridge takes their calls until the phone registers again). */
+const REGISTRY_TTL_MS = 30 * 86_400_000;
+
+/** [native review S2] The registered phones in Redis: opaque identity -> when it last registered. Nothing else. */
+export function redisInAppRegistry(redis: FastifyInstance['redis']): InAppRegistry {
+  return {
+    async mark(identity, atMs) {
+      await redis.set(`${INAPP_REGISTRY_PREFIX}${identity}`, String(atMs), 'PX', REGISTRY_TTL_MS);
+    },
+    async clear(identity) {
+      await redis.del(`${INAPP_REGISTRY_PREFIX}${identity}`);
+    },
+    async registeredAt(identities) {
+      if (identities.length === 0) return [];
+      const values = await redis.mget(...identities.map((identity) => `${INAPP_REGISTRY_PREFIX}${identity}`));
+      return values.map((v) => (v && /^\d{1,15}$/.test(v) ? Number(v) : null));
+    },
+  };
 }
 
 const defaultProvider = (twilio: InAppCallsConfig['twilio']): CallProvider => new TwilioVoiceProvider(twilio);
@@ -68,6 +93,7 @@ export async function inAppCallsRoutes(app: FastifyInstance, opts: InAppRoutesOp
   const depsFor = (config: InAppCallsConfig): InAppDeps => ({
     prisma: app.prisma, config, relay: liveRelay(providerFor), notifications,
     ledger: opts.ledger ?? redisServiceDayLedger(app.redis),
+    registry: opts.registry ?? redisInAppRegistry(app.redis),
     // [REVIEW-G23 S3-2] The bridge's own operator notice, deduped with it once per UTC day.
     alertDailyCap: async (max) => {
       const words = dailyCapNotice(max);
@@ -179,7 +205,7 @@ export async function inAppVoiceRoutes(app: FastifyInstance, opts: InAppRoutesOp
     app.post<{ Querystring: { s?: string } }>(`/${step}`, routeOptions, async (request, reply) => {
       const admitted = admit(request, reply, step);
       if (!admitted) return reply;
-      const deps: InAppDeps = { prisma: app.prisma, config: admitted.config, relay: liveRelay(providerFor), notifications };
+      const deps: InAppDeps = { prisma: app.prisma, config: admitted.config, relay: liveRelay(providerFor), notifications, registry: opts.registry ?? redisInAppRegistry(app.redis) };
       // The call id: from Swift's own step URL, or (the first step) from the caller's connect parameters.
       const callId = step === 'app' ? admitted.fields['callId']?.[0] ?? '' : typeof request.query.s === 'string' ? request.query.s : '';
       const sid = admitted.fields['CallSid']?.[0] ?? '';

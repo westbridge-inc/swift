@@ -6,6 +6,7 @@ import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import type { CallProvider, CallStep, ProviderWebhook } from '../../providers/voice/call-provider';
 import { CALL_RING_SECONDS, CALL_TIME_LIMIT_SECONDS, type CallRelayConfig } from './call-relay-switch';
 import { dialableNumber } from '../../providers/voice/dialable';
+import { INAPP_UNTAKEN_AFTER_MS } from './inapp-calls-switch';
 import type { NotificationAudience, NotificationPayload } from '../notification/notification.service';
 
 // ---------------------------------------------------------------------------
@@ -107,6 +108,8 @@ export const CALL_DAILY_CAP_LOCK = 'swift:call-relay-daily-cap';
 const DAY_MS = 86_400_000;
 
 const CALL_ID = /^c[a-z0-9]{20,32}$/;
+/** [INAPP-CALLS] An in-app start's state (inapp-calls.ts INAPP_STATUS.RINGING_APP), read here for the untaken sweep. */
+const UNTAKEN_APP_STATUS = 'RINGING_APP';
 const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
 
 type Notifier = { send(payload: NotificationPayload): Promise<string> };
@@ -299,6 +302,10 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
       await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
       // A call the provider never reported finished cannot hold the order's one live slot for ever.
       const stale = new Date(now.getTime() - CALL_STALE_AFTER_MS);
+      // [INAPP-CALLS · server review 7] An in-app start the provider never took (the caller's phone could not
+      // connect) frees the order and the caller after a minute, as the in-app start's own rule does.
+      const untakenApp = { endedAt: null, status: UNTAKEN_APP_STATUS, providerCallId: null, createdAt: { lt: new Date(now.getTime() - INAPP_UNTAKEN_AFTER_MS) } };
+      await tx.callSession.updateMany({ where: { orderId: order.id, ...untakenApp }, data: { endedAt: now, status: CALL_STATUS.NOT_CONNECTED, durationSeconds: 0 } });
       await tx.callSession.updateMany({
         where: { orderId: order.id, endedAt: null, createdAt: { lt: stale }, status: CALL_STATUS.CONNECTED },
         data: { endedAt: now },
@@ -318,6 +325,8 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CALL_DAILY_CAP_LOCK}))`;
       // [REVIEW-M17 S3-1] One live call per PERSON: their own call on another order that is still live refuses this
       // one (a call the provider never reported finished stops counting once it is stale, like the order's slot).
+      // [INAPP-CALLS · server review 7] The caller's own untaken in-app start (under the daily lock, as the in-app start does).
+      await tx.callSession.updateMany({ where: { callerUserId: input.userId, ...untakenApp }, data: { endedAt: now, status: CALL_STATUS.NOT_CONNECTED, durationSeconds: 0 } });
       await tx.callSession.updateMany({
         where: { callerUserId: input.userId, endedAt: null, createdAt: { lt: stale }, status: CALL_STATUS.CONNECTED },
         data: { endedAt: now },

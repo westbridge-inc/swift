@@ -16,6 +16,14 @@ vi.mock('react-native', () => ({
   },
 }));
 
+// A plain on-device flag store that survives an app restart (resetInAppVoiceForTests stands in for the restart).
+const disk = new Map<string, boolean>();
+const fakeFlags = () => ({
+  getBoolean: (k: string) => disk.get(k),
+  set: (k: string, v: boolean) => { disk.set(k, v); },
+  delete: (k: string) => { disk.delete(k); },
+});
+
 // The SDK stand-in, handed to the service's loader (Metro's require is not a vitest module, so vi.mock cannot reach it).
 const fakeSdk = () => {
   sdkState.imported += 1;
@@ -36,9 +44,10 @@ const fakeSdk = () => {
 import * as voice from './inAppVoice';
 
 beforeEach(() => {
-  voice.resetInAppVoiceForTests(fakeSdk);
+  voice.resetInAppVoiceForTests(fakeSdk, fakeFlags);
   rn.native = {}; rn.os = 'ios'; rn.granted = true; rn.requestResult = 'granted';
   sdkState.imported = 0; sdkState.connectFails = false; sdkState.calls = [];
+  disk.clear();
 });
 
 describe('[INAPP-CALLS] a build without the calling module (11/12)', () => {
@@ -69,16 +78,57 @@ describe('[INAPP-CALLS] build 13 (module present)', () => {
   it('registers with a server token for its platform, at most every ten minutes; a refusal is quiet', async () => {
     const fetchToken = vi.fn(async (p: string) => `tok-${p}`);
     expect(await voice.registerForInAppCalls(fetchToken, 1_000_000)).toBe(true);
-    expect(fetchToken).toHaveBeenCalledWith('ios');
+    expect(fetchToken).toHaveBeenCalledWith('ios', 'register');
+    // the SDK started first (PushKit + template), then registered
+    expect(sdkState.calls.map((c) => c.m)).toEqual(['initializePushRegistry', 'template', 'register']);
     expect(await voice.registerForInAppCalls(fetchToken, 1_000_000 + 60_000)).toBe(false);
     expect(fetchToken).toHaveBeenCalledTimes(1);
     expect(await voice.registerForInAppCalls(async () => { throw new Error('403'); }, 1_000_000 + 11 * 60_000)).toBe(false);
+  });
+
+  // [native review 5] The SDK (CallKit, audio, PushKit) starts at launch only on a phone that has registered before.
+  it('app launch: nothing starts on a phone that never registered; after a registration, it starts at every launch', async () => {
+    await voice.startInAppVoiceIfRegistered();
+    expect(sdkState.calls).toEqual([]);
+    expect(await voice.registerForInAppCalls(async () => 'tok', 2_000_000)).toBe(true);
+    voice.resetInAppVoiceForTests(fakeSdk, fakeFlags); sdkState.calls = []; // the app restarts
+    await voice.startInAppVoiceIfRegistered();
+    expect(sdkState.calls).toEqual([{ m: 'initializePushRegistry', a: [] }, { m: 'template', a: ['${swiftLine}'] }]);
+  });
+
+  it('iPhone: the very first registration waits once for PushKit\'s token and tries again', async () => {
+    let n = 0;
+    const wait = vi.fn(async () => undefined);
+    const fetchToken = vi.fn(async () => { n += 1; if (n === 1) throw new Error('no VoIP token yet'); return 'tok'; });
+    expect(await voice.registerForInAppCalls(fetchToken, 3_000_000, wait)).toBe(true);
+    expect(wait).toHaveBeenCalledWith(voice.FIRST_REGISTER_RETRY_MS);
+    expect(fetchToken).toHaveBeenCalledTimes(2);
+  });
+
+  // [native review S2] Android 11+: the SDK silently drops a ring without the microphone.
+  it('Android without the microphone: never registers (the bridge takes their calls) and never asks for it', async () => {
+    rn.os = 'android'; rn.granted = false;
+    const fetchToken = vi.fn(async () => 'tok');
+    expect(await voice.registerForInAppCalls(fetchToken, 4_000_000)).toBe(false);
+    expect(fetchToken).not.toHaveBeenCalled();
+    expect(sdkState.calls.filter((c) => c.m === 'register')).toEqual([]);
+  });
+
+  it('Android: a phone that registered and then lost the microphone removes its registration', async () => {
+    rn.os = 'android';
+    const fetchToken = vi.fn(async (_p: string, purpose: string) => `${purpose}-tok`);
+    expect(await voice.registerForInAppCalls(fetchToken, 5_000_000)).toBe(true);
+    rn.granted = false;
+    expect(await voice.registerForInAppCalls(fetchToken, 5_000_000 + 11 * 60_000)).toBe(false);
+    expect(fetchToken).toHaveBeenLastCalledWith('android', 'unregister');
+    expect(sdkState.calls.at(-1)).toEqual({ m: 'unregister', a: ['unregister-tok'] });
   });
 
   it('a call: the server starts it, the SDK connects with ONLY the call id, the handle is "Swift"', async () => {
     const start = vi.fn(async () => ({ callId: 'cabc', token: 'tok' }));
     await voice.placeInAppCall('o1', 'rider', { start, cancel: vi.fn() });
     expect(start).toHaveBeenCalledWith('o1', 'rider', 'ios');
+    expect(sdkState.calls[0]).toEqual({ m: 'initializePushRegistry', a: [] }); // started before connecting
     expect(sdkState.calls.at(-1)).toEqual({ m: 'connect', a: ['tok', { params: { callId: 'cabc' }, contactHandle: 'Swift', notificationDisplayName: 'Swift' }] });
     expect(voice.inAppCallActive()).toBe(true);
     await voice.endInAppCall();
@@ -114,7 +164,23 @@ describe('[INAPP-CALLS · SECURITY REVIEW] sign-out / account switch', () => {
     expect(await voice.registerForInAppCalls(fetchToken, 7_000_000 + 1_000)).toBe(true);
   });
 
+  // [native review 4] In-app calls off (never offered, so never registered): sign-out makes no request at all.
+  it('a phone that never registered: no request, sign-out goes straight on', async () => {
+    const fetchToken = vi.fn(async () => 'x');
+    expect(await voice.unregisterInAppCalls(fetchToken)).toBe(false);
+    expect(fetchToken).not.toHaveBeenCalled();
+  });
+
+  it('after a successful unregister the phone no longer starts the SDK at launch', async () => {
+    await voice.registerForInAppCalls(async () => 'reg', 8_000_000);
+    expect(await voice.unregisterInAppCalls(async () => 'old')).toBe(true);
+    voice.resetInAppVoiceForTests(fakeSdk, fakeFlags); sdkState.calls = [];
+    await voice.startInAppVoiceIfRegistered();
+    expect(sdkState.calls).toEqual([]);
+  });
+
   it('a hung network never holds up the sign-out beyond the bound', async () => {
+    await voice.registerForInAppCalls(async () => 'reg', 9_000_000);
     vi.useFakeTimers();
     try {
       const pending = voice.unregisterInAppCalls(() => new Promise<string>(() => undefined));
@@ -127,7 +193,7 @@ describe('[INAPP-CALLS · SECURITY REVIEW] sign-out / account switch', () => {
 
   it('a build without the module: nothing to unregister, no SDK import', async () => {
     rn.native = {};
-    voice.resetInAppVoiceForTests(fakeSdk);
+    voice.resetInAppVoiceForTests(fakeSdk, fakeFlags);
     expect(await voice.unregisterInAppCalls(async () => 'x')).toBe(false);
     expect(sdkState.imported).toBe(0);
   });

@@ -19,7 +19,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { callsRoutes, callVoiceRoutes, redisServiceDayLedger } from '../modules/calls/calls.routes';
 import { CALL_DAY_PREFIX, SERVICE_DAY_KEY, type ServiceDayLedger } from '../modules/calls/call-bridge';
-import { inAppCallsRoutes, inAppVoiceRoutes } from '../modules/calls/inapp-calls.routes';
+import { INAPP_REGISTRY_PREFIX, inAppCallsRoutes, inAppVoiceRoutes } from '../modules/calls/inapp-calls.routes';
 import { inAppIdentity } from '../modules/calls/inapp-calls-switch';
 import type { CallRelayConfig } from '../modules/calls/call-relay-switch';
 import { TwilioVoiceProvider } from '../providers/voice/twilio-voice';
@@ -104,6 +104,9 @@ const RECIPIENT = gyPhone();
 const allPhones = () => [diner, riderP, sender, courierP, owner, staff, passenger, driverP, stranger].map((p) => p.phone).concat(STORE_LINE, RECIPIENT);
 /** The identity of a person's ONE current session (per user + session + device; rotates on sign-out). */
 const id = (p: Pick<Person, 'id' | 'sessionId' | 'deviceId'>) => inAppIdentity(IDENTITY_SECRET, p.id, p.sessionId, p.deviceId);
+/** This phone registered to be rung in the app (what a register token records), `ago` ms back. */
+const registered = (p: Pick<Person, 'id' | 'sessionId' | 'deviceId'>, ago = 0) => app.redis.set(`${INAPP_REGISTRY_PREFIX}${id(p)}`, String(Date.now() - ago));
+const unregistered = (p: Pick<Person, 'id' | 'sessionId' | 'deviceId'>) => app.redis.del(`${INAPP_REGISTRY_PREFIX}${id(p)}`);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'test';
@@ -134,6 +137,9 @@ beforeAll(async () => {
   owner = await person(7, ['VENDOR_OWNER'], 'VENDOR_OWNER');
   staff = await person(8, ['CUSTOMER'], 'CUSTOMER');
   stranger = await person(9, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
+  // [native review S2] Every party's phone registered to be rung in the app (microphone granted), as a build-13
+  // phone does once it opens the order. The cases about NOT registered clear their own.
+  for (const p of [diner, sender, passenger, riderP, courierP, driverP, owner, staff]) await registered(p);
 
   riderId = (await system(() => app.prisma.rider.create({ data: { userId: riderP.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }))).id;
   courierRiderId = (await system(() => app.prisma.rider.create({ data: { userId: courierP.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }))).id;
@@ -169,6 +175,7 @@ afterAll(async () => {
     if (tenantIds.length) await app.prisma.tenant.deleteMany({ where: { id: { in: tenantIds } } });
   });
   for (const key of await app.redis.keys(`${CALL_DAY_PREFIX}*`)) await app.redis.del(key);
+  for (const key of await app.redis.keys(`${INAPP_REGISTRY_PREFIX}*`)) await app.redis.del(key);
   await app.close();
 });
 
@@ -266,7 +273,9 @@ describe('[INAPP-CALLS] tokens: only the people on a live order, opaque identity
     const { header, payload, signatureOk } = jwtParts(token);
     expect(signatureOk).toBe(true);
     expect(header).toEqual({ alg: 'HS256', typ: 'JWT', cty: 'twilio-fpa;v=1' });
-    expect(payload).toMatchObject({ iss: KEY, sub: SID, grants: { identity, voice: { incoming: { allow: true }, outgoing: { application_sid: APP_SID }, push_credential_sid: CRED_ANDROID } } });
+    expect(payload).toMatchObject({ iss: KEY, sub: SID, grants: { identity, voice: { incoming: { allow: true }, push_credential_sid: CRED_ANDROID } } });
+    // [server review 6] A register token can be rung but never call out.
+    expect(payload.grants.voice).not.toHaveProperty('outgoing');
     expect(payload.jti).toMatch(new RegExp(`^${KEY}-\\d+$`));
     expect(payload.exp - payload.iat).toBe(ttlSeconds);
     expect(ttlSeconds).toBe(900);
@@ -300,6 +309,8 @@ describe('[INAPP-CALLS] starting a call: the bridge\'s party rules, one budget w
     expect(res.statusCode).toBe(200);
     const { callId, token } = res.json().data;
     expect(jwtParts(token).payload.grants.identity).toBe(id(diner));
+    // [server review 6] Only the connect token carries the outgoing grant.
+    expect(jwtParts(token).payload.grants.voice.outgoing).toEqual({ application_sid: APP_SID });
     const row = await session(callId);
     expect(row).toMatchObject({ provider: 'twilio-app', status: 'RINGING_APP', callerUserId: diner.id, callerRole: 'customer', calleeRole: 'rider', providerCallId: null });
     for (const p of allPhones()) expect(JSON.stringify(row).includes(p) || res.body.includes(p)).toBe(false);
@@ -570,6 +581,7 @@ describe('[INAPP-CALLS] identity per session: a signed-out phone is never rung, 
 
   it('both of the rider\'s signed-in phones ring; after one signs out, only the other', async () => {
     const phone2 = await secondSession(riderP, 'rider-phone3');
+    await registered(phone2);
     const o1 = await liveFood();
     const first = (await start(diner.token, o1.id, 'rider')).json().data.callId;
     const { r: ringing1, callSid: sid1 } = await connect(first, diner);
@@ -705,6 +717,7 @@ describe('[INAPP-CALLS] the bridge\'s daily rules: one live call per person, the
     setEnv({ ...INAPP_ON, ...RELAY_ON });
     const offPlan = await person(10, ['RIDER', 'CUSTOMER'], 'RIDER', {}, testPhone());
     const offPlanRider = (await system(() => app.prisma.rider.create({ data: { userId: offPlan.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }))).id;
+    await registered(offPlan);
     try {
       const o = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: diner.id, vendorId, riderId: offPlanRider, status: 'PICKED_UP', acceptedAt: new Date() });
       const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
@@ -718,5 +731,109 @@ describe('[INAPP-CALLS] the bridge\'s daily rules: one live call per person, the
       await system(() => app.prisma.order.updateMany({ where: { riderId: offPlanRider }, data: { riderId: null } }));
       await system(() => app.prisma.rider.delete({ where: { id: offPlanRider } }));
     }
+  });
+});
+
+// [native review S2 · server review 6-9] Who is rung in the app, and the edges around it.
+describe('[INAPP-CALLS] only phones that registered are rung; the rest get the phone bridge', () => {
+  it('a register token records the phone, an unregister token removes it', async () => {
+    await liveFood();
+    await unregistered(riderP);
+    expect((await regToken(riderP.token)).statusCode).toBe(200);
+    expect(await app.redis.get(`${INAPP_REGISTRY_PREFIX}${id(riderP)}`)).not.toBeNull();
+    const un = await app.inject({ method: 'POST', url: '/api/v1/calls/app/token', headers: auth(riderP.token), payload: { platform: 'android', purpose: 'unregister' } });
+    expect(un.statusCode).toBe(200);
+    expect(jwtParts(un.json().data.token).payload.grants.voice).not.toHaveProperty('outgoing');
+    expect(await app.redis.get(`${INAPP_REGISTRY_PREFIX}${id(riderP)}`)).toBeNull();
+    await registered(riderP);
+  });
+
+  it('a callee whose phone never registered (no microphone) is not rung in the app: straight to their phone', async () => {
+    setEnv({ ...INAPP_ON, ...RELAY_ON });
+    await unregistered(riderP);
+    try {
+      const o = await liveFood();
+      const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
+      const { r } = await connect(callId, diner);
+      expect(r.body).not.toContain('<Client');
+      expect(r.body).toContain(`<Number url="${BASE}/screen?s=${callId}" method="POST">`);
+    } finally { await registered(riderP); }
+  });
+
+  async function extraSessions(n: number, tag: string): Promise<Person[]> {
+    const out: Person[] = [];
+    for (let i = 0; i < n; i++) {
+      const token = app.jwt.sign({ userId: riderP.id, role: 'RIDER', jti: nanoid(8) });
+      const deviceId = `inapp-${tag}-${i}-${NUM}`;
+      const s = await system(() => app.prisma.session.create({ data: { userId: riderP.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId, deviceType: tag, expiresAt: new Date(Date.now() + DAY) } }));
+      out.push({ ...riderP, token, sessionId: s.id, deviceId });
+    }
+    return out;
+  }
+
+  it('newer sessions that never registered (the web, an old phone) never push a registered phone out of the ring', async () => {
+    const extra = await extraSessions(12, 'web');
+    try {
+      const o = await liveFood();
+      const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
+      const { r } = await connect(callId, diner);
+      expect(r.body).toContain(`<Identity>${id(riderP)}</Identity>`);
+      expect(r.body.match(/<Identity>/g)).toHaveLength(1);
+    } finally {
+      await system(() => app.prisma.session.deleteMany({ where: { id: { in: extra.map((p) => p.sessionId) } } }));
+    }
+  });
+
+  it('more registered phones than the ring holds: the most recently registered ten ring', async () => {
+    const old = await extraSessions(11, 'old-phone');
+    for (const [i, p] of old.entries()) await registered(p, 3_600_000 + i * 1000);
+    await registered(riderP);
+    try {
+      const o = await liveFood();
+      const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
+      const { r } = await connect(callId, diner);
+      expect(r.body.match(/<Identity>/g)).toHaveLength(10);
+      expect(r.body).toContain(`<Identity>${id(riderP)}</Identity>`);
+      expect(r.body).not.toContain(id(old[10]!)); // the one registered longest ago is left out
+    } finally {
+      await system(() => app.prisma.session.deleteMany({ where: { id: { in: old.map((p) => p.sessionId) } } }));
+    }
+  });
+
+  it('the switch going off while it rings: an Answer connects nothing', async () => {
+    const o = await liveFood();
+    const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
+    await connect(callId, diner);
+    setEnv({ ...INAPP_ON, INAPP_CALLS: '0' });
+    const answered = await hook('app-answered', { CallSid: sid() }, { s: callId });
+    expect(answered.body).toContain('<Hangup/>');
+    expect(await session(callId)).toMatchObject({ status: 'NOT_CONNECTED' });
+  });
+
+  const bridge = (token: string, orderId: string, target: string) =>
+    app.inject({ method: 'POST', url: '/api/v1/calls/bridge', headers: auth(token), payload: { orderId, target } });
+
+  it('an in-app start the provider never took stops holding the ORDER for "Call via Swift" after a minute', async () => {
+    setEnv({ ...INAPP_ON, ...RELAY_ON });
+    const o = await liveFood();
+    const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
+    // the rider on the same order: held by the order's one live call
+    expect((await bridge(riderP.token, o.id, 'customer')).json().error.code).toBe('CALL_IN_PROGRESS');
+    await system(() => app.prisma.callSession.update({ where: { id: callId }, data: { createdAt: new Date(Date.now() - 61_000) } }));
+    const later = await bridge(riderP.token, o.id, 'customer');
+    expect(later.statusCode, later.body).toBe(502); // past every gate; the stubbed provider refuses to dial
+    expect(await session(callId)).toMatchObject({ status: 'NOT_CONNECTED', durationSeconds: 0 });
+  });
+
+  it('an in-app start the provider never took stops holding the CALLER for "Call via Swift" on another order after a minute', async () => {
+    setEnv({ ...INAPP_ON, ...RELAY_ON });
+    const o1 = await liveFood();
+    const o2 = await liveFood();
+    const { callId } = (await start(diner.token, o1.id, 'rider')).json().data;
+    expect((await bridge(diner.token, o2.id, 'rider')).json().error.code).toBe('CALL_CALLER_BUSY');
+    await system(() => app.prisma.callSession.update({ where: { id: callId }, data: { createdAt: new Date(Date.now() - 61_000) } }));
+    const later = await bridge(diner.token, o2.id, 'rider');
+    expect(later.statusCode, later.body).toBe(502);
+    expect(await session(callId)).toMatchObject({ status: 'NOT_CONNECTED', durationSeconds: 0 });
   });
 });

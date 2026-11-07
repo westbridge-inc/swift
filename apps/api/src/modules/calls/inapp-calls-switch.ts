@@ -165,7 +165,8 @@ export function mintVoiceAccessToken(input: {
   apiKeySid: string;
   apiKeySecret: string;
   identity: string;
-  twimlAppSid: string;
+  /** The TwiML App the token may place calls through; null = a token that can be rung but never call out. */
+  twimlAppSid: string | null;
   pushCredentialSid: string;
   ttlSeconds: number;
   now?: Date;
@@ -182,7 +183,7 @@ export function mintVoiceAccessToken(input: {
       identity: input.identity,
       voice: {
         incoming: { allow: true },
-        outgoing: { application_sid: input.twimlAppSid },
+        ...(input.twimlAppSid ? { outgoing: { application_sid: input.twimlAppSid } } : {}),
         push_credential_sid: input.pushCredentialSid,
       },
     },

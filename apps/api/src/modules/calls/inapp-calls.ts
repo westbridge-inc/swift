@@ -95,7 +95,23 @@ export interface InAppDeps {
   ledger?: ServiceDayLedger;
   /** [REVIEW-G23 S3-2] Tells the platform operators the shared daily cap tripped (best effort, once a day). */
   alertDailyCap?: (maxCallsPerDay: number) => Promise<void>;
+  /** [native review S2] Which phones said they can be rung in the app (registered with the microphone granted).
+   *  Missing or failing: nobody counts as registered, so the call goes to the phone bridge. */
+  registry?: InAppRegistry;
   now?: () => Date;
+}
+
+/**
+ * [native review S2 · server review 8] The phones that registered to be rung in the app: identity -> when.
+ * A phone asks for a register token only once the microphone is granted (Android 11+ silently drops a ring
+ * without it), and asks for an unregister token when it is not, or at sign-out. Kept outside the database
+ * (identities and times only, self-expiring): a signed-out phone's identity is dead anyway (per session).
+ */
+export interface InAppRegistry {
+  mark(identity: string, atMs: number): Promise<void>;
+  clear(identity: string): Promise<void>;
+  /** When each identity last registered, or null (same order as asked). */
+  registeredAt(identities: string[]): Promise<Array<number | null>>;
 }
 
 const DAY_MS = 86_400_000;
@@ -149,9 +165,12 @@ export async function sessionIdentity(prisma: PrismaClient, config: InAppCallsCo
   return inAppIdentity(config.identitySecret, userId, sessionId, session.deviceId);
 }
 
+/** The most current sessions of one person read at once (a person rarely has more than a few). */
+const SESSIONS_READ = 50;
+
 /**
- * The identities to ring for these people: one per CURRENT session (signed in, not expired), newest first,
- * at most INAPP_MAX_CLIENTS in all. A signed-out phone has no session, so it is never rung.
+ * Every identity of these people's CURRENT sessions (signed in, not expired), newest session first.
+ * A signed-out phone has no session, so its identity is never here.
  */
 export async function currentIdentities(prisma: PrismaClient, config: InAppCallsConfig, userIds: string[], now: Date): Promise<string[]> {
   if (userIds.length === 0) return [];
@@ -159,18 +178,36 @@ export async function currentIdentities(prisma: PrismaClient, config: InAppCalls
     where: { userId: { in: userIds }, expiresAt: { gt: now } },
     select: { id: true, userId: true, deviceId: true },
     orderBy: { createdAt: 'desc' },
-    take: INAPP_MAX_CLIENTS,
+    take: SESSIONS_READ * userIds.length,
   });
   return [...new Set(sessions.map((s) => inAppIdentity(config.identitySecret, s.userId, s.id, s.deviceId)))];
 }
 
-function tokenFor(config: InAppCallsConfig, identity: string, platform: InAppPlatform, now: Date): { token: string; identity: string; ttlSeconds: number } {
+/**
+ * [native review S2 · server review 8] The identities to RING: current sessions whose phone registered to be
+ * rung in the app (so web and never-registered sessions never take a slot), most recently registered first,
+ * at most INAPP_MAX_CLIENTS. No registry, or it fails: none (the phone bridge takes the call).
+ */
+export async function ringableIdentities(deps: Pick<InAppDeps, 'prisma' | 'config' | 'registry'>, userIds: string[], now: Date): Promise<string[]> {
+  const identities = await currentIdentities(deps.prisma, deps.config, userIds, now);
+  if (identities.length === 0 || !deps.registry) return [];
+  const at = await deps.registry.registeredAt(identities).catch(() => identities.map(() => null));
+  return identities
+    .map((identity, i) => ({ identity, at: at[i] ?? null }))
+    .filter((x): x is { identity: string; at: number } => typeof x.at === 'number')
+    .sort((a, b) => b.at - a.at)
+    .slice(0, INAPP_MAX_CLIENTS)
+    .map((x) => x.identity);
+}
+
+/** [server review 6] Only the connect token may place a call: register / unregister tokens carry no outgoing grant. */
+function tokenFor(config: InAppCallsConfig, identity: string, platform: InAppPlatform, now: Date, canCall: boolean): { token: string; identity: string; ttlSeconds: number } {
   const token = mintVoiceAccessToken({
     accountSid: config.twilio.accountSid,
     apiKeySid: config.twilio.apiKeySid,
     apiKeySecret: config.twilio.apiKeySecret,
     identity,
-    twimlAppSid: config.twimlAppSid,
+    twimlAppSid: canCall ? config.twimlAppSid : null,
     pushCredentialSid: config.pushCredential[platform],
     ttlSeconds: INAPP_TOKEN_TTL_SECONDS,
     now,
@@ -194,7 +231,13 @@ export async function issueSessionToken(
   if (input.purpose === 'register' && !(await onALiveOrder(deps.prisma, input.userId))) {
     throw new AppError(403, 'INAPP_NO_LIVE_ORDER', 'In-app calls are for the people on a live order.');
   }
-  return tokenFor(deps.config, identity, input.platform, now);
+  // [native review S2] The phone asks to register only with the microphone granted; until it does (or after
+  // it unregisters) Swift rings its phone through the bridge instead. Best effort: a registry failure only
+  // means the bridge takes their calls.
+  if (deps.registry) {
+    await (input.purpose === 'register' ? deps.registry.mark(identity, now.getTime()) : deps.registry.clear(identity)).catch(() => undefined);
+  }
+  return tokenFor(deps.config, identity, input.platform, now, false);
 }
 
 export interface StartInAppInput {
@@ -306,7 +349,7 @@ export async function startInAppCall(deps: InAppDeps, input: StartInAppInput): P
     }
     throw err;
   }
-  const { token, ttlSeconds } = tokenFor(deps.config, callerIdentity, input.platform, now);
+  const { token, ttlSeconds } = tokenFor(deps.config, callerIdentity, input.platform, now, true);
   return { callId, token, ttlSeconds };
 }
 
@@ -369,7 +412,7 @@ export async function handleInAppStep(
       const people = order && !isTerminalOrderStatus(order.status)
         ? (await appPeopleFor(deps.prisma, order, session.calleeRole as CallTarget)).filter((id) => id !== session.callerUserId)
         : [];
-      const clients = await currentIdentities(deps.prisma, deps.config, people, now);
+      const clients = await ringableIdentities(deps, people, now);
       // Single use: the first connect takes the row; a replay of the same call id is hung up.
       const taken = await deps.prisma.callSession.updateMany({
         where: { id: session.id, providerCallId: null, endedAt: null, status: INAPP_STATUS.RINGING_APP },
@@ -378,7 +421,8 @@ export async function handleInAppStep(
       });
       if (taken.count !== 1) return hangup();
       if (order && clients.length === 0) {
-        // Nobody signed in on build 13 for them: straight to their phone (bridge on), never a silent ring.
+        // Nobody signed in on build 13 and registered (microphone granted) for them: straight to their phone
+        // (bridge on), never a silent ring.
         const fallback = await phoneFallback(deps, session, 'failed', enabled);
         if (fallback) return fallback;
       }
@@ -401,6 +445,11 @@ export async function handleInAppStep(
     }
     case 'app-answered': {
       // Runs on the other person's leg after they tapped Answer: an app is a person, no Press 1 needed.
+      // [server review 9] The switch went off while it rang: nothing connects.
+      if (!enabled) {
+        await deps.prisma.callSession.updateMany({ where: { id: session.id, status: INAPP_STATUS.RINGING_APP, endedAt: null }, data: notConnected });
+        return hangup();
+      }
       const moved = await deps.prisma.callSession.updateMany({
         where: { id: session.id, status: INAPP_STATUS.RINGING_APP, endedAt: null },
         data: { status: CALL_STATUS.CONNECTED, connectedAt: now },

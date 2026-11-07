@@ -69,7 +69,7 @@ export function useInAppCall(input: { orderId?: string | null; target: CallTarge
 
   useEffect(() => {
     if (!visible) return;
-    void registerForInAppCalls(async (platform) => (await (await calls()).appToken(platform)).data.data.token);
+    void registerForInAppCalls(async (platform, purpose) => (await (await calls()).appToken(platform, purpose)).data.data.token);
   }, [visible]);
 
   const onPress = useCallback(async () => {

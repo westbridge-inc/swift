@@ -201,7 +201,11 @@ const config: SwiftExpoConfig = {
   name: 'SwiftGY',
   slug: 'swift',
   scheme: 'swift',
-  version: '1.0.0',
+  // [INAPP-CALLS · native review S1] 1.1.0 from build 13: the first binary with native in-app calling. With the
+  // runtime pinned to this version (below), an update published for 1.0.0 (builds 11/12) never reaches build 13,
+  // and one published from here (1.1.0) never reaches 11/12. A fix for builds 11/12 is published from a branch
+  // still at 1.0.0. The store also needs a new version number for a new binary after 1.0.0 is released.
+  version: '1.1.0',
   // [L13 item 7 · owner decision 4] Over-the-air updates. The runtime is pinned
   // explicitly to the app version: an update published for 1.0.0 only reaches
   // binaries built as 1.0.0, so JavaScript never lands on native code it was

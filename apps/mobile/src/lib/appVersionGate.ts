@@ -5,8 +5,8 @@
  * The API answers GET /public/app-version with a minimum build per platform
  * (an ops setting: apps/api/src/modules/ops/app-version.ts). The phone
  * compares its own NATIVE build number — the iPhone's CFBundleVersion and
- * Android's versionCode, which is what each store counts — because every
- * Swift binary is version 1.0.0. Pure: no React, no native module, so the
+ * Android's versionCode, which is what each store counts — because the
+ * version name moves rarely (1.0.0 to build 12, 1.1.0 from build 13). Pure: no React, no native module, so the
  * rule is tested on its own.
  *
  * Fail-open everywhere: no answer, a malformed answer, an unknown platform or

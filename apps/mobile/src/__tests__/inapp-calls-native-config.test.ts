@@ -232,11 +232,17 @@ describe('[INAPP-CALLS] ONE Firebase receiver: Twilio calls to the SDK, every ot
     expect(again.manifest.application[0]!.service).toHaveLength(4);
   });
 
-  it('the router: only a Twilio payload (twi_ keys) goes to the SDK; anything else, or a payload the SDK refuses, goes to Expo', () => {
+  it('the router: a Twilio payload (twi_ keys) goes to the SDK and NEVER on to Expo (refused or thrown: logged); anything else goes to Expo', () => {
     expect(I.ROUTER_KT).toContain('class SwiftMessagingService : ExpoFirebaseMessagingService()');
     expect(I.ROUTER_KT).toContain('if (data.keys.any { it.startsWith("twi_") }) {');
     expect(I.ROUTER_KT).toContain('Voice.handleMessage(this, data, VoiceFirebaseMessagingService.MessageHandler(), CallMessageListenerProxy())');
-    expect(I.ROUTER_KT).toMatch(/if \(handled\) return\n {4}\}\n {4}super\.onMessageReceived\(remoteMessage\)/);
+    // [native review S3] the Twilio branch always returns; only a non-Twilio message reaches Expo
+    const twilioBranch = I.ROUTER_KT.slice(I.ROUTER_KT.indexOf('if (data.keys.any'), I.ROUTER_KT.indexOf('super.onMessageReceived(remoteMessage)'));
+    expect(twilioBranch).toMatch(/\} catch \(e: Throwable\) \{\n {8}Log\.e\(TAG, "the call SDK failed on a Twilio message", e\)\n {6}\}\n {6}return\n {4}\}\n {4}$/);
+    expect(twilioBranch).not.toContain('super.');
+    // the SDK's own 30-second wake of a dark screen for an incoming call
+    expect(twilioBranch).toContain('if (!pm.isInteractive) {');
+    expect(twilioBranch).toContain('pm.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "SwiftMessagingService:incomingCall").acquire(30000)');
     expect(balanced(I.ROUTER_KT)).toBe(true);
   });
 
