@@ -693,14 +693,17 @@ describe('business-entry state never crosses a principal boundary', () => {
 describe('the account whose session ended last (owner of a tap made while signed out)', () => {
   // Each case lets its one session's lazy teardown (GPS, socket, server
   // revoke) finish inside the test, so no import outlives the file.
-  const teardownFinished = () => vi.waitFor(() => {
+  // [INAPP-CALLS] The revoke now waits for the in-app unregister first, so an EARLIER test's lazy revoke (one that
+  // did not wait for its own teardown) can land during this one: count only this case's own session (its own
+  // refresh token), which must be revoked exactly once.
+  const teardownFinished = (refreshToken: string) => vi.waitFor(() => {
     expect(stopMoverLocation).toHaveBeenCalledOnce();
     expect(disconnectSocket).toHaveBeenCalledOnce();
-    expect(revokeAuthSession).toHaveBeenCalledOnce();
+    expect((revokeAuthSession.mock.calls as unknown[][]).filter((call) => call[0] === refreshToken)).toHaveLength(1);
   });
 
   it('is the account a logout ended; signing in, a stale 401 and a repeat logout change nothing', async () => {
-    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-last-a');
     const a = getAuthSessionSnapshot()!;
     useAuthStore.getState().logout();
     expect(getLastSignedOutUserId()).toBe('a');
@@ -711,13 +714,13 @@ describe('the account whose session ended last (owner of a tap made while signed
     expect(getLastSignedOutUserId()).toBe('a'); // signing in is not a session end
     expect(useAuthStore.getState().logoutIfCurrent(a)).toBe(false);
     expect(getLastSignedOutUserId()).toBe('a'); // A's stale 401 ends nothing
-    await teardownFinished();
+    await teardownFinished('refresh-last-a');
   });
 
   it('is the account a 401 logout ended', async () => {
-    useAuthStore.getState().setAuth(user('c'), 'access-c', 'refresh-c');
+    useAuthStore.getState().setAuth(user('c'), 'access-c', 'refresh-last-c');
     expect(useAuthStore.getState().logoutIfCurrent(getAuthSessionSnapshot()!)).toBe(true);
     expect(getLastSignedOutUserId()).toBe('c');
-    await teardownFinished();
+    await teardownFinished('refresh-last-c');
   });
 });

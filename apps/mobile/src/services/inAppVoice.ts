@@ -45,14 +45,19 @@ interface SdkModule {
 
 const NATIVE_NAME = 'TwilioVoiceReactNative';
 
+/** The app always loads the real package; tests hand in their own (a Metro `require` is not a vitest module). */
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const defaultLoad = (): unknown => require('@twilio/voice-react-native-sdk');
+let load: () => unknown = defaultLoad;
+
 let sdk: SdkModule | null | undefined;
 function loadSdk(): SdkModule | null {
   if (sdk !== undefined) return sdk;
   sdk = null;
   try {
+    // Never evaluated on a binary without the native module (the SDK throws at import there).
     if (!(NativeModules as Record<string, unknown>)[NATIVE_NAME]) return sdk;
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const mod = require('@twilio/voice-react-native-sdk') as SdkModule;
+    const mod = load() as SdkModule | null | undefined;
     sdk = typeof mod?.Voice === 'function' ? mod : null;
   } catch {
     sdk = null;
@@ -197,7 +202,7 @@ export async function endInAppCall(): Promise<void> {
   await call?.disconnect().catch(() => undefined);
 }
 
-/** Tests only. */
-export function resetInAppVoiceForTests(): void {
-  sdk = undefined; voice = null; started = false; registeredAt = 0; active = null;
+/** Tests only: forget everything; `loader` stands in for the package (default: the real one). */
+export function resetInAppVoiceForTests(loader: () => unknown = defaultLoad): void {
+  sdk = undefined; voice = null; started = false; registeredAt = 0; active = null; load = loader;
 }

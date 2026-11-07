@@ -29,6 +29,7 @@ import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
 import { callsRoutes } from '../modules/calls/calls.routes';
+import { inAppCallsRoutes } from '../modules/calls/inapp-calls.routes';
 import { providerFeeRoutes } from '../modules/services/provider-fee.routes';
 import { loginWithOtp } from './helpers/otp';
 
@@ -89,6 +90,8 @@ async function buildTestApp() {
   await server.register(partnerRoutes, { prefix: '/api/v1/partner' });
   await server.register(statementRoutes, { prefix: '/api/v1/statements' });
   await server.register(callsRoutes, { prefix: '/api/v1/calls' });
+  // [INAPP-CALLS] In-app calling's signed-in door: the same parties as the bridge (swept under /api/v1/calls/).
+  await server.register(inAppCallsRoutes, { prefix: '/api/v1/calls/app' });
   await server.register(providerFeeRoutes, { prefix: '/api/v1/provider' });
   await server.ready();
   return server;
@@ -438,11 +441,14 @@ describe('composition root ↔ matrix drift guard, by plugin [SWIFT-092 · T1]',
   // call [O-1]: machine-to-machine, signed by the provider over the exact URL and refused (403)
   // unsigned, 503 until configured; a call back to Swift's number only hears 'call from the app' —
   // proven in call-bridge.test.ts.
+  // inAppVoiceRoutes (/api/v1/calls/voice, app*) is the same provider calling back during an in-app call
+  // [INAPP-CALLS]: signed over the exact URL and refused (403) unsigned, 503 until configured; a connect is
+  // accepted only from the call's own caller identity, once — proven in inapp-calls.test.ts.
   // testControlRoutes exists only in isolated load builds; production never registers it.
   const EXEMPT_PLUGINS = new Set([
     'agentCashRoutes', 'attributionRoutes', 'discoveryRoutes', 'marketRoutes', 'mmgCheckoutPublicRoutes',
     'cardRailPublicRoutes', 'publicRoutes', 'qrPublicRoutes', 'qrResolverRoutes', 'legalRoutes', 'testControlRoutes',
-    'smsInboundRoutes', 'callVoiceRoutes',
+    'smsInboundRoutes', 'callVoiceRoutes', 'inAppVoiceRoutes',
   ]);
 
   it('flags a route plugin the matrix never mounts, even under a prefix it already sweeps (red-first)', () => {

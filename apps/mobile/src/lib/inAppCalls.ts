@@ -14,7 +14,7 @@
  *
  * Pure: no React, no network, no native module.
  */
-import type { CallTarget } from './callBridge';
+import { bridgeErrorText, type CallTarget } from './callBridge';
 
 export interface InAppConfig {
   enabled: boolean;
@@ -50,6 +50,11 @@ export function inAppErrorText(code: string | null | undefined): string {
     case 'INAPP_NO_ONE': return 'There is no one to call in the app for this. Message them in chat, or ask support.';
     case 'INAPP_NOT_FOR_TARGET': return 'They do not have the Swift app. Use Call via Swift instead.';
     case 'MIC_REFUSED': return INAPP_WORDS.micRefused;
+    // [owner 6 Nov] The bridge's daily rules hold for in-app calls too: the bridge's own words.
+    case 'CALL_CALLER_BUSY':
+    case 'CALL_USER_DAILY_LIMIT_REACHED':
+    case 'CALL_DAILY_LIMIT_REACHED':
+      return bridgeErrorText(code);
     default: return 'Swift could not start the in-app call. Try again, use Call via Swift, or message them in chat.';
   }
 }

@@ -1,5 +1,21 @@
 import crypto from 'node:crypto';
-import { CALL_RELAY_DEFAULT_MAX_ATTEMPTS, CALL_RELAY_MAX_ATTEMPTS_ENV, CALL_RELAY_WEBHOOK_BASE_ENV } from './call-relay-switch';
+import {
+  CALL_RELAY_DEFAULT_MAX_ATTEMPTS,
+  CALL_RELAY_DEFAULT_MAX_CALL_MINUTES,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_CUSTOMER_PER_DAY,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY,
+  CALL_RELAY_DEFAULT_MAX_CALLS_PER_PARTNER_PER_DAY,
+  CALL_RELAY_MAX_ATTEMPTS_ENV,
+  CALL_RELAY_MAX_CALL_MINUTES_ENV,
+  CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY_ENV,
+  CALL_RELAY_MAX_CALLS_PER_DAY_CEILING,
+  CALL_RELAY_MAX_CALLS_PER_DAY_ENV,
+  CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY_ENV,
+  CALL_RELAY_MAX_CALLS_PER_PERSON_CEILING,
+  CALL_RELAY_MIN_CALL_MINUTES,
+  CALL_RELAY_WEBHOOK_BASE_ENV,
+  CALL_TIME_LIMIT_SECONDS,
+} from './call-relay-switch';
 
 /**
  * [INAPP-CALLS · owner 6 Nov 2026, "B"] In-app calling: the switch and its settings.
@@ -36,6 +52,13 @@ export type InAppPlatform = 'ios' | 'android';
 export interface InAppCallsConfig {
   webhookBase: string;
   maxAttemptsPerOrder: number;
+  /** [owner 6 Nov] The phone bridge's daily caps and call length, read from the SAME settings: one budget for
+   *  every Swift call, in the app or through the bridge (an in-app call can fall back to a paid phone leg). */
+  maxCallsPerDay: number;
+  maxCallsPerCustomerPerDay: number;
+  maxCallsPerPartnerPerDay: number;
+  /** Seconds a call may last (CALL_RELAY_MAX_CALL_MINUTES, default 10 minutes). */
+  maxCallSeconds: number;
   twimlAppSid: string;
   pushCredential: Record<InAppPlatform, string>;
   identitySecret: string;
@@ -67,6 +90,17 @@ export function readInAppCallsConfig(
   const rawMax = (env[CALL_RELAY_MAX_ATTEMPTS_ENV] ?? '').trim();
   const maxAttemptsPerOrder = rawMax === '' ? CALL_RELAY_DEFAULT_MAX_ATTEMPTS : /^\d{1,2}$/.test(rawMax) ? Number(rawMax) : NaN;
   if (!(maxAttemptsPerOrder >= 1 && maxAttemptsPerOrder <= 20)) problems.push(`${CALL_RELAY_MAX_ATTEMPTS_ENV} must be a whole number from 1 to 20`);
+  // [owner 6 Nov] The same caps and call length as the bridge (call-relay-switch.ts reads them the same way).
+  const whole = (name: string, fallback: number, digits: number, min: number, max: number): number => {
+    const raw = (env[name] ?? '').trim();
+    const value = raw === '' ? fallback : new RegExp(`^\\d{1,${digits}}$`).test(raw) ? Number(raw) : NaN;
+    if (!(value >= min && value <= max)) problems.push(`${name} must be a whole number from ${min} to ${max}`);
+    return value;
+  };
+  const maxCallsPerDay = whole(CALL_RELAY_MAX_CALLS_PER_DAY_ENV, CALL_RELAY_DEFAULT_MAX_CALLS_PER_DAY, 5, 1, CALL_RELAY_MAX_CALLS_PER_DAY_CEILING);
+  const maxCallsPerCustomerPerDay = whole(CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY_ENV, CALL_RELAY_DEFAULT_MAX_CALLS_PER_CUSTOMER_PER_DAY, 3, 1, CALL_RELAY_MAX_CALLS_PER_PERSON_CEILING);
+  const maxCallsPerPartnerPerDay = whole(CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY_ENV, CALL_RELAY_DEFAULT_MAX_CALLS_PER_PARTNER_PER_DAY, 3, 1, CALL_RELAY_MAX_CALLS_PER_PERSON_CEILING);
+  const maxCallSeconds = whole(CALL_RELAY_MAX_CALL_MINUTES_ENV, CALL_RELAY_DEFAULT_MAX_CALL_MINUTES, 2, CALL_RELAY_MIN_CALL_MINUTES, CALL_TIME_LIMIT_SECONDS / 60) * 60;
   const twimlAppSid = (env[INAPP_CALLS_TWIML_APP_SID_ENV] ?? '').trim();
   if (!APP_SID.test(twimlAppSid)) problems.push(`${INAPP_CALLS_TWIML_APP_SID_ENV} must be the TwiML App SID (AP...)`);
   const ios = (env[INAPP_CALLS_PUSH_CREDENTIAL_IOS_ENV] ?? '').trim();
@@ -87,7 +121,8 @@ export function readInAppCallsConfig(
   return {
     ok: true,
     config: {
-      webhookBase, maxAttemptsPerOrder, twimlAppSid, identitySecret,
+      webhookBase, maxAttemptsPerOrder, maxCallsPerDay, maxCallsPerCustomerPerDay, maxCallsPerPartnerPerDay, maxCallSeconds,
+      twimlAppSid, identitySecret,
       pushCredential: { ios, android },
       twilio: { accountSid, apiKeySid, apiKeySecret, authToken },
     },

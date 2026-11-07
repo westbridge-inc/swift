@@ -1,22 +1,27 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { log } from '../../utils/logger';
 import { isTerminalOrderStatus, TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import type { CallProvider, CallStep } from '../../providers/voice/call-provider';
-import { CALL_RING_SECONDS, CALL_TIME_LIMIT_SECONDS, type CallRelayConfig } from './call-relay-switch';
+import { CALL_RING_SECONDS, type CallRelayConfig } from './call-relay-switch';
 import {
+  CALL_DAILY_CAP_LOCK,
   CALL_STALE_AFTER_MS,
   CALL_STATUS,
   CALL_WORDS,
+  PARTNER_ROLES,
   callerRolesOn,
+  dialFor,
   loadOrder,
-  numberFor,
   pairAllowed,
   roleWords,
   warnOfCall,
   webhookUrl,
+  withinLedgerWait,
   type CallerRole,
   type CallTarget,
   type PartyOrder,
+  type ServiceDayLedger,
 } from './call-bridge';
 import {
   INAPP_MAX_CLIENTS,
@@ -86,8 +91,14 @@ export interface InAppDeps {
   /** The phone bridge's settings and provider while CALL_RELAY is on (the fallback); null while it is off. */
   relay: { config: CallRelayConfig; provider: CallProvider } | null;
   notifications: Notifier;
+  /** [owner 6 Nov · REVIEW-M17 S2-1] The bridge's service day list: required to START a call (refused without it). */
+  ledger?: ServiceDayLedger;
+  /** [REVIEW-G23 S3-2] Tells the platform operators the shared daily cap tripped (best effort, once a day). */
+  alertDailyCap?: (maxCallsPerDay: number) => Promise<void>;
   now?: () => Date;
 }
+
+const DAY_MS = 86_400_000;
 
 const first = (fields: Record<string, string[]>, name: string) => fields[name]?.[0] ?? null;
 
@@ -218,6 +229,12 @@ export async function startInAppCall(deps: InAppDeps, input: StartInAppInput): P
   if ((await appPeopleFor(deps.prisma, order, input.target)).filter((id) => id !== input.userId).length === 0) {
     throw new AppError(409, 'INAPP_NO_ONE', 'There is no one to call in the app for this. Message them in chat, or ask support.');
   }
+  const ledger = deps.ledger;
+  const ledgerDown = () => new AppError(503, 'CALL_PROVIDER_FAILED', 'Swift could not place the call right now. Try again, or message them in chat.');
+  if (!ledger) throw ledgerDown();
+  // [owner 6 Nov] The person's daily cap by their role ON THIS ORDER, exactly as the bridge counts it.
+  const asPartner = (PARTNER_ROLES as readonly string[]).includes(callerRole);
+  const personCap = asPartner ? deps.config.maxCallsPerPartnerPerDay : deps.config.maxCallsPerCustomerPerDay;
 
   let callId: string;
   try {
@@ -238,15 +255,54 @@ export async function startInAppCall(deps: InAppDeps, input: StartInAppInput): P
       if (attempts >= deps.config.maxAttemptsPerOrder) {
         throw new AppError(429, 'CALL_LIMIT_REACHED', 'Swift has connected as many calls as it can for this order. Message them in chat, or ask support.');
       }
+      // [owner 6 Nov · CALL-RELAY-ON] The bridge's daily rules, under the bridge's own lock, over the same rows:
+      // one live call per person, the person's day (customer 5 / partner 20), then the shared day (100), so an
+      // in-app call and a bridged call spend one budget. Mirrors startBridgeCall; keep the two in step.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CALL_DAILY_CAP_LOCK}))`;
+      await tx.callSession.updateMany({
+        where: { callerUserId: input.userId, endedAt: null, createdAt: { lt: new Date(now.getTime() - INAPP_UNTAKEN_AFTER_MS) }, status: INAPP_STATUS.RINGING_APP, providerCallId: null },
+        data: { endedAt: now, status: CALL_STATUS.NOT_CONNECTED, durationSeconds: 0 },
+      });
+      await tx.callSession.updateMany({
+        where: { callerUserId: input.userId, endedAt: null, createdAt: { lt: stale }, status: CALL_STATUS.CONNECTED },
+        data: { endedAt: now },
+      });
+      await tx.callSession.updateMany({
+        where: { callerUserId: input.userId, endedAt: null, createdAt: { lt: stale } },
+        data: { endedAt: now, status: CALL_STATUS.NOT_CONNECTED },
+      });
+      const myLive = await tx.callSession.count({ where: { callerUserId: input.userId, endedAt: null } });
+      if (myLive > 0) {
+        throw new AppError(409, 'CALL_CALLER_BUSY', 'You already have a Swift call ringing. Answer it, or try again in a minute.');
+      }
+      const inWindow = { createdAt: { gte: new Date(now.getTime() - DAY_MS) }, status: { not: CALL_STATUS.FAILED } };
+      const mine = await tx.callSession.count({
+        where: { ...inWindow, callerUserId: input.userId, callerRole: asPartner ? { in: [...PARTNER_ROLES] } : 'customer' },
+      });
+      if (mine >= personCap) {
+        throw new AppError(429, 'CALL_USER_DAILY_LIMIT_REACHED', 'You have used your Swift calls for today. Message them in chat, or ask support.');
+      }
+      const today = Math.max(
+        await tx.callSession.count({ where: inWindow }),
+        await withinLedgerWait(ledger.count(now.getTime() - DAY_MS)).catch(() => { throw ledgerDown(); }),
+      );
+      if (today >= deps.config.maxCallsPerDay) {
+        log().warn({ maxCallsPerDay: deps.config.maxCallsPerDay }, '[INAPP-CALLS] daily call cap reached: Call in app refused until a slot frees');
+        throw new AppError(429, 'CALL_DAILY_LIMIT_REACHED', 'Swift calls are busy right now. Message them in chat, or ask support.');
+      }
       const row = await tx.callSession.create({
         data: { orderId: order.id, callerUserId: input.userId, callerRole, calleeRole: input.target, provider: INAPP_PROVIDER, status: INAPP_STATUS.RINGING_APP },
         select: { id: true },
       });
+      await withinLedgerWait(ledger.add(row.id, now.getTime())).catch(() => { throw ledgerDown(); });
       return row.id;
     });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
       throw new AppError(409, 'CALL_IN_PROGRESS', 'A Swift call on this order is already ringing. Answer it, or try again in a minute.');
+    }
+    if (err instanceof AppError && err.code === 'CALL_DAILY_LIMIT_REACHED' && deps.alertDailyCap) {
+      await deps.alertDailyCap(deps.config.maxCallsPerDay).catch(() => undefined);
     }
     throw err;
   }
@@ -264,6 +320,10 @@ export async function cancelUntakenCall(deps: InAppDeps, userId: string, callId:
   });
   if (ended.count !== 1) throw new AppError(404, 'NOT_FOUND', 'Call not found');
 }
+
+/** The URL of one of Swift's own in-app steps (the bridge's steps keep the bridge's webhookUrl). */
+const appStepUrl = (config: Pick<InAppCallsConfig, 'webhookBase'>, step: InAppStepName, callId: string) =>
+  `${config.webhookBase}/${step}?s=${encodeURIComponent(callId)}`;
 
 const hangup = (say?: string): { step: CallStep } => ({ step: say ? { verb: 'hangup', say } : { verb: 'hangup' } });
 
@@ -319,7 +379,7 @@ export async function handleInAppStep(
       if (taken.count !== 1) return hangup();
       if (order && clients.length === 0) {
         // Nobody signed in on build 13 for them: straight to their phone (bridge on), never a silent ring.
-        const fallback = await phoneFallback(deps, session, 'failed', enabled, now);
+        const fallback = await phoneFallback(deps, session, 'failed', enabled);
         if (fallback) return fallback;
       }
       if (!order || clients.length === 0) {
@@ -332,10 +392,10 @@ export async function handleInAppStep(
           clients,
           callerId: 'client:Swift',
           params: { swiftLine: callScreenLine(session.callerRole as CallerRole, order.orderType), swiftCallId: session.id },
-          answered: webhookUrl(deps.config, 'app-answered', session.id),
-          done: webhookUrl(deps.config, 'app-dial-done', session.id),
+          answered: appStepUrl(deps.config, 'app-answered', session.id),
+          done: appStepUrl(deps.config, 'app-dial-done', session.id),
           ringSeconds: INAPP_RING_SECONDS,
-          limitSeconds: CALL_TIME_LIMIT_SECONDS,
+          limitSeconds: deps.config.maxCallSeconds,
         },
       };
     }
@@ -358,13 +418,11 @@ export async function handleInAppStep(
       }
       if (session.endedAt || session.status !== INAPP_STATUS.RINGING_APP) return hangup();
       const dialStatus = first(fields, 'DialCallStatus')?.toLowerCase() ?? '';
-      const fallback = await phoneFallback(deps, session, dialStatus, enabled, now);
+      const fallback = await phoneFallback(deps, session, dialStatus, enabled);
       if (fallback) return fallback;
       await deps.prisma.callSession.updateMany({ where: { id: session.id, endedAt: null }, data: notConnected });
       return hangup(INAPP_WORDS.notReached);
     }
-    case 'app-status':
-      return { step: null };
   }
 }
 
@@ -379,11 +437,11 @@ async function phoneFallback(
   session: { id: string; orderId: string; callerRole: string; calleeRole: string },
   dialStatus: string,
   enabled: boolean,
-  now: Date,
 ): Promise<{ step: CallStep } | null> {
   if (!deps.relay || !enabled || !FALLBACK_DIAL_STATUSES.has(dialStatus)) return null;
   const order = await loadOrder(deps.prisma, session.orderId);
-  const to = order && !isTerminalOrderStatus(order.status) ? numberFor(order, session.calleeRole as CallTarget) : null;
+  // [REVIEW-M17 S1-1] The bridge's one dial guard: a complete Guyana line, never Swift's own number, an ACTIVE store.
+  const to = order && !isTerminalOrderStatus(order.status) ? dialFor(order, session.calleeRole as CallTarget, deps.relay.config.callerId) : null;
   if (!order || !to) return null;
   const moved = await deps.prisma.callSession.updateMany({
     where: { id: session.id, status: INAPP_STATUS.RINGING_APP, endedAt: null },
@@ -405,7 +463,7 @@ async function phoneFallback(
       screen: webhookUrl(deps.relay.config, 'screen', session.id),
       done: webhookUrl(deps.relay.config, 'dial-done', session.id),
       ringSeconds: CALL_RING_SECONDS,
-      limitSeconds: CALL_TIME_LIMIT_SECONDS,
+      limitSeconds: deps.relay.config.maxCallSeconds,
     },
   };
 }

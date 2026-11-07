@@ -16,7 +16,8 @@ vi.mock('react-native', () => ({
   },
 }));
 
-vi.mock('@twilio/voice-react-native-sdk', () => {
+// The SDK stand-in, handed to the service's loader (Metro's require is not a vitest module, so vi.mock cannot reach it).
+const fakeSdk = () => {
   sdkState.imported += 1;
   class Voice {
     initializePushRegistry = vi.fn(async () => { sdkState.calls.push({ m: 'initializePushRegistry', a: [] }); });
@@ -30,12 +31,12 @@ vi.mock('@twilio/voice-react-native-sdk', () => {
     });
   }
   return { Voice };
-});
+};
 
 import * as voice from './inAppVoice';
 
 beforeEach(() => {
-  voice.resetInAppVoiceForTests();
+  voice.resetInAppVoiceForTests(fakeSdk);
   rn.native = {}; rn.os = 'ios'; rn.granted = true; rn.requestResult = 'granted';
   sdkState.imported = 0; sdkState.connectFails = false; sdkState.calls = [];
 });
@@ -126,7 +127,7 @@ describe('[INAPP-CALLS · SECURITY REVIEW] sign-out / account switch', () => {
 
   it('a build without the module: nothing to unregister, no SDK import', async () => {
     rn.native = {};
-    voice.resetInAppVoiceForTests();
+    voice.resetInAppVoiceForTests(fakeSdk);
     expect(await voice.unregisterInAppCalls(async () => 'x')).toBe(false);
     expect(sdkState.imported).toBe(0);
   });

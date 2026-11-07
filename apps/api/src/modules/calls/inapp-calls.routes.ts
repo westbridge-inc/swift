@@ -3,11 +3,12 @@ import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
-import { NotificationService } from '../notification/notification.service';
+import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import type { CallProvider } from '../../providers/voice/call-provider';
 import { TwilioVoiceProvider } from '../../providers/voice/twilio-voice';
 import { callRelayEnabled, readCallRelayConfig } from './call-relay-switch';
-import { CALL_TARGETS } from './call-bridge';
+import { CALL_TARGETS, type ServiceDayLedger } from './call-bridge';
+import { dailyCapNotice, redisServiceDayLedger } from './calls.routes';
 import { inAppCallsEnabled, readInAppCallsConfig, type InAppCallsConfig } from './inapp-calls-switch';
 import {
   INAPP_STEPS,
@@ -37,6 +38,8 @@ import {
 export interface InAppRoutesOptions {
   /** Tests inject a provider that never reaches a network (signature checks + rendering). */
   provider?: (twilio: InAppCallsConfig['twilio']) => CallProvider;
+  /** Tests may inject the service's daily list; by default it is the bridge's list in Redis (one budget). */
+  ledger?: ServiceDayLedger;
 }
 
 const defaultProvider = (twilio: InAppCallsConfig['twilio']): CallProvider => new TwilioVoiceProvider(twilio);
@@ -62,7 +65,18 @@ const callIdParam = z.object({ callId: z.string().min(1).max(40) });
 export async function inAppCallsRoutes(app: FastifyInstance, opts: InAppRoutesOptions = {}): Promise<void> {
   const notifications = new NotificationService(app.prisma, app.io);
   const providerFor = opts.provider ?? defaultProvider;
-  const depsFor = (config: InAppCallsConfig): InAppDeps => ({ prisma: app.prisma, config, relay: liveRelay(providerFor), notifications });
+  const depsFor = (config: InAppCallsConfig): InAppDeps => ({
+    prisma: app.prisma, config, relay: liveRelay(providerFor), notifications,
+    ledger: opts.ledger ?? redisServiceDayLedger(app.redis),
+    // [REVIEW-G23 S3-2] The bridge's own operator notice, deduped with it once per UTC day.
+    alertDailyCap: async (max) => {
+      const words = dailyCapNotice(max);
+      await notifyAdmins(app.prisma, notifications, {
+        ...words, tenantId: null, data: { kind: 'call_daily_cap' },
+        dedupeKey: `call-daily-cap:${new Date().toISOString().slice(0, 10)}`,
+      });
+    },
+  });
 
   app.get('/config', { preHandler: [app.authenticate] }, async () => ({ success: true, data: { enabled: liveConfig() !== null } }));
 

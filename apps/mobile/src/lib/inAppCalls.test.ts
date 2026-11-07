@@ -25,6 +25,12 @@ describe('[INAPP-CALLS] words', () => {
     expect(inAppErrorText('INAPP_NOT_FOR_TARGET')).toContain('Call via Swift');
   });
 
+  it('the bridge\'s daily rules (owner 6 Nov) read exactly as they do for Call via Swift', () => {
+    expect(inAppErrorText('CALL_CALLER_BUSY')).toBe('You already have a Swift call ringing. Answer it, or try again in a minute.');
+    expect(inAppErrorText('CALL_USER_DAILY_LIMIT_REACHED')).toBe('You have used your Swift calls for today. Message them in chat, or ask support.');
+    expect(inAppErrorText('CALL_DAILY_LIMIT_REACHED')).toBe('Swift calls are busy right now. Message them in chat, or ask support.');
+  });
+
   it('the microphone is explained before it is asked for, and says Swift never records', () => {
     expect(INAPP_WORDS.micWhy).toBe('Swift needs the microphone so you can talk on in-app calls. Swift never records calls.');
     expect(INAPP_WORDS.label).toBe('Call in app');

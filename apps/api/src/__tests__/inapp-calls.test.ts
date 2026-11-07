@@ -3,7 +3,8 @@
  * The provider is the REAL Twilio adapter (signature checks + TwiML rendering) over a stubbed fetch:
  * nothing reaches a network. Every webhook is signed exactly as Twilio signs (full URL + form).
  *
- * Every party has a real, distinct number from testPhone() (the run-wide fictional +59206 block),
+ * Every party has a distinct number in the shape of a Guyana mobile line (gyPhone(), as the bridge's own suite:
+ * [REVIEW-M17 S1-1] the dial guard refuses the fictional +5920 test block), never dialled (fetch is stubbed),
  * so a number anywhere it must not be (token, call screen line, row, response) is a leak.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
@@ -16,9 +17,11 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { callsRoutes, callVoiceRoutes } from '../modules/calls/calls.routes';
+import { callsRoutes, callVoiceRoutes, redisServiceDayLedger } from '../modules/calls/calls.routes';
+import { CALL_DAY_PREFIX, SERVICE_DAY_KEY, type ServiceDayLedger } from '../modules/calls/call-bridge';
 import { inAppCallsRoutes, inAppVoiceRoutes } from '../modules/calls/inapp-calls.routes';
 import { inAppIdentity } from '../modules/calls/inapp-calls-switch';
+import type { CallRelayConfig } from '../modules/calls/call-relay-switch';
 import { TwilioVoiceProvider } from '../providers/voice/twilio-voice';
 import { twilioSignature } from '../modules/notification/sms-inbound.routes';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
@@ -39,6 +42,9 @@ const CALLER_ID = '+15005550006';
 const BASE = 'https://api.example.test/api/v1/calls/voice';
 const INAPP_ON = {
   INAPP_CALLS: '1', CALL_RELAY_WEBHOOK_BASE: BASE, CALL_RELAY_MAX_ATTEMPTS_PER_ORDER: '3',
+  // [owner 6 Nov] The daily caps' own tests set them; every other test runs well under them. The call length is
+  // the longest allowed (30) so the older documents keep their numbers; the default (10) has its own test.
+  CALL_RELAY_MAX_CALLS_PER_DAY: '10000', CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY: '200', CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY: '200', CALL_RELAY_MAX_CALL_MINUTES: '30',
   INAPP_CALLS_TWIML_APP_SID: APP_SID, INAPP_CALLS_PUSH_CREDENTIAL_IOS: CRED_IOS, INAPP_CALLS_PUSH_CREDENTIAL_ANDROID: CRED_ANDROID,
   INAPP_CALLS_IDENTITY_SECRET: IDENTITY_SECRET,
   TWILIO_ACCOUNT_SID: SID, TWILIO_API_KEY_SID: KEY, TWILIO_API_KEY_SECRET: KEY_SECRET, TWILIO_WEBHOOK_AUTH_TOKEN: TOKEN,
@@ -46,17 +52,27 @@ const INAPP_ON = {
 const RELAY_ON = { CALL_RELAY: '1', CALL_RELAY_CALLER_ID: CALLER_ID };
 const ALL_KEYS = [...Object.keys(INAPP_ON), ...Object.keys(RELAY_ON)];
 const NUM = String(Date.now()).slice(-5);
+/** [REVIEW-M17 S1-1] A complete Guyana mobile number in shape, distinct within the run (fetch is stubbed: never dialled). */
+let gySeq = Math.floor(Math.random() * 9000);
+const gyPhone = () => `+592698${String((gySeq++ % 9000) + 1000)}`;
 const DAY = 86_400_000;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'inapp-calls-test');
 const http = (async () => new Response('{}', { status: 500 })) as unknown as typeof fetch;
 
 let app: FastifyInstance;
+/** [REVIEW-M17 S2-1] The real service day list, except that it fails on demand (the faulty door below). */
+let ledgerFault: 'none' | 'count-throws' | 'add-throws' = 'none';
+const realLedger = () => redisServiceDayLedger(app.redis);
+const faultyLedger: ServiceDayLedger = {
+  count: async (since) => { if (ledgerFault === 'count-throws') throw new Error('redis down'); return realLedger().count(since); },
+  add: async (member, at) => { if (ledgerFault === 'add-throws') throw new Error('redis down'); return realLedger().add(member, at); },
+  remove: async (member) => realLedger().remove(member),
+};
 const users: string[] = [];
 const orderIds: string[] = [];
 
 type Person = { id: string; token: string; phone: string; sessionId: string; deviceId: string };
-async function person(n: number, roles: string[], active: string, extra: Record<string, unknown> = {}): Promise<Person> {
-  const phone = testPhone();
+async function person(n: number, roles: string[], active: string, extra: Record<string, unknown> = {}, phone = gyPhone()): Promise<Person> {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone, firstName: 'Inapp', lastName: `Party${n}`, roles: roles as never, activeRole: active as never,
     countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true, selfieCapturedAt: new Date(), tenantId: 'swift-default', ...extra,
@@ -82,8 +98,8 @@ async function order(data: Record<string, unknown>) {
 
 let diner: Person, riderP: Person, sender: Person, courierP: Person, owner: Person, staff: Person, passenger: Person, driverP: Person, stranger: Person;
 let riderId = '', courierRiderId = '', driverId = '', vendorId = '';
-const STORE_LINE = testPhone();
-const RECIPIENT = testPhone();
+const STORE_LINE = gyPhone();
+const RECIPIENT = gyPhone();
 const allPhones = () => [diner, riderP, sender, courierP, owner, staff, passenger, driverP, stranger].map((p) => p.phone).concat(STORE_LINE, RECIPIENT);
 /** The identity of a person's ONE current session (per user + session + device; rotates on sign-out). */
 const id = (p: Pick<Person, 'id' | 'sessionId' | 'deviceId'>) => inAppIdentity(IDENTITY_SECRET, p.id, p.sessionId, p.deviceId);
@@ -100,11 +116,13 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   const provider = (twilio: ConstructorParameters<typeof TwilioVoiceProvider>[0]) => new TwilioVoiceProvider(twilio, http);
-  await app.register(callsRoutes, { prefix: '/api/v1/calls', provider: (c) => provider(c.twilio) });
-  await app.register(callVoiceRoutes, { prefix: '/api/v1/calls/voice', provider: (c) => provider(c.twilio) });
+  await app.register(callsRoutes, { prefix: '/api/v1/calls', provider: (c: CallRelayConfig) => provider(c.twilio) });
+  await app.register(callVoiceRoutes, { prefix: '/api/v1/calls/voice', provider: (c: CallRelayConfig) => provider(c.twilio) });
   await app.register(inAppCallsRoutes, { prefix: '/api/v1/calls/app', provider });
+  await app.register(inAppCallsRoutes, { prefix: '/api/v1/calls/app-faulty', provider, ledger: faultyLedger });
   await app.register(inAppVoiceRoutes, { prefix: '/api/v1/calls/voice', provider });
   await app.ready();
+  for (const key of await app.redis.keys(`${CALL_DAY_PREFIX}*`)) await app.redis.del(key);
 
   diner = await person(1, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
   sender = await person(2, ['CUSTOMER'], 'CUSTOMER', { customer: { create: {} } });
@@ -148,6 +166,7 @@ afterAll(async () => {
     await app.prisma.customer.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.user.deleteMany({ where: { id: { in: users } } });
   });
+  for (const key of await app.redis.keys(`${CALL_DAY_PREFIX}*`)) await app.redis.del(key);
   await app.close();
 });
 
@@ -156,9 +175,14 @@ function setEnv(env: Record<string, string>) {
   for (const k of ALL_KEYS) delete process.env[k];
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
 }
-beforeEach(() => {
+beforeEach(async () => {
   for (const k of ALL_KEYS) saved[k] = process.env[k];
   setEnv(INAPP_ON);
+  // [owner 6 Nov] One live call per PERSON across orders: every test starts with this suite's calls over, as
+  // real calls end (Twilio's status callback), so one test's ringing row never makes the next test's caller busy.
+  if (users.length) {
+    await system(() => app.prisma.callSession.updateMany({ where: { callerUserId: { in: users }, endedAt: null }, data: { endedAt: new Date(), status: 'NOT_CONNECTED' } }));
+  }
 });
 afterEach(() => {
   for (const k of ALL_KEYS) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
@@ -533,9 +557,12 @@ describe('[INAPP-CALLS] identity per session: a signed-out phone is never rung, 
     const phone2 = await secondSession(riderP, 'rider-phone3');
     const o1 = await liveFood();
     const first = (await start(diner.token, o1.id, 'rider')).json().data.callId;
-    const ring1 = (await connect(first, diner)).r.body;
+    const { r: ringing1, callSid: sid1 } = await connect(first, diner);
+    const ring1 = ringing1.body;
     expect(ring1).toContain(`<Identity>${id(riderP)}</Identity>`);
     expect(ring1).toContain(`<Identity>${id(phone2)}</Identity>`);
+    // the first call ends (one live call per person) before the second
+    await hook('app-status', { CallSid: sid1, CallStatus: 'completed' });
     await signOut(phone2);
     const o2 = await liveFood();
     const second = (await start(diner.token, o2.id, 'rider')).json().data.callId;
@@ -578,6 +605,103 @@ describe('[INAPP-CALLS] identity per session: a signed-out phone is never rung, 
       expect((await session(callId)).status).toBe('CALLER_CONFIRMED');
     } finally {
       for (const p of parked) await system(() => app.prisma.session.update({ where: { id: p.id }, data: { expiresAt: p.expiresAt } }));
+    }
+  });
+});
+
+// [owner 6 Nov · #2379] The bridge's daily rules hold for in-app calls too, over the same rows and the same service
+// list: one budget for every Swift call (an in-app call can fall back to a paid phone leg).
+describe('[INAPP-CALLS] the bridge\'s daily rules: one live call per person, the person\'s day, the service\'s day', () => {
+  const pastRow = (callerUserId: string, callerRole: string, orderId: string, status = 'NOT_CONNECTED') => system(() => app.prisma.callSession.create({
+    data: { orderId, callerUserId, callerRole, calleeRole: callerRole === 'customer' ? 'rider' : 'customer', provider: 'twilio', status, endedAt: new Date(), tenantId: 'swift-default' } as never,
+  }));
+
+  it('one live call per person: a ringing in-app call on one order refuses a start on another (409 CALL_CALLER_BUSY)', async () => {
+    const o1 = await liveFood();
+    const o2 = await liveFood();
+    expect((await start(diner.token, o1.id, 'rider')).statusCode).toBe(200);
+    const busy = await start(diner.token, o2.id, 'rider');
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json().error.code).toBe('CALL_CALLER_BUSY');
+    expect(await rowsFor(o2.id)).toHaveLength(0);
+  });
+
+  it('the person\'s day counts bridged and in-app calls together, by their role on the order; FAILED starts do not count', async () => {
+    setEnv({ ...INAPP_ON, CALL_RELAY_MAX_CALLS_PER_CUSTOMER_PER_DAY: '2', CALL_RELAY_MAX_CALLS_PER_PARTNER_PER_DAY: '200' });
+    const used = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: sender.id, vendorId, riderId, status: 'DELIVERED', acceptedAt: new Date() });
+    const before = await system(() => app.prisma.callSession.count({ where: { callerUserId: sender.id, callerRole: 'customer', status: { not: 'FAILED' }, createdAt: { gte: new Date(Date.now() - DAY) } } }));
+    expect(before).toBe(0);
+    await pastRow(sender.id, 'customer', used.id);              // a bridged call earlier today
+    await pastRow(sender.id, 'customer', used.id, 'FAILED');    // nothing dialled: no slot
+    const o = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: sender.id, vendorId, riderId, status: 'PICKED_UP', acceptedAt: new Date() });
+    const second = await start(sender.token, o.id, 'rider');
+    expect(second.statusCode, second.body).toBe(200);
+    await app.inject({ method: 'POST', url: `/api/v1/calls/app/${second.json().data.callId}/cancel`, headers: auth(sender.token) });
+    const third = await start(sender.token, o.id, 'rider');
+    expect(third.statusCode).toBe(429);
+    expect(third.json().error.code).toBe('CALL_USER_DAILY_LIMIT_REACHED');
+    // the rider on the same order is a partner: their own day, not the customer's
+    expect((await start(riderP.token, o.id, 'customer')).statusCode).toBe(200);
+  });
+
+  it('the service\'s day: at the shared cap the start is refused (429 CALL_DAILY_LIMIT_REACHED) and nothing is written', async () => {
+    const o = await liveFood();
+    await pastRow(diner.id, 'customer', o.id);
+    const today = await system(() => app.prisma.callSession.count({ where: { status: { not: 'FAILED' }, createdAt: { gte: new Date(Date.now() - DAY) } } }));
+    setEnv({ ...INAPP_ON, CALL_RELAY_MAX_CALLS_PER_DAY: String(today) });
+    const rowsBefore = (await rowsFor(o.id)).length;
+    const res = await start(diner.token, o.id, 'rider');
+    expect(res.statusCode).toBe(429);
+    expect(res.json().error.code).toBe('CALL_DAILY_LIMIT_REACHED');
+    expect(await rowsFor(o.id)).toHaveLength(rowsBefore);
+  });
+
+  it('every start is written to the bridge\'s service list (call id and time only); the list going down refuses the start (503), no row', async () => {
+    const o = await liveFood();
+    const ok = await start(diner.token, o.id, 'rider');
+    expect(ok.statusCode).toBe(200);
+    expect(await app.redis.zscore(SERVICE_DAY_KEY, ok.json().data.callId)).not.toBeNull();
+    await app.inject({ method: 'POST', url: `/api/v1/calls/app/${ok.json().data.callId}/cancel`, headers: auth(diner.token) });
+    for (const fault of ['count-throws', 'add-throws'] as const) {
+      const o2 = await liveFood();
+      ledgerFault = fault;
+      try {
+        const res = await app.inject({ method: 'POST', url: '/api/v1/calls/app-faulty', headers: auth(diner.token), payload: { orderId: o2.id, target: 'rider', platform: 'ios' } });
+        expect(res.statusCode, fault).toBe(503);
+        expect(res.json().error.code).toBe('CALL_PROVIDER_FAILED');
+        expect(await rowsFor(o2.id), fault).toHaveLength(0);
+      } finally { ledgerFault = 'none'; }
+    }
+  });
+
+  it('the call length is the owner\'s 10 minutes by default, on the app leg and the phone fallback leg', async () => {
+    const env: Record<string, string> = { ...INAPP_ON, ...RELAY_ON };
+    delete env['CALL_RELAY_MAX_CALL_MINUTES'];
+    setEnv(env);
+    const o = await liveFood();
+    const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
+    const { r } = await connect(callId, diner);
+    expect(r.body).toContain('<Dial callerId="client:Swift" timeout="20" timeLimit="600"');
+    const done = await hook('app-dial-done', { DialCallStatus: 'no-answer' }, { s: callId });
+    expect(done.body).toMatch(new RegExp(`<Dial callerId="\\${CALLER_ID}" timeout="25" timeLimit="600"`));
+  });
+
+  it('the phone fallback rings only a number the bridge\'s dial guard accepts: an off-plan number is never dialled', async () => {
+    setEnv({ ...INAPP_ON, ...RELAY_ON });
+    const offPlan = await person(10, ['RIDER', 'CUSTOMER'], 'RIDER', {}, testPhone());
+    const offPlanRider = (await system(() => app.prisma.rider.create({ data: { userId: offPlan.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }))).id;
+    try {
+      const o = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', customerId: diner.id, vendorId, riderId: offPlanRider, status: 'PICKED_UP', acceptedAt: new Date() });
+      const { callId } = (await start(diner.token, o.id, 'rider')).json().data;
+      await connect(callId, diner);
+      const done = await hook('app-dial-done', { DialCallStatus: 'no-answer' }, { s: callId });
+      expect(done.body).not.toContain('<Number');
+      expect(done.body).not.toContain(offPlan.phone);
+      expect(done.body).toContain("We couldn't reach them.");
+      expect((await session(callId)).status).toBe('NOT_CONNECTED');
+    } finally {
+      await system(() => app.prisma.order.updateMany({ where: { riderId: offPlanRider }, data: { riderId: null } }));
+      await system(() => app.prisma.rider.delete({ where: { id: offPlanRider } }));
     }
   });
 });

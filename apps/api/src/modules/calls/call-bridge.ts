@@ -91,7 +91,7 @@ export const CALL_DAY_PREFIX = 'swift:call-day:';
 export const SERVICE_DAY_KEY = `${CALL_DAY_PREFIX}all`;
 /** [REVIEW-G23 S3-3] The longest Swift waits for the list: a down Redis refuses the start fast (503), never a hung transaction. */
 export const LEDGER_WAIT_MS = 1_000;
-function withinLedgerWait<T>(work: Promise<T>): Promise<T> {
+export function withinLedgerWait<T>(work: Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('call day list did not answer')), LEDGER_WAIT_MS);
     timer.unref?.();
@@ -100,7 +100,7 @@ function withinLedgerWait<T>(work: Promise<T>): Promise<T> {
 }
 
 /** [owner 6 Nov ~11:10Z] A rider, driver or store on the order is a partner; the order's customer is a customer. */
-const PARTNER_ROLES = ['rider', 'driver', 'store'] as const;
+export const PARTNER_ROLES = ['rider', 'driver', 'store'] as const;
 
 /** [CALL-RELAY-ON] The one lock every start takes before it counts the day's calls. */
 export const CALL_DAILY_CAP_LOCK = 'swift:call-relay-daily-cap';
