@@ -19,8 +19,8 @@ import type { PrismaClient } from '@prisma/client';
  *
  * The values compare against the phone's native build number, which is what
  * each store counts: the iPhone's build (CFBundleVersion: 9, 10, 11, 12 …)
- * and Android's versionCode (5, 6, 7, 8 …). Every Swift binary is version
- * 1.0.0, so the marketing version cannot tell them apart.
+ * and Android's versionCode (5, 6, 7, 8 …). The marketing version moves
+ * rarely (1.0.0 to build 12, 1.1.0 from build 13), so it cannot tell builds apart.
  */
 export const MIN_BUILD_KEYS = {
   ios: 'app_min_build_ios',

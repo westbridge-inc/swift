@@ -36,6 +36,14 @@ describe('over-the-air updates (L13 item 7)', () => {
     expect(config.runtimeVersion).toEqual({ policy: 'appVersion' });
   });
 
+  // [INAPP-CALLS · native review S1] Build 13 adds native in-app calling: a new runtime, so an update published
+  // for the 1.0.0 binaries (builds 11/12) can never land on it, and the reverse.
+  it('build 13 is version 1.1.0, its own update runtime', async () => {
+    vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
+    const config = await loadConfig();
+    expect(config.version).toBe('1.1.0');
+  });
+
   it('an EAS build points at its project\'s update server and never blocks launch on the network', async () => {
     vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
     vi.stubEnv('EAS_PROJECT_ID', PROJECT_ID);

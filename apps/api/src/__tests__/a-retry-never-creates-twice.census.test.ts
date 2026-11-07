@@ -288,6 +288,8 @@ const OUT: Record<string, string> = {
   [`${CUSTOMER}|POST|/team-invites/:id/accept`]: 'Joins an advertiser/store team; no order or money.',
   [`${ADMIN}|POST|/ads/house`]: 'Uploads a house (Swift\'s own) ad creative; no advertiser, invoice or spend.',
   [`${ADMIN}|POST|/approvals/:id/cancel`]: 'An admin withdraws their own pending approval request; nothing is executed.',
+  // [INAPP-CALLS] The caller's phone could not connect: one compare-and-set on its own untaken call row.
+  'modules/calls/inapp-calls.routes.ts|POST|/:callId/cancel': 'The caller ends their own in-app call the provider never took (one compare-and-set: RINGING_APP, untaken, not ended -> NOT_CONNECTED); a retry finds nothing open (404). Creates no row and moves no money.',
 };
 
 /** Real gaps, each with its own server-fix PR to come (tolerated while listed). */
@@ -297,6 +299,8 @@ const PENDING_FIX: Record<string, string> = {
 
 /** Registrations the census cannot read (reviewed): not a creator of the eight. */
 const UNREADABLE: Record<string, string> = {
+  // [INAPP-CALLS] The provider's signed in-app call webhooks, one per INAPP_STEPS entry.
+  'modules/calls/inapp-calls.routes.ts|POST|`/${step}`': "The voice provider's signed in-app call steps (app, app-answered, app-dial-done, app-status from INAPP_STEPS): each moves one call_sessions row by compare-and-set (the connect is single use on its CallSid); no order and no money row.",
   'modules/rider/rider.routes.ts|PUT|`/orders/:id/${slug}`': "The rider's in-transit steps from STATUS_TRANSITIONS (en-route-pickup, arrived-pickup, picked-up, en-route-delivery, arrived): each moves the status through the order compare-and-set; no money row (earnings at delivered, cash at handover).",
 };
 

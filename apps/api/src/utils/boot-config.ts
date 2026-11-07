@@ -7,6 +7,7 @@ import { powerTranzConfigFromEnv } from '../providers/card/powertranz-provider';
 import { testControlEnabled } from '../modules/ops/test-control';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertCallRelayConfig } from '../modules/calls/call-relay-switch';
+import { assertInAppCallsConfig } from '../modules/calls/inapp-calls-switch';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
 import { identitySalt } from '../modules/integrity/normalize';
@@ -204,6 +205,8 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // [O-1] The Swift call bridge, in EVERY mode: CALL_RELAY=1 needs Swift's caller ID, the
   // public webhook address and the Twilio account, key and webhook token, or nothing starts.
   assertCallRelayConfig(env);
+  // [INAPP-CALLS] INAPP_CALLS=1 needs the TwiML App, both push credentials, the identity key and the Twilio account.
+  assertInAppCallsConfig(env);
   // Validate the documented retention setting in every mode. Production
   // salts are checked below after the existing configuration guards.
   scanRawRetentionDays(env);

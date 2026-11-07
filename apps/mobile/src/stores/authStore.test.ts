@@ -13,6 +13,13 @@ const preparePushTokenForLogout = vi.fn(async () => 'ExponentPushToken[device-a]
 const revokeAuthSession = vi.fn(async () => undefined);
 const stopMoverLocation = vi.fn(async () => undefined);
 const disconnectSocket = vi.fn(() => undefined);
+// [INAPP-CALLS · SECURITY REVIEW] The in-app call binding is removed with the OLD session's token, before revoke.
+const teardownOrder: string[] = [];
+const inAppUnregisterToken = vi.fn(async (accessToken: string, platform: string) => `unreg:${accessToken}:${platform}`);
+const unregisterInAppCalls = vi.fn(async (fetchToken: (platform: 'ios' | 'android') => Promise<string>) => {
+  teardownOrder.push(`unregister:${await fetchToken('ios')}`);
+  return true;
+});
 
 vi.mock('../lib/storage', () => ({
   zustandStorage: {
@@ -27,7 +34,11 @@ vi.mock('expo-crypto', () => ({
   randomUUID: () => `test-ad-scope-${++scopeSequence.value}`,
 }));
 vi.mock('../services/push', () => ({ preparePushTokenForLogout }));
-vi.mock('../services/api', () => ({ revokeAuthSession }));
+vi.mock('../services/api', () => ({
+  revokeAuthSession: (...args: unknown[]) => { teardownOrder.push('revoke'); return (revokeAuthSession as (...a: unknown[]) => Promise<undefined>)(...args); },
+  inAppUnregisterToken,
+}));
+vi.mock('../services/inAppVoice', () => ({ unregisterInAppCalls }));
 vi.mock('../services/backgroundLocation', () => ({ stopMoverLocation }));
 vi.mock('../services/socket', () => ({ disconnectSocket }));
 vi.mock('./storeSwitcher', () => ({
@@ -348,6 +359,27 @@ describe('authStore session boundaries', () => {
     expect(disconnectSocket).toHaveBeenCalledWith(aSession);
   });
 
+  it('[INAPP-CALLS] logout and account switch unregister the in-app call binding with the OLD session\'s token, before revoking it', async () => {
+    teardownOrder.length = 0;
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    useAuthStore.getState().logout();
+    useAuthStore.getState().setAuth(user('b'), 'access-b', 'refresh-b');
+    await vi.waitFor(() => expect(teardownOrder).toEqual(['unregister:unreg:access-a:ios', 'revoke']));
+    expect(inAppUnregisterToken).toHaveBeenCalledWith('access-a', 'ios');
+    // switching straight from B to C (no explicit logout) tears B down the same way
+    teardownOrder.length = 0;
+    useAuthStore.getState().setAuth(user('c'), 'access-c', 'refresh-c');
+    await vi.waitFor(() => expect(teardownOrder).toEqual(['unregister:unreg:access-b:ios', 'revoke']));
+  });
+
+  it('[INAPP-CALLS] a failed unregister never stops the revoke', async () => {
+    teardownOrder.length = 0;
+    unregisterInAppCalls.mockRejectedValueOnce(new Error('offline'));
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    useAuthStore.getState().logout();
+    await vi.waitFor(() => expect(teardownOrder).toEqual(['revoke']));
+  });
+
   it('ignores a stale refresh failure after a new principal boundary', () => {
     useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
     const staleA = getAuthSessionSnapshot()!;
@@ -661,14 +693,17 @@ describe('business-entry state never crosses a principal boundary', () => {
 describe('the account whose session ended last (owner of a tap made while signed out)', () => {
   // Each case lets its one session's lazy teardown (GPS, socket, server
   // revoke) finish inside the test, so no import outlives the file.
-  const teardownFinished = () => vi.waitFor(() => {
+  // [INAPP-CALLS] The revoke now waits for the in-app unregister first, so an EARLIER test's lazy revoke (one that
+  // did not wait for its own teardown) can land during this one: count only this case's own session (its own
+  // refresh token), which must be revoked exactly once.
+  const teardownFinished = (refreshToken: string) => vi.waitFor(() => {
     expect(stopMoverLocation).toHaveBeenCalledOnce();
     expect(disconnectSocket).toHaveBeenCalledOnce();
-    expect(revokeAuthSession).toHaveBeenCalledOnce();
+    expect((revokeAuthSession.mock.calls as unknown[][]).filter((call) => call[0] === refreshToken)).toHaveLength(1);
   });
 
   it('is the account a logout ended; signing in, a stale 401 and a repeat logout change nothing', async () => {
-    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-last-a');
     const a = getAuthSessionSnapshot()!;
     useAuthStore.getState().logout();
     expect(getLastSignedOutUserId()).toBe('a');
@@ -679,13 +714,13 @@ describe('the account whose session ended last (owner of a tap made while signed
     expect(getLastSignedOutUserId()).toBe('a'); // signing in is not a session end
     expect(useAuthStore.getState().logoutIfCurrent(a)).toBe(false);
     expect(getLastSignedOutUserId()).toBe('a'); // A's stale 401 ends nothing
-    await teardownFinished();
+    await teardownFinished('refresh-last-a');
   });
 
   it('is the account a 401 logout ended', async () => {
-    useAuthStore.getState().setAuth(user('c'), 'access-c', 'refresh-c');
+    useAuthStore.getState().setAuth(user('c'), 'access-c', 'refresh-last-c');
     expect(useAuthStore.getState().logoutIfCurrent(getAuthSessionSnapshot()!)).toBe(true);
     expect(getLastSignedOutUserId()).toBe('c');
-    await teardownFinished();
+    await teardownFinished('refresh-last-c');
   });
 });

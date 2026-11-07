@@ -32,6 +32,7 @@ import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
 import { CallParty } from '../../../components/CallParty';
+import { CallInApp } from '../../../components/CallInApp';
 import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import { RECIPIENT_CALL_WORDS } from '../../../lib/callBridge';
 import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
@@ -842,6 +843,18 @@ export function ActiveJobScreen({ navigation }: any) {
                     </Pressable>
                   )}
                 </CallParty>
+                {/* [INAPP-CALLS] Build 13+, switch on: call inside the app (their phone shows a Swift call screen). */}
+                <CallInApp orderId={job?.id} target="customer">
+                  {(call) => (
+                    <Pressable onPress={call.onPress} disabled={call.busy} hitSlop={6} accessibilityRole="button" accessibilityLabel={call.a11y} accessibilityHint={call.hint}>
+                      {({ pressed }) => (
+                        <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, marginRight: space.sm, opacity: pressed || call.busy ? 0.7 : 1 }}>
+                          <Feather name="headphones" size={17} color={dk.success} />
+                        </View>
+                      )}
+                    </Pressable>
+                  )}
+                </CallInApp>
                 <Pressable onPress={() => navigation.navigate('Conversation', { orderId: job.id, title: custName ?? 'Customer' })} hitSlop={6}>
                   {({ pressed }) => (
                     <View style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.cardSoft, opacity: pressed ? 0.7 : 1 }}>

@@ -20,6 +20,7 @@ import { toast } from '../../../kit/toast';
 import { parsePartyCaseView, partyCaseWorthShowing, storeCanConfirmReturn } from '../../../lib/custodyRecovery';
 import { money } from '../../../lib/money';
 import { CallParty } from '../../../components/CallParty';
+import { CallInApp } from '../../../components/CallInApp';
 import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import type { CallTarget } from '../../../lib/callBridge';
 import {
@@ -115,6 +116,10 @@ function ContactCard({
         <CallParty orderId={orderId} target={target} phone={phone} dialFailText={`Couldn't start the call — dial the ${title.toLowerCase()} directly.`}>
           {(call) => <PillButton label={call.label} variant="soft" size="sm" disabled={call.busy} onPress={call.onPress} />}
         </CallParty>
+        {/* [INAPP-CALLS] Build 13+, switch on: call inside the app (never the parcel recipient). */}
+        <CallInApp orderId={orderId} target={target}>
+          {(call) => <PillButton label={call.label} variant="soft" size="sm" disabled={call.busy} onPress={call.onPress} />}
+        </CallInApp>
       </View>
       {(lines ?? []).filter(Boolean).map((l, i) => (
         <View key={i} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: i === 0 ? space.md : 4 }}>

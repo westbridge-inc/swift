@@ -21,6 +21,12 @@ const cameraPermission =
   // is the only place a person is told what the camera is for, so a use the
   // string does not name is a use they never agreed to.
   'Swift uses the camera for your profile selfie, to photograph documents and deliveries, and to scan a store QR code.';
+// [INAPP-CALLS · owner 6 Nov 2026, "B"] In-app calls (build 13) use the microphone during a call the
+// person places or answers, and only then. Nothing is recorded. This is the only microphone use in Swift:
+// expo-camera, expo-image-picker and expo-audio are given these same words below (never `false`, which deletes
+// the key) and still never record (their Android recording options stay off).
+const microphonePermission =
+  'Swift uses the microphone only during in-app calls with your rider, driver, store or customer. Swift never records calls.';
 const photosPermission =
   'Swift needs your photo library so you can attach an existing photo to a delivery, a document or a support message.';
 
@@ -195,7 +201,11 @@ const config: SwiftExpoConfig = {
   name: 'SwiftGY',
   slug: 'swift',
   scheme: 'swift',
-  version: '1.0.0',
+  // [INAPP-CALLS · native review S1] 1.1.0 from build 13: the first binary with native in-app calling. With the
+  // runtime pinned to this version (below), an update published for 1.0.0 (builds 11/12) never reaches build 13,
+  // and one published from here (1.1.0) never reaches 11/12. A fix for builds 11/12 is published from a branch
+  // still at 1.0.0. The store also needs a new version number for a new binary after 1.0.0 is released.
+  version: '1.1.0',
   // [L13 item 7 · owner decision 4] Over-the-air updates. The runtime is pinned
   // explicitly to the app version: an update published for 1.0.0 only reaches
   // binaries built as 1.0.0, so JavaScript never lands on native code it was
@@ -254,7 +264,10 @@ const config: SwiftExpoConfig = {
       // cannot proceed. [Founder: this is a legal self-classification under
       // the US EAR — worth a five-minute check with counsel.]
       ITSAppUsesNonExemptEncryption: false,
-      UIBackgroundModes: ['location', 'remote-notification', 'fetch'],
+      // [INAPP-CALLS] 'voip' carries the incoming in-app call (PushKit -> CallKit) and 'audio' keeps the
+      // call's sound running while the phone is locked or Swift is in the background. Used for calls only.
+      UIBackgroundModes: ['location', 'remote-notification', 'fetch', 'voip', 'audio'],
+      NSMicrophoneUsageDescription: microphonePermission,
       // TLS pinning for the production API domain (iOS 14+ system pinning —
       // config only, no runtime library). Pinned to the Let's Encrypt roots'
       // SPKI hashes (ISRG Root X1 + X2, both computed from the published
@@ -356,13 +369,14 @@ const config: SwiftExpoConfig = {
       'POST_NOTIFICATIONS',
     ],
     // Permissions pulled in transitively for capabilities Swift does not have.
-    // Play scrutinises both: RECORD_AUDIO arrives with expo-camera/image-picker
-    // even though nothing records audio (expo-audio only PLAYS the job ring,
-    // its recorder is never used; no expo-av, no expo-media-library), and
-    // SYSTEM_ALERT_WINDOW is a special permission nothing here asks for.
-    // Shipping a permission you cannot justify is a policy finding on its own.
+    // SYSTEM_ALERT_WINDOW is a special permission nothing here asks for, and
+    // shipping a permission you cannot justify is a policy finding on its own.
+    // [INAPP-CALLS · build 13] RECORD_AUDIO is no longer blocked: in-app calls
+    // (@twilio/voice-react-native-sdk) need the microphone during a call, asked
+    // for in plain words at the first call. Nothing records audio: expo-audio
+    // only PLAYS the job ring, and the camera / image-picker microphone options
+    // stay off below.
     blockedPermissions: [
-      'android.permission.RECORD_AUDIO',
       'android.permission.SYSTEM_ALERT_WINDOW',
     ],
   },
@@ -401,7 +415,9 @@ const config: SwiftExpoConfig = {
     [
       'expo-audio',
       {
-        microphonePermission: false,
+        // [INAPP-CALLS] The same words, never `false`: `false` makes the plugin DELETE the iOS purpose string
+        // (expo/config-plugins ios/Permissions: `if (permissions[p] === false) delete infoPlist[p]`).
+        microphonePermission,
         recordAudioAndroid: false,
         enableBackgroundPlayback: false,
         enableBackgroundRecording: false,
@@ -448,7 +464,9 @@ const config: SwiftExpoConfig = {
         // NSMicrophoneUsageDescription and Android RECORD_AUDIO for a
         // capability the app does not have — a purpose string a reviewer can
         // ask about and we could not justify.
-        microphonePermission: false,
+        // [INAPP-CALLS] The same words, never `false`: `false` makes the plugin DELETE the iOS purpose string
+        // (expo/config-plugins ios/Permissions: `if (permissions[p] === false) delete infoPlist[p]`).
+        microphonePermission,
         recordAudioAndroid: false,
       },
     ],
@@ -457,12 +475,18 @@ const config: SwiftExpoConfig = {
       {
         photosPermission,
         cameraPermission,
-        microphonePermission: false,
+        // [INAPP-CALLS] The same words, never `false`: `false` makes the plugin DELETE the iOS purpose string
+        // (expo/config-plugins ios/Permissions: `if (permissions[p] === false) delete infoPlist[p]`).
+        microphonePermission,
       },
     ],
     // Android half of the api.swiftgy.com TLS pinning (iOS half: NSPinnedDomains
     // in infoPlist above).
     './plugins/withTlsPinning.js',
+    // [INAPP-CALLS] Android wiring for in-app calls: the call SDK's application proxy, call intents only
+    // (no prompt at start, never keeps the screen on), and ONE Firebase receiver that sends Twilio calls to
+    // the SDK and every other push to expo-notifications (plugins/withSwiftInAppCalls.js says why).
+    './plugins/withSwiftInAppCalls.js',
   ],
   extra: {
     ...(process.env['EAS_PROJECT_ID'] ? { eas: { projectId: process.env['EAS_PROJECT_ID'] } } : {}),

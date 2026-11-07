@@ -41,6 +41,8 @@ export const TWILIO_CALL_TIMEOUT_MS = 10_000;
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const doc = (inner: string) => `<?xml version="1.0" encoding="UTF-8"?><Response>${inner}</Response>`;
 const first = (fields: Record<string, string[]>, name: string) => fields[name]?.[0] ?? null;
+/** The one recording attribute Swift ever writes, on every <Dial> (phone or app): never record. */
+const NEVER_RECORD = 'record="do-not-record"';
 
 export class TwilioVoiceProvider implements CallProvider {
   readonly name = 'twilio';
@@ -127,8 +129,17 @@ export class TwilioVoiceProvider implements CallProvider {
         // [REVIEW-M17 S1-1] The backstop on leg 2: a number the dial guard refuses is never put in a <Dial>.
         if (!dialableNumber(step.to, step.callerId)) return twiml(doc('<Hangup/>'));
         return twiml(doc(
-          `${say(step.say)}<Dial callerId="${xml(step.callerId)}" timeout="${step.ringSeconds}" timeLimit="${step.limitSeconds}" record="do-not-record" action="${xml(step.done)}" method="POST">`
+          `${say(step.say)}<Dial callerId="${xml(step.callerId)}" timeout="${step.ringSeconds}" timeLimit="${step.limitSeconds}" ${NEVER_RECORD} action="${xml(step.done)}" method="POST">`
           + `<Number url="${xml(step.screen)}" method="POST">${xml(step.to)}</Number></Dial>`,
+        ));
+      case 'dialApp':
+        // [INAPP-CALLS] <Client><Identity> per app install, <Parameter> for the caller line, url= on answer.
+        return twiml(doc(
+          `<Dial callerId="${xml(step.callerId)}" timeout="${step.ringSeconds}" timeLimit="${step.limitSeconds}" ${NEVER_RECORD} action="${xml(step.done)}" method="POST">`
+          + step.clients.map((identity) => `<Client url="${xml(step.answered)}" method="POST"><Identity>${xml(identity)}</Identity>`
+            + Object.entries(step.params).map(([name, value]) => `<Parameter name="${xml(name)}" value="${xml(value)}"/>`).join('')
+            + '</Client>').join('')
+          + '</Dial>',
         ));
       case 'connect':
         // The screen's document ends here, so Twilio connects the two parties.

@@ -2663,6 +2663,7 @@ model CallSession {
   /// The provider's id for leg 1 (Twilio CallSid); null until the provider takes the call.
   providerCallId    String?   @unique
   /// DIALING_CALLER -> CALLER_CONFIRMED -> CONNECTED, or NOT_CONNECTED / FAILED.
+  /// [INAPP-CALLS] In-app: RINGING_APP -> CONNECTED (answered in the app), or -> CALLER_CONFIRMED (their phone, via the bridge).
   status            String    @default("DIALING_CALLER")
   callerConfirmedAt DateTime?
   connectedAt       DateTime?

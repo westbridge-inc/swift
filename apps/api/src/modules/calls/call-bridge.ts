@@ -6,6 +6,7 @@ import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import type { CallProvider, CallStep, ProviderWebhook } from '../../providers/voice/call-provider';
 import { CALL_RING_SECONDS, CALL_TIME_LIMIT_SECONDS, type CallRelayConfig } from './call-relay-switch';
 import { dialableNumber } from '../../providers/voice/dialable';
+import { INAPP_UNTAKEN_AFTER_MS } from './inapp-calls-switch';
 import type { NotificationAudience, NotificationPayload } from '../notification/notification.service';
 
 // ---------------------------------------------------------------------------
@@ -91,7 +92,7 @@ export const CALL_DAY_PREFIX = 'swift:call-day:';
 export const SERVICE_DAY_KEY = `${CALL_DAY_PREFIX}all`;
 /** [REVIEW-G23 S3-3] The longest Swift waits for the list: a down Redis refuses the start fast (503), never a hung transaction. */
 export const LEDGER_WAIT_MS = 1_000;
-function withinLedgerWait<T>(work: Promise<T>): Promise<T> {
+export function withinLedgerWait<T>(work: Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('call day list did not answer')), LEDGER_WAIT_MS);
     timer.unref?.();
@@ -100,13 +101,15 @@ function withinLedgerWait<T>(work: Promise<T>): Promise<T> {
 }
 
 /** [owner 6 Nov ~11:10Z] A rider, driver or store on the order is a partner; the order's customer is a customer. */
-const PARTNER_ROLES = ['rider', 'driver', 'store'] as const;
+export const PARTNER_ROLES = ['rider', 'driver', 'store'] as const;
 
 /** [CALL-RELAY-ON] The one lock every start takes before it counts the day's calls. */
 export const CALL_DAILY_CAP_LOCK = 'swift:call-relay-daily-cap';
 const DAY_MS = 86_400_000;
 
 const CALL_ID = /^c[a-z0-9]{20,32}$/;
+/** [INAPP-CALLS] An in-app start's state (inapp-calls.ts INAPP_STATUS.RINGING_APP), read here for the untaken sweep. */
+const UNTAKEN_APP_STATUS = 'RINGING_APP';
 const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
 
 type Notifier = { send(payload: NotificationPayload): Promise<string> };
@@ -123,7 +126,7 @@ export interface CallBridgeDeps {
   now?: () => Date;
 }
 
-const ORDER_PARTIES = {
+export const ORDER_PARTIES = {
   id: true,
   orderNumber: true,
   orderType: true,
@@ -135,7 +138,7 @@ const ORDER_PARTIES = {
   driver: { select: { userId: true, user: { select: { phone: true } } } },
   vendor: { select: { id: true, status: true, phone: true, publicPhone: true, owner: { select: { userId: true } } } },
 } as const;
-type PartyOrder = Prisma.OrderGetPayload<{ select: typeof ORDER_PARTIES }>;
+export type PartyOrder = Prisma.OrderGetPayload<{ select: typeof ORDER_PARTIES }>;
 
 const AUDIENCE: Record<CallerRole, NotificationAudience> = { customer: 'customer', rider: 'earner', driver: 'earner', store: 'business' };
 
@@ -158,7 +161,7 @@ async function isStoreStaff(prisma: PrismaClient, order: PartyOrder, userId: str
 }
 
 /** Everything `userId` is on this order (one person can be, say, the customer and a store's staff). */
-async function callerRolesOn(prisma: PrismaClient, order: PartyOrder, userId: string): Promise<CallerRole[]> {
+export async function callerRolesOn(prisma: PrismaClient, order: PartyOrder, userId: string): Promise<CallerRole[]> {
   const roles: CallerRole[] = [];
   if (order.rider?.userId === userId) roles.push('rider');
   if (order.driver?.userId === userId) roles.push('driver');
@@ -210,10 +213,10 @@ function peopleFor(order: PartyOrder, role: CallTarget): string[] {
   }
 }
 
-const webhookUrl = (config: CallRelayConfig, step: CallStepName, callId: string) =>
+export const webhookUrl = (config: Pick<CallRelayConfig, 'webhookBase'>, step: CallStepName, callId: string) =>
   `${config.webhookBase}/${step}?s=${encodeURIComponent(callId)}`;
 
-async function loadOrder(prisma: PrismaClient, orderId: string): Promise<PartyOrder | null> {
+export async function loadOrder(prisma: PrismaClient, orderId: string): Promise<PartyOrder | null> {
   return prisma.order.findUnique({ where: { id: orderId }, select: ORDER_PARTIES });
 }
 
@@ -222,7 +225,7 @@ async function loadOrder(prisma: PrismaClient, orderId: string): Promise<PartyOr
  * Leg 1 tells the person who tapped Call (their own phone rings first); leg 2 tells the account behind the
  * party being called. The parcel recipient has no account here and gets no push.
  */
-async function warnOfCall(
+export async function warnOfCall(
   deps: CallBridgeDeps,
   order: PartyOrder,
   listeners: string[],
@@ -299,6 +302,10 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
       await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
       // A call the provider never reported finished cannot hold the order's one live slot for ever.
       const stale = new Date(now.getTime() - CALL_STALE_AFTER_MS);
+      // [INAPP-CALLS · server review 7] An in-app start the provider never took (the caller's phone could not
+      // connect) frees the order and the caller after a minute, as the in-app start's own rule does.
+      const untakenApp = { endedAt: null, status: UNTAKEN_APP_STATUS, providerCallId: null, createdAt: { lt: new Date(now.getTime() - INAPP_UNTAKEN_AFTER_MS) } };
+      await tx.callSession.updateMany({ where: { orderId: order.id, ...untakenApp }, data: { endedAt: now, status: CALL_STATUS.NOT_CONNECTED, durationSeconds: 0 } });
       await tx.callSession.updateMany({
         where: { orderId: order.id, endedAt: null, createdAt: { lt: stale }, status: CALL_STATUS.CONNECTED },
         data: { endedAt: now },
@@ -318,6 +325,8 @@ export async function startBridgeCall(deps: CallBridgeDeps, input: StartCallInpu
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${CALL_DAILY_CAP_LOCK}))`;
       // [REVIEW-M17 S3-1] One live call per PERSON: their own call on another order that is still live refuses this
       // one (a call the provider never reported finished stops counting once it is stale, like the order's slot).
+      // [INAPP-CALLS · server review 7] The caller's own untaken in-app start (under the daily lock, as the in-app start does).
+      await tx.callSession.updateMany({ where: { callerUserId: input.userId, ...untakenApp }, data: { endedAt: now, status: CALL_STATUS.NOT_CONNECTED, durationSeconds: 0 } });
       await tx.callSession.updateMany({
         where: { callerUserId: input.userId, endedAt: null, createdAt: { lt: stale }, status: CALL_STATUS.CONNECTED },
         data: { endedAt: now },

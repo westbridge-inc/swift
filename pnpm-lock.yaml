@@ -429,6 +429,9 @@ importers:
       '@tanstack/react-query':
         specifier: ^5.66.0
         version: 5.91.2(react@19.2.3)
+      '@twilio/voice-react-native-sdk':
+        specifier: 1.8.1
+        version: 1.8.1(expo@56.0.12)(react-native@0.85.3(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.14)(react@19.2.3))(react@19.2.3)
       axios:
         specifier: ^1.20.0
         version: 1.20.0
@@ -3502,6 +3505,19 @@ packages:
     resolution: {integrity: sha512-+ql0wYc99Y2AMvyHCcC/P+xtyV4nz522L+C9HDnyi7ryHXBGM+ZjBP28M7SLBGMDImgpN8sk2szpgbvreMeXVA==}
     cpu: [arm64]
     os: [win32]
+
+  '@twilio/voice-errors@1.8.0':
+    resolution: {integrity: sha512-Mh3CCCNOZ+OCFNv90ibml1VrsXiJy/1+/FP6382tUQuqZztndp41eqnJhsnM44UBkMAtlvVUSd1HuK8iCdHM/A==}
+
+  '@twilio/voice-react-native-sdk@1.8.1':
+    resolution: {integrity: sha512-1ptHODEgqtzJQnOZDwBGxLmxieTh8CiJ1+fInBuNSXzicFdjLAA1Cj4fpfp9D2YPaE53nQPB24hS6h+bxYfddw==}
+    peerDependencies:
+      expo: '*'
+      react: '*'
+      react-native: '*'
+    peerDependenciesMeta:
+      expo:
+        optional: true
 
   '@tybys/wasm-util@0.10.2':
     resolution: {integrity: sha512-RoBvJ2X0wuKlWFIjrwffGw1IqZHKQqzIchKaadZZfnNpsAYp2mM0h36JtPCjNDAHGgYez/15uMBpfGwchhiMgg==}
@@ -11081,6 +11097,17 @@ snapshots:
 
   '@turbo/windows-arm64@2.9.17':
     optional: true
+
+  '@twilio/voice-errors@1.8.0': {}
+
+  '@twilio/voice-react-native-sdk@1.8.1(expo@56.0.12)(react-native@0.85.3(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.14)(react@19.2.3))(react@19.2.3)':
+    dependencies:
+      '@twilio/voice-errors': 1.8.0
+      eventemitter3: 4.0.7
+      react: 19.2.3
+      react-native: 0.85.3(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.14)(react@19.2.3)
+    optionalDependencies:
+      expo: 56.0.12(@babel/core@7.29.7)(@expo/dom-webview@56.0.5)(react-dom@19.2.4(react@19.2.3))(react-native-webview@13.16.1(react-native@0.85.3(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.14)(react@19.2.3))(react@19.2.3))(react-native-worklets@0.8.3(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(react-native@0.85.3(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.14)(react@19.2.3))(react@19.2.3))(react-native@0.85.3(@babel/core@7.29.7)(@react-native/metro-config@0.86.0(@babel/core@7.29.7))(@types/react@19.2.14)(react@19.2.3))(react@19.2.3)(typescript@6.0.3)
 
   '@tybys/wasm-util@0.10.2':
     dependencies:

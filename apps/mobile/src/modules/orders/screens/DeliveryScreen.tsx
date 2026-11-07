@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
 import { CallParty } from '../../../components/CallParty';
+import { CallInApp } from '../../../components/CallInApp';
 import { SwiftCallNumberTip } from '../../../components/SwiftCallNumberTip';
 import React, { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDimensions } from 'react-native';
@@ -1259,6 +1260,30 @@ export function DeliveryScreen() {
                   </Pressable>
                 )}
               </CallParty>
+              {/* [INAPP-CALLS] Build 13+, switch on: call the rider inside the app. */}
+              <CallInApp orderId={o?.id ?? orderId} target="rider">
+                {(call) => (
+                  <Pressable
+                    onPress={call.onPress}
+                    disabled={call.busy}
+                    accessibilityRole="button"
+                    accessibilityLabel={call.a11y}
+                    accessibilityHint={call.hint}
+                    style={{
+                      width: space['5xl'],
+                      height: space['5xl'],
+                      borderRadius: radius.full,
+                      backgroundColor: color.brand[500],
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      marginLeft: space.sm,
+                      opacity: call.busy ? 0.7 : 1,
+                    }}
+                  >
+                    <Feather name="headphones" size={18} color={color.white} />
+                  </Pressable>
+                )}
+              </CallInApp>
             </View>
           ) : null}
 

@@ -13,6 +13,7 @@ import { mmgCheckoutEnabled } from '../providers/mmg/mmg-checkout';
 import { webTaxiBookingEnabled } from '../modules/rides/web-taxi-booking';
 import { oldAppsKeepCounterpartPhones } from '../modules/calls/counterpart-phone';
 import { callRelayEnabled } from '../modules/calls/call-relay-switch';
+import { inAppCallsEnabled } from '../modules/calls/inapp-calls-switch';
 import { instantBookingEnabled } from '../modules/booking/instant-booking';
 
 // ---------------------------------------------------------------------------
@@ -153,6 +154,8 @@ describe('[dark features] the registry matches the code that reads the switch', 
       // [O-1] old builds' counterpart phones (retired with builds 9-12) + the call bridge switch
       read('apps/api/src/modules/calls/counterpart-phone.ts'),
       read('apps/api/src/modules/calls/call-relay-switch.ts'),
+      // [INAPP-CALLS] in-app calling's switch
+      read('apps/api/src/modules/calls/inapp-calls-switch.ts'),
       // [BUG-HUNT F23] the brake on approving partners
       read('apps/api/src/modules/verification/approval-brake.ts'),
     ].join('\n');
@@ -250,6 +253,7 @@ describe('[SWITCHES] the launch switches are registered and read exactly as the 
     ['WEB_TAXI_BOOKING', (env) => webTaxiBookingEnabled(env)],
     ['COUNTERPART_PHONES_TO_OLD_APPS', (env) => oldAppsKeepCounterpartPhones(env)],
     ['CALL_RELAY', (env) => callRelayEnabled(env)],
+    ['INAPP_CALLS', (env) => inAppCallsEnabled(env)],
     ['INSTANT_BOOKING', (env) => instantBookingEnabled(env)],
   ];
   const VALUES = [undefined, '', '0', '1', ' 1', '1 ', '2', '3', '9', '01', 'true', 'TRUE', 'yes', '-1', '1.5'];

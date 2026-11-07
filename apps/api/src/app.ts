@@ -391,6 +391,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
   const { callsRoutes, callVoiceRoutes } = await import('./modules/calls/calls.routes');
   await app.register(callsRoutes, { prefix: '/api/v1/calls' });
   await app.register(callVoiceRoutes, { prefix: '/api/v1/calls/voice' });
+  // [INAPP-CALLS · owner 6 Nov 2026] In-app calling (build 13): the parties' door (403 INAPP_CALLS_OFF
+  // while the switch is off) and Twilio's in-app webhooks under the same signed /calls/voice prefix.
+  const { inAppCallsRoutes, inAppVoiceRoutes } = await import('./modules/calls/inapp-calls.routes');
+  await app.register(inAppCallsRoutes, { prefix: '/api/v1/calls/app' });
+  await app.register(inAppVoiceRoutes, { prefix: '/api/v1/calls/voice' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps
